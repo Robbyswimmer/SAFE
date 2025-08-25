@@ -546,21 +546,21 @@ Our approach **mathematically guarantees** zero regression, not just hopes for i
 
 ### Stage Gates for Risk Management
 
-**Stage 1 Success** (Week 2):
-- ✅ `gate=0` reproduces original model exactly (bit-exact)
-- ✅ Only intended 52M parameters have gradients
-- ✅ Basic audio processing pipeline functional
+**Stage 1 Success**:
+- `gate=0` reproduces original model exactly (bit-exact)
+- Only intended 52M parameters have gradients
+- Basic audio processing pipeline functional
 
-**Stage 2 Success** (Week 4):  
-- ✅ VL retention: ≤0.5% degradation on VQAv2/GQA
-- ✅ Audio gains: ≥3% improvement on AVQA/AudioCaps
-- ✅ Training stability: Loss convergence without collapse
+**Stage 2 Success**:  
+- VL retention: ≤0.5% degradation on VQAv2/GQA
+- Audio gains: ≥3% improvement on AVQA/AudioCaps
+- Training stability: Loss convergence without collapse
 
-**Stage 3 Success** (Week 8):
-- ✅ VL retention: ≤0.3% degradation (production standard)
-- ✅ Audio gains: ≥5% improvement on audio tasks
-- ✅ Efficiency: ≥40% audio skipping with maintained accuracy
-- ✅ Latency: <50ms overhead per inference
+**Stage 3 Success**:
+- VL retention: ≤0.3% degradation (production standard)
+- Audio gains: ≥5% improvement on audio tasks
+- Efficiency: ≥40% audio skipping with maintained accuracy
+- Latency: <50ms overhead per inference
 
 ### Publication Readiness Criteria
 
