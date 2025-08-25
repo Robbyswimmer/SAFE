@@ -1,5 +1,5 @@
 # SAFE: Selectively Augmenting Frozen Encoders
-## Adding Audio to VL Models with Zero Regression & 50% Efficiency Gains
+## Adding Audio to VL Models with Zero Regression & Efficiency Gains
 
 ---
 
