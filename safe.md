@@ -5,7 +5,7 @@
 
 ## Executive Summary
 
-**The Challenge**: Production VL models (BLIP-2, LLaVA) lack audio understanding, but adding new modalities traditionally requires retraining → risks breaking what works.
+**The Challenge**: Production VL models (BLIP-2, LLaVA) lack audio understanding, but adding new modalities traditionally requires retraining and risks breaking what works via catastrophic task forgetting.
 
 **Our Solution**: SAFE provides a framework to add audio capabilities to frozen VL models with mathematical guarantees of zero regression and significant computational efficiency gains.
 
@@ -26,8 +26,8 @@
 ### The Core Challenge
 
 Traditional approaches require end-to-end fine-tuning:
-- **Risk**: 2-5% VL degradation typical (measured in preliminary experiments)
-- **Cost**: Full fine-tuning of 7B+ parameter models
+- **Risk**: VL degradation typical
+- **Cost**: Full fine-tuning of multi-billion parameter models
 - **Deployment**: Catastrophic forgetting makes production updates risky
 
 ### Key Insight
@@ -51,7 +51,7 @@ Traditional approaches require end-to-end fine-tuning:
 - **Mathematical guarantee**: Can always fall back to original performance
 
 #### Part 2: Learned Efficiency (RL Policy)
-- **Observation**: 40-70% of questions don't benefit from audio
+- **Observation**: Many questions don't benefit from audio and thus waste compute
 - **Policy learns**: "Does this specific question need audio?"
 - **Reward function**: Accuracy - Computational Cost
 - **Result**: Selective audio usage with efficiency gains
@@ -74,9 +74,9 @@ RL Policy: Should we use audio for this query?
 ## 3. Technical Approach
 
 ### What We Freeze (Zero Risk)
-- **Base VL model**: 7B parameters (BLIP-2/LLaVA) - completely frozen
+- **Base VL model**: 7B-13B parameters (BLIP-2/LLaVA) - completely frozen
 - **Audio encoder**: 150M parameters (CLAP) - completely frozen
-- **Total frozen**: 7.15B parameters (98.92% of model)
+- **Total frozen**: 7.15B-13.15B parameters (98.92% of model at a minimum)
 
 ### What We Train (Minimal Risk)
 - **Audio projector**: 33M parameters - Maps audio → VL space
@@ -103,7 +103,7 @@ RL Policy: Should we use audio for this query?
 ### Non-Regression Guarantee
 **Formal Property**: `Performance(SAFE, gate=0) ≡ Performance(Original VL)`
 
-This isn't empirical hope—it's architecturally enforced:
+This isn't empirical hope, instead it's architecturally enforced in our framework:
 - Gate=0 creates identical forward path
 - No parameters of original model modified
 - Bit-exact reproduction guaranteed
@@ -112,7 +112,7 @@ This isn't empirical hope—it's architecturally enforced:
 **Expected Computation**: `E[Compute] = P(use_audio) × Cost(audio) + Base_Cost`
 
 With learned policy achieving `P(use_audio) ≈ 0.3-0.6`:
-- **40-70% computational savings** on audio processing
+- **computational savings via selective listening** on audio processing
 - **Adaptive inference**: Expensive operations only when beneficial
 - **Graceful degradation**: Falls back to VL-only seamlessly
 
