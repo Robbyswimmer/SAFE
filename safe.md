@@ -1,13 +1,13 @@
 # SAFE: Selectively Augmenting Frozen Encoders
-## Adding Audio to VL Models with Zero Regression & 50% Efficiency Gains
+## Adding Audio to VL Models with Zero Regression & Efficiency Gains
 
 ---
 
 ## Executive Summary
 
-**The Challenge**: Production VL models (BLIP-2, LLaVA) lack audio understanding, but adding new modalities traditionally requires retraining → risks breaking what works.
+**The Challenge**: Production VL models (BLIP-2, LLaVA) lack audio understanding, but adding new modalities traditionally requires retraining and risks breaking what works via catastrophic task forgetting.
 
-**Our Solution**: SAFE provides a framework to add audio capabilities to frozen VL models with mathematical guarantees of zero regression and 40-70% computational efficiency gains.
+**Our Solution**: SAFE provides a framework to add audio capabilities to frozen VL models with mathematical guarantees of zero regression and significant computational efficiency gains.
 
 **Key Innovation**: Two-part architecture combining (1) gated bypass mechanism for safety and (2) learned RL policy for efficiency.
 
@@ -26,8 +26,8 @@
 ### The Core Challenge
 
 Traditional approaches require end-to-end fine-tuning:
-- **Risk**: 2-5% VL degradation typical (measured in preliminary experiments)
-- **Cost**: Full fine-tuning of 7B+ parameter models
+- **Risk**: VL degradation typical
+- **Cost**: Full fine-tuning of multi-billion parameter models
 - **Deployment**: Catastrophic forgetting makes production updates risky
 
 ### Key Insight
@@ -51,7 +51,7 @@ Traditional approaches require end-to-end fine-tuning:
 - **Mathematical guarantee**: Can always fall back to original performance
 
 #### Part 2: Learned Efficiency (RL Policy)
-- **Observation**: 40-70% of questions don't benefit from audio
+- **Observation**: Many questions don't benefit from audio and thus waste compute
 - **Policy learns**: "Does this specific question need audio?"
 - **Reward function**: Accuracy - Computational Cost
 - **Result**: Selective audio usage with efficiency gains
@@ -74,9 +74,9 @@ RL Policy: Should we use audio for this query?
 ## 3. Technical Approach
 
 ### What We Freeze (Zero Risk)
-- **Base VL model**: 7B parameters (BLIP-2/LLaVA) - completely frozen
+- **Base VL model**: 7B-13B parameters (BLIP-2/LLaVA) - completely frozen
 - **Audio encoder**: 150M parameters (CLAP) - completely frozen
-- **Total frozen**: 7.15B parameters (98.92% of model)
+- **Total frozen**: 7.15B-13.15B parameters (98.92% of model at a minimum)
 
 ### What We Train (Minimal Risk)
 - **Audio projector**: 33M parameters - Maps audio → VL space
@@ -103,7 +103,7 @@ RL Policy: Should we use audio for this query?
 ### Non-Regression Guarantee
 **Formal Property**: `Performance(SAFE, gate=0) ≡ Performance(Original VL)`
 
-This isn't empirical hope—it's architecturally enforced:
+This isn't empirical hope, instead it's architecturally enforced in our framework:
 - Gate=0 creates identical forward path
 - No parameters of original model modified
 - Bit-exact reproduction guaranteed
@@ -111,8 +111,10 @@ This isn't empirical hope—it's architecturally enforced:
 ### Efficiency Guarantee
 **Expected Computation**: `E[Compute] = P(use_audio) × Cost(audio) + Base_Cost`
 
+Note: numbers are currently GOALS
+
 With learned policy achieving `P(use_audio) ≈ 0.3-0.6`:
-- **40-70% computational savings** on audio processing
+- **computational savings via selective listening** on audio processing
 - **Adaptive inference**: Expensive operations only when beneficial
 - **Graceful degradation**: Falls back to VL-only seamlessly
 
@@ -120,7 +122,7 @@ With learned policy achieving `P(use_audio) ≈ 0.3-0.6`:
 - **Retention Loss**: `L_retention = KL(logits_safe || logits_original)`
 - **Audio Task Loss**: `L_audio = CrossEntropy(predictions, labels)`
 - **Efficiency Reward**: `r = Accuracy - α × LatencyCost - γ × IrrelevancePenalty`
-- **Constraint**: `τ = baseline_score - 0.3%` (hard performance floor)
+- **Constraint**: `τ = baseline_score - 0.5%` (hard performance floor)
 
 ---
 
@@ -446,68 +448,12 @@ total_reward = r - λ * retention_constraint
 
 ---
 
-## 11. Timeline & Resource Requirements
-
-### 11.1 8-Week Development Plan
-
-**Weeks 1-2: Safety Verification & Data Prep**
-- Implement gated architecture
-- Verify gate=0 ≡ original model
-- Prepare datasets and preprocessing pipeline
-- **Deliverable**: Safety validation results
-
-**Weeks 3-4: Pilot Experiments**  
-- Train projector + LoRA adapters on 50K examples
-- Measure retention and audio gains
-- **Go/No-Go Decision**: Proceed only if targets met
-
-**Weeks 5-6: Full Training**
-- Scale to full 250-500K example dataset
-- Complete curriculum learning
-- Train RL policy with efficiency constraints  
-
-**Weeks 7-8: Evaluation & Analysis**
-- Comprehensive evaluation protocol
-- Ablation studies and robustness tests
-- Paper writing and results analysis
-
-### 11.2 Resource Requirements
-
-**Computational**:
-- 4× A100 80GB GPUs for 8 weeks
-- Estimated cost: $12,000 compute budget
-- Storage: 2TB for datasets and checkpoints
-
 **Data Access**:
 - AudioCaps, MUSIC-AVQA, VGGSound (public)
 - VQAv2, GQA, COCO Captions (public)
 - No licensing constraints
 
-**Personnel**:
-- 1 PhD student (primary researcher) - 100% time
-- 1 engineer (data pipeline) - 25% time  
-- 1 advisor (guidance) - 10% time
-
 ---
-
-## 12. Publication Strategy & Impact
-
-### 12.1 Target Venues
-
-**Primary Target**: NeurIPS 2024
-- Deadline: May 2024
-- Focus: Novel architecture + theoretical guarantees
-- Differentiator: First formal non-regression framework
-
-**Backup Target**: EMNLP 2024  
-- Deadline: June 2024
-- Focus: Multimodal understanding + efficiency
-- Fallback if NeurIPS timing tight
-
-**Extension Target**: ICLR 2025
-- Complete framework paper
-- Multiple modality demonstrations
-- Industry adoption case studies
 
 ### 12.2 Contribution Claims
 
@@ -600,21 +546,21 @@ Our approach **mathematically guarantees** zero regression, not just hopes for i
 
 ### Stage Gates for Risk Management
 
-**Stage 1 Success** (Week 2):
-- ✅ `gate=0` reproduces original model exactly (bit-exact)
-- ✅ Only intended 52M parameters have gradients
-- ✅ Basic audio processing pipeline functional
+**Stage 1 Success**:
+- `gate=0` reproduces original model exactly (bit-exact)
+- Only intended 52M parameters have gradients
+- Basic audio processing pipeline functional
 
-**Stage 2 Success** (Week 4):  
-- ✅ VL retention: ≤0.5% degradation on VQAv2/GQA
-- ✅ Audio gains: ≥3% improvement on AVQA/AudioCaps
-- ✅ Training stability: Loss convergence without collapse
+**Stage 2 Success**:  
+- VL retention: ≤0.5% degradation on VQAv2/GQA
+- Audio gains: ≥3% improvement on AVQA/AudioCaps
+- Training stability: Loss convergence without collapse
 
-**Stage 3 Success** (Week 8):
-- ✅ VL retention: ≤0.3% degradation (production standard)
-- ✅ Audio gains: ≥5% improvement on audio tasks
-- ✅ Efficiency: ≥40% audio skipping with maintained accuracy
-- ✅ Latency: <50ms overhead per inference
+**Stage 3 Success**:
+- VL retention: ≤0.3% degradation (production standard)
+- Audio gains: ≥5% improvement on audio tasks
+- Efficiency: ≥40% audio skipping with maintained accuracy
+- Latency: <50ms overhead per inference
 
 ### Publication Readiness Criteria
 
@@ -639,8 +585,6 @@ SAFE represents a paradigm shift from "replace and retrain" to "augment and pres
 **The opportunity**: Be first to solve the production deployment challenge for multimodal capability expansion.
 
 **The evidence**: Strong theoretical foundations + preliminary experimental validation.
-
-**The ask**: 8 weeks and targeted compute resources to prove this approach at scale.
 
 **The impact**: A new framework enabling continuous, safe evolution of production AI systems.
 
