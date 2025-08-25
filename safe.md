@@ -111,6 +111,8 @@ This isn't empirical hope, instead it's architecturally enforced in our framewor
 ### Efficiency Guarantee
 **Expected Computation**: `E[Compute] = P(use_audio) × Cost(audio) + Base_Cost`
 
+Note: numbers are currently GOALS
+
 With learned policy achieving `P(use_audio) ≈ 0.3-0.6`:
 - **computational savings via selective listening** on audio processing
 - **Adaptive inference**: Expensive operations only when beneficial
@@ -120,7 +122,7 @@ With learned policy achieving `P(use_audio) ≈ 0.3-0.6`:
 - **Retention Loss**: `L_retention = KL(logits_safe || logits_original)`
 - **Audio Task Loss**: `L_audio = CrossEntropy(predictions, labels)`
 - **Efficiency Reward**: `r = Accuracy - α × LatencyCost - γ × IrrelevancePenalty`
-- **Constraint**: `τ = baseline_score - 0.3%` (hard performance floor)
+- **Constraint**: `τ = baseline_score - 0.5%` (hard performance floor)
 
 ---
 
@@ -446,68 +448,12 @@ total_reward = r - λ * retention_constraint
 
 ---
 
-## 11. Timeline & Resource Requirements
-
-### 11.1 8-Week Development Plan
-
-**Weeks 1-2: Safety Verification & Data Prep**
-- Implement gated architecture
-- Verify gate=0 ≡ original model
-- Prepare datasets and preprocessing pipeline
-- **Deliverable**: Safety validation results
-
-**Weeks 3-4: Pilot Experiments**  
-- Train projector + LoRA adapters on 50K examples
-- Measure retention and audio gains
-- **Go/No-Go Decision**: Proceed only if targets met
-
-**Weeks 5-6: Full Training**
-- Scale to full 250-500K example dataset
-- Complete curriculum learning
-- Train RL policy with efficiency constraints  
-
-**Weeks 7-8: Evaluation & Analysis**
-- Comprehensive evaluation protocol
-- Ablation studies and robustness tests
-- Paper writing and results analysis
-
-### 11.2 Resource Requirements
-
-**Computational**:
-- 4× A100 80GB GPUs for 8 weeks
-- Estimated cost: $12,000 compute budget
-- Storage: 2TB for datasets and checkpoints
-
 **Data Access**:
 - AudioCaps, MUSIC-AVQA, VGGSound (public)
 - VQAv2, GQA, COCO Captions (public)
 - No licensing constraints
 
-**Personnel**:
-- 1 PhD student (primary researcher) - 100% time
-- 1 engineer (data pipeline) - 25% time  
-- 1 advisor (guidance) - 10% time
-
 ---
-
-## 12. Publication Strategy & Impact
-
-### 12.1 Target Venues
-
-**Primary Target**: NeurIPS 2024
-- Deadline: May 2024
-- Focus: Novel architecture + theoretical guarantees
-- Differentiator: First formal non-regression framework
-
-**Backup Target**: EMNLP 2024  
-- Deadline: June 2024
-- Focus: Multimodal understanding + efficiency
-- Fallback if NeurIPS timing tight
-
-**Extension Target**: ICLR 2025
-- Complete framework paper
-- Multiple modality demonstrations
-- Industry adoption case studies
 
 ### 12.2 Contribution Claims
 
@@ -639,8 +585,6 @@ SAFE represents a paradigm shift from "replace and retrain" to "augment and pres
 **The opportunity**: Be first to solve the production deployment challenge for multimodal capability expansion.
 
 **The evidence**: Strong theoretical foundations + preliminary experimental validation.
-
-**The ask**: 8 weeks and targeted compute resources to prove this approach at scale.
 
 **The impact**: A new framework enabling continuous, safe evolution of production AI systems.
 
