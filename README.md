@@ -47,79 +47,6 @@ Input: Text + Vision + Audio
     └─────────────────┘
 ```
 
-## Quick Start
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/your-repo/safe
-cd safe
-
-# Create virtual environment (Python 3.11 recommended)
-python3.11 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Install SAFE package in development mode
-pip install -e .
-```
-
-### Basic Usage
-
-```python
-import torch
-from safe.models.projectors import AudioProjector
-from safe.models.fusion_adapter import CrossAttentionBlock
-from safe.rl.policy import AudioPolicyNetwork
-
-# Create audio projector
-projector = AudioProjector(
-    audio_embed_dim=512,      # CLAP embedding dimension
-    llm_hidden_size=768,      # LLM hidden dimension  
-    num_audio_tokens=8        # Audio tokens to generate
-)
-
-# Create fusion adapter
-fusion = CrossAttentionBlock(
-    hidden_size=768,
-    num_attention_heads=12
-)
-
-# Create RL policy
-policy = AudioPolicyNetwork(
-    state_feature_dim=256,
-    token_budgets=[0, 4, 8, 12]  # Token budget options
-)
-
-# Process audio features
-audio_features = torch.randn(2, 512)  # Batch of CLAP features
-audio_tokens = projector(audio_features)
-
-# Fuse with LLM hidden states
-llm_states = torch.randn(2, 10, 768)
-fused_states = fusion(llm_states, audio_tokens)
-
-# Get policy decisions
-state_features = torch.randn(2, 256)
-actions = policy.get_actions(state_features)
-```
-
-### Running Tests
-
-```bash
-# Run basic functionality tests
-python test_basic_functionality.py
-
-# Run integration tests  
-python test_integration.py
-
-# Run usage example
-python example_usage.py
-```
-
 ## Training Methodology
 
 SAFE employs a principled 3-stage training curriculum designed to ensure safe capability expansion:
@@ -203,20 +130,6 @@ The SAFE framework is designed for comprehensive evaluation across:
 - **Vision-Language Retention**: Standard VL benchmarks to validate zero regression
 - **Efficiency Metrics**: Computational cost and selective processing evaluation
 - **Robustness Testing**: Performance consistency across diverse input conditions
-
-## Contributing
-
-We welcome contributions! Please see our [contributing guidelines](CONTRIBUTING.md).
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- **LLaVA** team for the base VL architecture inspiration
-- **CLAP** and **Whisper** teams for excellent audio foundation models
-- **LoRA/PEFT** authors for parameter-efficient fine-tuning methods
 
 ## Implementation Status
 
