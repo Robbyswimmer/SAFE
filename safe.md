@@ -7,7 +7,7 @@
 
 **The Challenge**: Production VL models (BLIP-2, LLaVA) lack audio understanding, but adding new modalities traditionally requires retraining → risks breaking what works.
 
-**Our Solution**: SAFE provides a framework to add audio capabilities to frozen VL models with mathematical guarantees of zero regression and 40-70% computational efficiency gains.
+**Our Solution**: SAFE provides a framework to add audio capabilities to frozen VL models with mathematical guarantees of zero regression and significant computational efficiency gains.
 
 **Key Innovation**: Two-part architecture combining (1) gated bypass mechanism for safety and (2) learned RL policy for efficiency.
 
