@@ -1,0 +1,199 @@
+name: "default_safe_curriculum"
+description: "Default progressive curriculum for SAFE training with audio-visual learning"
+version: "1.0"
+
+# Global curriculum settings
+settings:
+  auto_progression: true              # Automatically progress between stages
+  validation_frequency: 5             # Validate every N epochs
+  early_stopping: true               # Stop if criteria not met
+  checkpoint_every_stage: true       # Save checkpoints at stage transitions
+  
+# Dataset configuration
+datasets:
+  audio_dependent:
+    - type: "AudioCaps"
+      weight: 0.4
+      difficulty_levels: ["easy", "medium", "hard"]
+    - type: "AVQA" 
+      weight: 0.6
+      difficulty_levels: ["easy", "medium", "hard"]
+      
+  visual_only:
+    - type: "VQAv2"
+      weight: 0.7
+      difficulty_levels: ["easy", "medium", "hard"]
+    - type: "GQA"
+      weight: 0.3
+      difficulty_levels: ["easy", "medium", "hard"]
+
+# Progressive learning stages
+stages:
+  # Stage 1: Foundation - Focus on basic audio-visual alignment
+  foundation:
+    duration_epochs: 3
+    audio_ratio: 0.3                  # 30% audio-dependent samples
+    difficulty_filter: "easy"         # Only easy samples
+    batch_size_multiplier: 1.0
+    
+    # Stage progression criteria
+    criteria:
+      min_audio_accuracy: 0.55
+      max_vl_degradation: 0.01        # 1% max degradation
+      min_samples_processed: 1000
+      
+    # Loss function weights for this stage
+    loss_weights:
+      audio_task_loss: 0.5
+      retention_loss: 1.0
+      distillation_loss: 0.8
+      fisher_loss: 0.3
+      
+    # Data augmentation settings
+    augmentation:
+      audio_noise_prob: 0.1
+      image_transforms: "light"
+      irrelevant_audio_prob: 0.05     # Low irrelevant audio
+      
+  # Stage 2: Integration - Increase complexity and audio usage  
+  integration:
+    duration_epochs: 5
+    audio_ratio: 0.5                  # 50% audio-dependent samples
+    difficulty_filter: ["easy", "medium"]
+    batch_size_multiplier: 1.0
+    
+    criteria:
+      min_audio_accuracy: 0.65
+      max_vl_degradation: 0.008       # 0.8% max degradation
+      min_samples_processed: 2000
+      efficiency_min_skip_rate: 0.2   # Start tracking efficiency
+      
+    loss_weights:
+      audio_task_loss: 0.7
+      retention_loss: 1.0  
+      distillation_loss: 0.6
+      fisher_loss: 0.4
+      
+    augmentation:
+      audio_noise_prob: 0.15
+      image_transforms: "medium"
+      irrelevant_audio_prob: 0.1      # Increase irrelevant audio
+      
+  # Stage 3: Mastery - Full complexity with efficiency optimization
+  mastery:
+    duration_epochs: 8
+    audio_ratio: 0.6                  # 60% audio-dependent samples  
+    difficulty_filter: ["easy", "medium", "hard"]
+    batch_size_multiplier: 0.8        # Smaller batches for harder samples
+    
+    criteria:
+      min_audio_accuracy: 0.75
+      max_vl_degradation: 0.005       # 0.5% max degradation (final target)
+      min_samples_processed: 5000
+      efficiency_min_skip_rate: 0.4   # 40% minimum efficiency
+      
+    loss_weights:
+      audio_task_loss: 1.0
+      retention_loss: 1.0
+      distillation_loss: 0.4
+      fisher_loss: 0.5
+      
+    augmentation:
+      audio_noise_prob: 0.2
+      image_transforms: "heavy"
+      irrelevant_audio_prob: 0.15     # Max irrelevant audio
+      
+  # Stage 4: Refinement - Polish and efficiency optimization
+  refinement:
+    duration_epochs: 10
+    audio_ratio: 0.7                  # 70% audio-dependent samples
+    difficulty_filter: ["medium", "hard"]
+    batch_size_multiplier: 0.6
+    
+    criteria:
+      min_audio_accuracy: 0.80        # Target performance
+      max_vl_degradation: 0.003       # 0.3% max degradation (strict)
+      min_samples_processed: 8000
+      efficiency_min_skip_rate: 0.6   # 60% target efficiency
+      
+    loss_weights:
+      audio_task_loss: 1.0
+      retention_loss: 1.0
+      distillation_loss: 0.2
+      fisher_loss: 0.6
+      
+    augmentation:
+      audio_noise_prob: 0.25
+      image_transforms: "heavy"
+      irrelevant_audio_prob: 0.2      # Maximum challenge
+
+# Validation settings for each stage
+validation:
+  metrics:
+    # Core performance metrics
+    - name: "audio_accuracy"
+      type: "accuracy"
+      scope: "audio_dependent"
+      weight: 1.0
+      
+    - name: "vl_retention"
+      type: "retention"
+      scope: "visual_only" 
+      baseline_required: true
+      weight: 2.0                     # High importance
+      
+    - name: "efficiency_rate"
+      type: "efficiency"
+      scope: "all"
+      weight: 0.5
+      
+    # Secondary metrics
+    - name: "cross_modal_alignment"
+      type: "alignment"
+      scope: "audio_visual"
+      weight: 0.3
+      
+    - name: "audio_irrelevant_robustness"
+      type: "robustness" 
+      scope: "audio_irrelevant"
+      weight: 0.8
+
+  # Evaluation datasets (separate from training)
+  eval_datasets:
+    audio_dependent: ["avqa_val", "audiocaps_val"]
+    visual_only: ["vqav2_val", "gqa_val"] 
+    mixed: ["safe_mixed_val"]
+
+# Adaptive progression rules
+adaptation:
+  # Automatic stage extension if criteria not met
+  extend_stage_if_failing: true
+  max_stage_extensions: 2
+  extension_epochs: 3
+  
+  # Early progression if exceeding criteria
+  early_progression_threshold: 1.1   # 10% above minimum criteria
+  early_progression_epochs: 2        # Must maintain for N epochs
+  
+  # Dynamic audio ratio adjustment
+  adaptive_audio_ratio: true
+  audio_ratio_adjustment_factor: 0.05 # ±5% per adjustment
+  
+  # Learning rate scheduling per stage
+  lr_schedule:
+    foundation: 1.0                   # Base LR
+    integration: 0.8                  # 20% reduction
+    mastery: 0.6                      # 40% reduction  
+    refinement: 0.4                   # 60% reduction
+
+# Monitoring and logging
+monitoring:
+  log_frequency: 100                  # Log every N steps
+  save_plots: true
+  plot_metrics: ["audio_accuracy", "vl_retention", "efficiency_rate"]
+  
+  # Alerts for concerning trends
+  alerts:
+    vl_degradation_alert: 0.008       # Alert if VL drops > 0.8%
+    audio_plateau_epochs: 5           # Alert if no audio improvement
+    efficiency_drop_threshold: 0.1    # Alert if efficiency drops significantly
