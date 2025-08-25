@@ -141,7 +141,7 @@ With learned policy achieving `P(use_audio) ≈ 0.3-0.6`:
 #### Stage 2: Pilot Study
 **Goal**: Validate learning on 50K examples
 - Train audio projector + fusion adapters
-- Measure audio gains: target `+5% on AVQA/AudioCaps`
+- Measure audio gains: target `+x% on AVQA/AudioCaps`
 - Verify no VL regression with gate=OFF
 
 **Go/No-Go**: Must achieve >3% audio gains with <0.5% VL loss
