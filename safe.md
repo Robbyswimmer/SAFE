@@ -341,7 +341,6 @@ total_reward = r - λ * retention_constraint
 #### Retention (Non-Regression)
 - **VQAv2 accuracy**: Δ ≤ 0.3-0.5% vs. base VL
 - **GQA accuracy**: Δ ≤ 0.3-0.5% vs. base VL
-- **Statistical test**: McNemar test for significance
 
 #### Audio Gains  
 - **AVQA accuracy**: +5-10% target vs. VL-only baseline
@@ -358,7 +357,6 @@ total_reward = r - λ * retention_constraint
 
 #### Sanity Checks
 - **LOMO analysis**: Performance with audio muted vs. active
-- **Shapley values**: Per-sample modality attribution  
 - **Irrelevance stress test**: VL questions + random audio → measure false positive rate
 
 #### Robustness Tests
@@ -378,12 +376,6 @@ total_reward = r - λ * retention_constraint
 **Encoder Comparison**:
 - CLAP vs. Whisper embeddings
 - Single vs. ensemble encoders
-
-### 9.4 Statistical Rigor
-
-**Reproducibility**: 5 random seeds, report mean ± 95% CI
-**Significance testing**: McNemar test for QA, bootstrap CI for generation metrics  
-**Effect sizes**: Report Cohen's d for meaningful differences
 
 ---
 
