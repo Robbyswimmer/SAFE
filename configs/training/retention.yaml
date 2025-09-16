@@ -1,0 +1,42 @@
+# Retention Training Configuration  
+# For focused retention validation and baseline studies
+name: "retention"
+description: "Training focused on retention validation and baseline comparison"
+
+# Training parameters
+num_epochs: 5
+batch_size: 4
+gradient_accumulation_steps: 2
+
+# Learning rates - conservative for retention study
+learning_rate_projector: 1e-4
+learning_rate_adapter: 5e-5
+weight_decay: 0.01
+warmup_steps: 50
+max_grad_norm: 1.0
+
+# Evaluation settings - frequent for retention monitoring
+eval_every_n_epochs: 1
+max_eval_batches: 25  # Reasonable evaluation size
+validation_frequency: 1
+
+# Loss weights - emphasis on retention
+audio_loss_weight: 0.8  # Slightly lower audio weight
+retention_loss_weight: 1.2  # Higher retention weight  
+distillation_temperature: 3.0
+fisher_weight: 0.15  # Higher Fisher weight for retention
+retention_tolerance: 0.005  # Strict 0.5% tolerance
+
+# Logging and saving
+logging_steps: 25
+save_steps: 100
+early_stopping_patience: 5  # Early stop if retention degrades
+
+# Performance  
+expected_runtime_minutes: 30
+compute_requirements: "moderate"
+
+# Retention-specific settings
+compute_baseline_metrics: true
+track_retention_per_epoch: true
+retention_failure_threshold: 0.02  # Stop if retention drops >2%

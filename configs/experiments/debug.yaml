@@ -1,0 +1,51 @@
+# Debug Experiment
+# Ultra-fast debugging and pipeline validation
+name: "debug"
+description: "Ultra-fast debugging experiment for pipeline validation and error reproduction"
+
+# Base configurations to inherit from
+base_configs:
+  training: "micro"
+  dataset: "debug"
+  model: "demo"
+
+# Experiment-specific overrides
+overrides:
+  training:
+    num_epochs: 1  # Single epoch for debugging
+    batch_size: 2  # Small batches
+    eval_every_n_epochs: 1
+    max_eval_batches: 2  # Minimal evaluation
+    warmup_steps: 2  # Minimal warmup
+    logging_steps: 1  # Log every step
+    
+  dataset:
+    train_size: 6  # 3 batches with batch_size=2
+    val_size: 4   # 2 batches
+    
+# Experiment settings
+experiment_type: "debugging"
+enable_curriculum: false
+verbose_logging: true
+
+# Debug-specific settings
+validate_data_loading: true
+validate_model_forward: true  
+validate_loss_computation: true
+check_gradient_flow: true
+
+# Success criteria - just need it to run without errors
+success_criteria:
+  completes_without_error: true
+  forward_pass_works: true
+  backward_pass_works: true
+  
+# Expected outcomes
+expected_runtime_minutes: 2
+expected_memory_usage_gb: 4
+compute_requirements: "minimal"
+
+# Debug settings
+save_debug_info: true
+detailed_error_logging: true
+validate_config_compatibility: true

@@ -1,0 +1,49 @@
+# Full Training Experiment
+# Complete training experiment with curriculum learning
+name: "full_training"
+description: "Full-scale training experiment with curriculum learning"
+
+# Base configurations to inherit from
+base_configs:
+  training: "full"
+  dataset: "medium"  
+  model: "demo"  # Can be overridden to "full" for production
+
+# Experiment-specific overrides
+overrides:
+  training:
+    enable_curriculum: true
+    curriculum_config: "configs/curriculum/default_curriculum.yaml"
+    max_eval_batches: 50  # Reasonable for full training
+    
+  dataset:
+    # Use medium dataset by default, can scale up
+    train_size: 1000
+    val_size: 200
+    
+# Experiment settings
+experiment_type: "full_training"
+enable_curriculum: true
+enable_wandb: true
+
+# Full training settings
+save_best_model: true
+save_intermediate_checkpoints: true
+compute_final_evaluation: true
+
+# Success criteria
+success_criteria:
+  min_audio_accuracy: 0.7
+  min_retention_score: 0.98  # 98% retention
+  curriculum_completion: true
+  
+# Expected outcomes
+expected_runtime_minutes: 180  # 3 hours
+expected_memory_usage_gb: 16
+compute_requirements: "high"
+
+# Analysis settings
+comprehensive_evaluation: true
+curriculum_analysis: true
+retention_tracking: true
+performance_profiling: true

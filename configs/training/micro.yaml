@@ -1,0 +1,37 @@
+# Micro Training Configuration
+# For ultra-fast debugging and pipeline validation
+name: "micro"
+description: "Ultra-fast training for debugging and pipeline validation"
+
+# Training parameters
+num_epochs: 2
+batch_size: 2
+gradient_accumulation_steps: 1
+
+# Learning rates
+learning_rate_projector: 1e-4
+learning_rate_adapter: 5e-5
+weight_decay: 0.01
+warmup_steps: 10  # Very short warmup
+max_grad_norm: 1.0
+
+# Evaluation settings
+eval_every_n_epochs: 1
+max_eval_batches: 5  # Limit evaluation to 5 batches max
+validation_frequency: 1
+
+# Loss weights  
+audio_loss_weight: 1.0
+retention_loss_weight: 1.0
+distillation_temperature: 3.0
+fisher_weight: 0.1
+retention_tolerance: 0.01  # 1% tolerance for micro tests
+
+# Logging and saving
+logging_steps: 5
+save_steps: 50  # Save frequently for debugging
+early_stopping_patience: 10
+
+# Performance
+expected_runtime_minutes: 5
+compute_requirements: "minimal"

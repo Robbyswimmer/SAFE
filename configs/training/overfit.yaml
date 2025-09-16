@@ -1,0 +1,37 @@
+# Overfitting Training Configuration
+# For testing model capacity and retention behavior under overfitting
+name: "overfit"
+description: "High epoch training on tiny datasets to test overfitting and retention"
+
+# Training parameters
+num_epochs: 20  # Many epochs to force overfitting
+batch_size: 4
+gradient_accumulation_steps: 1
+
+# Learning rates - slightly higher for faster overfitting
+learning_rate_projector: 2e-4
+learning_rate_adapter: 1e-4
+weight_decay: 0.001  # Lower weight decay to allow overfitting
+warmup_steps: 25
+max_grad_norm: 1.0
+
+# Evaluation settings - minimal evaluation during overfitting tests
+eval_every_n_epochs: 5  # Less frequent evaluation
+max_eval_batches: 10  # Small but reasonable evaluation
+validation_frequency: 5
+
+# Loss weights
+audio_loss_weight: 1.0
+retention_loss_weight: 1.0
+distillation_temperature: 3.0
+fisher_weight: 0.05  # Lower Fisher weight for overfitting test
+retention_tolerance: 0.02  # 2% tolerance during overfitting
+
+# Logging and saving
+logging_steps: 10
+save_steps: 200
+early_stopping_patience: 20  # Allow more patience for overfitting
+
+# Performance
+expected_runtime_minutes: 15
+compute_requirements: "low"
