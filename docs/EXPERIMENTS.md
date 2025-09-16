@@ -243,7 +243,7 @@ This document outlines a comprehensive experimental validation plan for SAFE (Sa
 - Test null-space projection if implemented
 - Ablate retention loss weight values
 
-**Go Criteria**:
+**Go Criteria**:11
 - ✅ Distillation reduces VL drift by ≥50% vs. no distillation
 - ✅ Null-space projection maintains or improves retention
 - ✅ Optimal retention weight found through systematic testing

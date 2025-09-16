@@ -10,6 +10,9 @@ import wandb
 import os
 from pathlib import Path
 
+# Set CPU threads for predictable performance
+torch.set_num_threads(min(8, os.cpu_count() or 2))
+
 from ..models.safe_model import SAFEModel
 from ..models.base_vl import BaseVLModel
 from ..data.datasets import create_safe_dataloader
@@ -89,10 +92,8 @@ class StageATrainer:
             self.scheduler = None
         else:
             total_steps = len(train_dataloader) * self.config["num_epochs"]
-            self.scheduler = CosineAnnealingLR(
-                self.optimizer, 
-                T_max=total_steps - self.config["warmup_steps"]
-            )
+            cold_steps = max(1, total_steps - self.config["warmup_steps"])
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=cold_steps)
         
         # Training state
         self.global_step = 0
@@ -100,9 +101,13 @@ class StageATrainer:
         self.best_retention_score = 0.0
         self.patience_counter = 0
         
-        # Base VL model for retention comparison
-        self.base_vl_model = self.safe_model.base_vl
-        self.base_vl_model.eval()
+        # Ensure base VL model is in eval mode for retention comparison
+        self.safe_model.base_vl.eval()
+        
+        # Fix tokenizer truncation warnings (QoL improvement)
+        tok = self.safe_model.base_vl.tokenizer
+        if getattr(tok, "model_max_length", None) in (None, 1e30):
+            tok.model_max_length = 2048  # pick a sane context limit
         
         # Metrics tracking
         self.training_stats = {
@@ -154,75 +159,58 @@ class StageATrainer:
         Split a batch dict into (mm_inputs, text_inputs) where:
           - mm_inputs: rows that contain the <image> token in input_ids; must include pixel_values
           - text_inputs: rows that DO NOT contain the <image> token; must NOT include pixel_values
-        Returns (None, None) if batch is empty.
+        Returns (mm_inputs, text_inputs, idx_mm, idx_text) with indices to preserve batch order.
+        
+        Note: Only applies to LLaVA models. BLIP-2 doesn't use <image> tokens.
         """
+        if self.safe_model.base_vl.model_type != "llava":
+            # Return "no split" + identity indices to simplify caller logic
+            B = inputs["input_ids"].size(0) if "input_ids" in inputs else 0
+            idx_full = torch.arange(B, device=inputs["input_ids"].device) if B else None
+            return inputs, None, idx_full, None
+            
         input_ids = inputs.get("input_ids", None)
         if input_ids is None:
-            return None, None
-
+            return None, None, None, None
+        
         if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)  # [B, T]
+            input_ids = input_ids.unsqueeze(0)
 
         image_token_id = self._get_image_token_id()
         has_img_tokens = (input_ids == image_token_id).any(dim=1)  # [B]
-
-        if has_img_tokens.numel() == 0:
-            return None, None
-
         idx_mm = torch.nonzero(has_img_tokens, as_tuple=False).flatten()
         idx_text = torch.nonzero(~has_img_tokens, as_tuple=False).flatten()
 
         def _subset(t, idx):
             if t is None or idx.numel() == 0:
                 return None
-            if isinstance(t, torch.Tensor):
+            if isinstance(t, torch.Tensor) and t.dim() >= 1 and t.size(0) == input_ids.size(0):
                 return t.index_select(0, idx.to(t.device))
-            return t  # leave non-tensors unchanged (usually absent here)
+            return t
 
-        # Build mm/text dicts by slicing tensors on batch dimension
-        def _build_subset(keys, allow_pixels: bool):
+        keys = list(inputs.keys())
+        
+        def _build_subset(indices, allow_pixels):
             sub = {}
-            indices = idx_mm if allow_pixels else idx_text
-            
             for k in keys:
                 if k == "pixel_values" and not allow_pixels:
                     continue
                 v = inputs.get(k, None)
-                if isinstance(v, torch.Tensor) and v.dim() >= 1:
-                    # Special handling for pixel_values - they already match the number of MM samples
-                    if k == "pixel_values" and allow_pixels:
-                        # pixel_values already have the right samples, just use them directly
-                        sub[k] = v
-                    elif v.size(0) == input_ids.size(0):
-                        # Regular tensors that match input_ids batch size
-                        subset_tensor = _subset(v, indices)
-                        if subset_tensor is not None:
-                            sub[k] = subset_tensor
-                    # else: skip tensors with mismatched batch sizes
-                else:
-                    # Non-batched entries or missing keys are passed as-is only if harmless
-                    if k != "pixel_values":
-                        sub[k] = v
+                if isinstance(v, torch.Tensor) and v.dim() >= 1 and v.size(0) == input_ids.size(0):
+                    v = _subset(v, indices)
+                sub[k] = v
+            if not allow_pixels and "pixel_values" in sub:
+                sub.pop("pixel_values", None)
             return sub
 
-        keys = list(inputs.keys())
+        mm_inputs = _build_subset(idx_mm, allow_pixels=True) if idx_mm.numel() > 0 else None
+        text_inputs = _build_subset(idx_text, allow_pixels=False) if idx_text.numel() > 0 else None
 
-        mm_inputs = _build_subset(keys, allow_pixels=True) if idx_mm.numel() > 0 else None
-        text_inputs = _build_subset(keys, allow_pixels=False) if idx_text.numel() > 0 else None
+        if mm_inputs is not None and ("pixel_values" not in mm_inputs or mm_inputs["pixel_values"] is None):
+            print("Warning: <image> tokens present but no pixel_values; skipping MM branch.")
+            return None, inputs, None, torch.arange(input_ids.size(0), device=input_ids.device)
 
-        # Ensure invariants:
-        if mm_inputs is not None:
-            
-            # Check if we have image tokens but no pixel_values - this indicates a problem upstream
-            if "pixel_values" not in mm_inputs or mm_inputs["pixel_values"] is None:
-                # Log the issue and skip multimodal processing for this batch
-                print(f"Warning: Found image tokens but no pixel_values in batch. Skipping MM processing.")
-                print(f"Available keys: {list(inputs.keys())}")
-                return None, inputs  # Return all as text batch
-        if text_inputs is not None and "pixel_values" in text_inputs:
-            text_inputs.pop("pixel_values", None)
-
-        return mm_inputs, text_inputs
+        return mm_inputs, text_inputs, idx_mm, idx_text
     
     def _setup_loss_functions(self):
         """Setup loss functions with curriculum-aware weights."""
@@ -281,18 +269,22 @@ class StageATrainer:
         # Projector parameters
         projector_params = list(self.safe_model.audio_projector.parameters())
         if projector_params:
+            projector_lr = self.config["learning_rate_projector"]
             param_groups.append({
                 "params": projector_params,
-                "lr": self.config["learning_rate_projector"],
+                "lr": projector_lr,
+                "base_lr": projector_lr,  # Store base learning rate for warmup
                 "name": "projector"
             })
         
         # Fusion adapter parameters (LoRA)
         adapter_params = list(self.safe_model.fusion_adapter.parameters())
         if adapter_params:
+            adapter_lr = self.config["learning_rate_adapter"]
             param_groups.append({
                 "params": adapter_params,
-                "lr": self.config["learning_rate_adapter"],
+                "lr": adapter_lr,
+                "base_lr": adapter_lr,  # Store base learning rate for warmup
                 "name": "adapter"
             })
         
@@ -304,13 +296,19 @@ class StageATrainer:
             weight_decay=self.config["weight_decay"],
             betas=(0.9, 0.999)
         )
+        
+        # base_lr is already set in parameter groups above
     
-    def _warmup_lr(self):
-        """Apply learning rate warmup."""
-        if self.global_step < self.config["warmup_steps"]:
-            warmup_factor = self.global_step / self.config["warmup_steps"]
-            for param_group in self.optimizer.param_groups:
-                param_group["lr"] *= warmup_factor
+    def _apply_warmup(self, step: int):
+        """Apply learning rate warmup (assign, don't multiply)."""
+        factor = min(1.0, step / max(1, self.config["warmup_steps"]))
+        for g in self.optimizer.param_groups:
+            base_lr = g.get("base_lr", g["lr"])
+            # Ensure base_lr is a number, not a sequence
+            if isinstance(base_lr, (list, tuple)):
+                print(f"Warning: base_lr is a sequence: {base_lr}, using first element")
+                base_lr = base_lr[0]
+            g["lr"] = float(base_lr) * factor
     
     def train_step(self, batch: Dict) -> Dict[str, float]:
         """
@@ -331,17 +329,20 @@ class StageATrainer:
             if isinstance(batch[key], torch.Tensor):
                 batch[key] = batch[key].to(device)
         
-        # Prepare inputs for SAFE model
-        has_audio = batch.get("has_audio", torch.zeros(len(batch["questions"]), dtype=torch.bool))
-        has_images = batch.get("has_images", torch.zeros(len(batch["questions"]), dtype=torch.bool))
+        # Prepare inputs for SAFE model (device-consistent masks)
+        has_audio = batch.get("has_audio", torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device))
         
-        # Create input tensors
+        # Create input tensors - always pass images/audio if available, don't gate on flags
         inputs = self.safe_model.prepare_multimodal_inputs(
             text=batch["questions"],
-            images=batch.get("images") if torch.any(has_images) else None,
-            audio=batch.get("audio") if torch.any(has_audio) else None,
+            images=batch.get("images", None),
+            audio=batch.get("audio", None),
             device=device
         )
+        
+        # Optional debug: Check multimodal input preparation (disabled for clean logs)
+        # print(f"DEBUG: After prepare_multimodal_inputs, keys: {inputs.keys()}")
+        # print(f"DEBUG: Has pixel_values: {'pixel_values' in inputs}")
         
         # Forward pass through SAFE model
         safe_outputs = self.safe_model(**inputs)
@@ -353,49 +354,62 @@ class StageATrainer:
                 "attention_mask": inputs["attention_mask"],
                 "labels": inputs["labels"]
             }
-            if self.base_vl_model.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
+            if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
                 base_inputs["pixel_values"] = inputs["pixel_values"]
 
-            if self.base_vl_model.model_type in ["llava", "blip2"]:
-                # Use splitter for mixed batches
-                mm_inputs, text_inputs = self._split_mm_text_batches(base_inputs)
+            if self.safe_model.base_vl.model_type == "llava":
+                # Use splitter for LLaVA mixed batches with order preservation
+                mm_inputs, text_inputs, idx_mm, idx_text = self._split_mm_text_batches(base_inputs)
+                
+                def _forward_and_restore(inputs_a, inputs_b, idx_a, idx_b):
+                    B = base_inputs["input_ids"].size(0)
+                    out_a = self.safe_model.base_vl(**inputs_a) if inputs_a is not None else None
+                    out_b = self.safe_model.base_vl(**inputs_b) if inputs_b is not None else None
 
-                base_outputs = None
+                    # Pull logits
+                    logits_a = (out_a["logits"] if isinstance(out_a, dict) else getattr(out_a, "logits", None)) if out_a else None
+                    logits_b = (out_b["logits"] if isinstance(out_b, dict) else getattr(out_b, "logits", None)) if out_b else None
 
-                # 1) multimodal sub-batch
-                if mm_inputs is not None:
-                    base_outputs = self.base_vl_model(**mm_inputs)
-
-                # 2) text-only sub-batch
-                if text_inputs is not None:
-                    out_text = self.base_vl_model(**text_inputs)
-                    if base_outputs is not None:
-                        # Handle dict outputs - access logits as dict keys
-                        mm_logits = base_outputs["logits"] if isinstance(base_outputs, dict) else base_outputs.logits
-                        text_logits = out_text["logits"] if isinstance(out_text, dict) else out_text.logits
-                        
-                        # Combine logits from both sub-batches
-                        combined_logits = torch.cat([mm_logits, text_logits], dim=0)
-                        
-                        if isinstance(base_outputs, dict):
-                            base_outputs["logits"] = combined_logits
-                            # Handle loss if present
-                            if "loss" in base_outputs and "loss" in out_text:
-                                base_outputs["loss"] = base_outputs["loss"] + out_text["loss"]
-                        else:
-                            base_outputs.logits = combined_logits
-                            if hasattr(base_outputs, 'loss') and hasattr(out_text, 'loss'):
-                                base_outputs.loss = base_outputs.loss + out_text.loss
+                    # Allocate and restore original order
+                    if logits_a is not None or logits_b is not None:
+                        ref_logits = logits_a or logits_b
+                        T, V = ref_logits.shape[1], ref_logits.shape[2]
+                        logits = torch.zeros(B, T, V, device=ref_logits.device, dtype=ref_logits.dtype)
+                        if logits_a is not None and idx_a is not None:
+                            logits[idx_a] = logits_a
+                        if logits_b is not None and idx_b is not None:
+                            logits[idx_b] = logits_b
                     else:
-                        base_outputs = out_text
+                        logits = None
 
-                # Safety: if somehow neither branch ran, fall back to original
-                if base_outputs is None:
-                    base_outputs = self.base_vl_model(**base_inputs)
+                    # Stitch a minimal outputs object (dict-like so losses can index it)
+                    class OutputsWrapper(dict):
+                        pass
+                    
+                    out = OutputsWrapper()
+                    out["logits"] = logits  # may be None
+                    
+                    # Sum losses if they exist
+                    if out_a and (hasattr(out_a, "loss") or (isinstance(out_a, dict) and "loss" in out_a)):
+                        la = out_a["loss"] if isinstance(out_a, dict) else out_a.loss
+                        if la is not None:
+                            out["loss"] = la if "loss" not in out else out["loss"] + la
+                    
+                    if out_b and (hasattr(out_b, "loss") or (isinstance(out_b, dict) and "loss" in out_b)):
+                        lb = out_b["loss"] if isinstance(out_b, dict) else out_b.loss
+                        if lb is not None:
+                            out["loss"] = lb if "loss" not in out else out["loss"] + lb
+                    
+                    return out
+
+                base_outputs = _forward_and_restore(mm_inputs, text_inputs, idx_mm, idx_text)
+            elif self.safe_model.base_vl.model_type == "blip2":
+                # BLIP-2: use directly without splitting
+                base_outputs = self.safe_model.base_vl(**base_inputs)
             else:
                 # For custom models, use vision features
                 base_inputs["vision_features"] = inputs.get("vision_features")
-                base_outputs = self.base_vl_model(**base_inputs)
+                base_outputs = self.safe_model.base_vl(**base_inputs)
         
         # Compute combined loss
         loss_dict = self.combined_loss(
@@ -405,19 +419,19 @@ class StageATrainer:
             has_audio=has_audio
         )
         
-        # DEBUG: Print detailed loss information
+        # DEBUG: Print detailed loss information (disabled for cleaner training)
         total_loss = loss_dict["total_loss"]
-        print(f"\n=== DEBUG STEP {self.global_step} ===")
-        print(f"Total Loss: {total_loss.item():.6f}")
-        print(f"Loss breakdown:")
-        for key, value in loss_dict.items():
-            if isinstance(value, torch.Tensor):
-                print(f"  {key}: {value.item():.6f}")
-            else:
-                print(f"  {key}: {value:.6f}")
-        print(f"Has audio samples: {torch.sum(has_audio).item()}/{len(has_audio)}")
-        print(f"Batch size: {len(inputs.get('input_ids', []))}")
-        print("="*30)
+        # print(f"\n=== DEBUG STEP {self.global_step} ===")
+        # print(f"Total Loss: {total_loss.item():.6f}")
+        # print(f"Loss breakdown:")
+        # for key, value in loss_dict.items():
+        #     if isinstance(value, torch.Tensor):
+        #         print(f"  {key}: {value.item():.6f}")
+        #     else:
+        #         print(f"  {key}: {value:.6f}")
+        # print(f"Has audio samples: {torch.sum(has_audio).item()}/{len(has_audio)}")
+        # print(f"Batch size: {len(inputs.get('input_ids', []))}")
+        # print("="*30)
         
         # Backward pass
         total_loss.backward()
@@ -432,12 +446,13 @@ class StageATrainer:
         self.optimizer.step()
         self.optimizer.zero_grad()
         
-        # Learning rate scheduling
-        if self.global_step >= self.config["warmup_steps"]:
-            if self.scheduler is not None:
-                self.scheduler.step()
-        else:
-            self._warmup_lr()
+        # Learning rate scheduling (fixed: use local_step, assign don't multiply)
+        local_step = self.global_step + 1  # because caller increments after train_step returns
+        
+        if local_step <= self.config["warmup_steps"]:
+            self._apply_warmup(local_step)
+        elif self.scheduler is not None:
+            self.scheduler.step()
         
         # Convert losses to float
         step_losses = {k: v.item() if isinstance(v, torch.Tensor) else v 
@@ -445,7 +460,7 @@ class StageATrainer:
         
         return step_losses
     
-    def evaluate(self) -> Dict[str, float]:
+    def evaluate(self, max_batches: Optional[int] = None) -> Dict[str, float]:
         """
         Evaluate model on validation set.
         
@@ -455,7 +470,7 @@ class StageATrainer:
         self.safe_model.eval()
         
         # Check if validation dataset has samples
-        if len(self.val_loader.dataset) == 0:
+        if len(self.val_dataloader.dataset) == 0:
             print("Warning: Validation dataset is empty!")
             return {
                 "loss": 0.0,
@@ -492,26 +507,33 @@ class StageATrainer:
         device = next(self.safe_model.parameters()).device
         
         with torch.no_grad():
-            for batch in tqdm(self.val_dataloader, desc="Evaluating"):
+            dataloader = self.val_dataloader
+            if max_batches:
+                from itertools import islice
+                dataloader = islice(self.val_dataloader, max_batches)
+                desc = f"Evaluating (first {max_batches} batches)"
+            else:
+                desc = "Evaluating"
+            
+            for batch in tqdm(dataloader, desc=desc, total=max_batches or len(self.val_dataloader)):
                 # Move batch to device
                 for key in batch:
                     if isinstance(batch[key], torch.Tensor):
                         batch[key] = batch[key].to(device)
                 
-                has_audio = batch.get("has_audio", torch.zeros(len(batch["questions"]), dtype=torch.bool))
-                has_images = batch.get("has_images", torch.zeros(len(batch["questions"]), dtype=torch.bool))
+                has_audio = batch.get("has_audio", torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device))
                 
-                # Prepare inputs
+                # Prepare inputs - always pass images/audio if available, don't gate on flags
                 inputs = self.safe_model.prepare_multimodal_inputs(
                     text=batch["questions"],
-                    images=batch.get("images") if torch.any(has_images) else None,
-                    audio=batch.get("audio") if torch.any(has_audio) else None,
+                    images=batch.get("images", None),
+                    audio=batch.get("audio", None),
                     device=device
                 )
                 
-                # For BLIP2/LLaVA models, ensure pixel_values match the presence of image tokens
-                if self.safe_model.base_vl.model_type in ["blip2", "llava"]:
-                    # Check which samples have image tokens
+                # Handle pixel_values based on model type
+                if self.safe_model.base_vl.model_type == "llava":
+                    # Only LLaVA uses <image> tokens - check for image token presence
                     image_token_id = self._get_image_token_id()
                     input_ids = inputs.get("input_ids")
                     if input_ids is not None:
@@ -523,13 +545,12 @@ class StageATrainer:
                         # If no samples have image tokens but we have pixel_values, remove them
                         if not torch.any(has_img_tokens) and "pixel_values" in inputs:
                             inputs.pop("pixel_values")
-                        # If some samples have image tokens but we don't have pixel_values, create dummy ones
+                        # If image tokens are present but pixel_values missing, log warning and skip
                         elif torch.any(has_img_tokens) and "pixel_values" not in inputs:
-                            # Only create pixel_values for the batch size we actually have
-                            batch_size = input_ids.size(0)
-                            dummy_pixel_values = torch.zeros((batch_size, 3, 224, 224), 
-                                                           dtype=torch.float32, device=device)
-                            inputs["pixel_values"] = dummy_pixel_values
+                            print(f"Warning: Found <image> tokens but no pixel_values. Skipping multimodal processing.")
+                elif self.safe_model.base_vl.model_type == "blip2":
+                    # BLIP-2 doesn't use <image> tokens, so keep pixel_values as-is if they exist
+                    pass
                 
                 
                 # SAFE model forward pass
@@ -541,50 +562,62 @@ class StageATrainer:
                     "attention_mask": inputs["attention_mask"],
                     "labels": inputs["labels"]
                 }
-                if self.base_vl_model.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
+                if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
                     base_inputs["pixel_values"] = inputs["pixel_values"]
 
-                if self.base_vl_model.model_type in ["llava", "blip2"]:
-                    # Use splitter for mixed batches
-                    mm_inputs, text_inputs = self._split_mm_text_batches(base_inputs)
+                if self.safe_model.base_vl.model_type == "llava":
+                    # Use splitter for LLaVA mixed batches with order preservation
+                    mm_inputs, text_inputs, idx_mm, idx_text = self._split_mm_text_batches(base_inputs)
+                    
+                    def _forward_and_restore(inputs_a, inputs_b, idx_a, idx_b):
+                        B = base_inputs["input_ids"].size(0)
+                        out_a = self.safe_model.base_vl(**inputs_a) if inputs_a is not None else None
+                        out_b = self.safe_model.base_vl(**inputs_b) if inputs_b is not None else None
 
-                    base_outputs = None
+                        # Pull logits
+                        logits_a = (out_a["logits"] if isinstance(out_a, dict) else getattr(out_a, "logits", None)) if out_a else None
+                        logits_b = (out_b["logits"] if isinstance(out_b, dict) else getattr(out_b, "logits", None)) if out_b else None
 
-                    # 1) multimodal sub-batch
-                    if mm_inputs is not None:
-                        
-                        base_outputs = self.base_vl_model(**mm_inputs)
-
-                    # 2) text-only sub-batch
-                    if text_inputs is not None:
-                        out_text = self.base_vl_model(**text_inputs)
-                        if base_outputs is not None:
-                            # Handle dict outputs - access logits as dict keys
-                            mm_logits = base_outputs["logits"] if isinstance(base_outputs, dict) else base_outputs.logits
-                            text_logits = out_text["logits"] if isinstance(out_text, dict) else out_text.logits
-                            
-                            # Combine logits from both sub-batches
-                            combined_logits = torch.cat([mm_logits, text_logits], dim=0)
-                            
-                            if isinstance(base_outputs, dict):
-                                base_outputs["logits"] = combined_logits
-                                # Handle loss if present
-                                if "loss" in base_outputs and "loss" in out_text:
-                                    base_outputs["loss"] = base_outputs["loss"] + out_text["loss"]
-                            else:
-                                base_outputs.logits = combined_logits
-                                if hasattr(base_outputs, 'loss') and hasattr(out_text, 'loss'):
-                                    base_outputs.loss = base_outputs.loss + out_text.loss
+                        # Allocate and restore original order
+                        if logits_a is not None or logits_b is not None:
+                            ref_logits = logits_a if logits_a is not None else logits_b
+                            T, V = ref_logits.shape[1], ref_logits.shape[2]
+                            logits = torch.zeros(B, T, V, device=ref_logits.device, dtype=ref_logits.dtype)
+                            if logits_a is not None and idx_a is not None:
+                                logits[idx_a] = logits_a
+                            if logits_b is not None and idx_b is not None:
+                                logits[idx_b] = logits_b
                         else:
-                            base_outputs = out_text
+                            logits = None
 
-                    # Safety: if somehow neither branch ran, fall back to original
-                    if base_outputs is None:
-                        base_outputs = self.base_vl_model(**base_inputs)
+                        # Stitch a minimal outputs object (dict-like so losses can index it)
+                        class OutputsWrapper(dict):
+                            pass
+                        
+                        out = OutputsWrapper()
+                        out["logits"] = logits  # may be None
+                        
+                        # Sum losses if they exist
+                        if out_a and (hasattr(out_a, "loss") or (isinstance(out_a, dict) and "loss" in out_a)):
+                            la = out_a["loss"] if isinstance(out_a, dict) else out_a.loss
+                            if la is not None:
+                                out["loss"] = la if "loss" not in out else out["loss"] + la
+                        
+                        if out_b and (hasattr(out_b, "loss") or (isinstance(out_b, dict) and "loss" in out_b)):
+                            lb = out_b["loss"] if isinstance(out_b, dict) else out_b.loss
+                            if lb is not None:
+                                out["loss"] = lb if "loss" not in out else out["loss"] + lb
+                        
+                        return out
+
+                    base_outputs = _forward_and_restore(mm_inputs, text_inputs, idx_mm, idx_text)
+                elif self.safe_model.base_vl.model_type == "blip2":
+                    # BLIP-2: use directly without splitting
+                    base_outputs = self.safe_model.base_vl(**base_inputs)
                 else:
                     # For custom models, use vision features
                     base_inputs["vision_features"] = inputs.get("vision_features")
-                    base_outputs = self.base_vl_model(**base_inputs)
+                    base_outputs = self.safe_model.base_vl(**base_inputs)
                 
                 # Compute losses
                 batch_losses = self.combined_loss(
@@ -600,43 +633,36 @@ class StageATrainer:
                     if key in batch_losses:
                         eval_losses[key] += batch_losses[key].item() * batch_size
                 
-                # Compute accuracy metrics
-                safe_preds = torch.argmax(safe_outputs["logits"], dim=-1)
-                base_preds = torch.argmax(base_outputs["logits"], dim=-1)
-                targets = inputs["labels"]
+                # Compute accuracy metrics using robust methods
+                # Generate predictions and compute answer-level accuracy
+                safe_accuracy_batch, base_accuracy_batch = self._compute_robust_accuracy(
+                    safe_outputs, base_outputs, inputs, has_audio, batch
+                )
+                
+                # Debug: Print model outputs for first few batches
+                if total_samples < 20:  # Only print for first 20 samples total
+                    self._debug_print_model_outputs(
+                        safe_outputs, base_outputs, inputs, batch, 
+                        safe_accuracy_batch, base_accuracy_batch
+                    )
                 
                 # Audio-dependent accuracy
                 if torch.any(has_audio):
                     audio_indices = torch.where(has_audio)[0]
-                    # Ensure indices are within bounds
-                    audio_indices = audio_indices[audio_indices < len(safe_preds)]
                     if len(audio_indices) > 0:
-                        audio_pred_sample = safe_preds[audio_indices]
-                        audio_target_sample = targets[audio_indices]
-                        
-                        # Simple token-level accuracy (simplified)
-                        audio_matches = (audio_pred_sample == audio_target_sample).float()
-                        audio_correct += torch.sum(audio_matches).item()
-                        audio_total += audio_matches.numel()
+                        # Use answer-level accuracy for audio samples (fix tensor indexing)
+                        audio_correct += sum(safe_accuracy_batch[int(i)] for i in audio_indices)
+                        audio_total += len(audio_indices)
                         audio_samples += len(audio_indices)
                 
-                # VL retention accuracy
+                # VL retention accuracy  
                 vl_indices = torch.where(~has_audio)[0] if torch.any(~has_audio) else torch.arange(len(has_audio))
                 if len(vl_indices) > 0:
-                    # Ensure indices are within bounds
-                    vl_indices = vl_indices[vl_indices < len(safe_preds)]
-                    if len(vl_indices) > 0:
-                        vl_safe_pred = safe_preds[vl_indices]
-                        vl_base_pred = base_preds[vl_indices]
-                        vl_target = targets[vl_indices]
-                        
-                        vl_safe_matches = (vl_safe_pred == vl_target).float()
-                        vl_base_matches = (vl_base_pred == vl_target).float()
-                        
-                        vl_safe_correct += torch.sum(vl_safe_matches).item()
-                        vl_base_correct += torch.sum(vl_base_matches).item()
-                        vl_total += vl_safe_matches.numel()
-                        vl_samples += len(vl_indices)
+                    # Use answer-level accuracy for VL samples (fix tensor indexing)
+                    vl_safe_correct += sum(safe_accuracy_batch[int(i)] for i in vl_indices)
+                    vl_base_correct += sum(base_accuracy_batch[int(i)] for i in vl_indices)
+                    vl_total += len(vl_indices)
+                    vl_samples += len(vl_indices)
                 
                 total_samples += batch_size
         
@@ -670,6 +696,314 @@ class StageATrainer:
         }
         
         return eval_metrics
+    
+    def _compute_robust_accuracy(self, safe_outputs, base_outputs, inputs, has_audio, batch):
+        """
+        Compute robust accuracy using proper answer generation and matching.
+        
+        Args:
+            safe_outputs: SAFE model outputs
+            base_outputs: Base VL model outputs  
+            inputs: Model inputs
+            has_audio: Audio sample mask
+            batch: Original batch data
+            
+        Returns:
+            Tuple of (safe_accuracies, base_accuracies) for each sample in batch
+        """
+        batch_size = len(batch.get("questions", inputs.get("input_ids", [])))
+        safe_accuracies = [0.0] * batch_size
+        base_accuracies = [0.0] * batch_size
+        
+        try:
+            # Get ground truth answers
+            if "answers" in batch:
+                gt_answers = batch["answers"]
+            elif "labels" in inputs:
+                # Decode labels to text (skip padding tokens)
+                labels = inputs["labels"]
+                gt_answers = []
+                for i in range(batch_size):
+                    # Remove padding tokens (-100) and decode
+                    label_tokens = labels[i][labels[i] != -100]
+                    if len(label_tokens) > 0:
+                        try:
+                            answer = self.safe_model.base_vl.tokenizer.decode(
+                                label_tokens, skip_special_tokens=True
+                            ).strip()
+                            gt_answers.append(answer)
+                        except:
+                            gt_answers.append("")
+                    else:
+                        gt_answers.append("")
+            else:
+                # No ground truth available
+                return safe_accuracies, base_accuracies
+            
+            # Generate predictions using proper generation (without labels)
+            gen_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+            safe_pred_tokens = self._generate_predictions(gen_inputs, "safe")
+            base_pred_tokens = self._generate_predictions(gen_inputs, "base")
+            
+            for i in range(batch_size):
+                try:
+                    # Decode SAFE model predictions and extract answer
+                    safe_pred_full = self.safe_model.base_vl.tokenizer.decode(
+                        safe_pred_tokens[i], skip_special_tokens=True
+                    ).strip()
+                    safe_pred = self._clean_answer(self._extract_answer(safe_pred_full))
+                    
+                    # Decode base model predictions and extract answer
+                    base_pred_full = self.safe_model.base_vl.tokenizer.decode(
+                        base_pred_tokens[i], skip_special_tokens=True
+                    ).strip()
+                    base_pred = self._clean_answer(self._extract_answer(base_pred_full))
+                    
+                    # Get ground truth with proper cleaning
+                    gt_answer = self._clean_answer(gt_answers[i]) if i < len(gt_answers) else ""
+                    
+                    # Compute answer-level accuracy (exact match or fuzzy match)
+                    safe_accuracies[i] = self._compute_answer_accuracy(safe_pred, gt_answer)
+                    base_accuracies[i] = self._compute_answer_accuracy(base_pred, gt_answer)
+                    
+                except Exception as e:
+                    # Handle decoding errors gracefully
+                    safe_accuracies[i] = 0.0
+                    base_accuracies[i] = 0.0
+                    
+        except Exception as e:
+            # Handle any errors gracefully
+            print(f"Warning: Error in robust accuracy computation: {e}")
+            pass
+        
+        return safe_accuracies, base_accuracies
+    
+    def _compute_answer_accuracy(self, pred_answer: str, gt_answer: str) -> float:
+        """
+        Compute accuracy between predicted and ground truth answers.
+        
+        Args:
+            pred_answer: Predicted answer string
+            gt_answer: Ground truth answer string
+            
+        Returns:
+            Accuracy score (0.0 or 1.0 for exact match, or partial score)
+        """
+        if not gt_answer or not pred_answer:
+            return 0.0
+        
+        # Clean and normalize answers
+        pred_clean = pred_answer.lower().strip()
+        gt_clean = gt_answer.lower().strip()
+        
+        # Exact match
+        if pred_clean == gt_clean:
+            return 1.0
+        
+        # For VQA-style answers, check if prediction contains the ground truth
+        if gt_clean in pred_clean or pred_clean in gt_clean:
+            return 1.0
+        
+        # For numerical answers, try to extract and compare numbers
+        import re
+        pred_numbers = re.findall(r'\d+\.?\d*', pred_clean)
+        gt_numbers = re.findall(r'\d+\.?\d*', gt_clean)
+        
+        if pred_numbers and gt_numbers:
+            try:
+                pred_num = float(pred_numbers[0])
+                gt_num = float(gt_numbers[0])
+                if abs(pred_num - gt_num) < 0.001:  # Close enough for numerical answers
+                    return 1.0
+            except:
+                pass
+        
+        # Token overlap-based similarity (for more lenient matching)
+        pred_tokens = set(pred_clean.split())
+        gt_tokens = set(gt_clean.split())
+        
+        if len(gt_tokens) > 0:
+            overlap = len(pred_tokens & gt_tokens) / len(gt_tokens)
+            if overlap >= 0.8:  # 80% token overlap
+                return overlap
+        
+        return 0.0
+    
+    def _generate_predictions(self, inputs, model_choice="safe"):
+        """Generate predictions using proper text generation (works on CPU)."""
+        model = self.safe_model if model_choice == "safe" else self.safe_model.base_vl
+        tok = self.safe_model.base_vl.tokenizer
+        
+        if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token_id", None) is not None:
+            tok.pad_token = tok.eos_token
+
+        gen_inputs = {k: inputs[k].cpu() for k in ("input_ids", "attention_mask", "pixel_values") if k in inputs and inputs[k] is not None}
+
+        if "input_ids" in gen_inputs and gen_inputs["input_ids"].dim() == 1:
+            gen_inputs["input_ids"] = gen_inputs["input_ids"].unsqueeze(0)
+            if "attention_mask" in gen_inputs and gen_inputs["attention_mask"].dim() == 1:
+                gen_inputs["attention_mask"] = gen_inputs["attention_mask"].unsqueeze(0)
+
+        if "input_ids" not in gen_inputs:
+            B = gen_inputs.get("pixel_values", torch.empty(0)).size(0)
+            return [torch.tensor([], dtype=torch.long) for _ in range(B)]
+
+        in_len = gen_inputs["input_ids"].shape[1]
+
+        model.eval()
+        if hasattr(model, "config"):
+            model.config.use_cache = True
+
+        with torch.inference_mode():
+            # For BaseVLModel, use the underlying LLM's generate method directly
+            if hasattr(model, 'llm') and hasattr(model.llm, 'generate'):
+                out = model.llm.generate(
+                    **gen_inputs,
+                    max_new_tokens=8,
+                    do_sample=False,
+                    num_beams=1,
+                    use_cache=True,
+                    pad_token_id=tok.pad_token_id,
+                    eos_token_id=getattr(tok, "eos_token_id", None),
+                )
+            else:
+                # Fallback for other model types
+                out = model.generate(
+                    **gen_inputs,
+                    max_new_tokens=8,
+                    do_sample=False,
+                    num_beams=1,
+                    use_cache=True,
+                    pad_token_id=tok.pad_token_id,
+                    eos_token_id=getattr(tok, "eos_token_id", None),
+                )
+
+        # Handle encoder-decoder vs decoder-only
+        if hasattr(model, "config") and getattr(model.config, "is_encoder_decoder", False):
+            return [out[i] for i in range(out.size(0))]
+        return [out[i, in_len:] for i in range(out.size(0))]
+    
+    def _clean_answer(self, s: str) -> str:
+        """Clean and normalize answer text."""
+        s = s.strip()
+        s = s.split("Answer:")[-1].strip() if "Answer:" in s else s
+        return " ".join(s.split())  # collapse spaces
+    
+    def _extract_answer(self, generated_text):
+        """Extract answer from generated text after 'Answer:'"""
+        if "Answer:" in generated_text:
+            answer = generated_text.split("Answer:")[-1].strip()
+        else:
+            answer = generated_text.strip()
+        
+        # Extract first few words as answer (VQA answers are usually short)
+        answer_words = answer.split()[:5]  # Max 5 words
+        return " ".join(answer_words).strip()
+    
+    def _debug_print_model_outputs(self, safe_outputs, base_outputs, inputs, batch, 
+                                 safe_accuracies, base_accuracies):
+        """
+        Debug function to print model outputs and compare them.
+        """
+        try:
+            batch_size = len(batch.get("questions", inputs.get("input_ids", [])))
+            
+            print(f"\n" + "="*80)
+            print(f"MODEL OUTPUT DEBUG - Batch with {batch_size} samples")
+            print(f"="*80)
+            
+            # Get ground truth answers
+            gt_answers = []
+            if "answers" in batch:
+                gt_answers = batch["answers"]
+            elif "labels" in inputs:
+                labels = inputs["labels"]
+                for i in range(batch_size):
+                    label_tokens = labels[i][labels[i] != -100]
+                    if len(label_tokens) > 0:
+                        try:
+                            answer = self.safe_model.base_vl.tokenizer.decode(
+                                label_tokens, skip_special_tokens=True
+                            ).strip()
+                            gt_answers.append(answer)
+                        except:
+                            gt_answers.append("DECODE_ERROR")
+                    else:
+                        gt_answers.append("NO_LABELS")
+            
+            # Get questions if available
+            questions = batch.get("questions", ["Question not available"] * batch_size)
+            
+            # Generate predictions using proper generation (for debug display)
+            gen_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+            try:
+                safe_pred_token_lists = self._generate_predictions(gen_inputs, "safe")
+                base_pred_token_lists = self._generate_predictions(gen_inputs, "base")
+                # Convert lists to tensors for consistent handling
+                safe_pred_tokens = [tokens for tokens in safe_pred_token_lists]
+                base_pred_tokens = [tokens for tokens in base_pred_token_lists]
+            except Exception as e:
+                print(f"Warning: Could not generate predictions for debug: {e}")
+                # Fallback to argmax
+                safe_pred_tokens = torch.argmax(safe_outputs["logits"], dim=-1)
+                base_pred_tokens = torch.argmax(base_outputs["logits"], dim=-1)
+            
+            for i in range(min(batch_size, 3)):  # Print first 3 samples from batch
+                print(f"\n--- Sample {i+1} ---")
+                print(f"Question: {questions[i][:100]}...")
+                print(f"Ground Truth: {gt_answers[i] if i < len(gt_answers) else 'N/A'}")
+                
+                # Debug: Show input structure
+                print(f"Input IDs shape: {inputs['input_ids'][i].shape}")
+                print(f"Has pixel values: {'pixel_values' in inputs}")
+                print(f"All input keys: {inputs.keys()}")
+                if 'pixel_values' in inputs:
+                    print(f"Pixel values shape: {inputs['pixel_values'].shape}")
+                print(f"Model type: {self.safe_model.base_vl.model_type}")
+                
+                try:
+                    # Handle both tensor and list formats
+                    if isinstance(safe_pred_tokens, list) and i < len(safe_pred_tokens):
+                        safe_pred = self.safe_model.base_vl.tokenizer.decode(
+                            safe_pred_tokens[i], skip_special_tokens=True
+                        ).strip()
+                    else:
+                        safe_pred = self.safe_model.base_vl.tokenizer.decode(
+                            safe_pred_tokens[i], skip_special_tokens=True
+                        ).strip()
+                    print(f"SAFE Prediction: '{safe_pred}'")
+                    print(f"SAFE Accuracy: {safe_accuracies[i]:.3f}")
+                except Exception as e:
+                    print(f"SAFE Prediction: DECODE_ERROR ({e})")
+                    print(f"SAFE Accuracy: {safe_accuracies[i]:.3f}")
+                
+                try:
+                    # Handle both tensor and list formats
+                    if isinstance(base_pred_tokens, list) and i < len(base_pred_tokens):
+                        base_pred = self.safe_model.base_vl.tokenizer.decode(
+                            base_pred_tokens[i], skip_special_tokens=True
+                        ).strip()
+                    else:
+                        base_pred = self.safe_model.base_vl.tokenizer.decode(
+                            base_pred_tokens[i], skip_special_tokens=True
+                        ).strip()
+                    print(f"Base Prediction: '{base_pred}'")
+                    print(f"Base Accuracy: {base_accuracies[i]:.3f}")
+                except Exception as e:
+                    print(f"Base Prediction: DECODE_ERROR ({e})")
+                    print(f"Base Accuracy: {base_accuracies[i]:.3f}")
+                
+                # Show raw logits info
+                print(f"SAFE logits shape: {safe_outputs['logits'][i].shape}")
+                print(f"Base logits shape: {base_outputs['logits'][i].shape}")
+                print(f"Labels shape: {inputs['labels'][i].shape if 'labels' in inputs else 'N/A'}")
+            
+            print(f"="*80)
+            
+        except Exception as e:
+            print(f"Debug print error: {e}")
+            import traceback
+            traceback.print_exc()
     
     def save_checkpoint(self, metrics: Dict[str, float], is_best: bool = False, suffix: str = ""):
         """Save model checkpoint."""
@@ -725,20 +1059,30 @@ class StageATrainer:
         print("🎓 Starting Stage A training with curriculum learning...")
         print(f"Curriculum has {self.curriculum_manager.config.get_num_stages()} stages")
         
-        # Skip baseline evaluation for faster startup - will evaluate after first epoch
-        print("Skipping baseline metrics computation for faster startup...")
-        baseline_metrics = {
-            "retention_score": 0.0,
-            "audio_accuracy": 0.0,
-            "vl_loss": 0.0,
-            "audio_loss": 0.0
-        }
+        # Compute baseline metrics before training (quick evaluation)
+        print("Computing baseline metrics (quick evaluation)...")
+        baseline_metrics = self.evaluate(max_batches=50)  # Only evaluate first 50 batches
         self.baseline_metrics = baseline_metrics
         self.curriculum_manager.set_baseline_metrics({
-            "vl_retention": 0.0,
-            "audio_accuracy": 0.0
+            "vl_retention": baseline_metrics["retention_score"],
+            "audio_accuracy": baseline_metrics["audio_accuracy"]
         })
-        print("Will compute metrics after first epoch...")
+        print(f"Baseline metrics computed:")
+        print(f"  Retention Score: {baseline_metrics['retention_score']:.4f}")
+        print(f"  Audio Accuracy: {baseline_metrics['audio_accuracy']:.4f}")
+        print(f"  VL Safe Accuracy: {baseline_metrics['vl_safe_accuracy']:.4f}")
+        print(f"  VL Base Accuracy: {baseline_metrics['vl_base_accuracy']:.4f}")
+        print(f"  Total Loss: {baseline_metrics['total_loss']:.4f}")
+        print(f"")
+        print(f"🔍 Model Comparison:")
+        print(f"  SAFE Model VL Accuracy: {baseline_metrics['vl_safe_accuracy']:.4f}")
+        print(f"  Base VL Model Accuracy: {baseline_metrics['vl_base_accuracy']:.4f}")
+        if baseline_metrics['vl_base_accuracy'] > 0.01:  # If base model has decent accuracy
+            if baseline_metrics['vl_safe_accuracy'] < baseline_metrics['vl_base_accuracy'] * 0.5:
+                print(f"  ⚠️  WARNING: SAFE model significantly underperforming base VL model!")
+                print(f"     This suggests an integration issue in the SAFE architecture.")
+        else:
+            print(f"  ℹ️  Both models show low accuracy - may be due to dataset/task mismatch.")
         
         # Initialize first stage
         self.update_curriculum_config()
@@ -799,7 +1143,8 @@ class StageATrainer:
             
             # End of epoch evaluation
             print(f"\n📊 End of Epoch {self.epoch} (Stage {stage_name}, Epoch {epoch_in_stage})")
-            eval_metrics = self.evaluate()
+            max_eval_batches = self.config.get("max_eval_batches", None)
+            eval_metrics = self.evaluate(max_batches=max_eval_batches)
             
             # Calculate curriculum-specific metrics
             curriculum_metrics = {
@@ -867,7 +1212,8 @@ class StageATrainer:
         print("🎓 Curriculum learning completed!")
         
         # Final evaluation and checkpoint
-        final_metrics = self.evaluate()
+        max_eval_batches = self.config.get("max_eval_batches", None)
+        final_metrics = self.evaluate(max_batches=max_eval_batches)
         self.save_checkpoint(final_metrics, is_best=False, suffix="final")
         
         # Print curriculum summary
@@ -887,9 +1233,12 @@ class StageATrainer:
         
         # Compute baseline retention score
         print("Computing baseline metrics...")
-        baseline_metrics = self.evaluate()
+        max_eval_batches = self.config.get("max_eval_batches", None)
+        baseline_metrics = self.evaluate(max_batches=max_eval_batches)
         baseline_retention = baseline_metrics["retention_score"]
         print(f"Baseline retention score: {baseline_retention:.4f}")
+        if max_eval_batches:
+            print(f"(Evaluation limited to {max_eval_batches} batches)")
         
         for epoch in range(self.config["num_epochs"]):
             self.epoch = epoch
@@ -928,7 +1277,8 @@ class StageATrainer:
                 
                 # Evaluation
                 if self.global_step % self.config["eval_steps"] == 0:
-                    eval_metrics = self.evaluate()
+                    max_eval_batches = self.config.get("max_eval_batches", None)
+                    eval_metrics = self.evaluate(max_batches=max_eval_batches)
                     
                     print(f"\nStep {self.global_step} Evaluation:")
                     print(f"  Retention Score: {eval_metrics['retention_score']:.4f}")
@@ -969,7 +1319,8 @@ class StageATrainer:
             
             # End of epoch evaluation
             print(f"\nEnd of Epoch {epoch+1}")
-            epoch_metrics = self.evaluate()
+            max_eval_batches = self.config.get("max_eval_batches", None)
+            epoch_metrics = self.evaluate(max_batches=max_eval_batches)
             print(f"Epoch {epoch+1} Results:")
             print(f"  Retention Score: {epoch_metrics['retention_score']:.4f}")
             print(f"  Audio Accuracy: {epoch_metrics['audio_accuracy']:.4f}")
@@ -979,6 +1330,7 @@ class StageATrainer:
         print(f"Best retention score: {self.best_retention_score:.4f}")
         
         # Final checkpoint
-        final_metrics = self.evaluate()
+        max_eval_batches = self.config.get("max_eval_batches", None)
+        final_metrics = self.evaluate(max_batches=max_eval_batches)
         self.save_checkpoint(final_metrics, is_best=False)
         return final_metrics

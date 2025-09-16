@@ -167,7 +167,15 @@ class BaseVLModel(nn.Module):
         Returns:
             Dictionary with input_ids, attention_mask, labels, pixel_values
         """
-        if self.model_type in ["llava", "blip2"] and images is not None:
+        # Check if we have valid images (not None and not a list of all None values)
+        has_valid_images = False
+        if images is not None:
+            if isinstance(images, list):
+                has_valid_images = any(img is not None for img in images)
+            else:
+                has_valid_images = True
+        
+        if self.model_type in ["llava", "blip2"] and has_valid_images:
             # For BLIP-2, we need to handle tokenization more carefully
             if self.model_type == "blip2":
                 # BLIP-2 expects text-only tokenization + separate pixel_values
@@ -180,26 +188,31 @@ class BaseVLModel(nn.Module):
                     max_length=512
                 )
                 
-                # Process images separately to get pixel_values
-                if hasattr(self.processor, 'image_processor'):
-                    image_inputs = self.processor.image_processor(
-                        images,
-                        return_tensors="pt"
-                    )
-                    pixel_values = image_inputs["pixel_values"]
-                else:
-                    # Fallback: process images with the full processor but ignore input_ids
-                    temp_inputs = self.processor(
-                        images=images,
-                        return_tensors="pt"
-                    )
-                    pixel_values = temp_inputs["pixel_values"]
-                
                 inputs = {
                     "input_ids": text_inputs["input_ids"],
-                    "attention_mask": text_inputs["attention_mask"],
-                    "pixel_values": pixel_values
+                    "attention_mask": text_inputs["attention_mask"]
                 }
+                
+                # Process images only if we have valid images
+                valid_images = images
+                if isinstance(images, list):
+                    valid_images = [img for img in images if img is not None]
+                
+                if valid_images:  # Only process if we have valid images after filtering
+                    # Process images separately to get pixel_values
+                    if hasattr(self.processor, 'image_processor'):
+                        image_inputs = self.processor.image_processor(
+                            valid_images,
+                            return_tensors="pt"
+                        )
+                        inputs["pixel_values"] = image_inputs["pixel_values"]
+                    else:
+                        # Fallback: process images with the full processor but ignore input_ids
+                        temp_inputs = self.processor(
+                            images=valid_images,
+                            return_tensors="pt"
+                        )
+                        inputs["pixel_values"] = temp_inputs["pixel_values"]
             else:
                 # LLaVA: Use processor normally (it handles multimodal correctly)
                 inputs = self.processor(
