@@ -1,0 +1,49 @@
+# Retention Baseline Experiment
+# Focused experiment to validate retention techniques and establish baselines
+name: "retention_baseline"
+description: "Retention validation experiment to establish baseline performance"
+
+# Base configurations to inherit from
+base_configs:
+  training: "retention"
+  dataset: "small"
+  model: "demo"
+
+# Experiment-specific overrides
+overrides:
+  training:
+    num_epochs: 3  # Short training focused on retention
+    eval_every_n_epochs: 1  # Evaluate every epoch for retention tracking
+    max_eval_batches: 25  # Reasonable evaluation size
+    retention_tolerance: 0.003  # Very strict tolerance (0.3%)
+    fisher_weight: 0.2  # Higher Fisher weight for retention focus
+    
+  dataset:
+    train_size: 100
+    val_size: 50
+    
+# Experiment settings
+experiment_type: "retention_validation"
+enable_curriculum: false
+
+# Retention-specific settings
+compute_fisher_information: true
+detailed_retention_logging: true
+retention_checkpoints: true
+
+# Success criteria
+success_criteria:
+  max_retention_loss: 0.005  # 0.5% max retention loss
+  min_retention_score: 0.995  # 99.5% retention score
+  stable_retention: true  # Retention shouldn't degrade over epochs
+  
+# Expected outcomes  
+expected_runtime_minutes: 20
+expected_memory_usage_gb: 8
+compute_requirements: "moderate"
+
+# Analysis settings
+baseline_comparison: true
+retention_curve_analysis: true
+fisher_importance_analysis: true
+save_retention_report: true

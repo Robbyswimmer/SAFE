@@ -1,0 +1,41 @@
+# Overfitting Test Experiment
+# Tests model capacity and retention behavior under overfitting conditions
+name: "overfit_test"
+description: "Overfitting test to validate model capacity and retention behavior"
+
+# Base configurations to inherit from
+base_configs:
+  training: "overfit"
+  dataset: "small"
+  model: "demo"
+
+# Experiment-specific overrides
+overrides:
+  training:
+    num_epochs: 25  # Extra epochs for stronger overfitting
+    eval_every_n_epochs: 5  # Less frequent evaluation
+    max_eval_batches: 5  # Minimal evaluation during overfitting
+    retention_tolerance: 0.03  # More tolerant during overfitting test
+    
+  dataset:
+    train_size: 50  # Small for faster overfitting
+    val_size: 20
+    
+# Experiment settings
+experiment_type: "overfitting"
+enable_curriculum: false
+save_intermediate_checkpoints: true
+
+# Success criteria
+success_criteria:
+  min_audio_accuracy: 0.8  # Should be able to overfit audio task
+  max_retention_degradation: 0.05  # 5% retention loss acceptable for overfit test
+  
+# Expected outcomes
+expected_runtime_minutes: 15
+expected_memory_usage_gb: 8
+compute_requirements: "low"
+
+# Analysis settings
+track_overfitting_metrics: true
+save_overfitting_analysis: true

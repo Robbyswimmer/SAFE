@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, List, Union, Tuple
+from collections import Counter
+from typing import Any, Optional, Dict, List, Sequence, Union, Tuple
 from .base_vl import BaseVLModel
 from .audio_encoders import CLAPAudioEncoder, WhisperAudioEncoder, MultiModalAudioEncoder
 from .projectors import AudioProjector, AdaptiveAudioProjector
@@ -128,14 +129,130 @@ class SAFEModel(nn.Module):
         self.audio_start_token = "<audio>"
         self.audio_end_token = "</audio>"
         
-        # Add audio tokens to tokenizer
-        special_tokens = [self.audio_start_token, self.audio_end_token]
-        self.base_vl.tokenizer.add_tokens(special_tokens)
-        self.base_vl.llm.resize_token_embeddings(len(self.base_vl.tokenizer))
+        # Store original vocabulary size to preserve base VL model
+        self.original_vocab_size = len(self.base_vl.tokenizer)
         
+        # Add audio tokens to tokenizer but DON'T resize embeddings yet
+        special_tokens = [self.audio_start_token, self.audio_end_token]
+        num_added = self.base_vl.tokenizer.add_tokens(special_tokens)
+        
+        # Store audio token IDs for later use
+        self.audio_start_token_id = self.base_vl.tokenizer.convert_tokens_to_ids(self.audio_start_token)
+        self.audio_end_token_id = self.base_vl.tokenizer.convert_tokens_to_ids(self.audio_end_token)
+        
+        # Create a separate embedding layer for audio tokens to avoid corrupting base model
+        if num_added > 0:
+            # Get the actual embedding dimension from the base model
+            base_embeddings = self.base_vl.llm.get_input_embeddings()
+            actual_hidden_size = base_embeddings.weight.size(1)
+            
+            self.audio_token_embeddings = nn.Embedding(
+                num_added, 
+                actual_hidden_size,
+                dtype=base_embeddings.weight.dtype
+            )
+            # Initialize audio token embeddings with mean of existing embeddings
+            with torch.no_grad():
+                mean_embedding = base_embeddings.weight.mean(dim=0)
+                for i in range(num_added):
+                    self.audio_token_embeddings.weight[i] = mean_embedding
+            
+            # Update our stored hidden size to match the actual model
+            self.llm_hidden_size = actual_hidden_size
+    
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Get input embeddings, handling both original tokens and new audio tokens.
+        
+        Args:
+            input_ids: Token IDs
+            
+        Returns:
+            Embeddings tensor
+        """
+        # Get base embeddings for original vocabulary
+        base_embeddings = self.base_vl.llm.get_input_embeddings()
+        
+        # Check if we have any audio tokens
+        has_audio_tokens = (input_ids >= self.original_vocab_size).any()
+        
+        if not has_audio_tokens:
+            # No audio tokens, use base embeddings directly
+            return base_embeddings(input_ids)
+        
+        # Handle mixed tokens (original + audio)
+        device = input_ids.device
+        batch_size, seq_len = input_ids.shape
+        
+        # Create output tensor using actual embedding dimension
+        actual_hidden_size = base_embeddings.weight.size(1)
+        embeddings = torch.zeros(
+            batch_size, seq_len, actual_hidden_size,
+            dtype=base_embeddings.weight.dtype,
+            device=device
+        )
+        
+        # Mask for original tokens (within original vocabulary)
+        original_mask = input_ids < self.original_vocab_size
+        audio_mask = input_ids >= self.original_vocab_size
+        
+        # Fill in original token embeddings
+        if original_mask.any():
+            original_ids = input_ids.masked_fill(~original_mask, 0)  # Use 0 for masked positions
+            original_embeds = base_embeddings(original_ids)
+            embeddings[original_mask] = original_embeds[original_mask]
+        
+        # Fill in audio token embeddings
+        if audio_mask.any() and hasattr(self, 'audio_token_embeddings'):
+            # Map audio token IDs to indices in audio_token_embeddings
+            audio_ids = input_ids[audio_mask] - self.original_vocab_size
+            audio_embeds = self.audio_token_embeddings(audio_ids)
+            embeddings[audio_mask] = audio_embeds
+        
+        return embeddings
+    
+    def get_trainable_parameters(self):
+        """
+        Get trainable parameters for Stage A training.
+        
+        Returns:
+            Iterator of trainable parameters
+        """
+        # Audio projector parameters
+        for param in self.audio_projector.parameters():
+            yield param
+        
+        # Fusion adapter parameters
+        for param in self.fusion_adapter.parameters():
+            yield param
+        
+        # Audio token embeddings (new addition)
+        if hasattr(self, 'audio_token_embeddings'):
+            for param in self.audio_token_embeddings.parameters():
+                yield param
+    
+    def enable_audio_training(self):
+        """Enable training mode for audio components while keeping base VL frozen."""
+        # Set audio components to training mode
+        self.audio_projector.train()
+        self.fusion_adapter.train()
+        if hasattr(self, 'audio_token_embeddings'):
+            self.audio_token_embeddings.train()
+        
+        # Ensure base VL model stays frozen and in eval mode
+        self.base_vl.eval()
+        for param in self.base_vl.parameters():
+            param.requires_grad = False
+    
+    def eval(self):
+        """Override eval to handle both base VL and audio components."""
+        super().eval()
+        self.base_vl.eval()
+        return self
+    
     def encode_audio(
-        self, 
-        audio: Union[torch.Tensor, List[str], List], 
+        self,
+        audio: Union[torch.Tensor, List[str], List],
         num_tokens: Optional[int] = None
     ) -> Tuple[torch.Tensor, Optional[List[str]]]:
         """
@@ -159,14 +276,141 @@ class SAFEModel(nn.Module):
             audio_tokens = self.audio_projector(audio_features, num_tokens)
         else:
             audio_tokens = self.audio_projector(audio_features)
-            
+
         return audio_tokens, transcripts
+
+    def _select_training_answer(self, answer: Any) -> str:
+        if answer is None:
+            return ""
+        if isinstance(answer, str):
+            return answer
+        if isinstance(answer, dict):
+            return answer.get("answer", "")
+        if isinstance(answer, (list, tuple)):
+            if not answer:
+                return ""
+            if isinstance(answer[0], dict):
+                counts = Counter(
+                    item.get("answer", "") for item in answer if item.get("answer")
+                )
+                if counts:
+                    return counts.most_common(1)[0][0]
+                return ""
+            counts = Counter(str(a) for a in answer)
+            return counts.most_common(1)[0][0]
+        return str(answer)
+
+    def _apply_answers_to_inputs(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        answers: Optional[Union[str, Sequence[Any]]],
+        device: torch.device,
+    ) -> None:
+        if answers is None:
+            return
+
+        tokenizer = self.base_vl.tokenizer
+        pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id or 0
+        eos_id = tokenizer.eos_token_id
+
+        input_ids = inputs["input_ids"].to(device)
+        attention_mask = inputs["attention_mask"].to(device)
+
+        if isinstance(answers, str):
+            answer_list = [answers] * input_ids.size(0)
+        else:
+            answer_list = list(answers)
+            if len(answer_list) != input_ids.size(0):
+                # Broadcast single answer to entire batch if needed
+                if len(answer_list) == 1:
+                    answer_list = answer_list * input_ids.size(0)
+                else:
+                    raise ValueError("Number of answers does not match batch size")
+
+        new_input_ids: List[torch.Tensor] = []
+        new_attention: List[torch.Tensor] = []
+        new_labels: List[torch.Tensor] = []
+        max_length = 0
+
+        for i, raw_answer in enumerate(answer_list):
+            answer_text = self._select_training_answer(raw_answer)
+            prompt_len = int(attention_mask[i].sum().item())
+            prompt_tokens = input_ids[i, :prompt_len]
+
+            answer_tokens = tokenizer.encode(
+                answer_text,
+                add_special_tokens=False,
+            )
+            if eos_id is not None:
+                if not answer_tokens or answer_tokens[-1] != eos_id:
+                    answer_tokens.append(eos_id)
+
+            if not answer_tokens:
+                # Ensure there is at least one target token to supervise on
+                answer_tokens = [tokenizer.pad_token_id or pad_id]
+
+            answer_tensor = torch.tensor(
+                answer_tokens,
+                dtype=prompt_tokens.dtype,
+                device=device,
+            )
+
+            combined = torch.cat([prompt_tokens, answer_tensor], dim=0)
+            labels_prefix = torch.full(
+                (prompt_len,),
+                -100,
+                dtype=torch.long,
+                device=device,
+            )
+            labels = torch.cat([labels_prefix, answer_tensor], dim=0)
+
+            attention = torch.cat(
+                [
+                    torch.ones(prompt_len, dtype=attention_mask.dtype, device=device),
+                    torch.ones(answer_tensor.size(0), dtype=attention_mask.dtype, device=device),
+                ],
+                dim=0,
+            )
+
+            new_input_ids.append(combined)
+            new_labels.append(labels)
+            new_attention.append(attention)
+            max_length = max(max_length, combined.size(0))
+
+        padded_ids = torch.full(
+            (len(new_input_ids), max_length),
+            pad_id,
+            dtype=input_ids.dtype,
+            device=device,
+        )
+        padded_attention = torch.zeros(
+            (len(new_attention), max_length),
+            dtype=new_attention[0].dtype,
+            device=device,
+        )
+        padded_labels = torch.full(
+            (len(new_labels), max_length),
+            -100,
+            dtype=torch.long,
+            device=device,
+        )
+
+        for i, (seq, mask, label) in enumerate(zip(new_input_ids, new_attention, new_labels)):
+            length = seq.size(0)
+            padded_ids[i, :length] = seq
+            padded_attention[i, :length] = mask
+            padded_labels[i, :length] = label
+
+        inputs["input_ids"] = padded_ids
+        inputs["attention_mask"] = padded_attention
+        inputs["labels"] = padded_labels
     
     def prepare_multimodal_inputs(
         self,
-        text: str,
-        images: Optional[torch.Tensor] = None,
+        text: Union[str, List[str]],
+        images: Optional[Union[torch.Tensor, List]] = None,
         audio: Optional[Union[torch.Tensor, List[str]]] = None,
+        answers: Optional[Union[str, Sequence[Any]]] = None,
         device: str = "cuda",
         include_audio_tokens: bool = True,
         num_audio_tokens: Optional[int] = None
@@ -178,226 +422,21 @@ class SAFEModel(nn.Module):
             text: Input text
             images: Optional images
             audio: Optional audio
+            answers: Optional answers for supervised training
             device: Target device
             include_audio_tokens: Whether to include audio token placeholders
             num_audio_tokens: Override for number of audio tokens
-            
+
         Returns:
             Dictionary with input_ids, attention_mask, audio_tokens, etc.
         """
-        # For LLaVA/BLIP2, use the base VL model's proper input preparation
-        if self.base_vl.model_type in ["llava", "blip2"]:
-            # Handle case where images might be a list (from batch processing)
-            if images is not None and isinstance(images, list):
-                # Process each text-image pair individually and then batch
-                from PIL import Image
-                import numpy as np
-                
-                
-                batch_results = []
-                texts = text if isinstance(text, list) else [text]
-                
-                for i, (single_text, single_image) in enumerate(zip(texts, images)):
-                    if single_image is not None:
-                        # Convert tensor to PIL
-                        if isinstance(single_image, torch.Tensor):
-                            img_tensor = single_image
-                            
-                            # Handle different tensor dimensions from real datasets
-                            if img_tensor.dim() == 4:  # (B, C, H, W) - take first sample
-                                img_tensor = img_tensor[0]
-                            elif img_tensor.dim() == 2:  # (H, W) - add channel dim
-                                img_tensor = img_tensor.unsqueeze(0).repeat(3, 1, 1)
-                            elif img_tensor.dim() != 3:
-                                raise ValueError(f"Unexpected image tensor dimensions: {img_tensor.shape}")
-                            
-                            # Convert to numpy and PIL format
-                            if img_tensor.shape[0] == 3:  # (C, H, W) -> (H, W, C)
-                                img_tensor = img_tensor.permute(1, 2, 0)
-                            elif img_tensor.shape[2] == 3:  # Already (H, W, C)
-                                pass  # No permutation needed
-                            else:
-                                raise ValueError(f"Unexpected channel dimension in tensor: {img_tensor.shape}")
-                            
-                            # Ensure values are in [0, 255] range
-                            if img_tensor.max() <= 1.0:
-                                img_tensor = (img_tensor * 255).clamp(0, 255)
-                            
-                            img_np = img_tensor.cpu().numpy().astype(np.uint8)
-                            pil_image = Image.fromarray(img_np)
-                        else:
-                            pil_image = single_image
-                        
-                        # Process this text-image pair
-                        single_result = self.base_vl.prepare_inputs_for_training(
-                            text=single_text,
-                            images=pil_image,
-                            device=device
-                        )
-                    else:
-                        # Text-only for this sample
-                        single_result = self.base_vl.prepare_inputs_for_training(
-                            text=single_text,
-                            images=None,
-                            device=device
-                        )
-                    
-                    batch_results.append(single_result)
-                
-                # Combine results into a batch
-                if batch_results:
-                    result = {}
-                    # Get all unique keys across all batch results
-                    all_keys = set()
-                    for br in batch_results:
-                        all_keys.update(br.keys())
-                    
-                    for key in all_keys:
-                        # Only collect values where the key exists
-                        values = [br[key] for br in batch_results if key in br]
-                        
-                        # Skip if no values found for this key
-                        if not values:
-                            continue
-                        # Special handling for pixel_values - include them even in mixed batches
-                        if key == "pixel_values":
-                            if len(values) > 0:
-                                # We have at least some pixel_values, concatenate them
-                                result[key] = torch.cat(values, dim=0) if len(values) > 1 else values[0]
-                            continue
-                        
-                        if isinstance(values[0], torch.Tensor):
-                            # Handle tensors with different sequence lengths by padding
-                            if len(values) > 1 and values[0].dim() > 1:
-                                # Find max length in the sequence dimension (usually dim 1)
-                                max_length = max(v.shape[1] for v in values)
-                                padded_values = []
-                                
-                                for v in values:
-                                    if v.shape[1] < max_length:
-                                        # Pad tensor to max length
-                                        pad_size = max_length - v.shape[1]
-                                        if key in ["input_ids", "labels"]:
-                                            # Use pad token ID for input_ids and labels
-                                            pad_value = 0  # Most tokenizers use 0 for padding
-                                        elif key == "attention_mask":
-                                            # Use 0 for attention mask padding
-                                            pad_value = 0
-                                        else:
-                                            # Use 0 for other tensors
-                                            pad_value = 0
-                                        
-                                        # Create padding tensor
-                                        pad_shape = list(v.shape)
-                                        pad_shape[1] = pad_size
-                                        padding = torch.full(pad_shape, pad_value, dtype=v.dtype, device=v.device)
-                                        
-                                        # Concatenate with padding
-                                        padded_v = torch.cat([v, padding], dim=1)
-                                        padded_values.append(padded_v)
-                                    else:
-                                        padded_values.append(v)
-                                
-                                result[key] = torch.cat(padded_values, dim=0)
-                            else:
-                                # For single sample or tensors without sequence dimension
-                                result[key] = torch.cat(values, dim=0)
-                        else:
-                            result[key] = values
-                else:
-                    # Fallback to text-only
-                    result = self.base_vl.prepare_inputs_for_training(
-                        text=text,
-                        images=None,
-                        device=device
-                    )
-            elif images is not None:
-                # Single image or tensor batch
-                if isinstance(images, torch.Tensor):
-                    # Convert from tensor to PIL Image format expected by processor
-                    from PIL import Image
-                    import numpy as np
-                    
-                    if images.dim() == 4:  # (B, C, H, W) - batch of images
-                        # Process all images in the batch
-                        pil_images = []
-                        for i in range(images.shape[0]):
-                            img_tensor = images[i]  # (C, H, W)
-                            
-                            # Handle different tensor dimensions
-                            if img_tensor.dim() == 4:  # Nested batch - take first
-                                img_tensor = img_tensor[0]
-                            elif img_tensor.dim() == 2:  # (H, W) - add channels
-                                img_tensor = img_tensor.unsqueeze(0).repeat(3, 1, 1)
-                            
-                            # Convert to numpy and PIL format
-                            if img_tensor.shape[0] == 3:  # (C, H, W) -> (H, W, C)
-                                img_tensor = img_tensor.permute(1, 2, 0)
-                            elif img_tensor.shape[2] == 3:  # Already (H, W, C)
-                                pass  # No permutation needed
-                            else:
-                                raise ValueError(f"Unexpected channel dimension in batched tensor: {img_tensor.shape}")
-                            
-                            # Ensure values are in [0, 255] range
-                            if img_tensor.max() <= 1.0:
-                                img_tensor = (img_tensor * 255).clamp(0, 255)
-                            
-                            img_np = img_tensor.cpu().numpy().astype(np.uint8)
-                            pil_images.append(Image.fromarray(img_np))
-                        
-                        # Use base VL model's proper input preparation with all images
-                        result = self.base_vl.prepare_inputs_for_training(
-                            text=text,
-                            images=pil_images,
-                            device=device
-                        )
-                    else:
-                        # Single image - handle various dimensions
-                        img_tensor = images
-                        
-                        # Handle different tensor dimensions
-                        if img_tensor.dim() == 4:  # (1, C, H, W) - remove batch dim
-                            img_tensor = img_tensor.squeeze(0)
-                        elif img_tensor.dim() == 2:  # (H, W) - add channels
-                            img_tensor = img_tensor.unsqueeze(0).repeat(3, 1, 1)
-                        elif img_tensor.dim() != 3:
-                            raise ValueError(f"Unexpected single image tensor dimensions: {img_tensor.shape}")
-                        
-                        # Convert to numpy and PIL format
-                        if img_tensor.shape[0] == 3:  # (C, H, W) -> (H, W, C)
-                            img_tensor = img_tensor.permute(1, 2, 0)
-                        elif img_tensor.shape[2] == 3:  # Already (H, W, C)
-                            pass  # No permutation needed
-                        else:
-                            raise ValueError(f"Unexpected channel dimension in single tensor: {img_tensor.shape}")
-                        
-                        # Ensure values are in [0, 255] range
-                        if img_tensor.max() <= 1.0:
-                            img_tensor = (img_tensor * 255).clamp(0, 255)
-                        
-                        img_np = img_tensor.cpu().numpy().astype(np.uint8)
-                        pil_image = Image.fromarray(img_np)
-                        
-                        # Use base VL model's proper input preparation
-                        result = self.base_vl.prepare_inputs_for_training(
-                            text=text,
-                            images=pil_image,
-                            device=device
-                        )
-                else:
-                    # Already PIL images
-                    result = self.base_vl.prepare_inputs_for_training(
-                        text=text,
-                        images=images,
-                        device=device
-                    )
-            else:
-                # Text-only input
-                result = self.base_vl.prepare_inputs_for_training(
-                    text=text,
-                    images=None,
-                    device=device
-                )
+        # For LLaVA/BLIP2, use proper multimodal input preparation
+        if self.base_vl.model_type == "llava":
+            # LLaVA-specific handling with chat templates and proper <image> token insertion
+            result = self._prepare_llava_inputs(text, images, device)
+        elif self.base_vl.model_type == "blip2":
+            # BLIP2-specific handling
+            result = self._prepare_blip2_inputs(text, images, device)
         else:
             # For custom models, use the original approach
             text_with_modalities = text
@@ -439,9 +478,238 @@ class SAFEModel(nn.Module):
             result["audio_tokens"] = audio_tokens
             if transcripts is not None:
                 result["transcripts"] = transcripts
-                
+
+        # Attach ground truth answers for supervised training
+        if answers is not None and "input_ids" in result and "attention_mask" in result:
+            dev = result["input_ids"].device if torch.is_tensor(result["input_ids"]) else torch.device(device)
+            self._apply_answers_to_inputs(result, answers, dev)
+        elif "labels" not in result and "input_ids" in result:
+            # Default labels mirror the input ids (e.g., for inference)
+            result["labels"] = result["input_ids"].clone()
+
         return result
     
+    def _prepare_llava_inputs(
+        self, 
+        text: Union[str, List[str]], 
+        images: Optional[Union[torch.Tensor, List]] = None, 
+        device: str = "cuda"
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Prepare inputs for LLaVA with proper chat templates and <image> tokens.
+        """
+        from PIL import Image
+        from pathlib import Path
+        
+        processor = self.base_vl.processor
+        
+        # Ensure we have lists for batch processing
+        if isinstance(text, str):
+            texts = [text]
+        else:
+            texts = text
+        
+        # Convert images to PIL format if needed
+        pil_images = []
+        if images is not None:
+            if isinstance(images, list):
+                for img in images:
+                    pil_images.append(self._convert_to_pil(img))
+            else:
+                # Single image or batch tensor
+                if isinstance(images, torch.Tensor) and images.dim() == 4:
+                    # Batch of images
+                    for i in range(images.shape[0]):
+                        pil_images.append(self._convert_to_pil(images[i]))
+                else:
+                    # Single image
+                    pil_images = [self._convert_to_pil(images)]
+        
+        # Build LLaVA chat conversations with proper <image> token placement
+        conversations = []
+        for i, question in enumerate(texts):
+            if i < len(pil_images) and pil_images[i] is not None:
+                # Multimodal conversation
+                conversations.append([
+                    {
+                        "role": "user", 
+                        "content": [
+                            {"type": "image"}, 
+                            {"type": "text", "text": question}
+                        ]
+                    }
+                ])
+            else:
+                # Text-only conversation
+                conversations.append([
+                    {"role": "user", "content": question}
+                ])
+        
+        # Apply chat template to get proper prompts with <image> tokens
+        try:
+            prompts = []
+            for conv in conversations:
+                prompt = processor.apply_chat_template(
+                    conv, 
+                    add_generation_prompt=True, 
+                    tokenize=False
+                )
+                prompts.append(prompt)
+        except (AttributeError, NotImplementedError):
+            # Fallback: manually insert image token
+            image_token = getattr(processor, 'image_token', '<image>')
+            prompts = []
+            for i, question in enumerate(texts):
+                if i < len(pil_images) and pil_images[i] is not None:
+                    prompts.append(f"USER: {image_token}\n{question}\nASSISTANT:")
+                else:
+                    prompts.append(f"USER: {question}\nASSISTANT:")
+        
+        # Process with LLaVA processor
+        if pil_images and any(img is not None for img in pil_images):
+            # Ensure we have same number of images as prompts (pad with None if needed)
+            while len(pil_images) < len(prompts):
+                pil_images.append(None)
+            
+            # Filter out None images and corresponding prompts
+            valid_pairs = [(p, img) for p, img in zip(prompts, pil_images) if img is not None]
+            if valid_pairs:
+                valid_prompts, valid_images = zip(*valid_pairs)
+                inputs = processor(
+                    text=list(valid_prompts),
+                    images=list(valid_images),
+                    padding=True,
+                    truncation=True,
+                    return_tensors="pt"
+                )
+            else:
+                # No valid images, process as text-only
+                inputs = processor(
+                    text=prompts,
+                    padding=True,
+                    truncation=True,
+                    return_tensors="pt"
+                )
+        else:
+            # Text-only processing
+            inputs = processor(
+                text=prompts,
+                padding=True,
+                truncation=True,
+                return_tensors="pt"
+            )
+        
+        # Move to device
+        for key in inputs:
+            if torch.is_tensor(inputs[key]):
+                inputs[key] = inputs[key].to(device)
+        
+        # Add labels for training
+        inputs["labels"] = inputs["input_ids"].clone()
+        
+        # Sanity checks for LLaVA
+        if pil_images and any(img is not None for img in pil_images):
+            image_token_id = self._get_image_token_id()
+            if not (inputs["input_ids"] == image_token_id).any():
+                print(f"WARNING: No <image> token (ID: {image_token_id}) found in input_ids for LLaVA!")
+                print(f"Prompt sample: {prompts[0][:200]}...")
+            
+            if "pixel_values" not in inputs or inputs["pixel_values"] is None:
+                print(f"WARNING: pixel_values missing for LLaVA with images!")
+        
+        return inputs
+    
+    def _prepare_blip2_inputs(
+        self, 
+        text: Union[str, List[str]], 
+        images: Optional[Union[torch.Tensor, List]] = None, 
+        device: str = "cuda"
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Prepare inputs for BLIP2 (simpler - no chat templates needed).
+        """
+        # Use the existing base VL preparation for BLIP2
+        return self.base_vl.prepare_inputs_for_training(text, images, device)
+    
+    def _convert_to_pil(self, image):
+        """
+        Convert various image formats to PIL Image.
+        """
+        from PIL import Image
+        from pathlib import Path
+        
+        if image is None:
+            return None
+        
+        if isinstance(image, Image.Image):
+            return image
+        
+        if isinstance(image, (str, type(Path(".")))):
+            try:
+                return Image.open(image).convert("RGB")
+            except:
+                return None
+        
+        if isinstance(image, torch.Tensor):
+            img_tensor = image
+            
+            # Handle different tensor dimensions
+            if img_tensor.dim() == 4:  # (B, C, H, W) - take first
+                img_tensor = img_tensor[0]
+            elif img_tensor.dim() == 2:  # (H, W) - add channels
+                img_tensor = img_tensor.unsqueeze(0).repeat(3, 1, 1)
+            elif img_tensor.dim() != 3:
+                return None
+            
+            # Convert to numpy and PIL format
+            if img_tensor.shape[0] == 3:  # (C, H, W) -> (H, W, C)
+                img_tensor = img_tensor.permute(1, 2, 0)
+            elif img_tensor.shape[2] == 3:  # Already (H, W, C)
+                pass
+            else:
+                return None
+            
+            # Ensure values are in [0, 255] range
+            if img_tensor.max() <= 1.0:
+                img_tensor = (img_tensor * 255).clamp(0, 255)
+            
+            import numpy as np
+            img_np = img_tensor.cpu().numpy().astype(np.uint8)
+            return Image.fromarray(img_np)
+        
+        return None
+    
+    def _get_image_token_id(self):
+        """Get the image token ID for LLaVA models."""
+        # Be defensive across processors/tokenizers  
+        bv = self.base_vl
+        tok = getattr(bv, "tokenizer", None)
+        proc = getattr(bv, "processor", None)
+
+        image_token = None
+        if proc is not None and hasattr(proc, "image_token"):
+            image_token = proc.image_token  # e.g., "<image>"
+        if image_token is None:
+            # Common default in Llava; still try tokenizer first
+            image_token = "<image>"
+
+        if tok is not None and hasattr(tok, "convert_tokens_to_ids"):
+            # Handle both AddedToken objects and string tokens
+            if hasattr(image_token, 'content'):
+                # It's an AddedToken, get the string content
+                token_str = image_token.content
+            else:
+                # It's already a string
+                token_str = str(image_token)
+            
+            # convert_tokens_to_ids expects a list of tokens
+            token_ids = tok.convert_tokens_to_ids([token_str])
+            return token_ids[0] if token_ids else None
+
+        # Last-resort fallback (LLaVA often uses 32000)
+        return getattr(bv, "image_token_id", 32000)
+
+    # Rest of the methods remain the same as original...
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -453,49 +721,81 @@ class SAFEModel(nn.Module):
         fusion_layer: Optional[int] = None,
         **kwargs
     ) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass through SAFE model.
-        
-        Args:
-            input_ids: Token IDs
-            attention_mask: Attention mask
-            vision_features: Optional vision features
-            audio_tokens: Optional audio tokens
-            labels: Optional labels for loss computation
-            gate: Audio fusion gate (0.0 = no audio, 1.0 = full audio)
-            fusion_layer: Specific layer for fusion (if supported)
-            
-        Returns:
-            Dictionary with logits, loss, etc.
-        """
-        # If no audio, gate is 0, or using BLIP2/LLaVA (which don't support manual fusion), use base VL model
-        if audio_tokens is None or gate == 0.0 or self.base_vl.model_type in ["blip2", "llava"]:
-            base_inputs = {
-                "input_ids": input_ids,
+        """Forward pass through SAFE model."""
+        # For BLIP2/LLaVA models, fuse audio by prefixing projected tokens
+        if self.base_vl.model_type in ["blip2", "llava"]:
+            pixel_values = kwargs.pop("pixel_values", None)
+            filtered_kwargs = kwargs
+
+            if attention_mask is None:
+                attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+
+            inputs_embeds = self.get_input_embeddings(input_ids)
+            if audio_tokens is not None and gate > 0.0:
+                audio_tokens = audio_tokens.to(inputs_embeds.dtype)
+                if gate != 1.0:
+                    audio_tokens = audio_tokens * gate
+
+                audio_mask = torch.ones(
+                    audio_tokens.size(0),
+                    audio_tokens.size(1),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+                inputs_embeds = torch.cat([audio_tokens, inputs_embeds], dim=1)
+                attention_mask = torch.cat([audio_mask, attention_mask], dim=1)
+
+                if labels is not None:
+                    audio_label_pad = torch.full(
+                        (labels.size(0), audio_tokens.size(1)),
+                        -100,
+                        dtype=labels.dtype,
+                        device=labels.device,
+                    )
+                    labels = torch.cat([audio_label_pad, labels], dim=1)
+
+            model_inputs = {
+                "inputs_embeds": inputs_embeds,
                 "attention_mask": attention_mask,
-                "labels": labels
+                "labels": labels,
+                **filtered_kwargs,
             }
-            # For BLIP2/LLaVA, pass pixel_values; for others, pass vision_features
-            if self.base_vl.model_type in ["blip2", "llava"]:
-                if "pixel_values" in kwargs:
-                    base_inputs["pixel_values"] = kwargs["pixel_values"]
-            else:
-                base_inputs["vision_features"] = vision_features
+
+            if pixel_values is not None:
+                model_inputs["pixel_values"] = pixel_values
+
+            outputs = self.base_vl.llm(**model_inputs)
+            logits = outputs.logits
+            loss = outputs.loss if labels is not None else None
+            return {"logits": logits, "loss": loss, "hidden_states": None}
+        
+        # For other model types, use custom implementation
+        if audio_tokens is None or gate == 0.0:
+            has_audio_tokens = (input_ids >= self.original_vocab_size).any()
             
-            # Filter out pixel_values from kwargs since we already added it to base_inputs if needed
-            filtered_kwargs = {k: v for k, v in kwargs.items() if k not in ["pixel_values"]}
-            return self.base_vl(**base_inputs, **filtered_kwargs)
+            if not has_audio_tokens:
+                base_inputs = {
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "labels": labels,
+                    "vision_features": vision_features
+                }
+                return self.base_vl(**base_inputs, **kwargs)
+            else:
+                inputs_embeds = self.get_input_embeddings(input_ids)
+                base_inputs = {
+                    "inputs_embeds": inputs_embeds,
+                    "attention_mask": attention_mask,
+                    "labels": labels,
+                    "vision_features": vision_features
+                }
+                return self.base_vl(**base_inputs, **kwargs)
         
-        # Get token embeddings
-        inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+        # Get token embeddings using our custom method
+        inputs_embeds = self.get_input_embeddings(input_ids)
         
-        # For a full implementation, you would need to properly insert
-        # vision and audio features at the correct positions in the sequence.
-        # This is a simplified version that shows the overall architecture.
-        
-        # Forward through LLM with potential audio fusion
+        # Forward through LLM with audio fusion (simplified implementation)
         if hasattr(self.base_vl.llm, 'transformer'):
-            # For GPT-style models
             hidden_states = inputs_embeds
             
             for i, layer in enumerate(self.base_vl.llm.transformer.h):
@@ -507,33 +807,29 @@ class SAFEModel(nn.Module):
                         hidden_states=hidden_states,
                         audio_tokens=audio_tokens,
                         layer_idx=i,
-                        attention_mask=None,  # Simplified
+                        attention_mask=None,
                         gate=gate,
                         active_fusion_layer=fusion_layer
                     )
                 elif i == len(self.base_vl.llm.transformer.h) // 2:  # Mid-layer fusion
                     if self.fusion_type == "gated":
-                        hidden_states, computed_gate = self.fusion_adapter(
+                        hidden_states, _ = self.fusion_adapter(
                             hidden_states=hidden_states,
                             audio_tokens=audio_tokens,
                             force_gate=gate if gate != 1.0 else None
                         )
                     else:
-                        # Only pass expected arguments to fusion adapter (no kwargs)
                         hidden_states = self.fusion_adapter(
                             hidden_states,
                             audio_tokens,
-                            None,  # attention_mask
+                            None,
                             gate
                         )
             
-            # Final layer norm and output projection
             hidden_states = self.base_vl.llm.transformer.ln_f(hidden_states)
             logits = self.base_vl.llm.lm_head(hidden_states)
         else:
-            # For BLIP2 and other multimodal architectures, use the base VL forward
             if self.base_vl.model_type in ["blip2", "llava"]:
-                # Use the base VL model's forward method which handles BLIP2 properly
                 base_inputs = {
                     "input_ids": input_ids,
                     "attention_mask": attention_mask,
@@ -544,7 +840,6 @@ class SAFEModel(nn.Module):
                     
                 outputs = self.base_vl(**base_inputs, **{k: v for k, v in kwargs.items() if k not in ["pixel_values"]})
             else:
-                # For other model architectures, use inputs_embeds
                 outputs = self.base_vl.llm(
                     inputs_embeds=inputs_embeds,
                     attention_mask=attention_mask,
@@ -572,29 +867,60 @@ class SAFEModel(nn.Module):
     
     def generate(
         self,
-        text: str,
+        text: Optional[str] = None,
         images: Optional[torch.Tensor] = None,
         audio: Optional[Union[torch.Tensor, List[str]]] = None,
         max_length: int = 100,
         gate: float = 1.0,
         num_audio_tokens: Optional[int] = None,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        audio_tokens: Optional[torch.Tensor] = None,
         **generation_kwargs
-    ) -> str:
-        """
-        Generate text response given multimodal inputs.
-        
-        Args:
-            text: Input text prompt
-            images: Optional images
-            audio: Optional audio
-            max_length: Maximum generation length
-            gate: Audio fusion gate
-            num_audio_tokens: Override for number of audio tokens
-            **generation_kwargs: Additional generation parameters
-            
-        Returns:
-            Generated text string
-        """
+    ) -> Union[str, torch.Tensor]:
+        """Generate text response given multimodal inputs."""
+        # Low-level API: direct tensor inputs
+        if input_ids is not None:
+            base_inputs = {**generation_kwargs}
+            if audio_tokens is not None and gate > 0.0:
+                embeds = self.get_input_embeddings(input_ids)
+                audio_tokens = audio_tokens.to(embeds.dtype)
+                if gate != 1.0:
+                    audio_tokens = audio_tokens * gate
+                embeds = torch.cat([audio_tokens, embeds], dim=1)
+
+                if attention_mask is None:
+                    attention_mask = torch.ones(
+                        input_ids.size(0),
+                        input_ids.size(1),
+                        dtype=torch.long,
+                        device=input_ids.device,
+                    )
+
+                audio_mask = torch.ones(
+                    audio_tokens.size(0),
+                    audio_tokens.size(1),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+                attention_mask = torch.cat([audio_mask, attention_mask], dim=1)
+
+                base_inputs["inputs_embeds"] = embeds
+            else:
+                base_inputs["input_ids"] = input_ids
+
+            if attention_mask is not None:
+                base_inputs["attention_mask"] = attention_mask
+            if pixel_values is not None:
+                base_inputs["pixel_values"] = pixel_values
+
+            return self.base_vl.llm.generate(**base_inputs)
+
+        # High-level API: text and multimodal inputs
+        if text is None:
+            raise ValueError("Either 'text' or 'input_ids' must be provided")
+
         inputs = self.prepare_multimodal_inputs(
             text=text,
             images=images,
@@ -602,36 +928,22 @@ class SAFEModel(nn.Module):
             include_audio_tokens=(audio is not None),
             num_audio_tokens=num_audio_tokens
         )
-        
-        with torch.no_grad():
-            if audio is not None and gate > 0.0:
-                # Use SAFE model for generation with audio
-                generated = self.base_vl.llm.generate(
-                    input_ids=inputs["input_ids"],
-                    attention_mask=inputs["attention_mask"],
-                    max_length=max_length,
-                    pad_token_id=self.base_vl.tokenizer.pad_token_id,
-                    eos_token_id=self.base_vl.tokenizer.eos_token_id,
-                    **generation_kwargs
-                )
-            else:
-                # Use base VL model without audio
-                generated = self.base_vl.generate(
-                    text=text,
-                    images=images,
-                    max_length=max_length,
-                    **generation_kwargs
-                )
-                return generated
-        
-        # Decode generated text
-        input_length = inputs["input_ids"].shape[1]
-        generated_text = self.base_vl.tokenizer.decode(
-            generated[0][input_length:],
-            skip_special_tokens=True
+
+        audio_tokens_tensor = inputs.pop("audio_tokens", None)
+        labels = inputs.pop("labels", None)
+        if labels is not None:
+            inputs["labels"] = labels  # keep alignment for recursion safety
+
+        return self.generate(
+            text=None,
+            max_length=max_length,
+            gate=gate,
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+            pixel_values=inputs.get("pixel_values"),
+            audio_tokens=audio_tokens_tensor,
+            **generation_kwargs,
         )
-        
-        return generated_text.strip()
     
     def get_base_vl_logits(
         self,
@@ -640,17 +952,7 @@ class SAFEModel(nn.Module):
         vision_features: Optional[torch.Tensor] = None,
         **kwargs
     ) -> torch.Tensor:
-        """
-        Get logits from base VL model for retention loss computation.
-        
-        Args:
-            input_ids: Token IDs
-            attention_mask: Attention mask
-            vision_features: Optional vision features
-            
-        Returns:
-            Base VL model logits
-        """
+        """Get logits from base VL model for retention loss computation."""
         with torch.no_grad():
             outputs = self.base_vl(
                 input_ids=input_ids,
@@ -660,22 +962,3 @@ class SAFEModel(nn.Module):
             )
         return outputs["logits"]
     
-    def enable_audio_training(self):
-        """Enable training mode for audio components only."""
-        self.audio_projector.train()
-        self.fusion_adapter.train()
-        
-        # Freeze base components
-        self.base_vl.eval()
-        self.audio_encoder.eval()
-        
-    def enable_full_training(self):
-        """Enable training mode for all components."""
-        self.train()
-        
-    def get_trainable_parameters(self) -> List[nn.Parameter]:
-        """Get list of trainable parameters (audio projector + fusion adapter)."""
-        params = []
-        params.extend(list(self.audio_projector.parameters()))
-        params.extend(list(self.fusion_adapter.parameters()))
-        return [p for p in params if p.requires_grad]

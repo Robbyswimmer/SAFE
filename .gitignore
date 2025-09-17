@@ -127,6 +127,9 @@ audiocaps_v2/
 vqa_data/
 audio_files/
 image_files/
+# SAFE data helpers (code, not datasets)
+!safe/data/
+!safe/data/*.py
 
 # Experiment outputs
 experiments/reports/

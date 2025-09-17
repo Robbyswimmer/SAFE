@@ -120,23 +120,9 @@ def main():
         print("bash scripts/setup_datasets.sh")
         return
     
-    # Ask user about download scope
-    print("\nDownload options:")
-    print("1. Test download (10 files each)")
-    print("2. Small download (100 files each)")  
-    print("3. Full download (all files - this will take hours)")
-    
-    choice = input("\nSelect option [1/2/3]: ").strip()
-    
-    if choice == "1":
-        max_downloads = 10
-    elif choice == "2":
-        max_downloads = 100
-    elif choice == "3":
-        max_downloads = None
-    else:
-        print("Invalid choice")
-        return
+    # Default to 2000 samples for Stage 1 testing
+    max_downloads = 2000
+    print(f"Downloading {max_downloads} AudioCaps samples for Stage 1 validation...")
     
     print(f"\nStarting download (max: {max_downloads or 'unlimited'} per split)...")
     

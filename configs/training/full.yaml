@@ -1,0 +1,43 @@
+# Full Production Training Configuration
+# For full-scale training with curriculum learning
+name: "full"
+description: "Full production training configuration with curriculum learning"
+
+# Training parameters
+num_epochs: 10  # Will be overridden by curriculum if enabled
+batch_size: 8
+gradient_accumulation_steps: 4
+
+# Learning rates - production values
+learning_rate_projector: 1e-4
+learning_rate_adapter: 5e-5
+weight_decay: 0.01
+warmup_steps: 1000
+max_grad_norm: 1.0
+
+# Evaluation settings
+eval_every_n_epochs: 2
+max_eval_batches: 100  # Full evaluation
+validation_frequency: 5
+
+# Loss weights - balanced
+audio_loss_weight: 1.0
+retention_loss_weight: 1.0
+distillation_temperature: 3.0
+fisher_weight: 0.1
+retention_tolerance: 0.005  # Strict tolerance for production
+
+# Logging and saving
+logging_steps: 100
+save_steps: 5000
+early_stopping_patience: 3
+
+# Performance
+expected_runtime_minutes: 120
+compute_requirements: "high"
+
+# Production settings
+enable_wandb: true
+compute_baseline_metrics: true  
+save_best_checkpoint: true
+final_evaluation: true

@@ -111,18 +111,38 @@ class RetentionLoss(nn.Module):
         Returns:
             KL divergence loss
         """
+        # Ensure teacher logits are detached
+        teacher_logits = teacher_logits.detach()
+        
+        # Handle shape mismatches
+        if student_logits.shape != teacher_logits.shape:
+            print(f"KL divergence shape mismatch: student={student_logits.shape}, teacher={teacher_logits.shape}")
+            
+            # For 3D tensors (batch, seq_len, vocab), align sequence lengths
+            if student_logits.dim() == 3 and teacher_logits.dim() == 3:
+                min_seq_len = min(student_logits.shape[1], teacher_logits.shape[1])
+                student_logits = student_logits[:, :min_seq_len, :]
+                teacher_logits = teacher_logits[:, :min_seq_len, :]
+            
+            # For vocab size mismatches, use minimum vocab size
+            if student_logits.shape[-1] != teacher_logits.shape[-1]:
+                min_vocab_size = min(student_logits.shape[-1], teacher_logits.shape[-1])
+                student_logits = student_logits[..., :min_vocab_size]
+                teacher_logits = teacher_logits[..., :min_vocab_size]
+        
         # Apply temperature scaling
-        student_probs = F.log_softmax(student_logits / self.temperature, dim=-1)
+        student_log_probs = F.log_softmax(student_logits / self.temperature, dim=-1)
         teacher_probs = F.softmax(teacher_logits / self.temperature, dim=-1)
         
         # Compute KL divergence
         kl_loss = F.kl_div(
-            student_probs,
+            student_log_probs,
             teacher_probs,
-            reduction="batchmean"
+            reduction="batchmean",
+            log_target=False
         )
         
-        # Scale by temperature squared
+        # Scale by temperature squared (standard distillation scaling)
         kl_loss *= (self.temperature ** 2)
         
         return kl_loss
@@ -142,24 +162,40 @@ class RetentionLoss(nn.Module):
         Returns:
             Fisher-weighted regularization loss
         """
-        if self.fisher_information is None:
-            return torch.tensor(0.0, device=next(iter(current_params.values())).device)
+        if not current_params:
+            return torch.tensor(0.0)
+            
+        device = next(iter(current_params.values())).device
         
-        reg_loss = 0.0
+        if self.fisher_information is None:
+            # Fallback to uniform L2 regularization if Fisher information not available
+            reg_loss = torch.tensor(0.0, device=device)
+            for name in current_params:
+                if name in base_params:
+                    param_diff = current_params[name] - base_params[name]
+                    reg_loss = reg_loss + torch.sum(param_diff ** 2)
+            return reg_loss
+        
+        reg_loss = torch.tensor(0.0, device=device)
         param_idx = 0
         
-        for name in current_params:
+        for name in sorted(current_params.keys()):  # Ensure consistent ordering
             if name in base_params:
                 param_diff = current_params[name] - base_params[name]
                 param_size = param_diff.numel()
                 
-                # Get corresponding Fisher information
-                fisher_slice = self.fisher_information[param_idx:param_idx + param_size]
-                fisher_slice = fisher_slice.view_as(param_diff)
-                
-                # Weighted L2 loss
-                weighted_loss = torch.sum(fisher_slice * (param_diff ** 2))
-                reg_loss = reg_loss + weighted_loss
+                # Check if we have enough Fisher information
+                if param_idx + param_size <= len(self.fisher_information):
+                    # Get corresponding Fisher information
+                    fisher_slice = self.fisher_information[param_idx:param_idx + param_size]
+                    fisher_slice = fisher_slice.view_as(param_diff)
+                    
+                    # Weighted L2 loss
+                    weighted_loss = torch.sum(fisher_slice * (param_diff ** 2))
+                    reg_loss = reg_loss + weighted_loss
+                else:
+                    # Fallback to unweighted L2 for remaining parameters
+                    reg_loss = reg_loss + torch.sum(param_diff ** 2)
                 
                 param_idx += param_size
         
@@ -314,17 +350,17 @@ class CombinedStageLoss(nn.Module):
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)
         loss_dict = {}
         
-        # DEBUG: Print input information
-        print(f"\n--- LOSS COMPUTATION DEBUG ---")
-        print(f"Safe logits shape: {safe_outputs['logits'].shape}")
-        print(f"Base logits shape: {base_outputs['logits'].shape if 'logits' in base_outputs else 'No base logits'}")
-        print(f"Has audio: {torch.sum(has_audio)}/{len(has_audio)} samples")
-        print(f"Device: {device}")
+        # DEBUG: Print input information (disabled for cleaner training)
+        # print(f"\n--- LOSS COMPUTATION DEBUG ---")
+        # print(f"Safe logits shape: {safe_outputs['logits'].shape}")
+        # print(f"Base logits shape: {base_outputs['logits'].shape if 'logits' in base_outputs else 'No base logits'}")
+        # print(f"Has audio: {torch.sum(has_audio)}/{len(has_audio)} samples")
+        # print(f"Device: {device}")
         
         # Audio task loss (for samples with audio)
         if torch.any(has_audio):
             audio_indices = torch.where(has_audio)[0]
-            print(f"Audio indices found: {len(audio_indices)}")
+            # print(f"Audio indices found: {len(audio_indices)}")
             # Ensure indices are within bounds
             audio_indices = audio_indices[audio_indices < len(safe_outputs["logits"])]
             if len(audio_indices) > 0:
@@ -334,34 +370,34 @@ class CombinedStageLoss(nn.Module):
                 if audio_mask is not None:
                     audio_mask = audio_mask[audio_indices]
                 
-                print(f"Computing audio loss for {len(audio_indices)} samples...")
+                # print(f"Computing audio loss for {len(audio_indices)} samples...")
                 audio_loss = self.audio_task_loss(
                     logits=audio_logits,
                     labels=audio_labels,
                     attention_mask=audio_mask
                 )
-                print(f"Audio loss computed: {audio_loss.item():.6f}")
+                # print(f"Audio loss computed: {audio_loss.item():.6f}")
                 
                 total_loss = total_loss + self.audio_weight * audio_loss
                 loss_dict["audio_task_loss"] = audio_loss
             else:
-                print("No valid audio indices after bounds check")
+                # print("No valid audio indices after bounds check")
                 loss_dict["audio_task_loss"] = torch.tensor(0.0, device=device)
         else:
-            print("No audio samples in batch")
+            # print("No audio samples in batch")
             loss_dict["audio_task_loss"] = torch.tensor(0.0, device=device)
         
         # Retention loss (for all samples, especially VL-only)
-        print("Computing retention loss...")
+        # print("Computing retention loss...")
         retention_losses = self.retention_loss(
             safe_logits=safe_outputs["logits"],
             base_logits=base_outputs["logits"]
         )
         
         retention_loss = retention_losses["retention_loss"]
-        print(f"Retention loss computed: {retention_loss.item():.6f}")
-        print(f"Distillation loss: {retention_losses['distillation_loss'].item():.6f}")
-        print(f"Fisher loss: {retention_losses['fisher_loss'].item():.6f}")
+        # print(f"Retention loss computed: {retention_loss.item():.6f}")
+        # print(f"Distillation loss: {retention_losses['distillation_loss'].item():.6f}")
+        # print(f"Fisher loss: {retention_losses['fisher_loss'].item():.6f}")
         
         total_loss = total_loss + self.retention_weight * retention_loss
         
@@ -372,8 +408,8 @@ class CombinedStageLoss(nn.Module):
         })
         
         loss_dict["total_loss"] = total_loss
-        print(f"Final total loss: {total_loss.item():.6f}")
-        print("--- END LOSS DEBUG ---\n")
+        # print(f"Final total loss: {total_loss.item():.6f}")
+        # print("--- END LOSS DEBUG ---\n")
         
         return loss_dict
 
