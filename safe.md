@@ -130,7 +130,7 @@ With learned policy achieving `P(use_audio) ≈ 0.3-0.6`:
 
 ### Three-Stage Validation with Go/No-Go Gates
 
-#### Stage 1: Safety Verification (Weeks 1-2)
+#### Stage 1: Safety Verification
 **Goal**: Prove architectural safety guarantees
 - Confirm `gate=0 ≡ original model` (bit-exact)
 - Verify only intended 52M parameters train
@@ -138,15 +138,15 @@ With learned policy achieving `P(use_audio) ≈ 0.3-0.6`:
 
 **Go/No-Go**: Must achieve <0.5% degradation or abort
 
-#### Stage 2: Pilot Study (Weeks 3-4)  
+#### Stage 2: Pilot Study
 **Goal**: Validate learning on 50K examples
 - Train audio projector + fusion adapters
-- Measure audio gains: target `+5% on AVQA/AudioCaps`
+- Measure audio gains: target `+x% on AVQA/AudioCaps`
 - Verify no VL regression with gate=OFF
 
 **Go/No-Go**: Must achieve >3% audio gains with <0.5% VL loss
 
-#### Stage 3: Full Training (Weeks 5-8)
+#### Stage 3: Full Training
 **Goal**: Complete curriculum + RL optimization
 - Full 250-500K example training
 - RL policy learning for efficiency
@@ -154,7 +154,7 @@ With learned policy achieving `P(use_audio) ≈ 0.3-0.6`:
 
 **Success Criteria**:
 - **VL Retention**: ≥99.5% of original performance
-- **Audio Tasks**: +5-10% over audio-naive baselines  
+- **Audio Tasks**: large increase over audio-naive baselines  
 - **Efficiency**: 40-70% audio skipping rate
 - **Latency**: <50ms added per inference
 
@@ -341,7 +341,6 @@ total_reward = r - λ * retention_constraint
 #### Retention (Non-Regression)
 - **VQAv2 accuracy**: Δ ≤ 0.3-0.5% vs. base VL
 - **GQA accuracy**: Δ ≤ 0.3-0.5% vs. base VL
-- **Statistical test**: McNemar test for significance
 
 #### Audio Gains  
 - **AVQA accuracy**: +5-10% target vs. VL-only baseline
@@ -358,7 +357,6 @@ total_reward = r - λ * retention_constraint
 
 #### Sanity Checks
 - **LOMO analysis**: Performance with audio muted vs. active
-- **Shapley values**: Per-sample modality attribution  
 - **Irrelevance stress test**: VL questions + random audio → measure false positive rate
 
 #### Robustness Tests
@@ -378,12 +376,6 @@ total_reward = r - λ * retention_constraint
 **Encoder Comparison**:
 - CLAP vs. Whisper embeddings
 - Single vs. ensemble encoders
-
-### 9.4 Statistical Rigor
-
-**Reproducibility**: 5 random seeds, report mean ± 95% CI
-**Significance testing**: McNemar test for QA, bootstrap CI for generation metrics  
-**Effect sizes**: Report Cohen's d for meaningful differences
 
 ---
 
@@ -534,7 +526,7 @@ Our approach **mathematically guarantees** zero regression, not just hopes for i
 **Primary risk**: Audio provides less value than expected (gains <5%)
 
 **Mitigation strategy**:
-- Explicit go/no-go criteria in Stage 2 (week 4)
+- Explicit go/no-go criteria in Stage 2
 - Framework generalizes beyond audio
 - Stage-gated approach allows fast failure
 
