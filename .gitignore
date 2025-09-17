@@ -186,6 +186,7 @@ config/secrets.json
 # Large files
 *.tar
 *.tar.gz
+*.tgz
 *.zip
 *.7z
 
