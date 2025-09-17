@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from tqdm import tqdm
 import wandb
 import os
@@ -337,6 +337,7 @@ class StageATrainer:
             text=batch["questions"],
             images=batch.get("images", None),
             audio=batch.get("audio", None),
+            answers=batch.get("answers", None),
             device=device
         )
         
@@ -528,6 +529,7 @@ class StageATrainer:
                     text=batch["questions"],
                     images=batch.get("images", None),
                     audio=batch.get("audio", None),
+                    answers=batch.get("answers", None),
                     device=device
                 )
                 
@@ -778,110 +780,132 @@ class StageATrainer:
         
         return safe_accuracies, base_accuracies
     
-    def _compute_answer_accuracy(self, pred_answer: str, gt_answer: str) -> float:
-        """
-        Compute accuracy between predicted and ground truth answers.
-        
-        Args:
-            pred_answer: Predicted answer string
-            gt_answer: Ground truth answer string
-            
-        Returns:
-            Accuracy score (0.0 or 1.0 for exact match, or partial score)
-        """
-        if not gt_answer or not pred_answer:
-            return 0.0
-        
-        # Clean and normalize answers
-        pred_clean = pred_answer.lower().strip()
-        gt_clean = gt_answer.lower().strip()
-        
-        # Exact match
-        if pred_clean == gt_clean:
-            return 1.0
-        
-        # For VQA-style answers, check if prediction contains the ground truth
-        if gt_clean in pred_clean or pred_clean in gt_clean:
-            return 1.0
-        
-        # For numerical answers, try to extract and compare numbers
+    def _normalize_vqa_answer(self, answer: str) -> str:
         import re
-        pred_numbers = re.findall(r'\d+\.?\d*', pred_clean)
-        gt_numbers = re.findall(r'\d+\.?\d*', gt_clean)
-        
-        if pred_numbers and gt_numbers:
-            try:
-                pred_num = float(pred_numbers[0])
-                gt_num = float(gt_numbers[0])
-                if abs(pred_num - gt_num) < 0.001:  # Close enough for numerical answers
-                    return 1.0
-            except:
-                pass
-        
-        # Token overlap-based similarity (for more lenient matching)
-        pred_tokens = set(pred_clean.split())
-        gt_tokens = set(gt_clean.split())
-        
-        if len(gt_tokens) > 0:
-            overlap = len(pred_tokens & gt_tokens) / len(gt_tokens)
-            if overlap >= 0.8:  # 80% token overlap
-                return overlap
-        
-        return 0.0
+
+        answer = answer.lower().strip()
+        answer = answer.replace("\n", " ")
+        answer = answer.replace("-", " ")
+        answer = re.sub(r"[^a-z0-9 ]", "", answer)
+
+        contractions = {
+            "cant": "cannot",
+            "won't": "will not",
+            "aint": "is not",
+        }
+        for key, value in contractions.items():
+            answer = answer.replace(key, value)
+
+        number_map = {
+            "zero": "0",
+            "one": "1",
+            "two": "2",
+            "three": "3",
+            "four": "4",
+            "five": "5",
+            "six": "6",
+            "seven": "7",
+            "eight": "8",
+            "nine": "9",
+            "ten": "10",
+        }
+        words = [w for w in answer.split() if w not in {"a", "an", "the"}]
+        words = [number_map.get(w, w) for w in words]
+        return " ".join(words)
+
+    def _prepare_gt_answers(self, gt_answer: Any) -> List[str]:
+        if gt_answer is None:
+            return []
+        if isinstance(gt_answer, str):
+            return [gt_answer]
+        if isinstance(gt_answer, dict):
+            value = gt_answer.get("answer")
+            return [value] if value else []
+        if isinstance(gt_answer, (list, tuple)):
+            answers = []
+            for item in gt_answer:
+                if isinstance(item, dict):
+                    value = item.get("answer")
+                    if value:
+                        answers.append(value)
+                elif isinstance(item, str):
+                    answers.append(item)
+            return answers
+        return [str(gt_answer)]
+
+    def _compute_answer_accuracy(self, pred_answer: str, gt_answer: Any) -> float:
+        """Compute VQA-style consensus accuracy for a prediction."""
+
+        gt_answers = [a for a in self._prepare_gt_answers(gt_answer) if a]
+        if not gt_answers or not pred_answer:
+            return 0.0
+
+        pred_norm = self._normalize_vqa_answer(pred_answer)
+        if not pred_norm:
+            return 0.0
+
+        matches = 0
+        for ans in gt_answers:
+            if self._normalize_vqa_answer(ans) == pred_norm:
+                matches += 1
+
+        return min(1.0, matches / 3.0)
     
     def _generate_predictions(self, inputs, model_choice="safe"):
-        """Generate predictions using proper text generation (works on CPU)."""
-        model = self.safe_model if model_choice == "safe" else self.safe_model.base_vl
+        """Generate predictions using consistent SAFE/base pathways."""
         tok = self.safe_model.base_vl.tokenizer
-        
         if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token_id", None) is not None:
             tok.pad_token = tok.eos_token
 
-        gen_inputs = {k: inputs[k].cpu() for k in ("input_ids", "attention_mask", "pixel_values") if k in inputs and inputs[k] is not None}
+        input_ids = inputs.get("input_ids")
+        attention_mask = inputs.get("attention_mask")
+        pixel_values = inputs.get("pixel_values")
+        audio_tokens = inputs.get("audio_tokens")
 
-        if "input_ids" in gen_inputs and gen_inputs["input_ids"].dim() == 1:
-            gen_inputs["input_ids"] = gen_inputs["input_ids"].unsqueeze(0)
-            if "attention_mask" in gen_inputs and gen_inputs["attention_mask"].dim() == 1:
-                gen_inputs["attention_mask"] = gen_inputs["attention_mask"].unsqueeze(0)
+        if input_ids is None:
+            batch_size = pixel_values.size(0) if isinstance(pixel_values, torch.Tensor) else 0
+            return [torch.tensor([], dtype=torch.long) for _ in range(batch_size)]
 
-        if "input_ids" not in gen_inputs:
-            B = gen_inputs.get("pixel_values", torch.empty(0)).size(0)
-            return [torch.tensor([], dtype=torch.long) for _ in range(B)]
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+            if isinstance(attention_mask, torch.Tensor) and attention_mask.dim() == 1:
+                attention_mask = attention_mask.unsqueeze(0)
 
-        in_len = gen_inputs["input_ids"].shape[1]
+        device = next(self.safe_model.parameters()).device
 
-        model.eval()
-        if hasattr(model, "config"):
-            model.config.use_cache = True
+        gen_kwargs = dict(
+            max_new_tokens=8,
+            do_sample=False,
+            num_beams=1,
+            pad_token_id=tok.pad_token_id,
+            eos_token_id=getattr(tok, "eos_token_id", None),
+        )
 
-        with torch.inference_mode():
-            # For BaseVLModel, use the underlying LLM's generate method directly
-            if hasattr(model, 'llm') and hasattr(model.llm, 'generate'):
-                out = model.llm.generate(
-                    **gen_inputs,
-                    max_new_tokens=8,
-                    do_sample=False,
-                    num_beams=1,
-                    use_cache=True,
-                    pad_token_id=tok.pad_token_id,
-                    eos_token_id=getattr(tok, "eos_token_id", None),
-                )
-            else:
-                # Fallback for other model types
-                out = model.generate(
-                    **gen_inputs,
-                    max_new_tokens=8,
-                    do_sample=False,
-                    num_beams=1,
-                    use_cache=True,
-                    pad_token_id=tok.pad_token_id,
-                    eos_token_id=getattr(tok, "eos_token_id", None),
-                )
+        if model_choice == "safe":
+            generated = self.safe_model.generate(
+                input_ids=input_ids.to(device),
+                attention_mask=attention_mask.to(device) if isinstance(attention_mask, torch.Tensor) else None,
+                pixel_values=pixel_values.to(device) if isinstance(pixel_values, torch.Tensor) else None,
+                audio_tokens=audio_tokens.to(device) if isinstance(audio_tokens, torch.Tensor) else None,
+                **gen_kwargs,
+            )
+        else:
+            base_kwargs = {
+                "input_ids": input_ids.to(device),
+                "attention_mask": attention_mask.to(device) if isinstance(attention_mask, torch.Tensor) else None,
+                **gen_kwargs,
+            }
+            if isinstance(pixel_values, torch.Tensor):
+                base_kwargs["pixel_values"] = pixel_values.to(device)
 
-        # Handle encoder-decoder vs decoder-only
-        if hasattr(model, "config") and getattr(model.config, "is_encoder_decoder", False):
-            return [out[i] for i in range(out.size(0))]
-        return [out[i, in_len:] for i in range(out.size(0))]
+            generated = self.safe_model.base_vl.llm.generate(**base_kwargs)
+
+        if not isinstance(generated, torch.Tensor):
+            generated = torch.as_tensor(generated)
+
+        audio_prefix = audio_tokens.size(1) if isinstance(audio_tokens, torch.Tensor) else 0
+        prompt_len = input_ids.shape[1]
+        return [generated[i, audio_prefix + prompt_len :] for i in range(generated.size(0))]
     
     def _clean_answer(self, s: str) -> str:
         """Clean and normalize answer text."""
