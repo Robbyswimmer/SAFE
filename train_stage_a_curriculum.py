@@ -90,9 +90,8 @@ def create_datasets_with_config(config: dict, data_path="./data"):
             vqa_train_dataset = VQADataset(data_path=data_path, split="train")
             vqa_val_dataset = VQADataset(data_path=data_path, split="val")
             
-            # Use AudioCaps for training, VQA val for validation
-            # train_dataset = ConcatDataset([audiocaps_dataset, vqa_train_dataset])
-            train_dataset = audiocaps_dataset
+            # Use AudioCaps + VQA for training to expose both modalities
+            train_dataset = ConcatDataset([audiocaps_dataset, vqa_train_dataset])
             val_dataset = vqa_val_dataset
             
             print(f"✓ Real datasets loaded:")
@@ -124,7 +123,11 @@ def create_datasets_with_config(config: dict, data_path="./data"):
             print("3. (Optional) Download MUSIC-AVQA dataset to ./data/avqa/")
             print("\nFor demo purposes, falling back to dummy datasets...")
             print("="*60 + "\n")
-            return create_datasets(use_dummy=True, data_path=data_path)
+            fallback_dataset_cfg = dict(dataset_config)
+            fallback_dataset_cfg["use_dummy_data"] = True
+            fallback_config = dict(config)
+            fallback_config["dataset"] = fallback_dataset_cfg
+            return create_datasets_with_config(fallback_config, data_path=data_path)
         
         return train_dataset, val_dataset
 

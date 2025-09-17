@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, List, Union, Tuple
+from collections import Counter
+from typing import Any, Optional, Dict, List, Sequence, Union, Tuple
 from .base_vl import BaseVLModel
 from .audio_encoders import CLAPAudioEncoder, WhisperAudioEncoder, MultiModalAudioEncoder
 from .projectors import AudioProjector, AdaptiveAudioProjector
@@ -250,8 +251,8 @@ class SAFEModel(nn.Module):
         return self
     
     def encode_audio(
-        self, 
-        audio: Union[torch.Tensor, List[str], List], 
+        self,
+        audio: Union[torch.Tensor, List[str], List],
         num_tokens: Optional[int] = None
     ) -> Tuple[torch.Tensor, Optional[List[str]]]:
         """
@@ -275,14 +276,141 @@ class SAFEModel(nn.Module):
             audio_tokens = self.audio_projector(audio_features, num_tokens)
         else:
             audio_tokens = self.audio_projector(audio_features)
-            
+
         return audio_tokens, transcripts
+
+    def _select_training_answer(self, answer: Any) -> str:
+        if answer is None:
+            return ""
+        if isinstance(answer, str):
+            return answer
+        if isinstance(answer, dict):
+            return answer.get("answer", "")
+        if isinstance(answer, (list, tuple)):
+            if not answer:
+                return ""
+            if isinstance(answer[0], dict):
+                counts = Counter(
+                    item.get("answer", "") for item in answer if item.get("answer")
+                )
+                if counts:
+                    return counts.most_common(1)[0][0]
+                return ""
+            counts = Counter(str(a) for a in answer)
+            return counts.most_common(1)[0][0]
+        return str(answer)
+
+    def _apply_answers_to_inputs(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        answers: Optional[Union[str, Sequence[Any]]],
+        device: torch.device,
+    ) -> None:
+        if answers is None:
+            return
+
+        tokenizer = self.base_vl.tokenizer
+        pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id or 0
+        eos_id = tokenizer.eos_token_id
+
+        input_ids = inputs["input_ids"].to(device)
+        attention_mask = inputs["attention_mask"].to(device)
+
+        if isinstance(answers, str):
+            answer_list = [answers] * input_ids.size(0)
+        else:
+            answer_list = list(answers)
+            if len(answer_list) != input_ids.size(0):
+                # Broadcast single answer to entire batch if needed
+                if len(answer_list) == 1:
+                    answer_list = answer_list * input_ids.size(0)
+                else:
+                    raise ValueError("Number of answers does not match batch size")
+
+        new_input_ids: List[torch.Tensor] = []
+        new_attention: List[torch.Tensor] = []
+        new_labels: List[torch.Tensor] = []
+        max_length = 0
+
+        for i, raw_answer in enumerate(answer_list):
+            answer_text = self._select_training_answer(raw_answer)
+            prompt_len = int(attention_mask[i].sum().item())
+            prompt_tokens = input_ids[i, :prompt_len]
+
+            answer_tokens = tokenizer.encode(
+                answer_text,
+                add_special_tokens=False,
+            )
+            if eos_id is not None:
+                if not answer_tokens or answer_tokens[-1] != eos_id:
+                    answer_tokens.append(eos_id)
+
+            if not answer_tokens:
+                # Ensure there is at least one target token to supervise on
+                answer_tokens = [tokenizer.pad_token_id or pad_id]
+
+            answer_tensor = torch.tensor(
+                answer_tokens,
+                dtype=prompt_tokens.dtype,
+                device=device,
+            )
+
+            combined = torch.cat([prompt_tokens, answer_tensor], dim=0)
+            labels_prefix = torch.full(
+                (prompt_len,),
+                -100,
+                dtype=torch.long,
+                device=device,
+            )
+            labels = torch.cat([labels_prefix, answer_tensor], dim=0)
+
+            attention = torch.cat(
+                [
+                    torch.ones(prompt_len, dtype=attention_mask.dtype, device=device),
+                    torch.ones(answer_tensor.size(0), dtype=attention_mask.dtype, device=device),
+                ],
+                dim=0,
+            )
+
+            new_input_ids.append(combined)
+            new_labels.append(labels)
+            new_attention.append(attention)
+            max_length = max(max_length, combined.size(0))
+
+        padded_ids = torch.full(
+            (len(new_input_ids), max_length),
+            pad_id,
+            dtype=input_ids.dtype,
+            device=device,
+        )
+        padded_attention = torch.zeros(
+            (len(new_attention), max_length),
+            dtype=new_attention[0].dtype,
+            device=device,
+        )
+        padded_labels = torch.full(
+            (len(new_labels), max_length),
+            -100,
+            dtype=torch.long,
+            device=device,
+        )
+
+        for i, (seq, mask, label) in enumerate(zip(new_input_ids, new_attention, new_labels)):
+            length = seq.size(0)
+            padded_ids[i, :length] = seq
+            padded_attention[i, :length] = mask
+            padded_labels[i, :length] = label
+
+        inputs["input_ids"] = padded_ids
+        inputs["attention_mask"] = padded_attention
+        inputs["labels"] = padded_labels
     
     def prepare_multimodal_inputs(
         self,
         text: Union[str, List[str]],
         images: Optional[Union[torch.Tensor, List]] = None,
         audio: Optional[Union[torch.Tensor, List[str]]] = None,
+        answers: Optional[Union[str, Sequence[Any]]] = None,
         device: str = "cuda",
         include_audio_tokens: bool = True,
         num_audio_tokens: Optional[int] = None
@@ -294,10 +422,11 @@ class SAFEModel(nn.Module):
             text: Input text
             images: Optional images
             audio: Optional audio
+            answers: Optional answers for supervised training
             device: Target device
             include_audio_tokens: Whether to include audio token placeholders
             num_audio_tokens: Override for number of audio tokens
-            
+
         Returns:
             Dictionary with input_ids, attention_mask, audio_tokens, etc.
         """
@@ -349,7 +478,15 @@ class SAFEModel(nn.Module):
             result["audio_tokens"] = audio_tokens
             if transcripts is not None:
                 result["transcripts"] = transcripts
-                
+
+        # Attach ground truth answers for supervised training
+        if answers is not None and "input_ids" in result and "attention_mask" in result:
+            dev = result["input_ids"].device if torch.is_tensor(result["input_ids"]) else torch.device(device)
+            self._apply_answers_to_inputs(result, answers, dev)
+        elif "labels" not in result and "input_ids" in result:
+            # Default labels mirror the input ids (e.g., for inference)
+            result["labels"] = result["input_ids"].clone()
+
         return result
     
     def _prepare_llava_inputs(
@@ -585,30 +722,52 @@ class SAFEModel(nn.Module):
         **kwargs
     ) -> Dict[str, torch.Tensor]:
         """Forward pass through SAFE model."""
-        # For BLIP2/LLaVA models, always use base VL model as they handle multimodal fusion internally
+        # For BLIP2/LLaVA models, fuse audio by prefixing projected tokens
         if self.base_vl.model_type in ["blip2", "llava"]:
-            # Check if input_ids contain audio tokens
-            has_audio_tokens = (input_ids >= self.original_vocab_size).any()
-            
-            if has_audio_tokens:
-                # Replace audio tokens with a generic token to avoid index errors
-                unk_token_id = self.base_vl.tokenizer.unk_token_id or 0
-                clean_input_ids = input_ids.clone()
-                clean_input_ids[input_ids >= self.original_vocab_size] = unk_token_id
-            else:
-                clean_input_ids = input_ids
-            
-            base_inputs = {
-                "input_ids": clean_input_ids,
+            pixel_values = kwargs.pop("pixel_values", None)
+            filtered_kwargs = kwargs
+
+            if attention_mask is None:
+                attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+
+            inputs_embeds = self.get_input_embeddings(input_ids)
+            if audio_tokens is not None and gate > 0.0:
+                audio_tokens = audio_tokens.to(inputs_embeds.dtype)
+                if gate != 1.0:
+                    audio_tokens = audio_tokens * gate
+
+                audio_mask = torch.ones(
+                    audio_tokens.size(0),
+                    audio_tokens.size(1),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+                inputs_embeds = torch.cat([audio_tokens, inputs_embeds], dim=1)
+                attention_mask = torch.cat([audio_mask, attention_mask], dim=1)
+
+                if labels is not None:
+                    audio_label_pad = torch.full(
+                        (labels.size(0), audio_tokens.size(1)),
+                        -100,
+                        dtype=labels.dtype,
+                        device=labels.device,
+                    )
+                    labels = torch.cat([audio_label_pad, labels], dim=1)
+
+            model_inputs = {
+                "inputs_embeds": inputs_embeds,
                 "attention_mask": attention_mask,
-                "labels": labels
+                "labels": labels,
+                **filtered_kwargs,
             }
-            
-            if "pixel_values" in kwargs:
-                base_inputs["pixel_values"] = kwargs["pixel_values"]
-            
-            filtered_kwargs = {k: v for k, v in kwargs.items() if k not in ["pixel_values"]}
-            return self.base_vl(**base_inputs, **filtered_kwargs)
+
+            if pixel_values is not None:
+                model_inputs["pixel_values"] = pixel_values
+
+            outputs = self.base_vl.llm(**model_inputs)
+            logits = outputs.logits
+            loss = outputs.loss if labels is not None else None
+            return {"logits": logits, "loss": loss, "hidden_states": None}
         
         # For other model types, use custom implementation
         if audio_tokens is None or gate == 0.0:
@@ -717,25 +876,51 @@ class SAFEModel(nn.Module):
         input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
+        audio_tokens: Optional[torch.Tensor] = None,
         **generation_kwargs
     ) -> Union[str, torch.Tensor]:
         """Generate text response given multimodal inputs."""
         # Low-level API: direct tensor inputs
         if input_ids is not None:
-            base_inputs = {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                **generation_kwargs
-            }
+            base_inputs = {**generation_kwargs}
+            if audio_tokens is not None and gate > 0.0:
+                embeds = self.get_input_embeddings(input_ids)
+                audio_tokens = audio_tokens.to(embeds.dtype)
+                if gate != 1.0:
+                    audio_tokens = audio_tokens * gate
+                embeds = torch.cat([audio_tokens, embeds], dim=1)
+
+                if attention_mask is None:
+                    attention_mask = torch.ones(
+                        input_ids.size(0),
+                        input_ids.size(1),
+                        dtype=torch.long,
+                        device=input_ids.device,
+                    )
+
+                audio_mask = torch.ones(
+                    audio_tokens.size(0),
+                    audio_tokens.size(1),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+                attention_mask = torch.cat([audio_mask, attention_mask], dim=1)
+
+                base_inputs["inputs_embeds"] = embeds
+            else:
+                base_inputs["input_ids"] = input_ids
+
+            if attention_mask is not None:
+                base_inputs["attention_mask"] = attention_mask
             if pixel_values is not None:
                 base_inputs["pixel_values"] = pixel_values
-                
+
             return self.base_vl.llm.generate(**base_inputs)
-        
+
         # High-level API: text and multimodal inputs
         if text is None:
             raise ValueError("Either 'text' or 'input_ids' must be provided")
-            
+
         inputs = self.prepare_multimodal_inputs(
             text=text,
             images=images,
@@ -743,33 +928,22 @@ class SAFEModel(nn.Module):
             include_audio_tokens=(audio is not None),
             num_audio_tokens=num_audio_tokens
         )
-        
-        with torch.no_grad():
-            if audio is not None and gate > 0.0:
-                generated = self.base_vl.llm.generate(
-                    input_ids=inputs["input_ids"],
-                    attention_mask=inputs["attention_mask"],
-                    max_length=max_length,
-                    pad_token_id=self.base_vl.tokenizer.pad_token_id,
-                    eos_token_id=self.base_vl.tokenizer.eos_token_id,
-                    **generation_kwargs
-                )
-            else:
-                generated = self.base_vl.generate(
-                    text=text,
-                    images=images,
-                    max_length=max_length,
-                    **generation_kwargs
-                )
-                return generated
-        
-        input_length = inputs["input_ids"].shape[1]
-        generated_text = self.base_vl.tokenizer.decode(
-            generated[0][input_length:],
-            skip_special_tokens=True
+
+        audio_tokens_tensor = inputs.pop("audio_tokens", None)
+        labels = inputs.pop("labels", None)
+        if labels is not None:
+            inputs["labels"] = labels  # keep alignment for recursion safety
+
+        return self.generate(
+            text=None,
+            max_length=max_length,
+            gate=gate,
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+            pixel_values=inputs.get("pixel_values"),
+            audio_tokens=audio_tokens_tensor,
+            **generation_kwargs,
         )
-        
-        return generated_text.strip()
     
     def get_base_vl_logits(
         self,
@@ -788,22 +962,3 @@ class SAFEModel(nn.Module):
             )
         return outputs["logits"]
     
-    def enable_audio_training(self):
-        """Enable training mode for audio components only."""
-        self.audio_projector.train()
-        self.fusion_adapter.train()
-        
-        # Freeze base components
-        self.base_vl.eval()
-        self.audio_encoder.eval()
-        
-    def enable_full_training(self):
-        """Enable training mode for all components."""
-        self.train()
-        
-    def get_trainable_parameters(self) -> List[nn.Parameter]:
-        """Get list of trainable parameters (audio projector + fusion adapter)."""
-        params = []
-        params.extend(list(self.audio_projector.parameters()))
-        params.extend(list(self.fusion_adapter.parameters()))
-        return [p for p in params if p.requires_grad]
