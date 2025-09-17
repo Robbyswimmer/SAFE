@@ -18,6 +18,7 @@ from ..models.base_vl import BaseVLModel
 from ..data.datasets import create_safe_dataloader
 from ..data.curriculum import CurriculumManager, CurriculumConfig, ProgressionStatus
 from .losses import RetentionLoss, AudioTaskLoss, CombinedStageLoss
+from .null_space import NullSpaceProjector, NullSpaceConfig
 
 
 class StageATrainer:
@@ -71,7 +72,14 @@ class StageATrainer:
             "output_dir": "./checkpoints/stage_a",
             "early_stopping_patience": 3,
             "retention_tolerance": 0.005,  # 0.5% tolerance for VL degradation
-            "validation_frequency": 5 if self.use_curriculum else 1000  # More frequent validation for curriculum
+            "validation_frequency": 5 if self.use_curriculum else 1000,  # More frequent validation for curriculum
+            "enable_null_space": False,
+            "null_space_rank": 8,
+            "null_space_min_samples": 32,
+            "null_space_max_samples": 128,
+            "null_space_audio_threshold": 0.25,
+            "null_space_refresh_interval": 2000,
+            "null_space_verbose": False
         }
         
         if config:
@@ -109,6 +117,14 @@ class StageATrainer:
         if getattr(tok, "model_max_length", None) in (None, 1e30):
             tok.model_max_length = 2048  # pick a sane context limit
         
+        # Cache trainable parameter references (needed for gradient ops)
+        self.trainable_params = {
+            name: param
+            for name, param in self.safe_model.named_parameters()
+            if param.requires_grad
+        }
+        self.trainable_param_list = list(self.trainable_params.values())
+
         # Metrics tracking
         self.training_stats = {
             "total_loss": [],
@@ -119,10 +135,30 @@ class StageATrainer:
             "vl_retention_score": [],
             "audio_gain_score": []
         }
-        
+
         # Curriculum state
         self.current_stage_config = None
         self.baseline_metrics = None
+
+        # Null-space projector (optional hard retention guard)
+        self.null_space_projector = None
+        if self.config.get("enable_null_space", False):
+            if not self.trainable_params:
+                raise ValueError("Null-space editing enabled but no trainable parameters found")
+
+            ns_config = NullSpaceConfig(
+                max_rank=self.config.get("null_space_rank", 8),
+                min_samples=self.config.get("null_space_min_samples", 32),
+                max_samples=self.config.get("null_space_max_samples", 128),
+                audio_ratio_threshold=self.config.get("null_space_audio_threshold", 0.25),
+                refresh_interval=self.config.get("null_space_refresh_interval", 2000),
+                verbose=self.config.get("null_space_verbose", False)
+            )
+
+            self.null_space_projector = NullSpaceProjector(
+                params=self.trainable_params,
+                config=ns_config
+            )
     
     def _get_image_token_id(self):
         """Get the image token ID for LLaVA models."""
@@ -436,13 +472,18 @@ class StageATrainer:
         
         # Backward pass
         total_loss.backward()
-        
+
+        if self.null_space_projector is not None:
+            self.null_space_projector.observe(step=self.global_step, has_audio=has_audio)
+            self.null_space_projector.project()
+
         # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(
-            self.safe_model.get_trainable_parameters(),
-            self.config["max_grad_norm"]
-        )
-        
+        if self.trainable_param_list:
+            torch.nn.utils.clip_grad_norm_(
+                self.trainable_param_list,
+                self.config["max_grad_norm"]
+            )
+
         # Optimizer step
         self.optimizer.step()
         self.optimizer.zero_grad()
