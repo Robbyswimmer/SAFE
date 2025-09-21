@@ -5,7 +5,6 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
 from typing import Any, Dict, List, Optional, Tuple, Union
-from tqdm import tqdm
 import wandb
 import os
 from pathlib import Path
@@ -203,63 +202,66 @@ class StageATrainer:
         # Last-resort fallback (LLaVA often uses 32000)
         return getattr(bv, "image_token_id", 32000)
 
-    def _split_mm_text_batches(self, inputs: dict):
-        """
-        Split a batch dict into (mm_inputs, text_inputs) where:
-          - mm_inputs: rows that contain the <image> token in input_ids; must include pixel_values
-          - text_inputs: rows that DO NOT contain the <image> token; must NOT include pixel_values
-        Returns (mm_inputs, text_inputs, idx_mm, idx_text) with indices to preserve batch order.
-        
-        Note: Only applies to LLaVA models. BLIP-2 doesn't use <image> tokens.
-        """
-        if self.safe_model.base_vl.model_type != "llava":
-            # Return "no split" + identity indices to simplify caller logic
-            B = inputs["input_ids"].size(0) if "input_ids" in inputs else 0
-            idx_full = torch.arange(B, device=inputs["input_ids"].device) if B else None
-            return inputs, None, idx_full, None
-            
-        input_ids = inputs.get("input_ids", None)
+    def _forward_llava_teacher(self, base_inputs: dict):
+        """Run the frozen base LLaVA model on each sample to keep logits aligned with the SAFE batch."""
+        input_ids = base_inputs.get("input_ids")
+        attention_mask = base_inputs.get("attention_mask")
+        labels = base_inputs.get("labels")
+        pixel_values = base_inputs.get("pixel_values")
+
         if input_ids is None:
-            return None, None, None, None
-        
+            return self.safe_model.base_vl(**base_inputs)
+
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
+            if isinstance(attention_mask, torch.Tensor) and attention_mask.dim() == 1:
+                attention_mask = attention_mask.unsqueeze(0)
+            if isinstance(labels, torch.Tensor) and labels.dim() == 1:
+                labels = labels.unsqueeze(0)
+            if isinstance(pixel_values, torch.Tensor) and pixel_values.dim() == 3:
+                pixel_values = pixel_values.unsqueeze(0)
 
-        image_token_id = self._get_image_token_id()
-        has_img_tokens = (input_ids == image_token_id).any(dim=1)  # [B]
-        idx_mm = torch.nonzero(has_img_tokens, as_tuple=False).flatten()
-        idx_text = torch.nonzero(~has_img_tokens, as_tuple=False).flatten()
+        batch_size = input_ids.size(0)
+        image_token_id = self.safe_model._get_image_token_id()
+        has_img_tokens = (input_ids == image_token_id).any(dim=1)
 
-        def _subset(t, idx):
-            if t is None or idx.numel() == 0:
-                return None
-            if isinstance(t, torch.Tensor) and t.dim() >= 1 and t.size(0) == input_ids.size(0):
-                return t.index_select(0, idx.to(t.device))
-            return t
+        logits_list = []
+        losses = []
 
-        keys = list(inputs.keys())
-        
-        def _build_subset(indices, allow_pixels):
-            sub = {}
-            for k in keys:
-                if k == "pixel_values" and not allow_pixels:
-                    continue
-                v = inputs.get(k, None)
-                if isinstance(v, torch.Tensor) and v.dim() >= 1 and v.size(0) == input_ids.size(0):
-                    v = _subset(v, indices)
-                sub[k] = v
-            if not allow_pixels and "pixel_values" in sub:
-                sub.pop("pixel_values", None)
-            return sub
+        for idx in range(batch_size):
+            sample_kwargs = {
+                "input_ids": input_ids[idx : idx + 1],
+            }
+            if attention_mask is not None:
+                sample_kwargs["attention_mask"] = attention_mask[idx : idx + 1]
+            if labels is not None:
+                sample_kwargs["labels"] = labels[idx : idx + 1]
+            if pixel_values is not None and has_img_tokens[idx]:
+                sample_kwargs["pixel_values"] = pixel_values[idx : idx + 1]
 
-        mm_inputs = _build_subset(idx_mm, allow_pixels=True) if idx_mm.numel() > 0 else None
-        text_inputs = _build_subset(idx_text, allow_pixels=False) if idx_text.numel() > 0 else None
+            outputs = self.safe_model.base_vl(**sample_kwargs)
+            logits = outputs.get("logits") if isinstance(outputs, dict) else getattr(outputs, "logits", None)
+            if logits is None:
+                continue
+            logits_list.append(logits)
 
-        if mm_inputs is not None and ("pixel_values" not in mm_inputs or mm_inputs["pixel_values"] is None):
-            print("Warning: <image> tokens present but no pixel_values; skipping MM branch.")
-            return None, inputs, None, torch.arange(input_ids.size(0), device=input_ids.device)
+            loss_val = outputs.get("loss") if isinstance(outputs, dict) else getattr(outputs, "loss", None)
+            if loss_val is not None:
+                losses.append(loss_val)
 
-        return mm_inputs, text_inputs, idx_mm, idx_text
+        if not logits_list:
+            raise RuntimeError("Base LLaVA teacher produced no logits for the current batch.")
+
+        logits = torch.cat(logits_list, dim=0)
+
+        class OutputsWrapper(dict):
+            pass
+
+        wrapped = OutputsWrapper()
+        wrapped["logits"] = logits
+        if losses:
+            wrapped["loss"] = torch.stack(losses).mean()
+        return wrapped
     
     def _setup_loss_functions(self):
         """Setup loss functions with curriculum-aware weights."""
@@ -402,63 +404,23 @@ class StageATrainer:
             sanitized_ids = self.safe_model.sanitize_input_ids_for_base(
                 inputs.get("input_ids")
             )
+            sanitized_labels = self.safe_model.sanitize_labels_for_base(
+                inputs.get("labels")
+            )
             base_inputs = {
                 "attention_mask": inputs["attention_mask"],
-                "labels": inputs["labels"]
             }
             if sanitized_ids is not None:
                 base_inputs["input_ids"] = sanitized_ids
             elif "inputs_embeds" in inputs:
                 base_inputs["inputs_embeds"] = inputs["inputs_embeds"]
+            if sanitized_labels is not None:
+                base_inputs["labels"] = sanitized_labels
             if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
                 base_inputs["pixel_values"] = inputs["pixel_values"]
 
             if self.safe_model.base_vl.model_type == "llava":
-                # Use splitter for LLaVA mixed batches with order preservation
-                mm_inputs, text_inputs, idx_mm, idx_text = self._split_mm_text_batches(base_inputs)
-                
-                def _forward_and_restore(inputs_a, inputs_b, idx_a, idx_b):
-                    B = base_inputs["input_ids"].size(0)
-                    out_a = self.safe_model.base_vl(**inputs_a) if inputs_a is not None else None
-                    out_b = self.safe_model.base_vl(**inputs_b) if inputs_b is not None else None
-
-                    # Pull logits
-                    logits_a = (out_a["logits"] if isinstance(out_a, dict) else getattr(out_a, "logits", None)) if out_a else None
-                    logits_b = (out_b["logits"] if isinstance(out_b, dict) else getattr(out_b, "logits", None)) if out_b else None
-
-                    # Allocate and restore original order
-                    if logits_a is not None or logits_b is not None:
-                        ref_logits = logits_a or logits_b
-                        T, V = ref_logits.shape[1], ref_logits.shape[2]
-                        logits = torch.zeros(B, T, V, device=ref_logits.device, dtype=ref_logits.dtype)
-                        if logits_a is not None and idx_a is not None:
-                            logits[idx_a] = logits_a
-                        if logits_b is not None and idx_b is not None:
-                            logits[idx_b] = logits_b
-                    else:
-                        logits = None
-
-                    # Stitch a minimal outputs object (dict-like so losses can index it)
-                    class OutputsWrapper(dict):
-                        pass
-                    
-                    out = OutputsWrapper()
-                    out["logits"] = logits  # may be None
-                    
-                    # Sum losses if they exist
-                    if out_a and (hasattr(out_a, "loss") or (isinstance(out_a, dict) and "loss" in out_a)):
-                        la = out_a["loss"] if isinstance(out_a, dict) else out_a.loss
-                        if la is not None:
-                            out["loss"] = la if "loss" not in out else out["loss"] + la
-                    
-                    if out_b and (hasattr(out_b, "loss") or (isinstance(out_b, dict) and "loss" in out_b)):
-                        lb = out_b["loss"] if isinstance(out_b, dict) else out_b.loss
-                        if lb is not None:
-                            out["loss"] = lb if "loss" not in out else out["loss"] + lb
-                    
-                    return out
-
-                base_outputs = _forward_and_restore(mm_inputs, text_inputs, idx_mm, idx_text)
+                base_outputs = self._forward_llava_teacher(base_inputs)
             elif self.safe_model.base_vl.model_type == "blip2":
                 # BLIP-2: use directly without splitting
                 base_outputs = self.safe_model.base_vl(**base_inputs)
@@ -584,11 +546,8 @@ class StageATrainer:
             if max_batches:
                 from itertools import islice
                 dataloader = islice(self.val_dataloader, max_batches)
-                desc = f"Evaluating (first {max_batches} batches)"
-            else:
-                desc = "Evaluating"
             
-            for batch in tqdm(dataloader, desc=desc, total=max_batches or len(self.val_dataloader)):
+            for batch in dataloader:
                 # Move batch to device
                 for key in batch:
                     if isinstance(batch[key], torch.Tensor):
@@ -632,63 +591,21 @@ class StageATrainer:
                 
                 # Base VL model forward pass
                 sanitized_ids = self.safe_model.sanitize_input_ids_for_base(inputs.get("input_ids"))
+                sanitized_labels = self.safe_model.sanitize_labels_for_base(inputs.get("labels"))
                 base_inputs = {
                     "attention_mask": inputs["attention_mask"],
-                    "labels": inputs["labels"]
                 }
                 if sanitized_ids is not None:
                     base_inputs["input_ids"] = sanitized_ids
                 elif "inputs_embeds" in inputs:
                     base_inputs["inputs_embeds"] = inputs["inputs_embeds"]
+                if sanitized_labels is not None:
+                    base_inputs["labels"] = sanitized_labels
                 if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
                     base_inputs["pixel_values"] = inputs["pixel_values"]
 
                 if self.safe_model.base_vl.model_type == "llava":
-                    # Use splitter for LLaVA mixed batches with order preservation
-                    mm_inputs, text_inputs, idx_mm, idx_text = self._split_mm_text_batches(base_inputs)
-                    
-                    def _forward_and_restore(inputs_a, inputs_b, idx_a, idx_b):
-                        B = base_inputs["input_ids"].size(0)
-                        out_a = self.safe_model.base_vl(**inputs_a) if inputs_a is not None else None
-                        out_b = self.safe_model.base_vl(**inputs_b) if inputs_b is not None else None
-
-                        # Pull logits
-                        logits_a = (out_a["logits"] if isinstance(out_a, dict) else getattr(out_a, "logits", None)) if out_a else None
-                        logits_b = (out_b["logits"] if isinstance(out_b, dict) else getattr(out_b, "logits", None)) if out_b else None
-
-                        # Allocate and restore original order
-                        if logits_a is not None or logits_b is not None:
-                            ref_logits = logits_a if logits_a is not None else logits_b
-                            T, V = ref_logits.shape[1], ref_logits.shape[2]
-                            logits = torch.zeros(B, T, V, device=ref_logits.device, dtype=ref_logits.dtype)
-                            if logits_a is not None and idx_a is not None:
-                                logits[idx_a] = logits_a
-                            if logits_b is not None and idx_b is not None:
-                                logits[idx_b] = logits_b
-                        else:
-                            logits = None
-
-                        # Stitch a minimal outputs object (dict-like so losses can index it)
-                        class OutputsWrapper(dict):
-                            pass
-                        
-                        out = OutputsWrapper()
-                        out["logits"] = logits  # may be None
-                        
-                        # Sum losses if they exist
-                        if out_a and (hasattr(out_a, "loss") or (isinstance(out_a, dict) and "loss" in out_a)):
-                            la = out_a["loss"] if isinstance(out_a, dict) else out_a.loss
-                            if la is not None:
-                                out["loss"] = la if "loss" not in out else out["loss"] + la
-                        
-                        if out_b and (hasattr(out_b, "loss") or (isinstance(out_b, dict) and "loss" in out_b)):
-                            lb = out_b["loss"] if isinstance(out_b, dict) else out_b.loss
-                            if lb is not None:
-                                out["loss"] = lb if "loss" not in out else out["loss"] + lb
-                        
-                        return out
-
-                    base_outputs = _forward_and_restore(mm_inputs, text_inputs, idx_mm, idx_text)
+                    base_outputs = self._forward_llava_teacher(base_inputs)
                 elif self.safe_model.base_vl.model_type == "blip2":
                     # BLIP-2: use directly without splitting
                     base_outputs = self.safe_model.base_vl(**base_inputs)
@@ -1204,11 +1121,7 @@ class StageATrainer:
             stage_name = self.current_stage_config["stage_name"] if self.current_stage_config else "unknown"
             stage_idx = self.current_stage_config["stage_idx"] if self.current_stage_config else 0
             
-            progress_bar = tqdm(
-                self.train_dataloader, 
-                desc=f"Stage {stage_name} | Epoch {epoch_in_stage} | Global {self.epoch}"
-            )
-            
+            progress_bar = self.train_dataloader
             for step, batch in enumerate(progress_bar):
                 # Training step
                 step_losses = self.train_step(batch)
@@ -1222,12 +1135,11 @@ class StageATrainer:
                         epoch_losses[key].append(step_losses[key])
                 
                 # Update progress bar
-                if epoch_losses["total_loss"]:
+                if epoch_losses["total_loss"] and (step + 1) % self.config.get("logging_steps", 50) == 0:
                     avg_loss = np.mean(epoch_losses["total_loss"][-10:])
-                    progress_bar.set_postfix({
-                        "loss": f"{avg_loss:.4f}",
-                        "stage": stage_name
-                    })
+                    print(
+                        f"Stage {stage_name} | Epoch {epoch_in_stage} Step {step+1}: loss={avg_loss:.4f}"
+                    )
                 
                 # Logging
                 if self.global_step % self.config["logging_steps"] == 0:
@@ -1350,12 +1262,7 @@ class StageATrainer:
             epoch_losses = {key: [] for key in ["total_loss", "audio_task_loss", "retention_loss"]}
             
             # Training loop
-            try:
-                progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}/{self.config['num_epochs']}")
-            except OSError:
-                # Fallback for cluster environments with stale file handles
-                progress_bar = self.train_dataloader
-            
+            progress_bar = self.train_dataloader
             for step, batch in enumerate(progress_bar):
                 # Training step
                 step_losses = self.train_step(batch)
@@ -1367,9 +1274,9 @@ class StageATrainer:
                         epoch_losses[key].append(step_losses[key])
                 
                 # Update progress bar
-                if epoch_losses["total_loss"]:
+                if epoch_losses["total_loss"] and (step + 1) % self.config.get("logging_steps", 50) == 0:
                     avg_loss = np.mean(epoch_losses["total_loss"][-100:])
-                    progress_bar.set_postfix({"loss": f"{avg_loss:.4f}"})
+                    print(f"Epoch {epoch+1} Step {step+1}: loss={avg_loss:.4f}")
                 
                 # Logging
                 if self.global_step % self.config["logging_steps"] == 0:

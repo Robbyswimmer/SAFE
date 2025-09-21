@@ -900,6 +900,21 @@ class SAFEModel(nn.Module):
     def sanitize_input_ids_for_base(self, input_ids: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
         return self._sanitize_input_ids_for_base(input_ids)
 
+    def sanitize_labels_for_base(self, labels: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        """Mask out audio-token targets so the base model never sees out-of-vocab labels."""
+        if labels is None or not torch.is_tensor(labels):
+            return labels
+
+        original_vocab = getattr(self, "original_vocab_size", None)
+        if original_vocab is None:
+            return labels
+
+        sanitized = labels.clone()
+        mask = (sanitized >= original_vocab) & (sanitized != -100)
+        if mask.any():
+            sanitized[mask] = -100
+        return sanitized
+
     def _get_image_token_id(self):
         """Get the image token ID for LLaVA models."""
         # Be defensive across processors/tokenizers  
