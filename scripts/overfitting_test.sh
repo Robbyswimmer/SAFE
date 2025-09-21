@@ -4,7 +4,7 @@
 #SBATCH --output=logs/overfitting_%j.txt
 #SBATCH --error=logs/overfitting_%j.err
 #SBATCH --time=12:00:00
-#SBATCH --mem=24G
+#SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mail-type=FAIL,END
@@ -37,7 +37,7 @@ VAL_SIZE=${VAL_SIZE:-500}
 NUM_EPOCHS=${NUM_EPOCHS:-30}
 TRAIN_BS=${TRAIN_BS:-8}
 VAL_BS=${VAL_BS:-16}
-NUM_WORKERS=${NUM_WORKERS:-4}
+NUM_WORKERS=${NUM_WORKERS:-0}
 SEED=${SEED:-42}
 
 mkdir -p logs

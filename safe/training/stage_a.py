@@ -826,6 +826,12 @@ class StageATrainer:
             
             for i in range(batch_size):
                 try:
+                    # Check bounds before accessing prediction tokens
+                    if i >= len(safe_pred_tokens) or i >= len(base_pred_tokens):
+                        safe_accuracies[i] = 0.0
+                        base_accuracies[i] = 0.0
+                        continue
+                    
                     # Decode SAFE model predictions and extract answer
                     safe_pred_full = self.safe_model.base_vl.tokenizer.decode(
                         safe_pred_tokens[i], skip_special_tokens=True

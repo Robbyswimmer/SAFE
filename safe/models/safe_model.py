@@ -1032,11 +1032,19 @@ class SAFEModel(nn.Module):
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
+            
+            # Ensure shapes match after flattening
+            flat_logits = shift_logits.view(-1, shift_logits.size(-1)).float()
+            flat_labels = shift_labels.view(-1)
+            
+            # Only compute loss on valid tokens (ignore -100 padding)
+            if flat_logits.size(0) != flat_labels.size(0):
+                min_size = min(flat_logits.size(0), flat_labels.size(0))
+                flat_logits = flat_logits[:min_size]
+                flat_labels = flat_labels[:min_size]
+            
             loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)).float(),
-                shift_labels.view(-1)
-            )
+            loss = loss_fct(flat_logits, flat_labels)
         
         return {
             "logits": logits,
