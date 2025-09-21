@@ -487,7 +487,7 @@ def parse_args() -> argparse.Namespace:
                         help="Number of dataloader worker processes")
     parser.add_argument("--data-path", type=str, default="./data",
                         help="Root directory for datasets")
-    parser.add_argument("--pack-root", type=str, default="experiments/overfitting/data_pack",
+    parser.add_argument("--pack-root", type=str, default="data_pack",
                         help="Root of packaged subset (used when train/val-source='pack*')")
     parser.add_argument("--output-root", type=str, default="experiments/overfitting/runs",
                         help="Directory to store experiment outputs")
