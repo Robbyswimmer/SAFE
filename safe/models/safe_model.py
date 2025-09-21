@@ -902,7 +902,9 @@ class SAFEModel(nn.Module):
             return {"logits": logits, "loss": loss, "hidden_states": None}
         
         resolved_input_ids = input_ids if input_ids is not None else kwargs.pop("input_ids", None)
-        if resolved_input_ids is None and "inputs_embeds" not in kwargs:
+        inputs_embeds_kw = kwargs.pop("inputs_embeds", None)
+
+        if resolved_input_ids is None and inputs_embeds_kw is None:
             raise ValueError("SAFEModel.forward requires input_ids or inputs_embeds")
 
         # For other model types, use custom implementation
@@ -912,27 +914,36 @@ class SAFEModel(nn.Module):
                 and self.original_vocab_size is not None
                 and (resolved_input_ids >= self.original_vocab_size).any()
             )
-            
+
             if not has_audio_tokens:
                 base_inputs = {
-                    "input_ids": resolved_input_ids,
                     "attention_mask": attention_mask,
                     "labels": labels,
-                    "vision_features": vision_features
+                    "vision_features": vision_features,
                 }
+                if resolved_input_ids is not None:
+                    base_inputs["input_ids"] = resolved_input_ids
+                else:
+                    base_inputs["inputs_embeds"] = inputs_embeds_kw
                 return self.base_vl(**base_inputs, **kwargs)
             else:
-                inputs_embeds = self.get_input_embeddings(resolved_input_ids)
+                if resolved_input_ids is not None:
+                    inputs_embeds = self.get_input_embeddings(resolved_input_ids)
+                else:
+                    inputs_embeds = inputs_embeds_kw
                 base_inputs = {
                     "inputs_embeds": inputs_embeds,
                     "attention_mask": attention_mask,
                     "labels": labels,
-                    "vision_features": vision_features
+                    "vision_features": vision_features,
                 }
                 return self.base_vl(**base_inputs, **kwargs)
-        
+
         # Get token embeddings using our custom method
-        inputs_embeds = self.get_input_embeddings(resolved_input_ids)
+        if resolved_input_ids is not None:
+            inputs_embeds = self.get_input_embeddings(resolved_input_ids)
+        else:
+            inputs_embeds = inputs_embeds_kw
         
         # Forward through LLM with audio fusion (simplified implementation)
         if hasattr(self.base_vl.llm, 'transformer'):
@@ -971,10 +982,13 @@ class SAFEModel(nn.Module):
         else:
             if self.base_vl.model_type in ["blip2", "llava"]:
                 base_inputs = {
-                    "input_ids": resolved_input_ids,
                     "attention_mask": attention_mask,
                     "labels": labels,
                 }
+                if resolved_input_ids is not None:
+                    base_inputs["input_ids"] = resolved_input_ids
+                else:
+                    base_inputs["inputs_embeds"] = inputs_embeds
                 if "pixel_values" in kwargs:
                     base_inputs["pixel_values"] = kwargs["pixel_values"]
                     
