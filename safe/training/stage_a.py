@@ -540,14 +540,17 @@ class StageATrainer:
         }
         
         device = next(self.safe_model.parameters()).device
+        eval_logging_steps = self.config.get("eval_logging_steps", 20)
         
         with torch.no_grad():
             dataloader = self.val_dataloader
+            total_eval_batches = max_batches if max_batches else len(self.val_dataloader)
             if max_batches:
                 from itertools import islice
                 dataloader = islice(self.val_dataloader, max_batches)
+            print(f"Evaluating on {total_eval_batches} batches...", flush=True)
             
-            for batch in dataloader:
+            for batch_idx, batch in enumerate(dataloader, start=1):
                 # Move batch to device
                 for key in batch:
                     if isinstance(batch[key], torch.Tensor):
@@ -667,6 +670,12 @@ class StageATrainer:
                     vl_samples += len(vl_indices)
                 
                 total_samples += batch_size
+
+                if eval_logging_steps and (batch_idx % eval_logging_steps == 0 or batch_idx == total_eval_batches):
+                    print(
+                        f"[Eval] Processed {batch_idx}/{total_eval_batches} batches",
+                        flush=True
+                    )
         
         # Normalize losses (avoid division by zero)
         if total_samples > 0:
@@ -1078,33 +1087,33 @@ class StageATrainer:
     
     def _train_with_curriculum(self):
         """Training loop with curriculum learning."""
-        print("🎓 Starting Stage A training with curriculum learning...")
-        print(f"Curriculum has {self.curriculum_manager.config.get_num_stages()} stages")
+        print("🎓 Starting Stage A training with curriculum learning...", flush=True)
+        print(f"Curriculum has {self.curriculum_manager.config.get_num_stages()} stages", flush=True)
         
         # Compute baseline metrics before training (quick evaluation)
-        print("Computing baseline metrics (quick evaluation)...")
+        print("Computing baseline metrics (quick evaluation)...", flush=True)
         baseline_metrics = self.evaluate(max_batches=50)  # Only evaluate first 50 batches
         self.baseline_metrics = baseline_metrics
         self.curriculum_manager.set_baseline_metrics({
             "vl_retention": baseline_metrics["retention_score"],
             "audio_accuracy": baseline_metrics["audio_accuracy"]
         })
-        print(f"Baseline metrics computed:")
-        print(f"  Retention Score: {baseline_metrics['retention_score']:.4f}")
-        print(f"  Audio Accuracy: {baseline_metrics['audio_accuracy']:.4f}")
-        print(f"  VL Safe Accuracy: {baseline_metrics['vl_safe_accuracy']:.4f}")
-        print(f"  VL Base Accuracy: {baseline_metrics['vl_base_accuracy']:.4f}")
-        print(f"  Total Loss: {baseline_metrics['total_loss']:.4f}")
-        print(f"")
-        print(f"🔍 Model Comparison:")
-        print(f"  SAFE Model VL Accuracy: {baseline_metrics['vl_safe_accuracy']:.4f}")
-        print(f"  Base VL Model Accuracy: {baseline_metrics['vl_base_accuracy']:.4f}")
+        print(f"Baseline metrics computed:", flush=True)
+        print(f"  Retention Score: {baseline_metrics['retention_score']:.4f}", flush=True)
+        print(f"  Audio Accuracy: {baseline_metrics['audio_accuracy']:.4f}", flush=True)
+        print(f"  VL Safe Accuracy: {baseline_metrics['vl_safe_accuracy']:.4f}", flush=True)
+        print(f"  VL Base Accuracy: {baseline_metrics['vl_base_accuracy']:.4f}", flush=True)
+        print(f"  Total Loss: {baseline_metrics['total_loss']:.4f}", flush=True)
+        print(f"", flush=True)
+        print(f"🔍 Model Comparison:", flush=True)
+        print(f"  SAFE Model VL Accuracy: {baseline_metrics['vl_safe_accuracy']:.4f}", flush=True)
+        print(f"  Base VL Model Accuracy: {baseline_metrics['vl_base_accuracy']:.4f}", flush=True)
         if baseline_metrics['vl_base_accuracy'] > 0.01:  # If base model has decent accuracy
             if baseline_metrics['vl_safe_accuracy'] < baseline_metrics['vl_base_accuracy'] * 0.5:
-                print(f"  ⚠️  WARNING: SAFE model significantly underperforming base VL model!")
-                print(f"     This suggests an integration issue in the SAFE architecture.")
+                print(f"  ⚠️  WARNING: SAFE model significantly underperforming base VL model!", flush=True)
+                print(f"     This suggests an integration issue in the SAFE architecture.", flush=True)
         else:
-            print(f"  ℹ️  Both models show low accuracy - may be due to dataset/task mismatch.")
+            print(f"  ℹ️  Both models show low accuracy - may be due to dataset/task mismatch.", flush=True)
         
         # Initialize first stage
         self.update_curriculum_config()
@@ -1138,7 +1147,8 @@ class StageATrainer:
                 if epoch_losses["total_loss"] and (step + 1) % self.config.get("logging_steps", 50) == 0:
                     avg_loss = np.mean(epoch_losses["total_loss"][-10:])
                     print(
-                        f"Stage {stage_name} | Epoch {epoch_in_stage} Step {step+1}: loss={avg_loss:.4f}"
+                        f"Stage {stage_name} | Epoch {epoch_in_stage} Step {step+1}: loss={avg_loss:.4f}",
+                        flush=True
                     )
                 
                 # Logging
@@ -1159,7 +1169,7 @@ class StageATrainer:
                         pass
             
             # End of epoch evaluation
-            print(f"\n📊 End of Epoch {self.epoch} (Stage {stage_name}, Epoch {epoch_in_stage})")
+            print(f"\n📊 End of Epoch {self.epoch} (Stage {stage_name}, Epoch {epoch_in_stage})", flush=True)
             max_eval_batches = self.config.get("max_eval_batches", None)
             eval_metrics = self.evaluate(max_batches=max_eval_batches)
             
@@ -1245,17 +1255,17 @@ class StageATrainer:
     
     def _train_traditional(self):
         """Traditional fixed-epoch training loop."""
-        print(f"Starting Stage A training for {self.config['num_epochs']} epochs...")
-        print(f"Total training steps: {len(self.train_dataloader) * self.config['num_epochs']}")
-        
+        print(f"Starting Stage A training for {self.config['num_epochs']} epochs...", flush=True)
+        print(f"Total training steps: {len(self.train_dataloader) * self.config['num_epochs']}", flush=True)
+
         # Compute baseline retention score
-        print("Computing baseline metrics...")
+        print("Computing baseline metrics...", flush=True)
         max_eval_batches = self.config.get("max_eval_batches", None)
         baseline_metrics = self.evaluate(max_batches=max_eval_batches)
         baseline_retention = baseline_metrics["retention_score"]
-        print(f"Baseline retention score: {baseline_retention:.4f}")
+        print(f"Baseline retention score: {baseline_retention:.4f}", flush=True)
         if max_eval_batches:
-            print(f"(Evaluation limited to {max_eval_batches} batches)")
+            print(f"(Evaluation limited to {max_eval_batches} batches)", flush=True)
         
         for epoch in range(self.config["num_epochs"]):
             self.epoch = epoch
@@ -1263,10 +1273,18 @@ class StageATrainer:
             
             # Training loop
             progress_bar = self.train_dataloader
+            print(f"Starting epoch {epoch+1}/{self.config['num_epochs']} with {len(self.train_dataloader)} batches...", flush=True)
+            
             for step, batch in enumerate(progress_bar):
+                if step == 0:
+                    print(f"Processing first batch of epoch {epoch+1}...", flush=True)
+                
                 # Training step
                 step_losses = self.train_step(batch)
                 self.global_step += 1
+                
+                if step == 0:
+                    print(f"First batch completed successfully! Loss: {step_losses.get('total_loss', 'N/A'):.4f}", flush=True)
                 
                 # Accumulate losses
                 for key in epoch_losses:
@@ -1276,7 +1294,7 @@ class StageATrainer:
                 # Update progress bar
                 if epoch_losses["total_loss"] and (step + 1) % self.config.get("logging_steps", 50) == 0:
                     avg_loss = np.mean(epoch_losses["total_loss"][-100:])
-                    print(f"Epoch {epoch+1} Step {step+1}: loss={avg_loss:.4f}")
+                    print(f"Epoch {epoch+1} Step {step+1}: loss={avg_loss:.4f}", flush=True)
                 
                 # Logging
                 if self.global_step % self.config["logging_steps"] == 0:
@@ -1296,11 +1314,11 @@ class StageATrainer:
                     max_eval_batches = self.config.get("max_eval_batches", None)
                     eval_metrics = self.evaluate(max_batches=max_eval_batches)
                     
-                    print(f"\nStep {self.global_step} Evaluation:")
-                    print(f"  Retention Score: {eval_metrics['retention_score']:.4f}")
-                    print(f"  Audio Accuracy: {eval_metrics['audio_accuracy']:.4f}")
-                    print(f"  VL Safe Accuracy: {eval_metrics['vl_safe_accuracy']:.4f}")
-                    print(f"  Total Loss: {eval_metrics['total_loss']:.4f}")
+                    print(f"\nStep {self.global_step} Evaluation:", flush=True)
+                    print(f"  Retention Score: {eval_metrics['retention_score']:.4f}", flush=True)
+                    print(f"  Audio Accuracy: {eval_metrics['audio_accuracy']:.4f}", flush=True)
+                    print(f"  VL Safe Accuracy: {eval_metrics['vl_safe_accuracy']:.4f}", flush=True)
+                    print(f"  Total Loss: {eval_metrics['total_loss']:.4f}", flush=True)
                     self.logger.info(
                         "[Eval][step=%s] retention=%.4f audio_acc=%.4f vl_safe=%.4f total_loss=%.4f",
                         self.global_step,
@@ -1327,10 +1345,10 @@ class StageATrainer:
                     # Early stopping check
                     retention_degradation = baseline_retention - current_retention
                     if retention_degradation > self.config["retention_tolerance"]:
-                        print(f"WARNING: Retention degradation ({retention_degradation:.4f}) exceeds tolerance!")
-                    
+                        print(f"WARNING: Retention degradation ({retention_degradation:.4f}) exceeds tolerance!", flush=True)
+
                     if self.patience_counter >= self.config["early_stopping_patience"]:
-                        print(f"Early stopping after {self.patience_counter} evaluations without improvement")
+                        print(f"Early stopping after {self.patience_counter} evaluations without improvement", flush=True)
                         return eval_metrics
                     
                     # Log to wandb
@@ -1342,13 +1360,13 @@ class StageATrainer:
                         pass
             
             # End of epoch evaluation
-            print(f"\nEnd of Epoch {epoch+1}")
+            print(f"\nEnd of Epoch {epoch+1}", flush=True)
             max_eval_batches = self.config.get("max_eval_batches", None)
             epoch_metrics = self.evaluate(max_batches=max_eval_batches)
-            print(f"Epoch {epoch+1} Results:")
-            print(f"  Retention Score: {epoch_metrics['retention_score']:.4f}")
-            print(f"  Audio Accuracy: {epoch_metrics['audio_accuracy']:.4f}")
-            print(f"  Retention Loss: {epoch_metrics['retention_loss']:.4f}")
+            print(f"Epoch {epoch+1} Results:", flush=True)
+            print(f"  Retention Score: {epoch_metrics['retention_score']:.4f}", flush=True)
+            print(f"  Audio Accuracy: {epoch_metrics['audio_accuracy']:.4f}", flush=True)
+            print(f"  Retention Loss: {epoch_metrics['retention_loss']:.4f}", flush=True)
             self.logger.info(
                 "[Eval][epoch=%s] retention=%.4f audio_acc=%.4f retention_loss=%.4f",
                 epoch + 1,
@@ -1357,8 +1375,8 @@ class StageATrainer:
                 epoch_metrics['retention_loss'],
             )
         
-        print("Stage A training completed!")
-        print(f"Best retention score: {self.best_retention_score:.4f}")
+        print("Stage A training completed!", flush=True)
+        print(f"Best retention score: {self.best_retention_score:.4f}", flush=True)
         
         # Final checkpoint
         max_eval_batches = self.config.get("max_eval_batches", None)
