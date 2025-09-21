@@ -467,9 +467,11 @@ class SAFEModel(nn.Module):
             
             # Process vision if provided
             if images is not None:
-                images = images.to(device)
-                vision_features = self.base_vl.encode_images(images)
-                result["vision_features"] = vision_features
+                images = self._ensure_image_batch(images)
+                if images is not None:
+                    images = images.to(device)
+                    vision_features = self.base_vl.encode_images(images)
+                    result["vision_features"] = vision_features
         
         # Process audio if provided (same for all model types)
         if audio is not None:
@@ -678,6 +680,52 @@ class SAFEModel(nn.Module):
             return Image.fromarray(img_np)
         
         return None
+
+    def _ensure_image_batch(self, images: Union[torch.Tensor, List]) -> Optional[torch.Tensor]:
+        """Normalize different image container types into a batched tensor.
+
+        Args:
+            images: Either a tensor or a list of tensors/PIL images/paths.
+
+        Returns:
+            Torch tensor with shape (B, C, H, W) or None if conversion fails.
+        """
+        if images is None:
+            return None
+
+        if isinstance(images, torch.Tensor):
+            if images.dim() == 3:
+                return images.unsqueeze(0)
+            return images
+
+        # Handle list/tuple inputs
+        if isinstance(images, (list, tuple)):
+            tensors = []
+            for img in images:
+                if img is None:
+                    continue
+                if isinstance(img, torch.Tensor):
+                    tensor = img.unsqueeze(0) if img.dim() == 3 else img
+                else:
+                    pil = self._convert_to_pil(img)
+                    if pil is None:
+                        continue
+                    import torchvision.transforms as T
+                    tensor = T.ToTensor()(pil).unsqueeze(0)
+                tensors.append(tensor)
+
+            if not tensors:
+                return None
+
+            images_tensor = torch.cat(tensors, dim=0)
+            return images_tensor
+
+        # Fallback: try converting single item
+        pil_image = self._convert_to_pil(images)
+        if pil_image is None:
+            return None
+        import torchvision.transforms as T
+        return T.ToTensor()(pil_image).unsqueeze(0)
     
     def _get_image_token_id(self):
         """Get the image token ID for LLaVA models."""

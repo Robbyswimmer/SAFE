@@ -3,28 +3,33 @@
 #SBATCH --job-name="SAFE-Overfit"
 #SBATCH --output=logs/overfitting_%j.txt
 #SBATCH --error=logs/overfitting_%j.err
-#SBATCH --time=48:00:00
-#SBATCH --mem=16G
+#SBATCH --time=12:00:00
+#SBATCH --mem=24G
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mail-type=FAIL,END
-#SBATCH --mail-user=you@example.com   # <-- update to your email or comment out if not needed
-#SBATCH -p batch
+#SBATCH --mail-user=rmose009@ucr.edu
+#SBATCH -p gpu
 
 set -euo pipefail
 
 # Optional: load/activate your environment
 if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
   source "$HOME/miniconda3/etc/profile.d/conda.sh"
+elif command -v module &>/dev/null; then
+  module load anaconda &>/dev/null || true
+  source "$HOME/.bashrc"
 fi
-# TODO: replace 'safe-env' with the correct environment name for your cluster setup
-echo "Activating conda environment 'safe-env'"
-conda activate safe-env
+
+CONDA_ENV=${CONDA_ENV:-safe-env}
+echo "Activating conda environment '${CONDA_ENV}'"
+conda activate "${CONDA_ENV}"
 
 echo "Starting SAFE overfitting ablation at $(date)"
 
-DATA_ROOT=${DATA_ROOT:-"./data"}
-OUTPUT_ROOT=${OUTPUT_ROOT:-"experiments/overfitting/runs/${SLURM_JOB_ID}"}
+DATA_ROOT=${DATA_ROOT:-"$PWD/experiments/overfitting/data_pack"}
+PACK_ROOT=${PACK_ROOT:-"$DATA_ROOT"}
+OUTPUT_ROOT=${OUTPUT_ROOT:-"$PWD/experiments/overfitting/runs/${SLURM_JOB_ID}"}
 SUBSET_SIZE=${SUBSET_SIZE:-400}
 TRAIN_SOURCE=${TRAIN_SOURCE:-"pack"}
 VAL_SOURCE=${VAL_SOURCE:-"pack_vl"}
@@ -34,10 +39,15 @@ TRAIN_BS=${TRAIN_BS:-8}
 VAL_BS=${VAL_BS:-16}
 NUM_WORKERS=${NUM_WORKERS:-4}
 SEED=${SEED:-42}
-PACK_ROOT=${PACK_ROOT:-"experiments/overfitting/data_pack"}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_ROOT"
+
+# Sanity check for packaged data
+if [[ ! -d "$PACK_ROOT" ]]; then
+  echo "[ERROR] Expected data pack at '$PACK_ROOT' but it was not found." >&2
+  exit 1
+fi
 
 variants=(no_retention soft_retention full_safe)
 
