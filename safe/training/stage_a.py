@@ -228,65 +228,57 @@ class StageATrainer:
         image_token_id = self.safe_model._get_image_token_id()
         has_img_tokens = (input_ids == image_token_id).any(dim=1)
 
-        logits_list = []
-        losses = []
+        if pixel_values is None:
+            pixel_values = torch.empty(0)
 
-        if not getattr(self, "_teacher_debug_printed", False):
-            print(
-                f"[TeacherDebug] batch_size={batch_size}, logits_list_size=0, has_img_tokens={has_img_tokens.tolist()}",
-                flush=True
-            )
-            self._teacher_debug_printed = True
+        def _slice_inputs(indices: torch.Tensor, keep_pixels: bool) -> dict:
+            if indices is None or indices.numel() == 0:
+                return None
+            subset = {}
+            for key, value in base_inputs.items():
+                if isinstance(value, torch.Tensor) and value.dim() >= 1 and value.size(0) == batch_size:
+                    subset[key] = value.index_select(0, indices.to(value.device))
+                else:
+                    subset[key] = value
+            if not keep_pixels:
+                subset.pop("pixel_values", None)
+            return subset
 
-        for idx in range(batch_size):
-            sample_kwargs = {
-                "input_ids": input_ids[idx : idx + 1],
-            }
-            if attention_mask is not None:
-                sample_kwargs["attention_mask"] = attention_mask[idx : idx + 1]
-            if labels is not None:
-                sample_kwargs["labels"] = labels[idx : idx + 1]
-            if pixel_values is not None and has_img_tokens[idx]:
-                sample_kwargs["pixel_values"] = pixel_values[idx : idx + 1]
+        idx_mm = torch.nonzero(has_img_tokens, as_tuple=False).flatten()
+        idx_text = torch.nonzero(~has_img_tokens, as_tuple=False).flatten()
 
-            outputs = self.safe_model.base_vl(**sample_kwargs)
-            logits = outputs.get("logits") if isinstance(outputs, dict) else getattr(outputs, "logits", None)
-            if logits is None:
-                if not getattr(self, "_teacher_missing_logits_warned", False):
-                    print(f"[TeacherDebug] Missing logits for sample {idx}", flush=True)
-                    self._teacher_missing_logits_warned = True
-                continue
-            logits_list.append(logits)
+        outputs_ordered: List[Optional[torch.Tensor]] = [None] * batch_size
+        loss_values: List[torch.Tensor] = []
 
-            if not getattr(self, "_teacher_sample_shape_logged", False):
-                print(
-                    f"[TeacherDebug] sample {idx} logits shape {logits.shape}",
-                    flush=True
-                )
-                self._teacher_sample_shape_logged = True
+        def _run_subset(sub_inputs, indices):
+            if sub_inputs is None:
+                return
+            result = self.safe_model.base_vl(**sub_inputs)
+            logits_subset = result.get("logits") if isinstance(result, dict) else getattr(result, "logits", None)
+            if logits_subset is None:
+                raise RuntimeError("Base LLaVA teacher returned no logits for a subset.")
+            for slot, tensor in zip(indices.tolist(), logits_subset):
+                outputs_ordered[slot] = tensor.unsqueeze(0)
+            loss_tensor = result.get("loss") if isinstance(result, dict) else getattr(result, "loss", None)
+            if loss_tensor is not None:
+                loss_values.append(loss_tensor)
 
-            loss_val = outputs.get("loss") if isinstance(outputs, dict) else getattr(outputs, "loss", None)
-            if loss_val is not None:
-                losses.append(loss_val)
+        _run_subset(_slice_inputs(idx_mm, keep_pixels=True), idx_mm)
+        _run_subset(_slice_inputs(idx_text, keep_pixels=False), idx_text)
 
-        if not logits_list:
-            raise RuntimeError("Base LLaVA teacher produced no logits for the current batch.")
+        if any(o is None for o in outputs_ordered):
+            missing = [i for i, o in enumerate(outputs_ordered) if o is None]
+            raise RuntimeError(f"Base LLaVA teacher failed to return logits for samples: {missing}")
 
-        logits = torch.cat(logits_list, dim=0)
-        if logits.size(0) != batch_size and not self._teacher_shape_warned:
-            print(
-                f"Warning: LLaVA teacher returned {logits.size(0)} samples for batch of size {batch_size}",
-                flush=True
-            )
-            self._teacher_shape_warned = True
+        logits = torch.cat(outputs_ordered, dim=0)
 
         class OutputsWrapper(dict):
             pass
 
         wrapped = OutputsWrapper()
         wrapped["logits"] = logits
-        if losses:
-            wrapped["loss"] = torch.stack(losses).mean()
+        if loss_values:
+            wrapped["loss"] = torch.stack(loss_values).mean()
         return wrapped
     
     def _setup_loss_functions(self):
