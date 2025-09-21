@@ -11,6 +11,7 @@ import json
 import random
 from dataclasses import asdict, dataclass
 from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -68,6 +69,7 @@ class ManifestAudioCapsDataset(Dataset):
     def __init__(self, pack_root: Path, resample_rate: int = 48_000):
         self.pack_root = pack_root
         self.resample_rate = resample_rate
+        self.logger = logging.getLogger(__name__)
 
         manifest_path = pack_root / "manifest.json"
         if not manifest_path.exists():
@@ -76,8 +78,8 @@ class ManifestAudioCapsDataset(Dataset):
             )
 
         self.manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        self.entries = self.manifest.get("entries", [])
-        if not self.entries:
+        entries = self.manifest.get("entries", [])
+        if not entries:
             raise ValueError("Manifest contains no entries")
 
         if librosa is None:
@@ -85,13 +87,43 @@ class ManifestAudioCapsDataset(Dataset):
                 "librosa is required to load audio from the packaged subset."
             )
 
+        valid_entries: List[Dict[str, object]] = []
+        missing_paths: List[str] = []
+        for entry in entries:
+            rel = entry.get("audio_relpath")
+            if not rel:
+                continue
+            audio_path = self.pack_root / rel
+            if audio_path.exists():
+                entry["_abs_audio_path"] = audio_path
+                valid_entries.append(entry)
+            else:
+                missing_paths.append(str(audio_path))
+
+        if missing_paths:
+            preview = ", ".join(missing_paths[:3])
+            self.logger.warning(
+                "Skipping %d missing audio files (e.g., %s)",
+                len(missing_paths),
+                preview,
+            )
+
+        if not valid_entries:
+            raise FileNotFoundError(
+                "No valid audio files found in data pack. Did you copy the clips?"
+            )
+
+        self.entries = valid_entries
+
     def __len__(self) -> int:
         return len(self.entries)
 
     def __getitem__(self, idx: int) -> Dict[str, object]:
         entry = self.entries[idx]
-        audio_relpath = entry["audio_relpath"]
-        audio_path = self.pack_root / audio_relpath
+        audio_path = entry.get("_abs_audio_path")
+        if audio_path is None:
+            audio_relpath = entry["audio_relpath"]
+            audio_path = self.pack_root / audio_relpath
         if not audio_path.exists():
             raise FileNotFoundError(f"Missing audio clip: {audio_path}")
 
