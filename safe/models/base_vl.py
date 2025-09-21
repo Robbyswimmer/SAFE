@@ -266,10 +266,11 @@ class BaseVLModel(nn.Module):
     
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
         vision_features: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         **kwargs
     ) -> Dict[str, torch.Tensor]:
@@ -288,34 +289,29 @@ class BaseVLModel(nn.Module):
         """
         if self.model_type in ["llava", "blip2"]:
             # Use native multimodal forward pass
+            llm_kwargs = dict(attention_mask=attention_mask, labels=labels, **kwargs)
             if self.model_type == "blip2" and pixel_values is None:
-                # For BLIP-2 text-only inputs, we need to provide dummy pixel_values
-                # or use the language model directly if that's supported
-                batch_size = input_ids.size(0)
-                device = input_ids.device
-                
-                # Create minimal dummy pixel_values for BLIP-2
-                dummy_pixel_values = torch.zeros((batch_size, 3, 224, 224), 
-                                                dtype=torch.float32, device=device)
-                
-                outputs = self.llm(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    pixel_values=dummy_pixel_values,
-                    labels=labels,
-                    **kwargs
-                )
+                base = input_ids if input_ids is not None else inputs_embeds
+                if base is None:
+                    raise ValueError("BLIP-2 forward requires input_ids or inputs_embeds")
+                batch_size = base.size(0)
+                device = base.device
+                pixel_values = torch.zeros((batch_size, 3, 224, 224), dtype=torch.float32, device=device)
+            if pixel_values is not None:
+                llm_kwargs["pixel_values"] = pixel_values
+
+            if input_ids is not None:
+                outputs = self.llm(input_ids=input_ids, **llm_kwargs)
+            elif inputs_embeds is not None:
+                outputs = self.llm(inputs_embeds=inputs_embeds, **llm_kwargs)
             else:
-                outputs = self.llm(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    pixel_values=pixel_values,
-                    labels=labels,
-                    **kwargs
-                )
+                raise ValueError("BaseVLModel.forward requires input_ids or inputs_embeds")
         else:
             # Handle custom models
-            inputs_embeds = self.llm.get_input_embeddings()(input_ids)
+            if inputs_embeds is None:
+                if input_ids is None:
+                    raise ValueError("Custom model forward requires input_ids or inputs_embeds")
+                inputs_embeds = self.llm.get_input_embeddings()(input_ids)
             
             if vision_features is not None:
                 # In a full implementation, you'd need to properly insert vision features
@@ -327,12 +323,12 @@ class BaseVLModel(nn.Module):
                 pass
             
             # Forward through LLM
-            outputs = self.llm(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                labels=labels,
-                **kwargs
-            )
+                outputs = self.llm(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    **kwargs
+                )
         
         return {
             "logits": outputs.logits,

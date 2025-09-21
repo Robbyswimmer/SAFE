@@ -844,7 +844,7 @@ class SAFEModel(nn.Module):
     # Rest of the methods remain the same as original...
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         vision_features: Optional[torch.Tensor] = None,
         audio_tokens: Optional[torch.Tensor] = None,
