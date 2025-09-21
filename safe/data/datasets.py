@@ -56,7 +56,9 @@ def _collate_multimodal_batch(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]
         questions.append(sample.get("question") or sample.get("questions") or "")
         answers.append(sample.get("answers") or sample.get("answer"))
 
-        image = sample.get("images") or sample.get("image")
+        image = sample.get("images")
+        if image is None:
+            image = sample.get("image")
         images.append(image)
 
         audio = sample.get("audio")
