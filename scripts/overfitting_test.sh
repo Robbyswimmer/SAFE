@@ -27,7 +27,7 @@ conda activate "${CONDA_ENV}"
 
 echo "Starting SAFE overfitting ablation at $(date)"
 
-DATA_ROOT=${DATA_ROOT:-"$PWD/experiments/overfitting/data_pack"}
+DATA_ROOT=${DATA_ROOT:-"$PWD/data_pack"}
 PACK_ROOT=${PACK_ROOT:-"$DATA_ROOT"}
 OUTPUT_ROOT=${OUTPUT_ROOT:-"$PWD/experiments/overfitting/runs/${SLURM_JOB_ID}"}
 SUBSET_SIZE=${SUBSET_SIZE:-400}
