@@ -625,11 +625,15 @@ class StageATrainer:
                 safe_outputs = self.safe_model(**inputs)
                 
                 # Base VL model forward pass
+                sanitized_ids = self.safe_model.sanitize_input_ids_for_base(inputs.get("input_ids"))
                 base_inputs = {
-                    "input_ids": inputs["input_ids"],
                     "attention_mask": inputs["attention_mask"],
                     "labels": inputs["labels"]
                 }
+                if sanitized_ids is not None:
+                    base_inputs["input_ids"] = sanitized_ids
+                elif "inputs_embeds" in inputs:
+                    base_inputs["inputs_embeds"] = inputs["inputs_embeds"]
                 if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
                     base_inputs["pixel_values"] = inputs["pixel_values"]
 

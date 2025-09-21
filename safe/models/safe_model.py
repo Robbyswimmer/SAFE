@@ -810,7 +810,31 @@ class SAFEModel(nn.Module):
         for pos, tr in zip(indices, transcripts):
             full[pos] = tr
         return full
-    
+
+    def _sanitize_input_ids_for_base(self, input_ids: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if input_ids is None:
+            return None
+        if not torch.is_tensor(input_ids):
+            return input_ids
+        original_vocab = getattr(self, "original_vocab_size", None)
+        if original_vocab is None:
+            return input_ids
+        mask = input_ids >= original_vocab
+        if not mask.any():
+            return input_ids
+        sanitized = input_ids.clone()
+        tokenizer = getattr(self.base_vl, "tokenizer", None)
+        pad_id = getattr(tokenizer, "pad_token_id", None)
+        if pad_id is None:
+            pad_id = getattr(tokenizer, "eos_token_id", None)
+        if pad_id is None:
+            pad_id = 0
+        sanitized[mask] = pad_id
+        return sanitized
+
+    def sanitize_input_ids_for_base(self, input_ids: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        return self._sanitize_input_ids_for_base(input_ids)
+
     def _get_image_token_id(self):
         """Get the image token ID for LLaVA models."""
         # Be defensive across processors/tokenizers  
@@ -916,13 +940,14 @@ class SAFEModel(nn.Module):
             )
 
             if not has_audio_tokens:
+                sanitized_ids = self._sanitize_input_ids_for_base(resolved_input_ids)
                 base_inputs = {
                     "attention_mask": attention_mask,
                     "labels": labels,
                     "vision_features": vision_features,
                 }
                 if resolved_input_ids is not None:
-                    base_inputs["input_ids"] = resolved_input_ids
+                    base_inputs["input_ids"] = sanitized_ids
                 else:
                     base_inputs["inputs_embeds"] = inputs_embeds_kw
                 return self.base_vl(**base_inputs, **kwargs)
@@ -986,12 +1011,12 @@ class SAFEModel(nn.Module):
                     "labels": labels,
                 }
                 if resolved_input_ids is not None:
-                    base_inputs["input_ids"] = resolved_input_ids
+                    base_inputs["input_ids"] = self._sanitize_input_ids_for_base(resolved_input_ids)
                 else:
                     base_inputs["inputs_embeds"] = inputs_embeds
                 if "pixel_values" in kwargs:
                     base_inputs["pixel_values"] = kwargs["pixel_values"]
-                    
+
                 outputs = self.base_vl(**base_inputs, **{k: v for k, v in kwargs.items() if k not in ["pixel_values"]})
             else:
                 outputs = self.base_vl.llm(
