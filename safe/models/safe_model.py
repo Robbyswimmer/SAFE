@@ -1150,6 +1150,9 @@ class SAFEModel(nn.Module):
         # Low-level API: direct tensor inputs
         if input_ids is not None:
             base_inputs = {**generation_kwargs}
+            sanitized_ids = self.sanitize_input_ids_for_base(input_ids)
+            if sanitized_ids is not None:
+                sanitized_ids = sanitized_ids.to(input_ids.device)
             if audio_tokens is not None and gate > 0.0:
                 embeds = self.get_input_embeddings(input_ids)
                 audio_tokens = audio_tokens.to(embeds.dtype)
@@ -1175,7 +1178,7 @@ class SAFEModel(nn.Module):
 
                 base_inputs["inputs_embeds"] = embeds
             else:
-                base_inputs["input_ids"] = input_ids
+                base_inputs["input_ids"] = sanitized_ids if sanitized_ids is not None else input_ids
 
             if attention_mask is not None:
                 base_inputs["attention_mask"] = attention_mask
