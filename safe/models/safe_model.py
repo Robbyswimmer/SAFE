@@ -474,8 +474,27 @@ class SAFEModel(nn.Module):
                     result["vision_features"] = vision_features
         
         # Process audio if provided (same for all model types)
-        if audio is not None:
-            audio_tokens, transcripts = self.encode_audio(audio, num_audio_tokens)
+        audio_to_encode = audio
+        audio_indices = None
+        batch_size = None
+
+        if isinstance(audio, list):
+            batch_size = len(audio)
+            non_null = [(idx, a) for idx, a in enumerate(audio) if a is not None]
+            if not non_null:
+                audio_to_encode = None
+            else:
+                audio_indices, audio_list = zip(*non_null)
+                audio_to_encode = list(audio_list)
+
+        if audio_to_encode is not None:
+            audio_tokens, transcripts = self.encode_audio(audio_to_encode, num_audio_tokens)
+
+            if isinstance(audio, list) and audio_indices is not None:
+                audio_tokens = self._scatter_audio_tokens(audio_tokens, audio_indices, batch_size)
+                if transcripts is not None:
+                    transcripts = self._scatter_transcripts(transcripts, audio_indices, batch_size)
+
             audio_tokens = audio_tokens.to(device)
             result["audio_tokens"] = audio_tokens
             if transcripts is not None:
@@ -759,6 +778,32 @@ class SAFEModel(nn.Module):
             T.ToTensor(),
         ])
         return transform(pil_image).unsqueeze(0)
+
+    def _scatter_audio_tokens(self, audio_tokens: torch.Tensor, indices, batch_size: int) -> torch.Tensor:
+        """Place encoded audio tokens back into their original batch positions."""
+        if batch_size is None:
+            return audio_tokens
+
+        if audio_tokens.dim() == 2:
+            audio_tokens = audio_tokens.unsqueeze(1)
+
+        device = audio_tokens.device
+        dtype = audio_tokens.dtype
+        full = torch.zeros((batch_size,) + audio_tokens.shape[1:], device=device, dtype=dtype)
+
+        for pos, token in zip(indices, audio_tokens):
+            full[pos] = token
+
+        return full
+
+    def _scatter_transcripts(self, transcripts, indices, batch_size: int):
+        if batch_size is None or transcripts is None:
+            return transcripts
+
+        full = [None] * batch_size
+        for pos, tr in zip(indices, transcripts):
+            full[pos] = tr
+        return full
     
     def _get_image_token_id(self):
         """Get the image token ID for LLaVA models."""
