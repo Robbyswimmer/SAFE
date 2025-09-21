@@ -314,21 +314,15 @@ class BaseVLModel(nn.Module):
                 inputs_embeds = self.llm.get_input_embeddings()(input_ids)
             
             if vision_features is not None:
-                # In a full implementation, you'd need to properly insert vision features
-                # at the correct positions in the sequence. For now, this is a placeholder.
-                # You would typically:
-                # 1. Find positions of vision tokens in input_ids
-                # 2. Replace those positions with vision_features
-                # 3. Adjust attention_mask accordingly
+                # Placeholder: vision fusion for custom models would go here
                 pass
-            
-            # Forward through LLM
-                outputs = self.llm(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                    **kwargs
-                )
+
+            outputs = self.llm(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                labels=labels,
+                **kwargs
+            )
         
         return {
             "logits": outputs.logits,
