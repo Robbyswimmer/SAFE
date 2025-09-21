@@ -116,7 +116,7 @@ class RetentionLoss(nn.Module):
         
         # Handle shape mismatches
         if student_logits.shape != teacher_logits.shape:
-            print(f"KL divergence shape mismatch: student={student_logits.shape}, teacher={teacher_logits.shape}")
+            print(f"KL divergence shape mismatch: student={student_logits.shape}, teacher={teacher_logits.shape}", flush=True)
             
             # For 3D tensors (batch, seq_len, vocab), handle all dimension mismatches
             if student_logits.dim() == 3 and teacher_logits.dim() == 3:
@@ -124,13 +124,16 @@ class RetentionLoss(nn.Module):
                 if student_logits.shape[0] != teacher_logits.shape[0]:
                     if teacher_logits.shape[0] == 1:
                         teacher_logits = teacher_logits.expand(student_logits.shape[0], -1, -1)
+                        print(f"KL divergence: expanded teacher from [1, ...] to {teacher_logits.shape}", flush=True)
                     elif student_logits.shape[0] == 1:
                         student_logits = student_logits.expand(teacher_logits.shape[0], -1, -1)
+                        print(f"KL divergence: expanded student from [1, ...] to {student_logits.shape}", flush=True)
                     else:
                         # Take minimum batch size
                         min_batch_size = min(student_logits.shape[0], teacher_logits.shape[0])
                         student_logits = student_logits[:min_batch_size]
                         teacher_logits = teacher_logits[:min_batch_size]
+                        print(f"KL divergence: truncated both to size {min_batch_size}", flush=True)
                 
                 # Handle sequence length mismatch
                 if student_logits.shape[1] != teacher_logits.shape[1]:

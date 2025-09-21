@@ -446,7 +446,22 @@ class StageATrainer:
                 base_inputs["pixel_values"] = inputs["pixel_values"]
 
             if self.safe_model.base_vl.model_type == "llava":
+                # Debug: Log input shapes before calling teacher
+                if not getattr(self, "_train_debug_logged", False):
+                    print(f"[TrainDebug] Base inputs keys: {list(base_inputs.keys())}", flush=True)
+                    if "input_ids" in base_inputs:
+                        print(f"[TrainDebug] Base input_ids shape: {base_inputs['input_ids'].shape}", flush=True)
+                    if "pixel_values" in base_inputs:
+                        print(f"[TrainDebug] Base pixel_values shape: {base_inputs['pixel_values'].shape}", flush=True)
+                    self._train_debug_logged = True
+                
                 base_outputs = self._forward_llava_teacher(base_inputs)
+                
+                # Debug: Log output shapes
+                if not getattr(self, "_train_output_logged", False):
+                    print(f"[TrainDebug] Teacher output logits shape: {base_outputs['logits'].shape}", flush=True)
+                    self._train_output_logged = True
+                    
             elif self.safe_model.base_vl.model_type == "blip2":
                 # BLIP-2: use directly without splitting
                 base_outputs = self.safe_model.base_vl(**base_inputs)
