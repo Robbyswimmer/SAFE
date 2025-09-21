@@ -1338,7 +1338,11 @@ class StageATrainer:
             epoch_losses = {key: [] for key in ["total_loss", "audio_task_loss", "retention_loss"]}
             
             # Training loop
-            progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}/{self.config['num_epochs']}")
+            try:
+                progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}/{self.config['num_epochs']}")
+            except OSError:
+                # Fallback for cluster environments with stale file handles
+                progress_bar = self.train_dataloader
             
             for step, batch in enumerate(progress_bar):
                 # Training step
