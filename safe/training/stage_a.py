@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import logging
 import textwrap
+import traceback
 
 # Set CPU threads for predictable performance
 torch.set_num_threads(min(8, os.cpu_count() or 2))
@@ -120,6 +121,8 @@ class StageATrainer:
         self.sample_log_limit = int(self.config.get("sample_log_limit", 5))
         self.sample_log_examples = max(1, int(self.config.get("sample_log_examples", 3)))
         self.sample_logs_emitted = 0
+        self._robust_error_logged = False
+        self._teacher_shape_warned = False
 
         # Ensure base VL model is in eval mode for retention comparison
         self.safe_model.base_vl.eval()
@@ -253,6 +256,12 @@ class StageATrainer:
             raise RuntimeError("Base LLaVA teacher produced no logits for the current batch.")
 
         logits = torch.cat(logits_list, dim=0)
+        if logits.size(0) != batch_size and not self._teacher_shape_warned:
+            print(
+                f"Warning: LLaVA teacher returned {logits.size(0)} samples for batch of size {batch_size}",
+                flush=True
+            )
+            self._teacher_shape_warned = True
 
         class OutputsWrapper(dict):
             pass
@@ -790,9 +799,14 @@ class StageATrainer:
                     
         except Exception as e:
             # Handle any errors gracefully
+            if not self._robust_error_logged:
+                self.logger.exception("Error in robust accuracy computation")
+                self._robust_error_logged = True
+            else:
+                self.logger.warning("Error in robust accuracy computation: %s", e)
             print(f"Warning: Error in robust accuracy computation: {e}")
             pass
-        
+
         return safe_accuracies, base_accuracies
     
     def _normalize_vqa_answer(self, answer: str) -> str:
