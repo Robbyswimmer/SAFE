@@ -1193,6 +1193,17 @@ class StageATrainer:
                 if self.global_step % self.config["logging_steps"] == 0:
                     avg_losses = {k: np.mean(v[-self.config["logging_steps"]:]) 
                                  for k, v in epoch_losses.items() if v}
+                    if avg_losses:
+                        summary_parts = [f"{k}={val:.4f}" for k, val in avg_losses.items()]
+                        print(
+                            f"[Train|Stage {stage_name}] Global step {self.global_step}: " + ", ".join(summary_parts),
+                            flush=True
+                        )
+                    else:
+                        print(
+                            f"[Train|Stage {stage_name}] Global step {self.global_step}: metrics pending",
+                            flush=True
+                        )
                     
                     # Log to wandb if available
                     try:
@@ -1338,6 +1349,14 @@ class StageATrainer:
                 if self.global_step % self.config["logging_steps"] == 0:
                     avg_losses = {k: np.mean(v[-self.config["logging_steps"]:]) 
                                  for k, v in epoch_losses.items() if v}
+                    if avg_losses:
+                        summary_parts = [f"{k}={val:.4f}" for k, val in avg_losses.items()]
+                        print(
+                            f"[Train] Global step {self.global_step}: " + ", ".join(summary_parts),
+                            flush=True
+                        )
+                    else:
+                        print(f"[Train] Global step {self.global_step}: metrics pending", flush=True)
                     
                     # Log to wandb if available
                     try:
