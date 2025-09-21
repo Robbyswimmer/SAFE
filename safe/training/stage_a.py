@@ -257,11 +257,17 @@ class StageATrainer:
             logits_subset = result.get("logits") if isinstance(result, dict) else getattr(result, "logits", None)
             if logits_subset is None:
                 raise RuntimeError("Base LLaVA teacher returned no logits for a subset.")
+            if not getattr(self, "_teacher_subset_debugged", False):
+                print(
+                    f"[TeacherDebug] subset indices={indices.tolist()} logits_shape={tuple(logits_subset.shape)}",
+                    flush=True
+                )
             for slot, tensor in zip(indices.tolist(), logits_subset):
                 outputs_ordered[slot] = tensor.unsqueeze(0)
             loss_tensor = result.get("loss") if isinstance(result, dict) else getattr(result, "loss", None)
             if loss_tensor is not None:
                 loss_values.append(loss_tensor)
+            self._teacher_subset_debugged = True
 
         _run_subset(_slice_inputs(idx_mm, keep_pixels=True), idx_mm)
         _run_subset(_slice_inputs(idx_text, keep_pixels=False), idx_text)
