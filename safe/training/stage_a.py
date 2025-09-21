@@ -231,6 +231,13 @@ class StageATrainer:
         logits_list = []
         losses = []
 
+        if not getattr(self, "_teacher_debug_printed", False):
+            print(
+                f"[TeacherDebug] batch_size={batch_size}, logits_list_size=0, has_img_tokens={has_img_tokens.tolist()}",
+                flush=True
+            )
+            self._teacher_debug_printed = True
+
         for idx in range(batch_size):
             sample_kwargs = {
                 "input_ids": input_ids[idx : idx + 1],
@@ -245,8 +252,18 @@ class StageATrainer:
             outputs = self.safe_model.base_vl(**sample_kwargs)
             logits = outputs.get("logits") if isinstance(outputs, dict) else getattr(outputs, "logits", None)
             if logits is None:
+                if not getattr(self, "_teacher_missing_logits_warned", False):
+                    print(f"[TeacherDebug] Missing logits for sample {idx}", flush=True)
+                    self._teacher_missing_logits_warned = True
                 continue
             logits_list.append(logits)
+
+            if not getattr(self, "_teacher_sample_shape_logged", False):
+                print(
+                    f"[TeacherDebug] sample {idx} logits shape {logits.shape}",
+                    flush=True
+                )
+                self._teacher_sample_shape_logged = True
 
             loss_val = outputs.get("loss") if isinstance(outputs, dict) else getattr(outputs, "loss", None)
             if loss_val is not None:

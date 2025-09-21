@@ -316,8 +316,8 @@ def build_stage_a_config(config: ExperimentConfig) -> Dict[str, float | int | bo
         "learning_rate_projector": config.learning_rate_projector,
         "learning_rate_adapter": config.learning_rate_adapter,
         "num_epochs": config.num_epochs,
-        "eval_steps": 10_000,  # effectively disables mid-epoch evals
-        "save_steps": 10_000,
+        "eval_steps": 1_000,  # effectively disables mid-epoch evals
+        "save_steps": 1_000,
         "logging_steps": 50,
         "max_eval_batches": None,
         "retention_loss_weight": config.retention_loss_weight,
