@@ -316,16 +316,22 @@ class SAFEModel(nn.Module):
         input_ids = inputs["input_ids"].to(device)
         attention_mask = inputs["attention_mask"].to(device)
 
+        batch_size = input_ids.size(0)
+
         if isinstance(answers, str):
-            answer_list = [answers] * input_ids.size(0)
+            answer_list = [answers] * batch_size
         else:
-            answer_list = list(answers)
-            if len(answer_list) != input_ids.size(0):
-                # Broadcast single answer to entire batch if needed
-                if len(answer_list) == 1:
-                    answer_list = answer_list * input_ids.size(0)
-                else:
-                    raise ValueError("Number of answers does not match batch size")
+            answer_list = list(answers) if answers is not None else []
+
+        if len(answer_list) == 0:
+            answer_list = [""] * batch_size
+        elif len(answer_list) == 1 and batch_size > 1:
+            answer_list = answer_list * batch_size
+        elif len(answer_list) != batch_size:
+            if len(answer_list) < batch_size:
+                answer_list.extend([""] * (batch_size - len(answer_list)))
+            else:
+                answer_list = answer_list[:batch_size]
 
         new_input_ids: List[torch.Tensor] = []
         new_attention: List[torch.Tensor] = []

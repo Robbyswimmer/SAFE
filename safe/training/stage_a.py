@@ -9,6 +9,8 @@ from tqdm import tqdm
 import wandb
 import os
 from pathlib import Path
+import logging
+import textwrap
 
 # Set CPU threads for predictable performance
 torch.set_num_threads(min(8, os.cpu_count() or 2))
@@ -73,6 +75,9 @@ class StageATrainer:
             "early_stopping_patience": 3,
             "retention_tolerance": 0.005,  # 0.5% tolerance for VL degradation
             "validation_frequency": 5 if self.use_curriculum else 1000,  # More frequent validation for curriculum
+            "sample_log_interval": 500,
+            "sample_log_limit": 5,
+            "sample_log_examples": 3,
             "enable_null_space": False,
             "null_space_rank": 8,
             "null_space_min_samples": 32,
@@ -81,13 +86,17 @@ class StageATrainer:
             "null_space_refresh_interval": 2000,
             "null_space_verbose": False
         }
-        
+
         if config:
             self.config.update(config)
-        
+
+        self.logger = logging.getLogger(__name__)
+        if not self.logger.handlers:
+            logging.basicConfig(level=logging.INFO)
+
         # Create output directory
         Path(self.config["output_dir"]).mkdir(parents=True, exist_ok=True)
-        
+
         # Initialize loss functions (will be updated by curriculum)
         self._setup_loss_functions()
         
@@ -108,7 +117,11 @@ class StageATrainer:
         self.epoch = 0
         self.best_retention_score = 0.0
         self.patience_counter = 0
-        
+        self.sample_log_interval = max(1, int(self.config.get("sample_log_interval", 500)))
+        self.sample_log_limit = int(self.config.get("sample_log_limit", 5))
+        self.sample_log_examples = max(1, int(self.config.get("sample_log_examples", 3)))
+        self.sample_logs_emitted = 0
+
         # Ensure base VL model is in eval mode for retention comparison
         self.safe_model.base_vl.eval()
         
@@ -455,6 +468,18 @@ class StageATrainer:
             batch=inputs,
             has_audio=has_audio
         )
+
+        if self._should_log_sample():
+            try:
+                self._log_sample_predictions(
+                    safe_outputs=safe_outputs,
+                    base_outputs=base_outputs,
+                    inputs=inputs,
+                    batch=batch,
+                    context="train"
+                )
+            except Exception as exc:
+                self.logger.debug(f"Sample logging skipped due to error: {exc}")
         
         # DEBUG: Print detailed loss information (disabled for cleaner training)
         total_loss = loss_dict["total_loss"]
@@ -682,12 +707,19 @@ class StageATrainer:
                     safe_outputs, base_outputs, inputs, has_audio, batch
                 )
                 
-                # Debug: Print model outputs for first few batches
-                if total_samples < 20:  # Only print for first 20 samples total
-                    self._debug_print_model_outputs(
-                        safe_outputs, base_outputs, inputs, batch, 
-                        safe_accuracy_batch, base_accuracy_batch
-                    )
+                if self._should_log_sample():
+                    try:
+                        self._log_sample_predictions(
+                            safe_outputs=safe_outputs,
+                            base_outputs=base_outputs,
+                            inputs=inputs,
+                            batch=batch,
+                            safe_accuracies=safe_accuracy_batch,
+                            base_accuracies=base_accuracy_batch,
+                            context="eval"
+                        )
+                    except Exception as exc:
+                        self.logger.debug(f"Sample logging skipped during eval due to error: {exc}")
                 
                 # Audio-dependent accuracy
                 if torch.any(has_audio):
@@ -965,111 +997,98 @@ class StageATrainer:
         answer_words = answer.split()[:5]  # Max 5 words
         return " ".join(answer_words).strip()
     
-    def _debug_print_model_outputs(self, safe_outputs, base_outputs, inputs, batch, 
-                                 safe_accuracies, base_accuracies):
-        """
-        Debug function to print model outputs and compare them.
-        """
+    def _should_log_sample(self) -> bool:
+        if self.sample_logs_emitted >= self.sample_log_limit:
+            return False
+        if self.global_step == 0 and self.sample_logs_emitted == 0:
+            return True
+        return (self.global_step % self.sample_log_interval) == 0
+
+    def _log_sample_predictions(
+        self,
+        safe_outputs,
+        base_outputs,
+        inputs,
+        batch,
+        safe_accuracies: Optional[List[float]] = None,
+        base_accuracies: Optional[List[float]] = None,
+        context: str = "eval",
+    ) -> None:
+        if self.sample_logs_emitted >= self.sample_log_limit:
+            return
+
         try:
             batch_size = len(batch.get("questions", inputs.get("input_ids", [])))
-            
-            print(f"\n" + "="*80)
-            print(f"MODEL OUTPUT DEBUG - Batch with {batch_size} samples")
-            print(f"="*80)
-            
-            # Get ground truth answers
-            gt_answers = []
-            if "answers" in batch:
-                gt_answers = batch["answers"]
+            questions = batch.get("questions", ["<no question>"] * batch_size)
+
+            gt_answers: List[str] = []
+            if "answers" in batch and batch["answers"] is not None:
+                gt_answers = [self._select_training_answer(ans) for ans in batch["answers"]]
             elif "labels" in inputs:
                 labels = inputs["labels"]
+                tokenizer = self.safe_model.base_vl.tokenizer
                 for i in range(batch_size):
                     label_tokens = labels[i][labels[i] != -100]
                     if len(label_tokens) > 0:
                         try:
-                            answer = self.safe_model.base_vl.tokenizer.decode(
-                                label_tokens, skip_special_tokens=True
-                            ).strip()
-                            gt_answers.append(answer)
-                        except:
-                            gt_answers.append("DECODE_ERROR")
+                            gt_answers.append(tokenizer.decode(label_tokens, skip_special_tokens=True).strip())
+                        except Exception:
+                            gt_answers.append("<decode_error>")
                     else:
-                        gt_answers.append("NO_LABELS")
-            
-            # Get questions if available
-            questions = batch.get("questions", ["Question not available"] * batch_size)
-            
-            # Generate predictions using proper generation (for debug display)
+                        gt_answers.append("")
+
             gen_inputs = {k: v for k, v in inputs.items() if k != "labels"}
             try:
-                safe_pred_token_lists = self._generate_predictions(gen_inputs, "safe")
-                base_pred_token_lists = self._generate_predictions(gen_inputs, "base")
-                # Convert lists to tensors for consistent handling
-                safe_pred_tokens = [tokens for tokens in safe_pred_token_lists]
-                base_pred_tokens = [tokens for tokens in base_pred_token_lists]
-            except Exception as e:
-                print(f"Warning: Could not generate predictions for debug: {e}")
-                # Fallback to argmax
-                safe_pred_tokens = torch.argmax(safe_outputs["logits"], dim=-1)
-                base_pred_tokens = torch.argmax(base_outputs["logits"], dim=-1)
-            
-            for i in range(min(batch_size, 3)):  # Print first 3 samples from batch
-                print(f"\n--- Sample {i+1} ---")
-                print(f"Question: {questions[i][:100]}...")
-                print(f"Ground Truth: {gt_answers[i] if i < len(gt_answers) else 'N/A'}")
-                
-                # Debug: Show input structure
-                print(f"Input IDs shape: {inputs['input_ids'][i].shape}")
-                print(f"Has pixel values: {'pixel_values' in inputs}")
-                print(f"All input keys: {inputs.keys()}")
-                if 'pixel_values' in inputs:
-                    print(f"Pixel values shape: {inputs['pixel_values'].shape}")
-                print(f"Model type: {self.safe_model.base_vl.model_type}")
-                
-                try:
-                    # Handle both tensor and list formats
-                    if isinstance(safe_pred_tokens, list) and i < len(safe_pred_tokens):
-                        safe_pred = self.safe_model.base_vl.tokenizer.decode(
-                            safe_pred_tokens[i], skip_special_tokens=True
-                        ).strip()
-                    else:
-                        safe_pred = self.safe_model.base_vl.tokenizer.decode(
-                            safe_pred_tokens[i], skip_special_tokens=True
-                        ).strip()
-                    print(f"SAFE Prediction: '{safe_pred}'")
-                    print(f"SAFE Accuracy: {safe_accuracies[i]:.3f}")
-                except Exception as e:
-                    print(f"SAFE Prediction: DECODE_ERROR ({e})")
-                    print(f"SAFE Accuracy: {safe_accuracies[i]:.3f}")
-                
-                try:
-                    # Handle both tensor and list formats
-                    if isinstance(base_pred_tokens, list) and i < len(base_pred_tokens):
-                        base_pred = self.safe_model.base_vl.tokenizer.decode(
-                            base_pred_tokens[i], skip_special_tokens=True
-                        ).strip()
-                    else:
-                        base_pred = self.safe_model.base_vl.tokenizer.decode(
-                            base_pred_tokens[i], skip_special_tokens=True
-                        ).strip()
-                    print(f"Base Prediction: '{base_pred}'")
-                    print(f"Base Accuracy: {base_accuracies[i]:.3f}")
-                except Exception as e:
-                    print(f"Base Prediction: DECODE_ERROR ({e})")
-                    print(f"Base Accuracy: {base_accuracies[i]:.3f}")
-                
-                # Show raw logits info
-                print(f"SAFE logits shape: {safe_outputs['logits'][i].shape}")
-                print(f"Base logits shape: {base_outputs['logits'][i].shape}")
-                print(f"Labels shape: {inputs['labels'][i].shape if 'labels' in inputs else 'N/A'}")
-            
-            print(f"="*80)
-            
-        except Exception as e:
-            print(f"Debug print error: {e}")
-            import traceback
-            traceback.print_exc()
-    
+                safe_sequences = self._generate_predictions(gen_inputs, "safe")
+                base_sequences = self._generate_predictions(gen_inputs, "base")
+            except Exception as exc:
+                self.logger.debug(f"Generation for logging failed: {exc}")
+                safe_sequences = torch.argmax(safe_outputs["logits"], dim=-1)
+                base_sequences = torch.argmax(base_outputs["logits"], dim=-1)
+
+            tokenizer = self.safe_model.base_vl.tokenizer
+
+            self.logger.info("[SampleLog][%s] step=%s epoch=%s batch_size=%s", context, self.global_step, self.epoch, batch_size)
+
+            num_examples = min(batch_size, self.sample_log_examples)
+            for idx in range(num_examples):
+                question = textwrap.shorten(str(questions[idx]), width=160, placeholder="...")
+                gt = textwrap.shorten(gt_answers[idx] if idx < len(gt_answers) else "", width=120, placeholder="...")
+
+                safe_text = self._decode_token_sequence(safe_sequences, idx, tokenizer)
+                base_text = self._decode_token_sequence(base_sequences, idx, tokenizer)
+
+                safe_acc = safe_accuracies[idx] if safe_accuracies and idx < len(safe_accuracies) else None
+                base_acc = base_accuracies[idx] if base_accuracies and idx < len(base_accuracies) else None
+
+                self.logger.info(
+                    "[SampleLog][%s] #%d Q: %s | GT: %s | SAFE: %s%s | BASE: %s%s",
+                    context,
+                    idx + 1,
+                    question,
+                    gt,
+                    textwrap.shorten(safe_text, width=120, placeholder="..."),
+                    f" (acc={safe_acc:.2f})" if safe_acc is not None else "",
+                    textwrap.shorten(base_text, width=120, placeholder="..."),
+                    f" (acc={base_acc:.2f})" if base_acc is not None else "",
+                )
+
+            self.sample_logs_emitted += 1
+        except Exception as exc:
+            self.logger.debug(f"Sample logging error: {exc}")
+
+    def _decode_token_sequence(self, sequences, index: int, tokenizer) -> str:
+        try:
+            if isinstance(sequences, list) and index < len(sequences):
+                return tokenizer.decode(sequences[index], skip_special_tokens=True).strip()
+            if isinstance(sequences, torch.Tensor):
+                tokens = sequences[index]
+                if tokens.dim() > 1:
+                    tokens = tokens.argmax(dim=-1)
+                return tokenizer.decode(tokens, skip_special_tokens=True).strip()
+        except Exception:
+            pass
+        return ""
     def save_checkpoint(self, metrics: Dict[str, float], is_best: bool = False, suffix: str = ""):
         """Save model checkpoint."""
         checkpoint = {
@@ -1350,6 +1369,14 @@ class StageATrainer:
                     print(f"  Audio Accuracy: {eval_metrics['audio_accuracy']:.4f}")
                     print(f"  VL Safe Accuracy: {eval_metrics['vl_safe_accuracy']:.4f}")
                     print(f"  Total Loss: {eval_metrics['total_loss']:.4f}")
+                    self.logger.info(
+                        "[Eval][step=%s] retention=%.4f audio_acc=%.4f vl_safe=%.4f total_loss=%.4f",
+                        self.global_step,
+                        eval_metrics['retention_score'],
+                        eval_metrics['audio_accuracy'],
+                        eval_metrics['vl_safe_accuracy'],
+                        eval_metrics['total_loss'],
+                    )
                     
                     # Check for improvement
                     current_retention = eval_metrics["retention_score"]
@@ -1390,6 +1417,13 @@ class StageATrainer:
             print(f"  Retention Score: {epoch_metrics['retention_score']:.4f}")
             print(f"  Audio Accuracy: {epoch_metrics['audio_accuracy']:.4f}")
             print(f"  Retention Loss: {epoch_metrics['retention_loss']:.4f}")
+            self.logger.info(
+                "[Eval][epoch=%s] retention=%.4f audio_acc=%.4f retention_loss=%.4f",
+                epoch + 1,
+                epoch_metrics['retention_score'],
+                epoch_metrics['audio_accuracy'],
+                epoch_metrics['retention_loss'],
+            )
         
         print("Stage A training completed!")
         print(f"Best retention score: {self.best_retention_score:.4f}")
