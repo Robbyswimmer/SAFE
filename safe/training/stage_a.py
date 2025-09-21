@@ -967,11 +967,15 @@ class StageATrainer:
                 **gen_kwargs,
             )
         else:
+            sanitized_ids = self.safe_model.sanitize_input_ids_for_base(input_ids)
             base_kwargs = {
-                "input_ids": input_ids.to(device),
                 "attention_mask": attention_mask.to(device) if isinstance(attention_mask, torch.Tensor) else None,
                 **gen_kwargs,
             }
+            if sanitized_ids is not None:
+                base_kwargs["input_ids"] = sanitized_ids.to(device)
+            elif inputs.get("inputs_embeds") is not None:
+                base_kwargs["inputs_embeds"] = inputs["inputs_embeds"].to(device)
             if isinstance(pixel_values, torch.Tensor):
                 base_kwargs["pixel_values"] = pixel_values.to(device)
 
@@ -981,7 +985,8 @@ class StageATrainer:
             generated = torch.as_tensor(generated)
 
         audio_prefix = audio_tokens.size(1) if isinstance(audio_tokens, torch.Tensor) else 0
-        prompt_len = input_ids.shape[1]
+        prompt_source = sanitized_ids if model_choice == "base" and 'sanitized_ids' in locals() and sanitized_ids is not None else input_ids
+        prompt_len = prompt_source.shape[1]
         return [generated[i, audio_prefix + prompt_len :] for i in range(generated.size(0))]
     
     def _clean_answer(self, s: str) -> str:
