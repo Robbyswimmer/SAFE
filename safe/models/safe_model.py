@@ -592,48 +592,113 @@ class SAFEModel(nn.Module):
                 else:
                     prompts.append(f"USER: {question}\nASSISTANT:")
         
-        # Process with LLaVA processor
-        if pil_images and any(img is not None for img in pil_images):
-            # Ensure we have same number of images as prompts (pad with None if needed)
-            while len(pil_images) < len(prompts):
-                pil_images.append(None)
-            
-            # Filter out None images and corresponding prompts
-            valid_pairs = [(p, img) for p, img in zip(prompts, pil_images) if img is not None]
-            if valid_pairs:
-                valid_prompts, valid_images = zip(*valid_pairs)
-                inputs = processor(
-                    text=list(valid_prompts),
-                    images=list(valid_images),
+        num_samples = len(prompts)
+        if not pil_images:
+            pil_images = [None] * num_samples
+        elif len(pil_images) < num_samples:
+            pil_images.extend([None] * (num_samples - len(pil_images)))
+        elif len(pil_images) > num_samples:
+            pil_images = pil_images[:num_samples]
+
+        sample_encodings = []
+        for prompt, image in zip(prompts, pil_images):
+            if image is not None:
+                encoded = processor(
+                    text=[prompt],
+                    images=[image],
                     padding=True,
                     truncation=True,
                     return_tensors="pt"
                 )
             else:
-                # No valid images, process as text-only
-                inputs = processor(
-                    text=prompts,
+                encoded = processor(
+                    text=[prompt],
                     padding=True,
                     truncation=True,
                     return_tensors="pt"
                 )
-        else:
-            # Text-only processing
-            inputs = processor(
-                text=prompts,
-                padding=True,
-                truncation=True,
-                return_tensors="pt"
+            sample_encodings.append(encoded)
+
+        # Collate textual tensors while preserving batch order
+        pad_token_id = getattr(processor.tokenizer, "pad_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = getattr(processor.tokenizer, "eos_token_id", 0)
+
+        input_id_seqs = [enc["input_ids"].squeeze(0) for enc in sample_encodings]
+        attention_masks = [enc["attention_mask"].squeeze(0) for enc in sample_encodings]
+        max_len = max(seq.size(0) for seq in input_id_seqs)
+
+        input_ids = torch.full(
+            (num_samples, max_len),
+            pad_token_id,
+            dtype=input_id_seqs[0].dtype
+        )
+        attention_mask = torch.zeros(
+            (num_samples, max_len),
+            dtype=attention_masks[0].dtype
+        )
+
+        for idx, (seq, mask) in enumerate(zip(input_id_seqs, attention_masks)):
+            length = seq.size(0)
+            input_ids[idx, :length] = seq
+            attention_mask[idx, :length] = mask
+
+        inputs = {
+            "input_ids": input_ids.to(device),
+            "attention_mask": attention_mask.to(device)
+        }
+
+        # Collate optional tokenizer keys (e.g., position_ids) if present
+        auxiliary_keys = set().union(*(enc.keys() for enc in sample_encodings))
+        auxiliary_keys.discard("input_ids")
+        auxiliary_keys.discard("attention_mask")
+        auxiliary_keys.discard("pixel_values")
+
+        for key in auxiliary_keys:
+            values = []
+            for enc in sample_encodings:
+                if key in enc:
+                    values.append(enc[key].squeeze(0))
+                else:
+                    values.append(None)
+
+            reference = next((v for v in values if v is not None), None)
+            if reference is None:
+                continue
+
+            if reference.dim() == 1:
+                padded = torch.zeros((num_samples, max_len), dtype=reference.dtype)
+                for idx, val in enumerate(values):
+                    if val is None:
+                        continue
+                    padded[idx, :val.size(0)] = val
+                inputs[key] = padded.to(device)
+            else:
+                stacked = []
+                for val in values:
+                    if val is None:
+                        val = torch.zeros_like(reference)
+                    stacked.append(val.unsqueeze(0))
+                inputs[key] = torch.cat(stacked, dim=0).to(device)
+
+        # Handle pixel values while keeping alignment with batch
+        pixel_values = [enc.get("pixel_values", None) for enc in sample_encodings]
+        if any(pv is not None for pv in pixel_values):
+            first_pixel = next(pv for pv in pixel_values if pv is not None)
+            pixel_shape = first_pixel.shape[1:]
+            pixel_dtype = first_pixel.dtype
+            stacked_pixels = torch.zeros(
+                (num_samples,) + pixel_shape,
+                dtype=pixel_dtype
             )
-        
-        # Move to device
-        for key in inputs:
-            if torch.is_tensor(inputs[key]):
-                inputs[key] = inputs[key].to(device)
-        
+            for idx, pv in enumerate(pixel_values):
+                if pv is not None:
+                    stacked_pixels[idx] = pv.squeeze(0)
+            inputs["pixel_values"] = stacked_pixels.to(device)
+
         # Add labels for training
         inputs["labels"] = inputs["input_ids"].clone()
-        
+
         # Sanity checks for LLaVA
         if pil_images and any(img is not None for img in pil_images):
             image_token_id = self._get_image_token_id()

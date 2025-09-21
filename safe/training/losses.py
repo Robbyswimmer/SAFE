@@ -360,9 +360,13 @@ class CombinedStageLoss(nn.Module):
         # Audio task loss (for samples with audio)
         if torch.any(has_audio):
             audio_indices = torch.where(has_audio)[0]
-            # print(f"Audio indices found: {len(audio_indices)}")
-            # Ensure indices are within bounds
-            audio_indices = audio_indices[audio_indices < len(safe_outputs["logits"])]
+            # Ensure indices are within bounds of both logits and labels tensors
+            safe_logits = safe_outputs["logits"] if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits")
+            max_safe = safe_logits.size(0) if safe_logits is not None else 0
+            labels = batch.get("labels")
+            max_labels = labels.size(0) if labels is not None else 0
+            max_bound = min(max_safe, max_labels)
+            audio_indices = audio_indices[audio_indices < max_bound]
             if len(audio_indices) > 0:
                 audio_logits = safe_outputs["logits"][audio_indices]
                 audio_labels = batch["labels"][audio_indices]
