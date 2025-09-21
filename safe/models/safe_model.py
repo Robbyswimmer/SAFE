@@ -710,8 +710,9 @@ class SAFEModel(nn.Module):
                     pil = self._convert_to_pil(img)
                     if pil is None:
                         continue
-                    import torchvision.transforms as T
-                    tensor = T.ToTensor()(pil).unsqueeze(0)
+                    tensor = self._process_image_to_tensor(pil)
+                    if tensor is None:
+                        continue
                 tensors.append(tensor)
 
             if not tensors:
@@ -724,8 +725,40 @@ class SAFEModel(nn.Module):
         pil_image = self._convert_to_pil(images)
         if pil_image is None:
             return None
+        return self._process_image_to_tensor(pil_image)
+
+    def _process_image_to_tensor(self, pil_image):
+        """Apply the model's vision preprocessing pipeline to a PIL image."""
+        if pil_image is None:
+            return None
+
+        processor = getattr(self.base_vl, "processor", None)
+        image_processor = getattr(self.base_vl, "image_processor", None)
+
+        try:
+            if self.base_vl.model_type in {"llava", "blip2"} and processor is not None:
+                processed = processor(images=pil_image, return_tensors="pt")
+                if "pixel_values" in processed:
+                    return processed["pixel_values"]
+                if hasattr(processor, "image_processor"):
+                    tmp = processor.image_processor(images=pil_image, return_tensors="pt")
+                    if "pixel_values" in tmp:
+                        return tmp["pixel_values"]
+
+            if image_processor is not None:
+                processed = image_processor(images=pil_image, return_tensors="pt")
+                if "pixel_values" in processed:
+                    return processed["pixel_values"]
+        except Exception:
+            pass
+
+        # Conservative fallback: resize + ToTensor
         import torchvision.transforms as T
-        return T.ToTensor()(pil_image).unsqueeze(0)
+        transform = T.Compose([
+            T.Resize((224, 224)),
+            T.ToTensor(),
+        ])
+        return transform(pil_image).unsqueeze(0)
     
     def _get_image_token_id(self):
         """Get the image token ID for LLaVA models."""
