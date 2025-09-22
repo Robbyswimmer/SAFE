@@ -354,12 +354,15 @@ def configure_variant(variant: str, base_config: ExperimentConfig) -> Experiment
 
 
 def run_experiment(args: argparse.Namespace) -> None:
+    print(f"[DEBUG] Starting run_experiment with variant: {args.variant}", flush=True)
     output_root = Path(args.output_root).expanduser().resolve()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = output_root / f"{timestamp}_{args.variant}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[DEBUG] Created run directory: {run_dir}", flush=True)
 
     set_random_seeds(args.seed)
+    print(f"[DEBUG] Set random seeds: {args.seed}", flush=True)
 
     data_path = Path(args.data_path).expanduser().resolve()
 
@@ -394,8 +397,11 @@ def run_experiment(args: argparse.Namespace) -> None:
     )
 
     # Base model setup (reuse demo config for now)
+    print(f"[DEBUG] Creating SAFEModel...", flush=True)
     model = SAFEModel()
+    print(f"[DEBUG] SAFEModel created successfully. Model type: {model.base_vl.model_type}", flush=True)
 
+    print(f"[DEBUG] Creating experiment config...", flush=True)
     base_config = ExperimentConfig(
         variant=args.variant,
         subset_size=args.subset_size,
@@ -416,9 +422,12 @@ def run_experiment(args: argparse.Namespace) -> None:
         output_dir=str(run_dir / "checkpoints"),
     )
 
+    print(f"[DEBUG] Configuring variant: {args.variant}", flush=True)
     variant_config = configure_variant(args.variant, base_config)
     stage_a_config = build_stage_a_config(variant_config)
+    print(f"[DEBUG] Stage A config created", flush=True)
 
+    print(f"[DEBUG] Creating StageATrainer...", flush=True)
     trainer = StageATrainer(
         safe_model=model,
         train_dataloader=train_loader,
@@ -426,8 +435,11 @@ def run_experiment(args: argparse.Namespace) -> None:
         config=stage_a_config,
         curriculum_config=None,
     )
+    print(f"[DEBUG] StageATrainer created successfully", flush=True)
 
+    print(f"[DEBUG] Starting trainer.train()...", flush=True)
     final_metrics = trainer.train()
+    print(f"[DEBUG] trainer.train() completed", flush=True)
 
     # Persist artefacts
     config_path = run_dir / "config.json"
