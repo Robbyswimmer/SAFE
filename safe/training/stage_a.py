@@ -588,7 +588,7 @@ class StageATrainer:
         
         # Check if validation dataset has samples
         if len(self.val_dataloader.dataset) == 0:
-        print("Warning: Validation dataset is empty!", flush=True)
+            print("Warning: Validation dataset is empty!", flush=True)
             return {
                 "loss": 0.0,
                 "audio_loss": 0.0,
@@ -665,7 +665,10 @@ class StageATrainer:
                             inputs.pop("pixel_values")
                         # If image tokens are present but pixel_values missing, log warning and skip
                         elif torch.any(has_img_tokens) and "pixel_values" not in inputs:
-                    print(f"Warning: Found <image> tokens but no pixel_values. Skipping multimodal processing.", flush=True)
+                            print(
+                                "Warning: Found <image> tokens but no pixel_values. Skipping multimodal processing.",
+                                flush=True
+                            )
                 elif self.safe_model.base_vl.model_type == "blip2":
                     # BLIP-2 doesn't use <image> tokens, so keep pixel_values as-is if they exist
                     pass
