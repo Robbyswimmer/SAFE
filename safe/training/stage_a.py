@@ -59,13 +59,13 @@ class StageATrainer:
         
         # Default configuration
         self.config = {
-            "learning_rate_projector": 1e-4,
-            "learning_rate_adapter": 5e-5,
+            "learning_rate_projector": 2e-4,
+            "learning_rate_adapter": 1e-4,
             "weight_decay": 0.01,
             "num_epochs": 10 if not self.use_curriculum else None,  # Curriculum controls epochs
             "warmup_steps": 1000,
             "max_grad_norm": 1.0,
-            "audio_loss_weight": 1.0,
+            "audio_loss_weight": 10.0,
             "retention_loss_weight": 1.0,
             "distillation_temperature": 3.0,
             "fisher_weight": 0.1,
@@ -660,19 +660,20 @@ class StageATrainer:
             except Exception as exc:
                 self.logger.debug(f"Sample logging skipped due to error: {exc}")
         
-        # DEBUG: Print detailed loss information (disabled for cleaner training)
+        # DEBUG: Print detailed loss information (enabled for plateau investigation)
         total_loss = loss_dict["total_loss"]
-        # print(f"\n=== DEBUG STEP {self.global_step} ===")
-        # print(f"Total Loss: {total_loss.item():.6f}")
-        # print(f"Loss breakdown:")
-        # for key, value in loss_dict.items():
-        #     if isinstance(value, torch.Tensor):
-        #         print(f"  {key}: {value.item():.6f}")
-        #     else:
-        #         print(f"  {key}: {value:.6f}")
-        # print(f"Has audio samples: {torch.sum(has_audio).item()}/{len(has_audio)}")
-        # print(f"Batch size: {len(inputs.get('input_ids', []))}")
-        # print("="*30)
+        if self.global_step % 50 == 0:  # Log every 50 steps
+            print(f"\n=== LOSS DEBUG STEP {self.global_step} ===", flush=True)
+            print(f"Total Loss: {total_loss.item():.6f}", flush=True)
+            print(f"Loss breakdown:", flush=True)
+            for key, value in loss_dict.items():
+                if isinstance(value, torch.Tensor):
+                    print(f"  {key}: {value.item():.6f}", flush=True)
+                else:
+                    print(f"  {key}: {value:.6f}", flush=True)
+            print(f"Has audio samples: {torch.sum(has_audio).item()}/{len(has_audio)}", flush=True)
+            print(f"Batch size: {len(inputs.get('input_ids', []))}", flush=True)
+            print("="*30, flush=True)
         
         # Backward pass
         total_loss.backward()

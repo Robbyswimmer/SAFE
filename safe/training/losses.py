@@ -18,7 +18,7 @@ class RetentionLoss(nn.Module):
         self,
         distillation_weight: float = 1.0,
         fisher_weight: float = 0.1,
-        temperature: float = 3.0,
+        temperature: float = 2.0,
         use_fisher_information: bool = True
     ):
         super().__init__()
