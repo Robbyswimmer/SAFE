@@ -457,13 +457,14 @@ class StageATrainer:
         # Prepare inputs for SAFE model (device-consistent masks)
         has_audio = batch.get("has_audio", torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device))
         
-        # Create input tensors - always pass images/audio if available, don't gate on flags
+        # Create input tensors for training - apply answers for supervised learning
         inputs = self.safe_model.prepare_multimodal_inputs(
             text=batch["questions"],
             images=batch.get("images", None),
             audio=batch.get("audio", None),
             answers=batch.get("answers", None),
-            device=device
+            device=device,
+            training_mode=True  # Apply answers during training
         )
 
         if self.debug_logging:
@@ -761,8 +762,9 @@ class StageATrainer:
                     text=batch["questions"],
                     images=batch.get("images", None),
                     audio=batch.get("audio", None),
-                    answers=batch.get("answers", None),
-                    device=device
+                    answers=None,  # Do NOT pass answers during evaluation to prevent contamination
+                    device=device,
+                    training_mode=False  # Inference mode - no answer application
                 )
                 
                 # Handle pixel_values based on model type
@@ -1216,15 +1218,25 @@ class StageATrainer:
             sample_input_text = tok.decode(input_ids[0], skip_special_tokens=True)
             print(f"[GenDebug] Sample input text: '{sample_input_text[:200]}...'", flush=True)
 
+        # Ensure model config has proper pad/eos tokens
+        if hasattr(self.safe_model.base_vl.llm, 'config'):
+            self.safe_model.base_vl.llm.config.pad_token_id = tok.pad_token_id
+            self.safe_model.base_vl.llm.config.eos_token_id = getattr(tok, "eos_token_id", None)
+        if hasattr(self.safe_model.base_vl.llm, 'generation_config'):
+            self.safe_model.base_vl.llm.generation_config.pad_token_id = tok.pad_token_id
+            self.safe_model.base_vl.llm.generation_config.eos_token_id = getattr(tok, "eos_token_id", None)
+
         gen_kwargs = dict(
-            max_new_tokens=6,
-            do_sample=False,
+            max_new_tokens=3,  # Reduced for single word/number answers
+            do_sample=False,   # Greedy decoding for deterministic results
             temperature=None,
             top_p=None,
             num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
             repetition_penalty=1.0,
+            output_scores=False,
+            return_dict_in_generate=False
         )
         if self.debug_logging:
             print(f"[GenDebug] Generation kwargs: {gen_kwargs}", flush=True)
@@ -1282,15 +1294,45 @@ class StageATrainer:
         
         return extracted_tokens
     
+    def _normalize_answer(self, s: str) -> str:
+        """Normalize answer text for consistent comparison."""
+        if not s:
+            return ""
+            
+        s = s.strip().lower()
+        
+        # Remove common answer prefixes
+        if "answer:" in s:
+            s = s.split("answer:")[-1].strip()
+        
+        # Map common words to digits
+        word_to_digit = {
+            "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+            "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9", 
+            "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13", 
+            "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
+            "eighteen": "18", "nineteen": "19", "twenty": "20",
+            "yes": "yes", "no": "no"
+        }
+        
+        # Check if answer starts with a known word
+        for word, digit in word_to_digit.items():
+            if s.startswith(word):
+                return digit
+        
+        # Extract first number if present
+        import re
+        number_match = re.search(r'-?\d+', s)
+        if number_match:
+            return number_match.group(0)
+        
+        # Return first word if no number found
+        first_word = s.split()[0] if s.split() else ""
+        return first_word
+
     def _clean_answer(self, s: str) -> str:
-        """Clean and normalize answer text."""
-        s = s.strip()
-        if "Answer:" in s:
-            s = s.split("Answer:")[-1].strip()
-        s = s.split("\n")[0]
-        s = s.split(".")[0]
-        tokens = s.split()
-        return " ".join(tokens[:5])  # collapse spaces
+        """Clean and normalize answer text (legacy method)."""
+        return self._normalize_answer(s)
     
     def _extract_answer(self, generated_text):
         """Extract answer from generated text after 'Answer:'"""

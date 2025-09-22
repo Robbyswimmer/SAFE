@@ -448,7 +448,8 @@ class SAFEModel(nn.Module):
         answers: Optional[Union[str, Sequence[Any]]] = None,
         device: str = "cuda",
         include_audio_tokens: bool = True,
-        num_audio_tokens: Optional[int] = None
+        num_audio_tokens: Optional[int] = None,
+        training_mode: bool = False
     ) -> Dict[str, torch.Tensor]:
         """
         Prepare inputs for multimodal processing.
@@ -457,10 +458,11 @@ class SAFEModel(nn.Module):
             text: Input text
             images: Optional images
             audio: Optional audio
-            answers: Optional answers for supervised training
+            answers: Optional answers for supervised training (only used if training_mode=True)
             device: Target device
             include_audio_tokens: Whether to include audio token placeholders
             num_audio_tokens: Override for number of audio tokens
+            training_mode: If True, apply answers for training. If False, ignore answers for inference.
 
         Returns:
             Dictionary with input_ids, attention_mask, audio_tokens, etc.
@@ -539,13 +541,17 @@ class SAFEModel(nn.Module):
             if transcripts is not None:
                 result["transcripts"] = transcripts
 
-        # Attach ground truth answers for supervised training
-        if answers is not None and "input_ids" in result and "attention_mask" in result:
+        # Apply ground truth answers ONLY during training mode to prevent gold answer leakage
+        if training_mode and answers is not None and "input_ids" in result and "attention_mask" in result:
             dev = result["input_ids"].device if torch.is_tensor(result["input_ids"]) else torch.device(device)
             self._apply_answers_to_inputs(result, answers, dev)
         elif "labels" not in result and "input_ids" in result:
-            # Default labels mirror the input ids (e.g., for inference)
+            # Default labels mirror the input ids (for inference or when no answers provided)
             result["labels"] = result["input_ids"].clone()
+            
+        # Add contamination detection
+        if not training_mode and answers is not None:
+            print("[WARNING] Answers provided in non-training mode - they will be ignored to prevent contamination", flush=True)
 
         return result
     
@@ -585,46 +591,67 @@ class SAFEModel(nn.Module):
                     # Single image
                     pil_images = [self._convert_to_pil(images)]
         
-        # Build LLaVA chat conversations with proper <image> token placement
+        # Build LLaVA chat conversations with concise, clear prompts
         conversations = []
-        instruction = "Answer in a single word or number."
+        instruction = "Answer in one word or a number."  # Shortened to reduce token count
+        
         for i, question in enumerate(texts):
+            # Create concise prompt combining question and instruction
+            prompt_text = f"{instruction} Question: {question}"
+            
             if i < len(pil_images) and pil_images[i] is not None:
-                # Multimodal conversation
+                # Multimodal conversation - use proper format for LLaVA
                 conversations.append([
                     {
                         "role": "user", 
                         "content": [
                             {"type": "image"}, 
-                            {"type": "text", "text": f"{question}\n{instruction}"}
+                            {"type": "text", "text": prompt_text}
                         ]
                     }
                 ])
             else:
                 # Text-only conversation
                 conversations.append([
-                    {"role": "user", "content": f"{question}\n{instruction}"}
+                    {"role": "user", "content": prompt_text}
                 ])
         
         # Apply chat template to get proper prompts with <image> tokens
-        try:
-            prompts = []
-            for conv in conversations:
+        prompts = []
+        for i, conv in enumerate(conversations):
+            try:
+                # Try using processor's chat template first
                 prompt = processor.apply_chat_template(
                     conv, 
                     add_generation_prompt=True, 
                     tokenize=False
                 )
                 prompts.append(prompt)
-        except (AttributeError, NotImplementedError):
-            # Fallback: manually insert image token
-            image_token = getattr(processor, 'image_token', '<image>')
-            prompts = []
-            for i, question in enumerate(texts):
-                if i < len(pil_images) and pil_images[i] is not None:
-                    prompts.append(f"USER: {image_token}\n{question}\n{instruction}\nASSISTANT:")
-                else:
-                    prompts.append(f"USER: {question}\n{instruction}\nASSISTANT:")
+            except (AttributeError, NotImplementedError):
+                # Fallback: use tokenizer's chat template
+                try:
+                    tokenizer = getattr(processor, 'tokenizer', self.base_vl.tokenizer)
+                    prompt = tokenizer.apply_chat_template(
+                        conv,
+                        add_generation_prompt=True,
+                        tokenize=False
+                    )
+                    # Manually insert image token if needed
+                    if i < len(pil_images) and pil_images[i] is not None:
+                        image_token = getattr(processor, 'image_token', '<image>')
+                        prompt = prompt.replace(conv[0]["content"][1]["text"], f"{image_token}\n{conv[0]['content'][1]['text']}")
+                    prompts.append(prompt)
+                except (AttributeError, NotImplementedError):
+                    # Final fallback: minimal manual construction
+                    question_text = conv[0]["content"]
+                    if isinstance(question_text, list):
+                        question_text = question_text[1]["text"]
+                    
+                    if i < len(pil_images) and pil_images[i] is not None:
+                        image_token = getattr(processor, 'image_token', '<image>')
+                        prompts.append(f"{image_token}\n{question_text}")
+                    else:
+                        prompts.append(question_text)
         
         num_samples = len(prompts)
         if not pil_images:
