@@ -160,6 +160,38 @@ class StageATrainer:
             if param.requires_grad
         }
         self.trainable_param_list = list(self.trainable_params.values())
+        
+        # DEBUG: Print trainable parameter analysis
+        total_params = sum(p.numel() for p in self.safe_model.parameters())
+        trainable_count = sum(p.numel() for p in self.trainable_param_list)
+        
+        print(f"\n🔍 TRAINABLE PARAMETER ANALYSIS:", flush=True)
+        print(f"Total model parameters: {total_params:,}", flush=True)
+        print(f"Trainable parameters: {trainable_count:,} ({100*trainable_count/total_params:.2f}%)", flush=True)
+        
+        # Show audio-related trainable components
+        audio_trainable = 0
+        base_trainable = 0
+        for name, param in self.trainable_params.items():
+            if any(keyword in name.lower() for keyword in ['audio', 'projector', 'fusion', 'lora']):
+                audio_trainable += param.numel()
+                print(f"✅ Audio: {name} - {param.numel():,} params", flush=True)
+            elif name.startswith('base_vl.'):
+                base_trainable += param.numel()
+                print(f"⚠️  Base: {name} - {param.numel():,} params", flush=True)
+        
+        print(f"Audio components: {audio_trainable:,} trainable", flush=True)
+        print(f"Base model: {base_trainable:,} trainable", flush=True)
+        
+        if trainable_count == 0:
+            print("❌ CRITICAL: NO TRAINABLE PARAMETERS! Training will not work.", flush=True)
+        elif audio_trainable == 0:
+            print("❌ CRITICAL: NO AUDIO COMPONENTS TRAINABLE! Audio learning impossible.", flush=True)
+        elif base_trainable > 0:
+            print("⚠️  WARNING: Base model not frozen - may cause catastrophic forgetting!", flush=True)
+        else:
+            print("✅ Parameter setup looks correct for modality addition.", flush=True)
+        print("=" * 60, flush=True)
 
         # Metrics tracking
         self.training_stats = {
@@ -1001,6 +1033,19 @@ class StageATrainer:
             "total_samples": total_samples
         }
         
+        # Report cumulative evaluation results
+        print(f"\n=== EVALUATION COMPLETE ===", flush=True)
+        print(f"Total samples evaluated: {total_samples}", flush=True)
+        print(f"  Audio samples: {audio_samples}", flush=True)
+        print(f"  VL samples: {vl_samples}", flush=True)
+        print(f"\nCumulative Accuracy Results:", flush=True)
+        print(f"  SAFE model accuracy: {vl_safe_accuracy:.3f} ({vl_safe_correct}/{vl_total})", flush=True)
+        print(f"  Base model accuracy: {vl_base_accuracy:.3f} ({vl_base_correct}/{vl_total})", flush=True)
+        if audio_total > 0:
+            print(f"  Audio task accuracy: {audio_accuracy:.3f} ({audio_correct}/{audio_total})", flush=True)
+        print(f"  Retention score: {retention_score:.3f} (SAFE/Base ratio)", flush=True)
+        print(f"==============================\n", flush=True)
+        
         return eval_metrics
     
     def _compute_robust_accuracy(self, safe_outputs, base_outputs, inputs, has_audio, batch):
@@ -1082,9 +1127,9 @@ class StageATrainer:
                     if i < 2:  # Only log first 2 samples to avoid spam
                         print(f"[AccuracyDebug] Sample {i}:", flush=True)
                         print(f"  GT: '{gt_answer}'", flush=True)
-                        print(f"  SAFE_full: '{safe_pred_full}'", flush=True)  # Show full text, no truncation
+                        print(f"  SAFE_full: '{safe_pred_full}'", flush=True)
                         print(f"  SAFE_pred: '{safe_pred}'", flush=True)
-                        print(f"  BASE_full: '{base_pred_full}'", flush=True)  # Show full text, no truncation
+                        print(f"  BASE_full: '{base_pred_full}'", flush=True)
                         print(f"  BASE_pred: '{base_pred}'", flush=True)
                     
                     # Compute answer-level accuracy (exact match or fuzzy match)

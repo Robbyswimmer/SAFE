@@ -150,7 +150,7 @@ class BaseVLModel(nn.Module):
             processor_tokenizer = getattr(self.processor, "tokenizer", None)
             if processor_tokenizer is self.tokenizer:
                 if processor_tokenizer is not None:
-                    print("[BaseVL] Processor tokenizer is same instance as main tokenizer", flush=True)
+                    pass  # Processor tokenizer is same instance as main tokenizer
             else:
                 if processor_tokenizer is not None and getattr(processor_tokenizer, "pad_token", None) is None:
                     processor_tokenizer.pad_token = processor_tokenizer.eos_token
