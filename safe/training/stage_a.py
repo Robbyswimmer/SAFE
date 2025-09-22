@@ -1165,7 +1165,7 @@ class StageATrainer:
         return [str(gt_answer)]
 
     def _compute_answer_accuracy(self, pred_answer: str, gt_answer: Any) -> float:
-        """Compute VQA-style consensus accuracy for a prediction."""
+        """Compute answer accuracy with proper handling for single vs. multiple ground truths."""
 
         gt_answers = [a for a in self._prepare_gt_answers(gt_answer) if a]
         if not gt_answers or not pred_answer:
@@ -1180,7 +1180,12 @@ class StageATrainer:
             if self._normalize_vqa_answer(ans) == pred_norm:
                 matches += 1
 
-        return min(1.0, matches / 3.0)
+        # For single ground truth: binary accuracy (0.0 or 1.0)
+        # For multiple ground truths: VQA-style consensus (matches/3.0, capped at 1.0)
+        if len(gt_answers) == 1:
+            return 1.0 if matches > 0 else 0.0
+        else:
+            return min(1.0, matches / 3.0)
     
     def _generate_predictions(self, inputs, model_choice="safe"):
         """Generate predictions using consistent SAFE/base pathways."""
