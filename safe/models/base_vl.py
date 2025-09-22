@@ -132,11 +132,13 @@ class BaseVLModel(nn.Module):
             self.tokenizer.pad_token = self.tokenizer.eos_token
             print(f"[BaseVL] Set pad_token to eos_token for main tokenizer", flush=True)
         
-        # 2. Set padding side for decoder-only models
-        if self.model_type in ["llava", "blip2"]:
-            self.tokenizer.padding_side = 'left'
-            print(f"[BaseVL] Set main tokenizer padding_side='left' for {self.model_type}", flush=True)
-            
+        # 2. Set padding side for decoder-only models (required for causal LMs)
+        is_decoder_only = not getattr(getattr(self.llm, "config", {}), "is_encoder_decoder", False)
+        if is_decoder_only:
+            if getattr(self.tokenizer, "padding_side", None) != 'left':
+                self.tokenizer.padding_side = 'left'
+                print("[BaseVL] Set main tokenizer padding_side='left' for decoder-only model", flush=True)
+
             # 3. Configure processor tokenizer if it exists and is different
             if hasattr(self, 'processor') and hasattr(self.processor, 'tokenizer'):
                 proc_tok = self.processor.tokenizer
@@ -152,8 +154,9 @@ class BaseVLModel(nn.Module):
                         proc_tok.pad_token = proc_tok.eos_token
                         print(f"[BaseVL] Set pad_token for processor tokenizer", flush=True)
                     
-                    proc_tok.padding_side = 'left'
-                    print(f"[BaseVL] Set processor tokenizer padding_side='left'", flush=True)
+                    if getattr(proc_tok, "padding_side", None) != 'left':
+                        proc_tok.padding_side = 'left'
+                        print(f"[BaseVL] Set processor tokenizer padding_side='left'", flush=True)
         
         # 4. Verify configuration
         self._verify_tokenizer_config()
