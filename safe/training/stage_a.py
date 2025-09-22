@@ -11,6 +11,7 @@ from pathlib import Path
 import logging
 import textwrap
 import traceback
+import time
 
 # Set CPU threads for predictable performance
 torch.set_num_threads(min(8, os.cpu_count() or 2))
@@ -126,6 +127,7 @@ class StageATrainer:
         self._teacher_broadcast_warned = False
         self._shape_debug_once = False
         self._eval_shape_debug_once = False
+        self.debug_logging = bool(self.config.get("debug_logging", False))
 
         # Ensure base VL model is in eval mode for retention comparison
         self.safe_model.base_vl.eval()
@@ -260,7 +262,7 @@ class StageATrainer:
             logits_subset = result.get("logits") if isinstance(result, dict) else getattr(result, "logits", None)
             if logits_subset is None:
                 raise RuntimeError("Base LLaVA teacher returned no logits for a subset.")
-            if not getattr(self, "_teacher_subset_debugged", False):
+            if self.debug_logging and not getattr(self, "_teacher_subset_debugged", False):
                 print(
                     f"[TeacherDebug] subset indices={indices.tolist()} logits_shape={tuple(logits_subset.shape)}",
                     flush=True
@@ -633,6 +635,12 @@ class StageATrainer:
             print(f"Evaluating on {total_eval_batches} batches...", flush=True)
             
             for batch_idx, batch in enumerate(dataloader, start=1):
+                batch_t0 = time.time()
+                if self.debug_logging:
+                    print(
+                        f"[EvalDebug] batch {batch_idx}/{total_eval_batches}: loading batch",
+                        flush=True,
+                    )
                 # Move batch to device
                 for key in batch:
                     if isinstance(batch[key], torch.Tensor):
@@ -641,6 +649,11 @@ class StageATrainer:
                 has_audio = batch.get("has_audio", torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device))
                 
                 # Prepare inputs - always pass images/audio if available, don't gate on flags
+                if self.debug_logging:
+                    print(
+                        f"[EvalDebug] batch {batch_idx}: preparing multimodal inputs (has_audio={int(has_audio.sum().item())})",
+                        flush=True,
+                    )
                 inputs = self.safe_model.prepare_multimodal_inputs(
                     text=batch["questions"],
                     images=batch.get("images", None),
@@ -675,9 +688,22 @@ class StageATrainer:
                 
                 
                 # SAFE model forward pass
+                if self.debug_logging:
+                    print(
+                        f"[EvalDebug] batch {batch_idx}: SAFE forward start",
+                        flush=True,
+                    )
                 safe_outputs = self.safe_model(**inputs)
+                if self.debug_logging:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    print(
+                        f"[EvalDebug] batch {batch_idx}: SAFE forward done in {time.time() - batch_t0:.2f}s",
+                        flush=True,
+                    )
                 
                 # Base VL model forward pass
+                teacher_t0 = time.time()
                 sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
                 sanitized_labels = self.safe_model.sanitize_labels_for_base(inputs.get("labels"))
                 base_inputs = {
@@ -701,6 +727,13 @@ class StageATrainer:
                     # For custom models, use vision features
                     base_inputs["vision_features"] = inputs.get("vision_features")
                     base_outputs = self.safe_model.base_vl(**base_inputs)
+                if self.debug_logging:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    print(
+                        f"[EvalDebug] batch {batch_idx}: teacher forward done in {time.time() - teacher_t0:.2f}s",
+                        flush=True,
+                    )
 
                 if not getattr(self, "_eval_shape_debug_once", False):
                     input_shape = None if inputs.get("input_ids") is None else tuple(inputs["input_ids"].shape)
@@ -742,9 +775,27 @@ class StageATrainer:
                 
                 # Compute accuracy metrics using robust methods
                 # Generate predictions and compute answer-level accuracy
+                if self.debug_logging:
+                    print(
+                        f"[EvalDebug] batch {batch_idx}: computing robust accuracy",
+                        flush=True,
+                    )
+                robust_t0 = time.time()
                 safe_accuracy_batch, base_accuracy_batch = self._compute_robust_accuracy(
                     safe_outputs, base_outputs, inputs, has_audio, batch
                 )
+                if self.debug_logging:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    print(
+                        f"[EvalDebug] batch {batch_idx}: robust accuracy done in {time.time() - robust_t0:.2f}s",
+                        flush=True,
+                    )
+                    if safe_accuracy_batch:
+                        print(
+                            f"[EvalDebug] batch {batch_idx}: sample SAFE acc={safe_accuracy_batch[0]:.3f}, base acc={base_accuracy_batch[0]:.3f}",
+                            flush=True,
+                        )
                 
                 if self._should_log_sample():
                     try:
@@ -784,6 +835,13 @@ class StageATrainer:
                     print(
                         f"[Eval] Processed {batch_idx}/{total_eval_batches} batches",
                         flush=True
+                    )
+                if self.debug_logging:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    print(
+                        f"[EvalDebug] batch {batch_idx}: total time {time.time() - batch_t0:.2f}s",
+                        flush=True,
                     )
         
         # Normalize losses (avoid division by zero)
@@ -904,7 +962,7 @@ class StageATrainer:
                 self._robust_error_logged = True
             else:
                 self.logger.warning("Error in robust accuracy computation: %s", e)
-            print(f"Warning: Error in robust accuracy computation: {e}")
+            print(f"Warning: Error in robust accuracy computation: {e}", flush=True)
             pass
 
         return safe_accuracies, base_accuracies

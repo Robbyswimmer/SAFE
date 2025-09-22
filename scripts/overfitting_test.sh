@@ -1,5 +1,39 @@
 #!/bin/bash -l
 
+variants=(no_retention soft_retention full_safe)
+
+debug_flag=()
+if [[ "${DEBUG_LOGGING}" != "0" ]]; then
+  debug_flag+=(--debug-logging)
+fi
+
+for variant in "${variants[@]}"; do
+  echo "\n=== Running variant: ${variant} ==="
+  python -m experiments.overfitting.run_overfitting \
+    --variant "${variant}" \
+    --subset-size "${SUBSET_SIZE}" \
+    --seed "${SEED}" \
+    --train-source "${TRAIN_SOURCE}" \
+    --val-source "${VAL_SOURCE}" \
+    --val-size "${VAL_SIZE}" \
+    --train-batch-size "${TRAIN_BS}" \
+    --val-batch-size "${VAL_BS}" \
+    --num-epochs "${NUM_EPOCHS}" \
+    --num-workers "${NUM_WORKERS}" \
+    --data-path "${DATA_ROOT}" \
+    --pack-root "${PACK_ROOT}" \
+    --output-root "${OUTPUT_ROOT}" \
+    --null-space-min-samples 64 \
+    --null-space-rank 8 \
+    --null-space-refresh 2000 \
+    --model-config "${MODEL_CONFIG}" \
+    --max-eval-batches "${MAX_EVAL_BATCHES}" \
+    --eval-logging-steps "${EVAL_LOGGING_STEPS}" \
+    ${debug_flag[@]}
+  echo "=== Completed variant: ${variant} ===\n"
+done
+
+echo "SAFE overfitting ablation complete at $(date)"
 #SBATCH --job-name="SAFE-Overfit"
 #SBATCH --output=logs/overfitting_%j.txt
 #SBATCH --error=logs/overfitting_%j.err
@@ -40,6 +74,9 @@ VAL_BS=${VAL_BS:-16}
 NUM_WORKERS=${NUM_WORKERS:-0}
 SEED=${SEED:-42}
 MODEL_CONFIG=${MODEL_CONFIG:-full}
+MAX_EVAL_BATCHES=${MAX_EVAL_BATCHES:-4}
+EVAL_LOGGING_STEPS=${EVAL_LOGGING_STEPS:-1}
+DEBUG_LOGGING=${DEBUG_LOGGING:-1}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_ROOT"
@@ -49,30 +86,3 @@ if [[ ! -d "$PACK_ROOT" ]]; then
   echo "[ERROR] Expected data pack at '$PACK_ROOT' but it was not found." >&2
   exit 1
 fi
-
-variants=(no_retention soft_retention full_safe)
-
-for variant in "${variants[@]}"; do
-  echo "\n=== Running variant: ${variant} ==="
-  python -m experiments.overfitting.run_overfitting \
-    --variant "${variant}" \
-    --subset-size "${SUBSET_SIZE}" \
-    --seed "${SEED}" \
-    --train-source "${TRAIN_SOURCE}" \
-    --val-source "${VAL_SOURCE}" \
-    --val-size "${VAL_SIZE}" \
-    --train-batch-size "${TRAIN_BS}" \
-    --val-batch-size "${VAL_BS}" \
-    --num-epochs "${NUM_EPOCHS}" \
-    --num-workers "${NUM_WORKERS}" \
-    --data-path "${DATA_ROOT}" \
-    --pack-root "${PACK_ROOT}" \
-    --output-root "${OUTPUT_ROOT}" \
-    --null-space-min-samples 64 \
-    --null-space-rank 8 \
-    --null-space-refresh 2000 \
-    --model-config "${MODEL_CONFIG}"
-  echo "=== Completed variant: ${variant} ===\n"
-done
-
-echo "SAFE overfitting ablation complete at $(date)"

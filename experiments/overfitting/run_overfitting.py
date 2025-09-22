@@ -54,6 +54,8 @@ class ExperimentConfig:
     null_space_min_samples: int
     null_space_refresh_interval: int
     output_dir: str
+    max_eval_batches: Optional[int]
+    eval_logging_steps: int
 
 
 def set_random_seeds(seed: int) -> None:
@@ -313,6 +315,9 @@ def build_val_dataset(
 
 def build_stage_a_config(config: ExperimentConfig) -> Dict[str, float | int | bool | str]:
     """Translate ExperimentConfig into StageATrainer keyword configuration."""
+    max_eval_batches = config.max_eval_batches
+    if max_eval_batches is not None and max_eval_batches <= 0:
+        max_eval_batches = None
     return {
         "learning_rate_projector": config.learning_rate_projector,
         "learning_rate_adapter": config.learning_rate_adapter,
@@ -320,7 +325,9 @@ def build_stage_a_config(config: ExperimentConfig) -> Dict[str, float | int | bo
         "eval_steps": 1_000,  # effectively disables mid-epoch evals
         "save_steps": 1_000,
         "logging_steps": 50,
-        "max_eval_batches": None,
+        "eval_logging_steps": max(1, config.eval_logging_steps),
+        "max_eval_batches": max_eval_batches,
+        "debug_logging": config.debug_logging,
         "retention_loss_weight": config.retention_loss_weight,
         "fisher_weight": config.fisher_weight,
         "enable_null_space": config.enable_null_space,
@@ -459,6 +466,9 @@ def run_experiment(args: argparse.Namespace) -> None:
         null_space_min_samples=args.null_space_min_samples,
         null_space_refresh_interval=args.null_space_refresh,
         output_dir=str(run_dir / "checkpoints"),
+        max_eval_batches=None if args.max_eval_batches <= 0 else args.max_eval_batches,
+        eval_logging_steps=max(1, args.eval_logging_steps),
+        debug_logging=args.debug_logging,
     )
 
     print(f"[DEBUG] Configuring variant: {args.variant}", flush=True)
@@ -548,6 +558,23 @@ def parse_args() -> argparse.Namespace:
         choices=["demo", "full", "multimodal"],
         default="full",
         help="Model backbone configuration to use",
+    )
+    parser.add_argument(
+        "--max-eval-batches",
+        type=int,
+        default=4,
+        help="Limit number of validation batches during evaluation (<=0 uses full set)",
+    )
+    parser.add_argument(
+        "--eval-logging-steps",
+        type=int,
+        default=1,
+        help="Number of eval batches between progress messages",
+    )
+    parser.add_argument(
+        "--debug-logging",
+        action="store_true",
+        help="Enable verbose debug logging inside trainer",
     )
     return parser.parse_args()
 
