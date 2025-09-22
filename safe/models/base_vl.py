@@ -123,64 +123,70 @@ class BaseVLModel(nn.Module):
             self.vision_start_token = None
             self.vision_end_token = None
     
+    def _set_padding_side_left(self, tokenizer, context: str) -> bool:
+        """Utility to set padding_side to left if needed."""
+        if tokenizer is None:
+            return False
+
+        if getattr(tokenizer, "padding_side", None) != "left":
+            tokenizer.padding_side = "left"
+            print(f"[BaseVL] Set {context} padding_side='left'", flush=True)
+            return True
+        return False
+
+    def ensure_left_padding(self) -> bool:
+        """Ensure all tokenizers use left padding when required."""
+        is_decoder_only = not getattr(getattr(self.llm, "config", {}), "is_encoder_decoder", False)
+        if not is_decoder_only:
+            return False
+
+        changed = False
+
+        # Main tokenizer
+        changed |= self._set_padding_side_left(self.tokenizer, "main tokenizer")
+
+        # Processor tokenizer and potential nested tokenizers
+        if hasattr(self, "processor"):
+            processor_tokenizer = getattr(self.processor, "tokenizer", None)
+            if processor_tokenizer is self.tokenizer:
+                if processor_tokenizer is not None:
+                    print("[BaseVL] Processor tokenizer is same instance as main tokenizer", flush=True)
+            else:
+                if processor_tokenizer is not None and getattr(processor_tokenizer, "pad_token", None) is None:
+                    processor_tokenizer.pad_token = processor_tokenizer.eos_token
+                    print("[BaseVL] Set pad_token for processor tokenizer", flush=True)
+                changed |= self._set_padding_side_left(processor_tokenizer, "processor tokenizer")
+
+            # Nested processor tokenizers (image/text processors)
+            nested_tokenizers = []
+            if hasattr(self.processor, "image_processor"):
+                nested_tokenizers.append((getattr(self.processor.image_processor, "tokenizer", None), "image processor tokenizer"))
+            if hasattr(self.processor, "text_processor"):
+                nested_tokenizers.append((getattr(self.processor.text_processor, "tokenizer", None), "text processor tokenizer"))
+
+            for nested_tok, context in nested_tokenizers:
+                changed |= self._set_padding_side_left(nested_tok, context)
+
+            if hasattr(self.processor, "padding_side") and getattr(self.processor, "padding_side", None) != "left":
+                self.processor.padding_side = "left"
+                print("[BaseVL] Set processor padding_side='left'", flush=True)
+                changed = True
+
+        return changed
+
     def _configure_tokenizers(self):
         """Configure all tokenizer instances consistently."""
         print(f"[BaseVL] Configuring tokenizers for {self.model_type}...", flush=True)
-        
+
         # 1. Configure main tokenizer
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             print(f"[BaseVL] Set pad_token to eos_token for main tokenizer", flush=True)
-        
-        # 2. Set padding side for decoder-only models (required for causal LMs)
-        is_decoder_only = not getattr(getattr(self.llm, "config", {}), "is_encoder_decoder", False)
-        if is_decoder_only:
-            # Configure main tokenizer
-            if getattr(self.tokenizer, "padding_side", None) != 'left':
-                self.tokenizer.padding_side = 'left'
-                print("[BaseVL] Set main tokenizer padding_side='left' for decoder-only model", flush=True)
 
-            # 3. Configure processor tokenizer if it exists and is different
-            if hasattr(self, 'processor') and hasattr(self.processor, 'tokenizer'):
-                proc_tok = self.processor.tokenizer
-                
-                # Check if it's the same instance
-                if proc_tok is self.tokenizer:
-                    print(f"[BaseVL] Processor tokenizer is same instance as main tokenizer", flush=True)
-                else:
-                    print(f"[BaseVL] Configuring separate processor tokenizer", flush=True)
-                    
-                    # Configure processor tokenizer separately
-                    if proc_tok.pad_token is None:
-                        proc_tok.pad_token = proc_tok.eos_token
-                        print(f"[BaseVL] Set pad_token for processor tokenizer", flush=True)
-                    
-                    if getattr(proc_tok, "padding_side", None) != 'left':
-                        proc_tok.padding_side = 'left'
-                        print(f"[BaseVL] Set processor tokenizer padding_side='left'", flush=True)
-            
-            # 4. Force configure any other tokenizer instances in the processor
-            if hasattr(self, 'processor'):
-                # For LLaVA, also check if there are nested tokenizers
-                if hasattr(self.processor, 'image_processor') and hasattr(self.processor.image_processor, 'tokenizer'):
-                    img_proc_tok = self.processor.image_processor.tokenizer
-                    if getattr(img_proc_tok, "padding_side", None) != 'left':
-                        img_proc_tok.padding_side = 'left'
-                        print(f"[BaseVL] Set image processor tokenizer padding_side='left'", flush=True)
-                
-                # Also check if there's a text processor with tokenizer
-                if hasattr(self.processor, 'text_processor') and hasattr(self.processor.text_processor, 'tokenizer'):
-                    text_proc_tok = self.processor.text_processor.tokenizer
-                    if getattr(text_proc_tok, "padding_side", None) != 'left':
-                        text_proc_tok.padding_side = 'left'
-                        print(f"[BaseVL] Set text processor tokenizer padding_side='left'", flush=True)
-                
-                # Force set on processor itself if it has padding_side attribute
-                if hasattr(self.processor, 'padding_side'):
-                    self.processor.padding_side = 'left'
-                    print(f"[BaseVL] Set processor padding_side='left'", flush=True)
-        
-        # 4. Verify configuration
+        # 2. Ensure left padding when required
+        self.ensure_left_padding()
+
+        # 3. Verify configuration
         self._verify_tokenizer_config()
     
     def _verify_tokenizer_config(self):
@@ -222,7 +228,7 @@ class BaseVLModel(nn.Module):
             return vision_features
     
     def prepare_inputs_for_training(
-        self, 
+        self,
         text: str,
         images: Optional[torch.Tensor] = None,
         device: str = "cuda"
@@ -238,6 +244,10 @@ class BaseVLModel(nn.Module):
         Returns:
             Dictionary with input_ids, attention_mask, labels, pixel_values
         """
+        # Re-assert tokenizer padding configuration before tokenization
+        if self.ensure_left_padding():
+            print("[PrepareInputs] Re-applied left padding configuration", flush=True)
+
         # Check if we have valid images (not None and not a list of all None values)
         has_valid_images = False
         if images is not None:

@@ -464,6 +464,10 @@ class SAFEModel(nn.Module):
         Returns:
             Dictionary with input_ids, attention_mask, audio_tokens, etc.
         """
+        # Ensure tokenizer padding configuration remains correct before encoding
+        if self.base_vl.ensure_left_padding():
+            print("[SAFEModel] Re-applied left padding configuration before multimodal prep", flush=True)
+
         # For LLaVA/BLIP2, use proper multimodal input preparation
         if self.base_vl.model_type == "llava":
             # LLaVA-specific handling with chat templates and proper <image> token insertion
