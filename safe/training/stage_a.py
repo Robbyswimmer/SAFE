@@ -129,6 +129,14 @@ class StageATrainer:
         self._eval_shape_debug_once = False
         self.debug_logging = bool(self.config.get("debug_logging", False))
 
+        # Move model to GPU if available
+        if torch.cuda.is_available():
+            print(f"Moving SAFE model to GPU...", flush=True)
+            self.safe_model = self.safe_model.cuda()
+            print(f"SAFE model moved to GPU successfully", flush=True)
+        else:
+            print(f"CUDA not available, keeping model on CPU", flush=True)
+
         # Ensure base VL model is in eval mode for retention comparison
         self.safe_model.base_vl.eval()
         
