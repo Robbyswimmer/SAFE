@@ -404,7 +404,7 @@ class StageATrainer:
             base_lr = g.get("base_lr", g["lr"])
             # Ensure base_lr is a number, not a sequence
             if isinstance(base_lr, (list, tuple)):
-                print(f"Warning: base_lr is a sequence: {base_lr}, using first element")
+                print(f"Warning: base_lr is a sequence: {base_lr}, using first element", flush=True)
                 base_lr = base_lr[0]
             g["lr"] = float(base_lr) * factor
     
@@ -1425,18 +1425,18 @@ class StageATrainer:
             # Update curriculum manager
             self.curriculum_manager.update_metrics(curriculum_metrics, samples_processed=samples_in_stage)
             
-            print(f"  Metrics:")
-            print(f"    Audio Accuracy: {eval_metrics['audio_accuracy']:.4f}")
-            print(f"    VL Retention: {eval_metrics['retention_score']:.4f}")
-            print(f"    Retention Loss: {eval_metrics['retention_loss']:.4f}")
-            print(f"    Samples in Stage: {samples_in_stage}")
+            print(f"  Metrics:", flush=True)
+            print(f"    Audio Accuracy: {eval_metrics['audio_accuracy']:.4f}", flush=True)
+            print(f"    VL Retention: {eval_metrics['retention_score']:.4f}", flush=True)
+            print(f"    Retention Loss: {eval_metrics['retention_loss']:.4f}", flush=True)
+            print(f"    Samples in Stage: {samples_in_stage}", flush=True)
             
             # Check curriculum progression
             if self.epoch % self.config.get("validation_frequency", 5) == 0:
                 progression_status = self.curriculum_manager.advance_epoch()
                 
                 if progression_status == ProgressionStatus.ADVANCE:
-                    print(f"🎯 Advanced to next curriculum stage!")
+                    print(f"🎯 Advanced to next curriculum stage!", flush=True)
                     
                     # Save checkpoint before advancing
                     self.save_checkpoint(eval_metrics, is_best=True, 
@@ -1448,14 +1448,14 @@ class StageATrainer:
                     samples_in_stage = 0
                     
                 elif progression_status == ProgressionStatus.EXTEND:
-                    print(f"⏳ Extended current stage due to unmet criteria")
+                    print(f"⏳ Extended current stage due to unmet criteria", flush=True)
                     
                 elif progression_status == ProgressionStatus.FAILED:
-                    print(f"❌ Curriculum failed - criteria not met after extensions")
+                    print(f"❌ Curriculum failed - criteria not met after extensions", flush=True)
                     break
                     
                 else:  # CONTINUE
-                    print(f"📈 Continuing current stage...")
+                    print(f"📈 Continuing current stage...", flush=True)
             else:
                 # Still advance curriculum epoch counter for timing
                 self.curriculum_manager.advance_epoch()
