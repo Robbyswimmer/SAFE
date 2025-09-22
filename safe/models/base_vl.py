@@ -93,6 +93,11 @@ class BaseVLModel(nn.Module):
         # Fix padding side for decoder-only models (LLaVA, BLIP2)
         if self.model_type in ["llava", "blip2"]:
             self.tokenizer.padding_side = 'left'
+            # Also configure processor tokenizer if it exists and is different
+            if hasattr(self, 'processor') and hasattr(self.processor, 'tokenizer'):
+                if self.processor.tokenizer is not self.tokenizer:
+                    self.processor.tokenizer.padding_side = 'left'
+                    print(f"[BaseVL] Set processor tokenizer padding_side='left' for {self.model_type}", flush=True)
             print(f"[BaseVL] Set tokenizer padding_side='left' for {self.model_type}", flush=True)
             
         if freeze_llm:

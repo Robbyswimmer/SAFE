@@ -1016,9 +1016,9 @@ class StageATrainer:
                     if i < 2:  # Only log first 2 samples to avoid spam
                         print(f"[AccuracyDebug] Sample {i}:", flush=True)
                         print(f"  GT: '{gt_answer}'", flush=True)
-                        print(f"  SAFE_full: '{safe_pred_full[:100]}...'", flush=True)
+                        print(f"  SAFE_full: '{safe_pred_full}'", flush=True)  # Show full text, no truncation
                         print(f"  SAFE_pred: '{safe_pred}'", flush=True)
-                        print(f"  BASE_full: '{base_pred_full[:100]}...'", flush=True)
+                        print(f"  BASE_full: '{base_pred_full}'", flush=True)  # Show full text, no truncation
                         print(f"  BASE_pred: '{base_pred}'", flush=True)
                     
                     # Compute answer-level accuracy (exact match or fuzzy match)
@@ -1121,6 +1121,9 @@ class StageATrainer:
         tok = self.safe_model.base_vl.tokenizer
         if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token_id", None) is not None:
             tok.pad_token = tok.eos_token
+        # Ensure left padding for generation
+        if hasattr(tok, 'padding_side'):
+            tok.padding_side = 'left'
 
         input_ids = inputs.get("input_ids")
         attention_mask = inputs.get("attention_mask")
@@ -1139,7 +1142,7 @@ class StageATrainer:
         device = next(self.safe_model.parameters()).device
 
         gen_kwargs = dict(
-            max_new_tokens=8,
+            max_new_tokens=32,  # Increased from 8 to allow longer answers
             do_sample=False,
             num_beams=1,
             pad_token_id=tok.pad_token_id,
