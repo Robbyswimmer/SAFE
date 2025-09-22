@@ -312,9 +312,12 @@ class AudioTaskLoss(nn.Module):
             
             # Mask out padded tokens
             active_loss = shift_mask.view(-1) == 1
+            if not torch.any(active_loss):
+                return torch.tensor(0.0, device=logits.device, requires_grad=True)
+
             active_logits = shift_logits.view(-1, shift_logits.size(-1))[active_loss]
             active_labels = shift_labels.view(-1)[active_loss]
-            
+
             loss = self.loss_fn(active_logits.float(), active_labels)
         else:
             loss = self.loss_fn(
