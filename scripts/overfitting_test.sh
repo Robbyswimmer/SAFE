@@ -4,7 +4,7 @@
 #SBATCH --output=logs/overfitting_%j.txt
 #SBATCH --error=logs/overfitting_%j.err
 #SBATCH --time=12:00:00
-#SBATCH --mem=32G
+#SBATCH --mem=48G
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mail-type=FAIL,END

@@ -1019,7 +1019,14 @@ class SAFEModel(nn.Module):
                 model_inputs["pixel_values"] = pixel_values
 
             print(f"[SAFEForward] Calling base_vl.llm with model_inputs keys: {list(model_inputs.keys())}", flush=True)
+            print(f"[SAFEForward] Model inputs shapes: inputs_embeds={inputs_embeds.shape}, attention_mask={attention_mask.shape}, labels={labels.shape if labels is not None else None}", flush=True)
+            print(f"[SAFEForward] LLM model type: {type(self.base_vl.llm)}", flush=True)
+            print(f"[SAFEForward] LLM device: {next(self.base_vl.llm.parameters()).device if hasattr(self.base_vl.llm, 'parameters') else 'unknown'}", flush=True)
+            print(f"[SAFEForward] About to call self.base_vl.llm(**model_inputs)", flush=True)
+            import sys
+            sys.stdout.flush()
             outputs = self.base_vl.llm(**model_inputs)
+            print(f"[SAFEForward] self.base_vl.llm call completed successfully!", flush=True)
             print(f"[SAFEForward] base_vl.llm completed, extracting outputs", flush=True)
             logits = outputs.logits
             loss = outputs.loss if labels is not None else None
