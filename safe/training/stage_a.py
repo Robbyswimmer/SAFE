@@ -1019,7 +1019,7 @@ class StageATrainer:
                 **gen_kwargs,
             )
         else:
-            sanitized_ids = self.safe_model.sanitize_input_ids_for_base(input_ids)
+            sanitized_ids = self._sanitize_input_ids_batch(input_ids)
             base_kwargs = {
                 "attention_mask": attention_mask.to(device) if isinstance(attention_mask, torch.Tensor) else None,
                 **gen_kwargs,

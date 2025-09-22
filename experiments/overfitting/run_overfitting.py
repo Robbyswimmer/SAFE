@@ -20,6 +20,7 @@ import torch
 from torch.utils.data import Dataset, Subset
 
 from safe.models.safe_model import SAFEModel
+from configs.model_configs import DEMO_CONFIG, FULL_CONFIG, MULTIMODAL_CONFIG
 from safe.training.stage_a import StageATrainer
 from safe.data.datasets import (
     AudioCapsDataset,
@@ -397,9 +398,47 @@ def run_experiment(args: argparse.Namespace) -> None:
     )
 
     # Base model setup (reuse demo config for now)
+    model_configs = {
+        "demo": DEMO_CONFIG,
+        "full": FULL_CONFIG,
+        "multimodal": MULTIMODAL_CONFIG,
+    }
+    if args.model_config not in model_configs:
+        raise ValueError(f"Unknown model config '{args.model_config}'. Available: {list(model_configs)}")
+
+    selected_model_config = model_configs[args.model_config]
+    print(f"[DEBUG] Using model config '{args.model_config}'", flush=True)
+
+    safe_model_keys = {
+        "llm_model_name",
+        "vision_model_name",
+        "audio_encoder_type",
+        "audio_encoder_config",
+        "projector_type",
+        "num_audio_tokens",
+        "projector_config",
+        "fusion_type",
+        "fusion_layer_indices",
+        "lora_rank",
+        "fusion_config",
+        "freeze_base_vl",
+        "freeze_audio_encoder",
+        "llm_hidden_size",
+        "audio_embed_dim",
+    }
+
+    model_kwargs = {
+        key: value
+        for key, value in selected_model_config.items()
+        if key in safe_model_keys
+    }
+
     print(f"[DEBUG] Creating SAFEModel...", flush=True)
-    model = SAFEModel()
-    print(f"[DEBUG] SAFEModel created successfully. Model type: {model.base_vl.model_type}", flush=True)
+    model = SAFEModel(**model_kwargs)
+    print(
+        f"[DEBUG] SAFEModel created successfully. Model type: {model.base_vl.model_type}",
+        flush=True,
+    )
 
     print(f"[DEBUG] Creating experiment config...", flush=True)
     base_config = ExperimentConfig(
@@ -503,6 +542,13 @@ def parse_args() -> argparse.Namespace:
                         help="Root of packaged subset (used when train/val-source='pack*')")
     parser.add_argument("--output-root", type=str, default="experiments/overfitting/runs",
                         help="Directory to store experiment outputs")
+    parser.add_argument(
+        "--model-config",
+        type=str,
+        choices=["demo", "full", "multimodal"],
+        default="full",
+        help="Model backbone configuration to use",
+    )
     return parser.parse_args()
 
 
