@@ -56,6 +56,7 @@ class ExperimentConfig:
     output_dir: str
     max_eval_batches: Optional[int]
     eval_logging_steps: int
+    debug_logging: bool
 
 
 def set_random_seeds(seed: int) -> None:
