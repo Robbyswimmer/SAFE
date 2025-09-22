@@ -431,9 +431,10 @@ class SAFEModel(nn.Module):
 
         for i, (seq, mask, label) in enumerate(zip(new_input_ids, new_attention, new_labels)):
             length = seq.size(0)
-            padded_ids[i, :length] = seq
-            padded_attention[i, :length] = mask
-            padded_labels[i, :length] = label
+            start = max_length - length
+            padded_ids[i, start:] = seq
+            padded_attention[i, start:] = mask
+            padded_labels[i, start:] = label
 
         inputs["input_ids"] = padded_ids
         inputs["attention_mask"] = padded_attention
@@ -672,8 +673,9 @@ class SAFEModel(nn.Module):
 
         for idx, (seq, mask) in enumerate(zip(input_id_seqs, attention_masks)):
             length = seq.size(0)
-            input_ids[idx, :length] = seq
-            attention_mask[idx, :length] = mask
+            start = max_len - length
+            input_ids[idx, start:] = seq
+            attention_mask[idx, start:] = mask
 
         inputs = {
             "input_ids": input_ids.to(device),
@@ -703,7 +705,9 @@ class SAFEModel(nn.Module):
                 for idx, val in enumerate(values):
                     if val is None:
                         continue
-                    padded[idx, :val.size(0)] = val
+                    length = val.size(0)
+                    start = max_len - length
+                    padded[idx, start:] = val
                 inputs[key] = padded.to(device)
             else:
                 stacked = []
