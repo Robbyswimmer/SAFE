@@ -135,6 +135,7 @@ class BaseVLModel(nn.Module):
         # 2. Set padding side for decoder-only models (required for causal LMs)
         is_decoder_only = not getattr(getattr(self.llm, "config", {}), "is_encoder_decoder", False)
         if is_decoder_only:
+            # Configure main tokenizer
             if getattr(self.tokenizer, "padding_side", None) != 'left':
                 self.tokenizer.padding_side = 'left'
                 print("[BaseVL] Set main tokenizer padding_side='left' for decoder-only model", flush=True)
@@ -157,6 +158,27 @@ class BaseVLModel(nn.Module):
                     if getattr(proc_tok, "padding_side", None) != 'left':
                         proc_tok.padding_side = 'left'
                         print(f"[BaseVL] Set processor tokenizer padding_side='left'", flush=True)
+            
+            # 4. Force configure any other tokenizer instances in the processor
+            if hasattr(self, 'processor'):
+                # For LLaVA, also check if there are nested tokenizers
+                if hasattr(self.processor, 'image_processor') and hasattr(self.processor.image_processor, 'tokenizer'):
+                    img_proc_tok = self.processor.image_processor.tokenizer
+                    if getattr(img_proc_tok, "padding_side", None) != 'left':
+                        img_proc_tok.padding_side = 'left'
+                        print(f"[BaseVL] Set image processor tokenizer padding_side='left'", flush=True)
+                
+                # Also check if there's a text processor with tokenizer
+                if hasattr(self.processor, 'text_processor') and hasattr(self.processor.text_processor, 'tokenizer'):
+                    text_proc_tok = self.processor.text_processor.tokenizer
+                    if getattr(text_proc_tok, "padding_side", None) != 'left':
+                        text_proc_tok.padding_side = 'left'
+                        print(f"[BaseVL] Set text processor tokenizer padding_side='left'", flush=True)
+                
+                # Force set on processor itself if it has padding_side attribute
+                if hasattr(self.processor, 'padding_side'):
+                    self.processor.padding_side = 'left'
+                    print(f"[BaseVL] Set processor padding_side='left'", flush=True)
         
         # 4. Verify configuration
         self._verify_tokenizer_config()
