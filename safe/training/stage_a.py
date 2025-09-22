@@ -420,6 +420,17 @@ class StageATrainer:
         """
         self.safe_model.train()
         self.safe_model.enable_audio_training()  # Only train audio components
+
+        step_timer_start = None
+        if self.debug_logging:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            step_timer_start = time.time()
+            batch_size_dbg = len(batch.get("questions", [])) if isinstance(batch, dict) else None
+            print(
+                f"[TrainDebug] step {self.global_step}: received batch size={batch_size_dbg}",
+                flush=True,
+            )
         
         # Move batch to device
         device = next(self.safe_model.parameters()).device
@@ -438,6 +449,15 @@ class StageATrainer:
             answers=batch.get("answers", None),
             device=device
         )
+
+        if self.debug_logging:
+            input_shape = None
+            if isinstance(inputs.get("input_ids"), torch.Tensor):
+                input_shape = tuple(inputs["input_ids"].shape)
+            print(
+                f"[TrainDebug] step {self.global_step}: prepared inputs input_ids={input_shape} has_audio={int(has_audio.sum().item())}",
+                flush=True,
+            )
         
         # Optional debug: Check multimodal input preparation (disabled for clean logs)
         # print(f"DEBUG: After prepare_multimodal_inputs, keys: {inputs.keys()}")
@@ -445,6 +465,14 @@ class StageATrainer:
         
         # Forward pass through SAFE model
         safe_outputs = self.safe_model(**inputs)
+        if self.debug_logging:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            elapsed_safe = time.time() - step_timer_start if step_timer_start is not None else 0.0
+            print(
+                f"[TrainDebug] step {self.global_step}: SAFE forward took {elapsed_safe:.2f}s",
+                flush=True,
+            )
         
         # Forward pass through base VL model (for retention loss)
         with torch.no_grad():
@@ -512,6 +540,14 @@ class StageATrainer:
                     raise RuntimeError(
                         f"Teacher/student batch mismatch: {teacher_logits.size(0)} vs {student_logits.size(0)}"
                     )
+        if self.debug_logging:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            elapsed_teacher = time.time() - step_timer_start if step_timer_start is not None else 0.0
+            print(
+                f"[TrainDebug] step {self.global_step}: teacher forward cumulative {elapsed_teacher:.2f}s",
+                flush=True,
+            )
 
         # Compute combined loss
         loss_dict = self.combined_loss(
@@ -520,6 +556,13 @@ class StageATrainer:
             batch=inputs,
             has_audio=has_audio
         )
+        if self.debug_logging:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            print(
+                f"[TrainDebug] step {self.global_step}: combined loss total={loss_dict['total_loss'].item():.4f}",
+                flush=True,
+            )
 
         if self._should_log_sample():
             try:
@@ -576,7 +619,16 @@ class StageATrainer:
         # Convert losses to float
         step_losses = {k: v.item() if isinstance(v, torch.Tensor) else v 
                       for k, v in loss_dict.items()}
-        
+
+        if self.debug_logging:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            elapsed_total = time.time() - step_timer_start if step_timer_start is not None else 0.0
+            print(
+                f"[TrainDebug] step {self.global_step}: total_loss={step_losses.get('total_loss')} elapsed={elapsed_total:.2f}s",
+                flush=True,
+            )
+
         return step_losses
     
     def evaluate(self, max_batches: Optional[int] = None) -> Dict[str, float]:
