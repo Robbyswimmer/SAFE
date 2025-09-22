@@ -123,6 +123,9 @@ class StageATrainer:
         self.sample_logs_emitted = 0
         self._robust_error_logged = False
         self._teacher_shape_warned = False
+        self._teacher_broadcast_warned = False
+        self._shape_debug_once = False
+        self._eval_shape_debug_once = False
 
         # Ensure base VL model is in eval mode for retention comparison
         self.safe_model.base_vl.eval()
@@ -286,6 +289,24 @@ class StageATrainer:
         if loss_values:
             wrapped["loss"] = torch.stack(loss_values).mean()
         return wrapped
+
+    def _sanitize_input_ids_batch(self, input_ids: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if input_ids is None:
+            return None
+        sanitized = self.safe_model.sanitize_input_ids_for_base(input_ids)
+        if sanitized is None:
+            return None
+        if not torch.is_tensor(sanitized):
+            return sanitized
+        if input_ids.dim() == 2 and sanitized.dim() == 1:
+            per_sample = []
+            for row in input_ids:
+                row_clean = self.safe_model.sanitize_input_ids_for_base(row)
+                if torch.is_tensor(row_clean) and row_clean.dim() == 1:
+                    row_clean = row_clean.unsqueeze(0)
+                per_sample.append(row_clean)
+            sanitized = torch.cat(per_sample, dim=0)
+        return sanitized
     
     def _setup_loss_functions(self):
         """Setup loss functions with curriculum-aware weights."""
@@ -425,9 +446,7 @@ class StageATrainer:
         
         # Forward pass through base VL model (for retention loss)
         with torch.no_grad():
-            sanitized_ids = self.safe_model.sanitize_input_ids_for_base(
-                inputs.get("input_ids")
-            )
+            sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
             sanitized_labels = self.safe_model.sanitize_labels_for_base(
                 inputs.get("labels")
             )
@@ -459,7 +478,7 @@ class StageATrainer:
                 if not getattr(self, "_train_output_logged", False):
                     print(f"[TrainDebug] Teacher output logits shape: {base_outputs['logits'].shape}", flush=True)
                     self._train_output_logged = True
-                    
+
             elif self.safe_model.base_vl.model_type == "blip2":
                 # BLIP-2: use directly without splitting
                 base_outputs = self.safe_model.base_vl(**base_inputs)
@@ -467,7 +486,31 @@ class StageATrainer:
                 # For custom models, use vision features
                 base_inputs["vision_features"] = inputs.get("vision_features")
                 base_outputs = self.safe_model.base_vl(**base_inputs)
-        
+
+            if not self._shape_debug_once:
+                input_shape = None if inputs.get("input_ids") is None else tuple(inputs["input_ids"].shape)
+                sanitized_shape = None if base_inputs.get("input_ids") is None else tuple(base_inputs["input_ids"].shape)
+                print(f"[ShapeDebug] SAFE input_ids: {input_shape}; teacher input_ids: {sanitized_shape}", flush=True)
+                self._shape_debug_once = True
+
+            student_logits = safe_outputs.get("logits") if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits", None)
+            teacher_logits = base_outputs.get("logits") if isinstance(base_outputs, dict) else getattr(base_outputs, "logits", None)
+            if student_logits is not None and teacher_logits is not None and teacher_logits.size(0) != student_logits.size(0):
+                if teacher_logits.size(0) == 1:
+                    if not getattr(self, "_teacher_broadcast_warned", False):
+                        print(
+                            f"[Warn] Teacher batch={teacher_logits.size(0)} but student batch={student_logits.size(0)}; expanding teacher logits",
+                            flush=True
+                        )
+                        self._teacher_broadcast_warned = True
+                    teacher_logits = teacher_logits.expand_as(student_logits)
+                    if isinstance(base_outputs, dict):
+                        base_outputs["logits"] = teacher_logits
+                else:
+                    raise RuntimeError(
+                        f"Teacher/student batch mismatch: {teacher_logits.size(0)} vs {student_logits.size(0)}"
+                    )
+
         # Compute combined loss
         loss_dict = self.combined_loss(
             safe_outputs=safe_outputs,
@@ -632,7 +675,7 @@ class StageATrainer:
                 safe_outputs = self.safe_model(**inputs)
                 
                 # Base VL model forward pass
-                sanitized_ids = self.safe_model.sanitize_input_ids_for_base(inputs.get("input_ids"))
+                sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
                 sanitized_labels = self.safe_model.sanitize_labels_for_base(inputs.get("labels"))
                 base_inputs = {
                     "attention_mask": inputs["attention_mask"],
@@ -655,7 +698,31 @@ class StageATrainer:
                     # For custom models, use vision features
                     base_inputs["vision_features"] = inputs.get("vision_features")
                     base_outputs = self.safe_model.base_vl(**base_inputs)
-                
+
+                if not getattr(self, "_eval_shape_debug_once", False):
+                    input_shape = None if inputs.get("input_ids") is None else tuple(inputs["input_ids"].shape)
+                    sanitized_shape = None if base_inputs.get("input_ids") is None else tuple(base_inputs["input_ids"].shape)
+                    print(f"[EvalShapeDebug] SAFE input_ids: {input_shape}; teacher input_ids: {sanitized_shape}", flush=True)
+                    self._eval_shape_debug_once = True
+
+                student_logits = safe_outputs.get("logits") if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits", None)
+                teacher_logits = base_outputs.get("logits") if isinstance(base_outputs, dict) else getattr(base_outputs, "logits", None)
+                if student_logits is not None and teacher_logits is not None and teacher_logits.size(0) != student_logits.size(0):
+                    if teacher_logits.size(0) == 1:
+                        if not getattr(self, "_teacher_broadcast_warned", False):
+                            print(
+                                f"[Warn] Teacher batch={teacher_logits.size(0)} but student batch={student_logits.size(0)}; expanding teacher logits",
+                                flush=True
+                            )
+                            self._teacher_broadcast_warned = True
+                        teacher_logits = teacher_logits.expand_as(student_logits)
+                        if isinstance(base_outputs, dict):
+                            base_outputs["logits"] = teacher_logits
+                    else:
+                        raise RuntimeError(
+                            f"Teacher/student batch mismatch: {teacher_logits.size(0)} vs {student_logits.size(0)}"
+                        )
+
                 # Compute losses
                 batch_losses = self.combined_loss(
                     safe_outputs=safe_outputs,
