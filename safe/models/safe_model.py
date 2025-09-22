@@ -996,9 +996,7 @@ class SAFEModel(nn.Module):
                 inputs_embeds = torch.cat([audio_tokens, inputs_embeds], dim=1)
                 attention_mask = torch.cat([audio_mask, attention_mask], dim=1)
                 print(f"[SAFEForward] After audio fusion - inputs_embeds: {inputs_embeds.shape}, attention_mask: {attention_mask.shape}", flush=True)
-            else:
-                print(f"[SAFEForward] No audio tokens to process (audio_tokens is None: {audio_tokens is None}, gate: {gate})", flush=True)
-
+                
                 if labels is not None:
                     audio_label_pad = torch.full(
                         (labels.size(0), audio_tokens.size(1)),
@@ -1007,6 +1005,8 @@ class SAFEModel(nn.Module):
                         device=labels.device,
                     )
                     labels = torch.cat([audio_label_pad, labels], dim=1)
+            else:
+                print(f"[SAFEForward] No audio tokens to process (audio_tokens is None: {audio_tokens is None}, gate: {gate})", flush=True)
 
             model_inputs = {
                 "inputs_embeds": inputs_embeds,
