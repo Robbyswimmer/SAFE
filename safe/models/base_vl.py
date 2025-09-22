@@ -289,6 +289,7 @@ class BaseVLModel(nn.Module):
         """
         if self.model_type in ["llava", "blip2"]:
             # Use native multimodal forward pass
+            print(f"[BaseVLForward] Using {self.model_type} forward path", flush=True)
             llm_kwargs = dict(attention_mask=attention_mask, labels=labels, **kwargs)
             if self.model_type == "blip2" and pixel_values is None:
                 base = input_ids if input_ids is not None else inputs_embeds
@@ -301,9 +302,13 @@ class BaseVLModel(nn.Module):
                 llm_kwargs["pixel_values"] = pixel_values
 
             if input_ids is not None:
+                print(f"[BaseVLForward] Calling self.llm with input_ids shape: {input_ids.shape}", flush=True)
                 outputs = self.llm(input_ids=input_ids, **llm_kwargs)
+                print(f"[BaseVLForward] self.llm returned successfully", flush=True)
             elif inputs_embeds is not None:
+                print(f"[BaseVLForward] Calling self.llm with inputs_embeds shape: {inputs_embeds.shape}", flush=True)
                 outputs = self.llm(inputs_embeds=inputs_embeds, **llm_kwargs)
+                print(f"[BaseVLForward] self.llm returned successfully", flush=True)
             else:
                 raise ValueError("BaseVLModel.forward requires input_ids or inputs_embeds")
         else:
