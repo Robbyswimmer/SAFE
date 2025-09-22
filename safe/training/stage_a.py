@@ -128,6 +128,7 @@ class StageATrainer:
         self._shape_debug_once = False
         self._eval_shape_debug_once = False
         self.debug_logging = bool(self.config.get("debug_logging", False))
+        setattr(self.safe_model, "debug_logging", self.debug_logging)
 
         # Move model to GPU if available
         if torch.cuda.is_available():

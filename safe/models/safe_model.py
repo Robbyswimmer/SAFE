@@ -285,6 +285,24 @@ class SAFEModel(nn.Module):
         if self.projector_type == "adaptive":
             audio_tokens = self.audio_projector(audio_features, num_tokens)
         else:
+            if not isinstance(audio_features, torch.Tensor):
+                audio_features = torch.tensor(audio_features)
+            device = next(self.audio_projector.parameters()).device
+            audio_features = audio_features.to(device)
+            if audio_features.dim() > 2:
+                if getattr(self, "debug_logging", False):
+                    print(
+                        f"[AudioDebug] audio_features dim={audio_features.dim()} shape={audio_features.shape}; reducing via mean",
+                        flush=True,
+                    )
+                audio_features = audio_features.mean(dim=1)
+            elif audio_features.dim() == 1:
+                audio_features = audio_features.unsqueeze(0)
+            if getattr(self, "debug_logging", False):
+                print(
+                    f"[AudioDebug] Projector input shape={audio_features.shape}",
+                    flush=True,
+                )
             audio_tokens = self.audio_projector(audio_features)
 
         return audio_tokens, transcripts
