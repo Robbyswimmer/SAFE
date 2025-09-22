@@ -541,6 +541,25 @@ class StageATrainer:
 
             student_logits = safe_outputs.get("logits") if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits", None)
             teacher_logits = base_outputs.get("logits") if isinstance(base_outputs, dict) else getattr(base_outputs, "logits", None)
+            if student_logits is not None and teacher_logits is not None:
+                trim_len = min(student_logits.size(1), teacher_logits.size(1))
+                if student_logits.size(1) != trim_len:
+                    trimmed_student = student_logits[:, -trim_len:, :]
+                    if isinstance(safe_outputs, dict):
+                        safe_outputs["logits"] = trimmed_student
+                    else:
+                        safe_outputs.logits = trimmed_student
+                    if inputs.get("labels") is not None and inputs["labels"].size(1) != trim_len:
+                        inputs["labels"] = inputs["labels"][:, -trim_len:]
+                    if inputs.get("attention_mask") is not None and inputs["attention_mask"].size(1) != trim_len:
+                        inputs["attention_mask"] = inputs["attention_mask"][:, -trim_len:]
+                if teacher_logits.size(1) != trim_len:
+                    trimmed_teacher = teacher_logits[:, -trim_len:, :]
+                    if isinstance(base_outputs, dict):
+                        base_outputs["logits"] = trimmed_teacher
+                    else:
+                        base_outputs.logits = trimmed_teacher
+
             if student_logits is not None and teacher_logits is not None and teacher_logits.size(0) != student_logits.size(0):
                 if teacher_logits.size(0) == 1:
                     if not getattr(self, "_teacher_broadcast_warned", False):
@@ -811,6 +830,25 @@ class StageATrainer:
 
                 student_logits = safe_outputs.get("logits") if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits", None)
                 teacher_logits = base_outputs.get("logits") if isinstance(base_outputs, dict) else getattr(base_outputs, "logits", None)
+                if student_logits is not None and teacher_logits is not None:
+                    trim_len = min(student_logits.size(1), teacher_logits.size(1))
+                    if student_logits.size(1) != trim_len:
+                        trimmed_student = student_logits[:, -trim_len:, :]
+                        if isinstance(safe_outputs, dict):
+                            safe_outputs["logits"] = trimmed_student
+                        else:
+                            safe_outputs.logits = trimmed_student
+                        if inputs.get("labels") is not None and inputs["labels"].size(1) != trim_len:
+                            inputs["labels"] = inputs["labels"][:, -trim_len:]
+                        if inputs.get("attention_mask") is not None and inputs["attention_mask"].size(1) != trim_len:
+                            inputs["attention_mask"] = inputs["attention_mask"][:, -trim_len:]
+                    if teacher_logits.size(1) != trim_len:
+                        trimmed_teacher = teacher_logits[:, -trim_len:, :]
+                        if isinstance(base_outputs, dict):
+                            base_outputs["logits"] = trimmed_teacher
+                        else:
+                            base_outputs.logits = trimmed_teacher
+
                 if student_logits is not None and teacher_logits is not None and teacher_logits.size(0) != student_logits.size(0):
                     if teacher_logits.size(0) == 1:
                         if not getattr(self, "_teacher_broadcast_warned", False):
