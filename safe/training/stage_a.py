@@ -1012,9 +1012,21 @@ class StageATrainer:
                     # Get ground truth with proper cleaning
                     gt_answer = self._clean_answer(gt_answers[i]) if i < len(gt_answers) else ""
                     
+                    # Debug output for first few samples
+                    if i < 2:  # Only log first 2 samples to avoid spam
+                        print(f"[AccuracyDebug] Sample {i}:", flush=True)
+                        print(f"  GT: '{gt_answer}'", flush=True)
+                        print(f"  SAFE_full: '{safe_pred_full[:100]}...'", flush=True)
+                        print(f"  SAFE_pred: '{safe_pred}'", flush=True)
+                        print(f"  BASE_full: '{base_pred_full[:100]}...'", flush=True)
+                        print(f"  BASE_pred: '{base_pred}'", flush=True)
+                    
                     # Compute answer-level accuracy (exact match or fuzzy match)
                     safe_accuracies[i] = self._compute_answer_accuracy(safe_pred, gt_answer)
                     base_accuracies[i] = self._compute_answer_accuracy(base_pred, gt_answer)
+                    
+                    if i < 2:  # Continue debug for accuracy computation
+                        print(f"  SAFE_acc: {safe_accuracies[i]}, BASE_acc: {base_accuracies[i]}", flush=True)
                     
                 except Exception as e:
                     # Handle decoding errors gracefully

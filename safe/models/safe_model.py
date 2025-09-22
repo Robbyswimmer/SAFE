@@ -1267,3 +1267,31 @@ class SAFEModel(nn.Module):
             )
         return outputs["logits"]
     
+    def cuda(self, device=None):
+        """Move all model components to CUDA device."""
+        print(f"[SAFEModel] Moving all components to CUDA...", flush=True)
+        
+        # Move main module to CUDA
+        super().cuda(device)
+        
+        # Explicitly move all subcomponents
+        print(f"[SAFEModel] Moving base_vl to CUDA...", flush=True)
+        self.base_vl = self.base_vl.cuda(device)
+        
+        print(f"[SAFEModel] Moving audio_encoder to CUDA...", flush=True)
+        self.audio_encoder = self.audio_encoder.cuda(device)
+        
+        print(f"[SAFEModel] Moving audio_projector to CUDA...", flush=True)
+        self.audio_projector = self.audio_projector.cuda(device)
+        
+        if hasattr(self, 'fusion_adapter') and self.fusion_adapter is not None:
+            print(f"[SAFEModel] Moving fusion_adapter to CUDA...", flush=True)
+            self.fusion_adapter = self.fusion_adapter.cuda(device)
+        
+        if hasattr(self, 'audio_token_embeddings') and self.audio_token_embeddings is not None:
+            print(f"[SAFEModel] Moving audio_token_embeddings to CUDA...", flush=True)
+            self.audio_token_embeddings = self.audio_token_embeddings.cuda(device)
+        
+        print(f"[SAFEModel] All components moved to CUDA successfully", flush=True)
+        return self
+    

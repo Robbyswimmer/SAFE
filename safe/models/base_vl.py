@@ -89,6 +89,11 @@ class BaseVLModel(nn.Module):
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        # Fix padding side for decoder-only models (LLaVA, BLIP2)
+        if self.model_type in ["llava", "blip2"]:
+            self.tokenizer.padding_side = 'left'
+            print(f"[BaseVL] Set tokenizer padding_side='left' for {self.model_type}", flush=True)
             
         if freeze_llm:
             for param in self.llm.parameters():
