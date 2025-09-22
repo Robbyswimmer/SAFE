@@ -549,6 +549,7 @@ class StageATrainer:
                         safe_outputs["logits"] = trimmed_student
                     else:
                         safe_outputs.logits = trimmed_student
+                    student_logits = trimmed_student
                     if inputs.get("labels") is not None and inputs["labels"].size(1) != trim_len:
                         inputs["labels"] = inputs["labels"][:, -trim_len:]
                     if inputs.get("attention_mask") is not None and inputs["attention_mask"].size(1) != trim_len:
@@ -559,6 +560,7 @@ class StageATrainer:
                         base_outputs["logits"] = trimmed_teacher
                     else:
                         base_outputs.logits = trimmed_teacher
+                    teacher_logits = trimmed_teacher
 
             if student_logits is not None and teacher_logits is not None and teacher_logits.size(0) != student_logits.size(0):
                 if teacher_logits.size(0) == 1:
@@ -596,6 +598,20 @@ class StageATrainer:
                 torch.cuda.synchronize()
             print(
                 f"[TrainDebug] step {self.global_step}: combined loss total={loss_dict['total_loss'].item():.4f}",
+                flush=True,
+            )
+            if 'audio_task_loss' in loss_dict:
+                audio_val = loss_dict['audio_task_loss']
+                audio_val = audio_val.item() if isinstance(audio_val, torch.Tensor) else audio_val
+            else:
+                audio_val = None
+            if 'retention_loss' in loss_dict:
+                retention_val = loss_dict['retention_loss']
+                retention_val = retention_val.item() if isinstance(retention_val, torch.Tensor) else retention_val
+            else:
+                retention_val = None
+            print(
+                f"[TrainDebug] step {self.global_step}: components audio={audio_val} retention={retention_val}",
                 flush=True,
             )
 
@@ -838,6 +854,7 @@ class StageATrainer:
                             safe_outputs["logits"] = trimmed_student
                         else:
                             safe_outputs.logits = trimmed_student
+                        student_logits = trimmed_student
                         if inputs.get("labels") is not None and inputs["labels"].size(1) != trim_len:
                             inputs["labels"] = inputs["labels"][:, -trim_len:]
                         if inputs.get("attention_mask") is not None and inputs["attention_mask"].size(1) != trim_len:
@@ -848,6 +865,7 @@ class StageATrainer:
                             base_outputs["logits"] = trimmed_teacher
                         else:
                             base_outputs.logits = trimmed_teacher
+                        teacher_logits = trimmed_teacher
 
                 if student_logits is not None and teacher_logits is not None and teacher_logits.size(0) != student_logits.size(0):
                     if teacher_logits.size(0) == 1:
@@ -1192,23 +1210,24 @@ class StageATrainer:
                 attention_mask = attention_mask.unsqueeze(0)
 
         device = next(self.safe_model.parameters()).device
-        
-        # Debug input format
-        print(f"[GenDebug] Input shape: {input_ids.shape}", flush=True)
-        sample_input_text = tok.decode(input_ids[0], skip_special_tokens=True)
-        print(f"[GenDebug] Sample input text: '{sample_input_text[:200]}...'", flush=True)
+
+        if self.debug_logging:
+            print(f"[GenDebug] Input shape: {input_ids.shape}", flush=True)
+            sample_input_text = tok.decode(input_ids[0], skip_special_tokens=True)
+            print(f"[GenDebug] Sample input text: '{sample_input_text[:200]}...'", flush=True)
 
         gen_kwargs = dict(
-            max_new_tokens=64,  # Increased further for better answers
-            do_sample=True,     # Enable sampling for more diverse responses
-            temperature=0.7,    # Add temperature for controlled randomness
-            top_p=0.9,         # Use nucleus sampling
-            num_beams=1,       # Keep beam search simple
+            max_new_tokens=6,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
-            repetition_penalty=1.1,  # Reduce repetition
+            repetition_penalty=1.0,
         )
-        print(f"[GenDebug] Generation kwargs: {gen_kwargs}", flush=True)
+        if self.debug_logging:
+            print(f"[GenDebug] Generation kwargs: {gen_kwargs}", flush=True)
 
         if model_choice == "safe":
             generated = self.safe_model.generate(
@@ -1235,15 +1254,16 @@ class StageATrainer:
 
         if not isinstance(generated, torch.Tensor):
             generated = torch.as_tensor(generated)
+        generated = generated.to(device)
 
         audio_prefix = audio_tokens.size(1) if isinstance(audio_tokens, torch.Tensor) else 0
         prompt_source = sanitized_ids if model_choice == "base" and 'sanitized_ids' in locals() and sanitized_ids is not None else input_ids
         prompt_len = prompt_source.shape[1]
         
-        # Debug generation output
-        print(f"[GenDebug] Generated shape: {generated.shape}", flush=True)
-        print(f"[GenDebug] Audio prefix: {audio_prefix}, Prompt len: {prompt_len}", flush=True)
-        print(f"[GenDebug] Extraction start index: {audio_prefix + prompt_len}", flush=True)
+        if self.debug_logging:
+            print(f"[GenDebug] Generated shape: {generated.shape}", flush=True)
+            print(f"[GenDebug] Audio prefix: {audio_prefix}, Prompt len: {prompt_len}", flush=True)
+            print(f"[GenDebug] Extraction start index: {audio_prefix + prompt_len}", flush=True)
         
         # Extract only the newly generated tokens (after prompt)
         extracted_tokens = []
@@ -1252,19 +1272,25 @@ class StageATrainer:
             start_idx = audio_prefix + prompt_len
             if start_idx < generated.shape[1]:
                 new_tokens = generated[i, start_idx:]
-                print(f"[GenDebug] Sample {i}: extracted {len(new_tokens)} new tokens", flush=True)
+                if self.debug_logging:
+                    print(f"[GenDebug] Sample {i}: extracted {len(new_tokens)} new tokens", flush=True)
                 extracted_tokens.append(new_tokens)
             else:
-                print(f"[GenDebug] Sample {i}: no new tokens generated (start_idx={start_idx} >= seq_len={generated.shape[1]})", flush=True)
-                extracted_tokens.append(torch.tensor([], dtype=torch.long))
+                if self.debug_logging:
+                    print(f"[GenDebug] Sample {i}: no new tokens generated (start_idx={start_idx} >= seq_len={generated.shape[1]})", flush=True)
+                extracted_tokens.append(torch.tensor([], dtype=torch.long, device=generated.device))
         
         return extracted_tokens
     
     def _clean_answer(self, s: str) -> str:
         """Clean and normalize answer text."""
         s = s.strip()
-        s = s.split("Answer:")[-1].strip() if "Answer:" in s else s
-        return " ".join(s.split())  # collapse spaces
+        if "Answer:" in s:
+            s = s.split("Answer:")[-1].strip()
+        s = s.split("\n")[0]
+        s = s.split(".")[0]
+        tokens = s.split()
+        return " ".join(tokens[:5])  # collapse spaces
     
     def _extract_answer(self, generated_text):
         """Extract answer from generated text after 'Answer:'"""

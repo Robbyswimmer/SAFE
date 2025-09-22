@@ -185,6 +185,12 @@ class BaseVLModel(nn.Module):
 
         # 2. Ensure left padding when required
         self.ensure_left_padding()
+        if hasattr(self.llm, "config"):
+            self.llm.config.pad_token_id = self.tokenizer.pad_token_id
+            self.llm.config.eos_token_id = self.tokenizer.eos_token_id
+        if hasattr(self.llm, "generation_config"):
+            self.llm.generation_config.pad_token_id = self.tokenizer.pad_token_id
+            self.llm.generation_config.eos_token_id = self.tokenizer.eos_token_id
 
         # 3. Verify configuration
         self._verify_tokenizer_config()

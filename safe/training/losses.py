@@ -304,21 +304,21 @@ class AudioTaskLoss(nn.Module):
             Task loss
         """
         # Flatten for loss computation
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = labels[..., 1:].contiguous()
+        shift_logits = logits[..., :-1, :]
+        shift_labels = labels[..., 1:]
+
+        seq_len = min(shift_logits.size(-2), shift_labels.size(-1))
+        shift_logits = shift_logits[..., :seq_len, :].contiguous()
+        shift_labels = shift_labels[..., :seq_len].contiguous()
 
         if attention_mask is not None:
-            shift_mask = attention_mask[..., 1:].contiguous()
-            
-            seq_len = min(shift_logits.size(1), shift_labels.size(1), shift_mask.size(1))
-            shift_logits = shift_logits[:, :seq_len, :]
-            shift_labels = shift_labels[:, :seq_len]
-            shift_mask = shift_mask[:, :seq_len]
+            shift_mask = attention_mask[..., 1:]
+            shift_mask = shift_mask[..., :seq_len].contiguous()
 
-            flat_logits = shift_logits.reshape(-1, shift_logits.size(-1))
+            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
             flat_labels = shift_labels.reshape(-1)
-            flat_mask = shift_mask.reshape(-1) == 1
-
+            flat_mask = shift_mask.reshape(-1).eq(1)
+            
             # Also ignore label positions explicitly marked as -100
             valid = flat_mask & (flat_labels != -100)
             if not torch.any(valid):
@@ -326,11 +326,7 @@ class AudioTaskLoss(nn.Module):
 
             loss = self.loss_fn(flat_logits[valid].float(), flat_labels[valid])
         else:
-            seq_len = min(shift_logits.size(1), shift_labels.size(1))
-            shift_logits = shift_logits[:, :seq_len, :]
-            shift_labels = shift_labels[:, :seq_len]
-
-            flat_logits = shift_logits.reshape(-1, shift_logits.size(-1))
+            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
             flat_labels = shift_labels.reshape(-1)
             valid = flat_labels != -100
             if not torch.any(valid):

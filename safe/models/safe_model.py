@@ -587,6 +587,7 @@ class SAFEModel(nn.Module):
         
         # Build LLaVA chat conversations with proper <image> token placement
         conversations = []
+        instruction = "Answer in a single word or number."
         for i, question in enumerate(texts):
             if i < len(pil_images) and pil_images[i] is not None:
                 # Multimodal conversation
@@ -595,14 +596,14 @@ class SAFEModel(nn.Module):
                         "role": "user", 
                         "content": [
                             {"type": "image"}, 
-                            {"type": "text", "text": question}
+                            {"type": "text", "text": f"{question}\n{instruction}"}
                         ]
                     }
                 ])
             else:
                 # Text-only conversation
                 conversations.append([
-                    {"role": "user", "content": question}
+                    {"role": "user", "content": f"{question}\n{instruction}"}
                 ])
         
         # Apply chat template to get proper prompts with <image> tokens
@@ -621,9 +622,9 @@ class SAFEModel(nn.Module):
             prompts = []
             for i, question in enumerate(texts):
                 if i < len(pil_images) and pil_images[i] is not None:
-                    prompts.append(f"USER: {image_token}\n{question}\nASSISTANT:")
+                    prompts.append(f"USER: {image_token}\n{question}\n{instruction}\nASSISTANT:")
                 else:
-                    prompts.append(f"USER: {question}\nASSISTANT:")
+                    prompts.append(f"USER: {question}\n{instruction}\nASSISTANT:")
         
         num_samples = len(prompts)
         if not pil_images:
