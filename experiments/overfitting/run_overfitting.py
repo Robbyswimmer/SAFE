@@ -339,6 +339,57 @@ def build_stage_a_config(config: ExperimentConfig) -> Dict[str, float | int | bo
     }
 
 
+def _save_variant_checkpoint(safe_model: SAFEModel, variant: str, run_dir: Path) -> None:
+    """Save only the parameters that were actually trained for each variant."""
+    # Create checkpoints directory  
+    checkpoint_dir = Path("experiments/overfitting/checkpoints")
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create variant-specific checkpoint path
+    checkpoint_path = checkpoint_dir / f"{variant}_model.pt"
+    
+    if variant == "no_retention":
+        # No additional parameters trained - just save a marker file
+        marker_path = checkpoint_dir / f"{variant}_marker.txt"
+        with open(marker_path, "w") as f:
+            f.write("no_retention variant - uses base model only\n")
+        print(f"No checkpoint saved for {variant} (uses base model only)")
+        print(f"Marker saved to: {marker_path}")
+        
+    elif variant == "soft_retention":
+        # Save only retention/distillation components (projectors, adapters)
+        state_dict = {}
+        for name, param in safe_model.named_parameters():
+            # Save only trainable parameters that aren't part of the base LLM
+            if param.requires_grad and not name.startswith('base_vl.llm.'):
+                state_dict[name] = param.cpu()
+        
+        if state_dict:
+            torch.save({
+                'variant': variant,
+                'model_state_dict': state_dict,
+                'trained_params': list(state_dict.keys())
+            }, checkpoint_path)
+            print(f"Soft retention checkpoint saved to: {checkpoint_path}")
+            print(f"Saved {len(state_dict)} trained parameter tensors")
+        else:
+            print(f"Warning: No trainable parameters found for {variant}")
+            
+    elif variant == "full_safe":
+        # Save all SAFE model parameters
+        state_dict = safe_model.state_dict()
+        torch.save({
+            'variant': variant,
+            'model_state_dict': state_dict,
+            'full_model': True
+        }, checkpoint_path)
+        print(f"Full SAFE checkpoint saved to: {checkpoint_path}")
+        print(f"Saved {len(state_dict)} total parameter tensors")
+    
+    else:
+        print(f"Warning: Unknown variant '{variant}' - no checkpoint saved")
+
+
 def configure_variant(variant: str, base_config: ExperimentConfig) -> ExperimentConfig:
     variant = variant.lower()
     cfg = base_config
@@ -490,6 +541,9 @@ def run_experiment(args: argparse.Namespace) -> None:
     print(f"[DEBUG] Starting trainer.train()...", flush=True)
     final_metrics = trainer.train()
     print(f"[DEBUG] trainer.train() completed", flush=True)
+
+    # Save variant-specific model parameters (only what was actually trained)
+    _save_variant_checkpoint(safe_model, variant, run_dir)
 
     # Persist artefacts
     config_path = run_dir / "config.json"
