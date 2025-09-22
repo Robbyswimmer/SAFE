@@ -39,6 +39,7 @@ TRAIN_BS=${TRAIN_BS:-8}
 VAL_BS=${VAL_BS:-16}
 NUM_WORKERS=${NUM_WORKERS:-0}
 SEED=${SEED:-42}
+MODEL_CONFIG=${MODEL_CONFIG:-full}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_ROOT"
@@ -69,7 +70,8 @@ for variant in "${variants[@]}"; do
     --output-root "${OUTPUT_ROOT}" \
     --null-space-min-samples 64 \
     --null-space-rank 8 \
-    --null-space-refresh 2000
+    --null-space-refresh 2000 \
+    --model-config "${MODEL_CONFIG}"
   echo "=== Completed variant: ${variant} ===\n"
 done
 
