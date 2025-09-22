@@ -170,32 +170,22 @@ class SAFEModel(nn.Module):
         Returns:
             Embeddings tensor
         """
-        print(f"[GetInputEmbeddings] Starting with input_ids shape: {input_ids.shape}", flush=True)
         # Get base embeddings for original vocabulary
-        print(f"[GetInputEmbeddings] Getting base embeddings from base_vl.llm", flush=True)
         base_embeddings = self.base_vl.llm.get_input_embeddings()
-        print(f"[GetInputEmbeddings] Got base embeddings", flush=True)
         
         # Check if we have any audio tokens
-        print(f"[GetInputEmbeddings] Checking for audio tokens (original_vocab_size: {self.original_vocab_size})", flush=True)
         has_audio_tokens = (input_ids >= self.original_vocab_size).any()
-        print(f"[GetInputEmbeddings] Has audio tokens: {has_audio_tokens}", flush=True)
         
         if not has_audio_tokens:
             # No audio tokens, use base embeddings directly
-            print(f"[GetInputEmbeddings] No audio tokens, calling base_embeddings directly", flush=True)
-            result = base_embeddings(input_ids)
-            print(f"[GetInputEmbeddings] Base embeddings returned shape: {result.shape}", flush=True)
-            return result
+            return base_embeddings(input_ids)
         
         # Handle mixed tokens (original + audio)
-        print(f"[GetInputEmbeddings] Handling mixed tokens", flush=True)
         device = input_ids.device
         batch_size, seq_len = input_ids.shape
         
         # Create output tensor using actual embedding dimension
         actual_hidden_size = base_embeddings.weight.size(1)
-        print(f"[GetInputEmbeddings] Creating embeddings tensor: {batch_size}x{seq_len}x{actual_hidden_size}", flush=True)
         embeddings = torch.zeros(
             batch_size, seq_len, actual_hidden_size,
             dtype=base_embeddings.weight.dtype,
@@ -1022,21 +1012,16 @@ class SAFEModel(nn.Module):
         **kwargs
     ) -> Dict[str, torch.Tensor]:
         """Forward pass through SAFE model."""
-        print(f"[SAFEForward] Starting forward pass, model_type={self.base_vl.model_type}", flush=True)
         # For BLIP2/LLaVA models, fuse audio by prefixing projected tokens
         if self.base_vl.model_type in ["blip2", "llava"]:
-            print(f"[SAFEForward] Using BLIP2/LLaVA path", flush=True)
             pixel_values = kwargs.pop("pixel_values", None)
             filtered_kwargs = kwargs
 
             if attention_mask is None:
                 attention_mask = torch.ones_like(input_ids, dtype=torch.long)
 
-            print(f"[SAFEForward] Getting input embeddings for input_ids shape: {input_ids.shape if input_ids is not None else None}", flush=True)
             inputs_embeds = self.get_input_embeddings(input_ids)
-            print(f"[SAFEForward] Got input embeddings shape: {inputs_embeds.shape}", flush=True)
             if audio_tokens is not None and gate > 0.0:
-                print(f"[SAFEForward] Processing audio tokens shape: {audio_tokens.shape}", flush=True)
                 audio_tokens = audio_tokens.to(inputs_embeds.dtype)
                 if gate != 1.0:
                     audio_tokens = audio_tokens * gate
@@ -1049,7 +1034,6 @@ class SAFEModel(nn.Module):
                 )
                 inputs_embeds = torch.cat([audio_tokens, inputs_embeds], dim=1)
                 attention_mask = torch.cat([audio_mask, attention_mask], dim=1)
-                print(f"[SAFEForward] After audio fusion - inputs_embeds: {inputs_embeds.shape}, attention_mask: {attention_mask.shape}", flush=True)
                 
                 if labels is not None:
                     audio_label_pad = torch.full(
@@ -1059,8 +1043,6 @@ class SAFEModel(nn.Module):
                         device=labels.device,
                     )
                     labels = torch.cat([audio_label_pad, labels], dim=1)
-            else:
-                print(f"[SAFEForward] No audio tokens to process (audio_tokens is None: {audio_tokens is None}, gate: {gate})", flush=True)
 
             model_inputs = {
                 "inputs_embeds": inputs_embeds,
@@ -1072,22 +1054,13 @@ class SAFEModel(nn.Module):
             if pixel_values is not None:
                 model_inputs["pixel_values"] = pixel_values
 
-            print(f"[SAFEForward] Calling base_vl.llm with model_inputs keys: {list(model_inputs.keys())}", flush=True)
-            print(f"[SAFEForward] Model inputs shapes: inputs_embeds={inputs_embeds.shape}, attention_mask={attention_mask.shape}, labels={labels.shape if labels is not None else None}", flush=True)
-            print(f"[SAFEForward] LLM model type: {type(self.base_vl.llm)}", flush=True)
-            print(f"[SAFEForward] LLM device: {next(self.base_vl.llm.parameters()).device if hasattr(self.base_vl.llm, 'parameters') else 'unknown'}", flush=True)
-            print(f"[SAFEForward] About to call self.base_vl.llm(**model_inputs)", flush=True)
             import sys
             sys.stdout.flush()
             outputs = self.base_vl.llm(**model_inputs)
-            print(f"[SAFEForward] self.base_vl.llm call completed successfully!", flush=True)
-            print(f"[SAFEForward] base_vl.llm completed, extracting outputs", flush=True)
             logits = outputs.logits
             loss = outputs.loss if labels is not None else None
-            print(f"[SAFEForward] Returning logits shape: {logits.shape}, loss: {loss is not None}", flush=True)
             return {"logits": logits, "loss": loss, "hidden_states": None}
         
-        print(f"[SAFEForward] Using custom model path", flush=True)
         resolved_input_ids = input_ids if input_ids is not None else kwargs.pop("input_ids", None)
         inputs_embeds_kw = kwargs.pop("inputs_embeds", None)
 
@@ -1113,9 +1086,7 @@ class SAFEModel(nn.Module):
                     base_inputs["input_ids"] = sanitized_ids
                 else:
                     base_inputs["inputs_embeds"] = inputs_embeds_kw
-                print(f"[SAFEForward] Calling base_vl for no audio path", flush=True)
                 result = self.base_vl(**base_inputs, **kwargs)
-                print(f"[SAFEForward] base_vl returned for no audio path", flush=True)
                 return result
             else:
                 if resolved_input_ids is not None:
@@ -1128,9 +1099,7 @@ class SAFEModel(nn.Module):
                     "labels": labels,
                     "vision_features": vision_features,
                 }
-                print(f"[SAFEForward] Calling base_vl for no audio path", flush=True)
                 result = self.base_vl(**base_inputs, **kwargs)
-                print(f"[SAFEForward] base_vl returned for no audio path", flush=True)
                 return result
 
         # Get token embeddings using our custom method
