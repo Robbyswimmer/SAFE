@@ -775,6 +775,7 @@ class StageATrainer:
                 
                 # Compute accuracy metrics using robust methods
                 # Generate predictions and compute answer-level accuracy
+                print(f"[PROGRESS] Starting robust accuracy for batch {batch_idx}", flush=True)
                 if self.debug_logging:
                     print(
                         f"[EvalDebug] batch {batch_idx}: computing robust accuracy",
@@ -784,6 +785,7 @@ class StageATrainer:
                 safe_accuracy_batch, base_accuracy_batch = self._compute_robust_accuracy(
                     safe_outputs, base_outputs, inputs, has_audio, batch
                 )
+                print(f"[PROGRESS] Finished robust accuracy for batch {batch_idx}", flush=True)
                 if self.debug_logging:
                     if torch.cuda.is_available():
                         torch.cuda.synchronize()
@@ -919,9 +921,13 @@ class StageATrainer:
                 return safe_accuracies, base_accuracies
             
             # Generate predictions using proper generation (without labels)
+            print(f"[PROGRESS] Starting generation for robust accuracy", flush=True)
             gen_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+            print(f"[PROGRESS] Generating SAFE predictions...", flush=True)
             safe_pred_tokens = self._generate_predictions(gen_inputs, "safe")
+            print(f"[PROGRESS] Generating base predictions...", flush=True)
             base_pred_tokens = self._generate_predictions(gen_inputs, "base")
+            print(f"[PROGRESS] Generation complete", flush=True)
             
             for i in range(batch_size):
                 try:
