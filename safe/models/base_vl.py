@@ -87,21 +87,8 @@ class BaseVLModel(nn.Module):
             self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
             self.model_type = "custom"
         
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        if self.model_type == "llava" and hasattr(self.tokenizer, "padding_side"):
-            self.tokenizer.padding_side = "left"
-        
-        # Fix padding side for decoder-only models (LLaVA, BLIP2)
-        if self.model_type in ["llava", "blip2"]:
-            self.tokenizer.padding_side = 'left'
-            # Also configure processor tokenizer if it exists and is different
-            if hasattr(self, 'processor') and hasattr(self.processor, 'tokenizer'):
-                if self.processor.tokenizer is not self.tokenizer:
-                    self.processor.tokenizer.padding_side = 'left'
-                    print(f"[BaseVL] Set processor tokenizer padding_side='left' for {self.model_type}", flush=True)
-            print(f"[BaseVL] Set tokenizer padding_side='left' for {self.model_type}", flush=True)
+        # Configure all tokenizers comprehensively
+        self._configure_tokenizers()
             
         if freeze_llm:
             for param in self.llm.parameters():
@@ -135,6 +122,52 @@ class BaseVLModel(nn.Module):
             # LLaVA and BLIP2 use their own vision tokens
             self.vision_start_token = None
             self.vision_end_token = None
+    
+    def _configure_tokenizers(self):
+        """Configure all tokenizer instances consistently."""
+        print(f"[BaseVL] Configuring tokenizers for {self.model_type}...", flush=True)
+        
+        # 1. Configure main tokenizer
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            print(f"[BaseVL] Set pad_token to eos_token for main tokenizer", flush=True)
+        
+        # 2. Set padding side for decoder-only models
+        if self.model_type in ["llava", "blip2"]:
+            self.tokenizer.padding_side = 'left'
+            print(f"[BaseVL] Set main tokenizer padding_side='left' for {self.model_type}", flush=True)
+            
+            # 3. Configure processor tokenizer if it exists and is different
+            if hasattr(self, 'processor') and hasattr(self.processor, 'tokenizer'):
+                proc_tok = self.processor.tokenizer
+                
+                # Check if it's the same instance
+                if proc_tok is self.tokenizer:
+                    print(f"[BaseVL] Processor tokenizer is same instance as main tokenizer", flush=True)
+                else:
+                    print(f"[BaseVL] Configuring separate processor tokenizer", flush=True)
+                    
+                    # Configure processor tokenizer separately
+                    if proc_tok.pad_token is None:
+                        proc_tok.pad_token = proc_tok.eos_token
+                        print(f"[BaseVL] Set pad_token for processor tokenizer", flush=True)
+                    
+                    proc_tok.padding_side = 'left'
+                    print(f"[BaseVL] Set processor tokenizer padding_side='left'", flush=True)
+        
+        # 4. Verify configuration
+        self._verify_tokenizer_config()
+    
+    def _verify_tokenizer_config(self):
+        """Verify tokenizer configuration is correct."""
+        print(f"[TokenizerVerify] Main tokenizer padding_side: {getattr(self.tokenizer, 'padding_side', 'NOT_SET')}", flush=True)
+        print(f"[TokenizerVerify] Main tokenizer pad_token: {self.tokenizer.pad_token}", flush=True)
+        
+        if hasattr(self, 'processor') and hasattr(self.processor, 'tokenizer'):
+            proc_tok = self.processor.tokenizer
+            if proc_tok is not self.tokenizer:
+                print(f"[TokenizerVerify] Processor tokenizer padding_side: {getattr(proc_tok, 'padding_side', 'NOT_SET')}", flush=True)
+                print(f"[TokenizerVerify] Processor tokenizer pad_token: {proc_tok.pad_token}", flush=True)
         
     def encode_images(self, images: torch.Tensor) -> torch.Tensor:
         """
@@ -193,6 +226,7 @@ class BaseVLModel(nn.Module):
             if self.model_type == "blip2":
                 # BLIP-2 expects text-only tokenization + separate pixel_values
                 # Don't let the processor create excessive image tokens
+                print(f"[PrepareInputs] Using tokenizer directly, padding_side: {getattr(self.tokenizer, 'padding_side', 'NOT_SET')}", flush=True)
                 text_inputs = self.tokenizer(
                     text,
                     return_tensors="pt",
@@ -228,6 +262,7 @@ class BaseVLModel(nn.Module):
                         inputs["pixel_values"] = temp_inputs["pixel_values"]
             else:
                 # LLaVA: Use processor normally (it handles multimodal correctly)
+                print(f"[PrepareInputs] Using processor, processor.tokenizer padding_side: {getattr(self.processor.tokenizer, 'padding_side', 'NOT_SET')}", flush=True)
                 inputs = self.processor(
                     text=text,
                     images=images,

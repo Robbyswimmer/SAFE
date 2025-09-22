@@ -1285,31 +1285,81 @@ class SAFEModel(nn.Module):
             )
         return outputs["logits"]
     
-    def cuda(self, device=None):
-        """Move all model components to CUDA device."""
-        print(f"[SAFEModel] Moving all components to CUDA...", flush=True)
+    def to_device(self, device):
+        """Properly move all model components to specified device."""
+        print(f"[SAFEModel] Moving all components to device: {device}", flush=True)
         
-        # Move main module to CUDA
-        super().cuda(device)
+        # Use .to() instead of .cuda() for proper device management
+        device = torch.device(device)
         
-        # Explicitly move all subcomponents
-        print(f"[SAFEModel] Moving base_vl to CUDA...", flush=True)
-        self.base_vl = self.base_vl.cuda(device)
+        # Move main module
+        self.to(device)
         
-        print(f"[SAFEModel] Moving audio_encoder to CUDA...", flush=True)
-        self.audio_encoder = self.audio_encoder.cuda(device)
+        # Explicitly move all subcomponents with verification
+        print(f"[SAFEModel] Moving base_vl to device...", flush=True)
+        self.base_vl = self.base_vl.to(device)
+        base_vl_device = next(self.base_vl.parameters()).device
+        print(f"[SAFEModel] base_vl now on device: {base_vl_device}", flush=True)
         
-        print(f"[SAFEModel] Moving audio_projector to CUDA...", flush=True)
-        self.audio_projector = self.audio_projector.cuda(device)
+        print(f"[SAFEModel] Moving audio_encoder to device...", flush=True)
+        self.audio_encoder = self.audio_encoder.to(device)
+        audio_enc_device = next(self.audio_encoder.parameters()).device
+        print(f"[SAFEModel] audio_encoder now on device: {audio_enc_device}", flush=True)
+        
+        print(f"[SAFEModel] Moving audio_projector to device...", flush=True)
+        self.audio_projector = self.audio_projector.to(device)
+        proj_device = next(self.audio_projector.parameters()).device
+        print(f"[SAFEModel] audio_projector now on device: {proj_device}", flush=True)
         
         if hasattr(self, 'fusion_adapter') and self.fusion_adapter is not None:
-            print(f"[SAFEModel] Moving fusion_adapter to CUDA...", flush=True)
-            self.fusion_adapter = self.fusion_adapter.cuda(device)
+            print(f"[SAFEModel] Moving fusion_adapter to device...", flush=True)
+            self.fusion_adapter = self.fusion_adapter.to(device)
+            fusion_device = next(self.fusion_adapter.parameters()).device
+            print(f"[SAFEModel] fusion_adapter now on device: {fusion_device}", flush=True)
         
         if hasattr(self, 'audio_token_embeddings') and self.audio_token_embeddings is not None:
-            print(f"[SAFEModel] Moving audio_token_embeddings to CUDA...", flush=True)
-            self.audio_token_embeddings = self.audio_token_embeddings.cuda(device)
+            print(f"[SAFEModel] Moving audio_token_embeddings to device...", flush=True)
+            self.audio_token_embeddings = self.audio_token_embeddings.to(device)
+            embed_device = self.audio_token_embeddings.weight.device
+            print(f"[SAFEModel] audio_token_embeddings now on device: {embed_device}", flush=True)
         
-        print(f"[SAFEModel] All components moved to CUDA successfully", flush=True)
+        print(f"[SAFEModel] All components moved to device successfully", flush=True)
         return self
+    
+    def verify_device_placement(self, expected_device):
+        """Verify all components are on the expected device."""
+        print(f"[SAFEModel] Verifying device placement, expected: {expected_device}", flush=True)
+        
+        # Check main model
+        main_device = next(self.parameters()).device
+        print(f"[DeviceCheck] Main model device: {main_device}", flush=True)
+        
+        # Check base_vl
+        base_vl_device = next(self.base_vl.parameters()).device
+        print(f"[DeviceCheck] base_vl device: {base_vl_device}", flush=True)
+        
+        # Check audio_encoder
+        audio_enc_device = next(self.audio_encoder.parameters()).device
+        print(f"[DeviceCheck] audio_encoder device: {audio_enc_device}", flush=True)
+        
+        # Check audio_projector
+        proj_device = next(self.audio_projector.parameters()).device
+        print(f"[DeviceCheck] audio_projector device: {proj_device}", flush=True)
+        
+        # Check if all are on expected device
+        devices = [main_device, base_vl_device, audio_enc_device, proj_device]
+        expected = torch.device(expected_device)
+        
+        all_correct = all(d == expected for d in devices)
+        print(f"[DeviceCheck] All components on correct device: {all_correct}", flush=True)
+        
+        if not all_correct:
+            print(f"[DeviceCheck] ERROR: Device mismatch detected!", flush=True)
+            for i, d in enumerate(devices):
+                component_names = ['main', 'base_vl', 'audio_encoder', 'audio_projector']
+                if d != expected:
+                    print(f"[DeviceCheck] {component_names[i]} on wrong device: {d} (expected {expected})", flush=True)
+            return False
+        
+        return True
     

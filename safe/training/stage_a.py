@@ -132,9 +132,16 @@ class StageATrainer:
 
         # Move model to GPU if available
         if torch.cuda.is_available():
-            print(f"Moving SAFE model to GPU...", flush=True)
-            self.safe_model = self.safe_model.cuda()
-            print(f"SAFE model moved to GPU successfully", flush=True)
+            device = torch.cuda.current_device()
+            print(f"Moving SAFE model to GPU device: {device}", flush=True)
+            self.safe_model.to_device(f"cuda:{device}")
+            
+            # Verify device placement worked
+            if self.safe_model.verify_device_placement(f"cuda:{device}"):
+                print(f"✅ SAFE model device placement verified successfully", flush=True)
+            else:
+                print(f"❌ SAFE model device placement FAILED - aborting", flush=True)
+                raise RuntimeError("Device placement verification failed")
         else:
             print(f"CUDA not available, keeping model on CPU", flush=True)
 
@@ -1120,11 +1127,17 @@ class StageATrainer:
     def _generate_predictions(self, inputs, model_choice="safe"):
         """Generate predictions using consistent SAFE/base pathways."""
         tok = self.safe_model.base_vl.tokenizer
-        if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token_id", None) is not None:
-            tok.pad_token = tok.eos_token
-        # Ensure left padding for generation
-        if hasattr(tok, 'padding_side'):
+        
+        # Verify tokenizer is properly configured (should be done in BaseVL init)
+        if getattr(tok, 'padding_side', None) != 'left':
+            print(f"[GenWarning] Tokenizer padding_side is '{getattr(tok, 'padding_side', 'NOT_SET')}', should be 'left'", flush=True)
+            # Fix it as fallback, but this shouldn't be needed
             tok.padding_side = 'left'
+            
+        if getattr(tok, "pad_token_id", None) is None:
+            print(f"[GenWarning] Tokenizer pad_token_id is None, fixing...", flush=True)
+            if getattr(tok, "eos_token_id", None) is not None:
+                tok.pad_token = tok.eos_token
 
         input_ids = inputs.get("input_ids")
         attention_mask = inputs.get("attention_mask")
@@ -1141,14 +1154,23 @@ class StageATrainer:
                 attention_mask = attention_mask.unsqueeze(0)
 
         device = next(self.safe_model.parameters()).device
+        
+        # Debug input format
+        print(f"[GenDebug] Input shape: {input_ids.shape}", flush=True)
+        sample_input_text = tok.decode(input_ids[0], skip_special_tokens=True)
+        print(f"[GenDebug] Sample input text: '{sample_input_text[:200]}...'", flush=True)
 
         gen_kwargs = dict(
-            max_new_tokens=32,  # Increased from 8 to allow longer answers
-            do_sample=False,
-            num_beams=1,
+            max_new_tokens=64,  # Increased further for better answers
+            do_sample=True,     # Enable sampling for more diverse responses
+            temperature=0.7,    # Add temperature for controlled randomness
+            top_p=0.9,         # Use nucleus sampling
+            num_beams=1,       # Keep beam search simple
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
+            repetition_penalty=1.1,  # Reduce repetition
         )
+        print(f"[GenDebug] Generation kwargs: {gen_kwargs}", flush=True)
 
         if model_choice == "safe":
             generated = self.safe_model.generate(
@@ -1179,7 +1201,26 @@ class StageATrainer:
         audio_prefix = audio_tokens.size(1) if isinstance(audio_tokens, torch.Tensor) else 0
         prompt_source = sanitized_ids if model_choice == "base" and 'sanitized_ids' in locals() and sanitized_ids is not None else input_ids
         prompt_len = prompt_source.shape[1]
-        return [generated[i, audio_prefix + prompt_len :] for i in range(generated.size(0))]
+        
+        # Debug generation output
+        print(f"[GenDebug] Generated shape: {generated.shape}", flush=True)
+        print(f"[GenDebug] Audio prefix: {audio_prefix}, Prompt len: {prompt_len}", flush=True)
+        print(f"[GenDebug] Extraction start index: {audio_prefix + prompt_len}", flush=True)
+        
+        # Extract only the newly generated tokens (after prompt)
+        extracted_tokens = []
+        for i in range(generated.size(0)):
+            # Extract new tokens after the prompt
+            start_idx = audio_prefix + prompt_len
+            if start_idx < generated.shape[1]:
+                new_tokens = generated[i, start_idx:]
+                print(f"[GenDebug] Sample {i}: extracted {len(new_tokens)} new tokens", flush=True)
+                extracted_tokens.append(new_tokens)
+            else:
+                print(f"[GenDebug] Sample {i}: no new tokens generated (start_idx={start_idx} >= seq_len={generated.shape[1]})", flush=True)
+                extracted_tokens.append(torch.tensor([], dtype=torch.long))
+        
+        return extracted_tokens
     
     def _clean_answer(self, s: str) -> str:
         """Clean and normalize answer text."""
