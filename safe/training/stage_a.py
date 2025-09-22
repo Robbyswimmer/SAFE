@@ -50,11 +50,11 @@ class StageATrainer:
             else:
                 self.curriculum_manager = CurriculumManager(curriculum_config)
             self.use_curriculum = True
-            print(f"Curriculum learning enabled with {self.curriculum_manager.config.get_num_stages()} stages")
+            print(f"Curriculum learning enabled with {self.curriculum_manager.config.get_num_stages()} stages", flush=True)
         else:
             self.curriculum_manager = None
             self.use_curriculum = False
-            print("Using traditional fixed-epoch training")
+            print("Using traditional fixed-epoch training", flush=True)
         
         # Default configuration
         self.config = {
@@ -353,10 +353,10 @@ class StageATrainer:
                 elif param_group["name"] == "adapter":
                     param_group["lr"] = self.config["learning_rate_adapter"] * lr_multiplier
         
-        print(f"Updated to curriculum stage: {stage_config['stage_name']}")
-        print(f"  Audio ratio: {stage_config['audio_ratio']:.2f}")
-        print(f"  Difficulty filter: {stage_config['difficulty_filter']}")
-        print(f"  LR multiplier: {lr_multiplier:.2f}")
+        print(f"Updated to curriculum stage: {stage_config['stage_name']}", flush=True)
+        print(f"  Audio ratio: {stage_config['audio_ratio']:.2f}", flush=True)
+        print(f"  Difficulty filter: {stage_config['difficulty_filter']}", flush=True)
+        print(f"  LR multiplier: {lr_multiplier:.2f}", flush=True)
     
     def _setup_optimizer(self):
         """Setup optimizer with different learning rates for different components."""
@@ -588,7 +588,7 @@ class StageATrainer:
         
         # Check if validation dataset has samples
         if len(self.val_dataloader.dataset) == 0:
-            print("Warning: Validation dataset is empty!")
+        print("Warning: Validation dataset is empty!", flush=True)
             return {
                 "loss": 0.0,
                 "audio_loss": 0.0,
@@ -665,7 +665,7 @@ class StageATrainer:
                             inputs.pop("pixel_values")
                         # If image tokens are present but pixel_values missing, log warning and skip
                         elif torch.any(has_img_tokens) and "pixel_values" not in inputs:
-                            print(f"Warning: Found <image> tokens but no pixel_values. Skipping multimodal processing.")
+                    print(f"Warning: Found <image> tokens but no pixel_values. Skipping multimodal processing.", flush=True)
                 elif self.safe_model.base_vl.model_type == "blip2":
                     # BLIP-2 doesn't use <image> tokens, so keep pixel_values as-is if they exist
                     pass
@@ -788,7 +788,7 @@ class StageATrainer:
             for key in eval_losses:
                 eval_losses[key] /= total_samples
         else:
-            print("Warning: No validation samples processed!")
+            print("Warning: No validation samples processed!", flush=True)
             for key in eval_losses:
                 eval_losses[key] = 0.0
         
@@ -1358,7 +1358,7 @@ class StageATrainer:
             except:
                 pass
         
-        print("🎓 Curriculum learning completed!")
+            print("🎓 Curriculum learning completed!", flush=True)
         
         # Final evaluation and checkpoint
         max_eval_batches = self.config.get("max_eval_batches", None)
@@ -1367,11 +1367,11 @@ class StageATrainer:
         
         # Print curriculum summary
         summary = self.curriculum_manager.get_progress_summary()
-        print(f"\n📋 Curriculum Summary:")
-        print(f"  Total Epochs: {summary['total_epochs']}")
-        print(f"  Stages Completed: {summary['current_stage_idx']}/{summary['total_stages']}")
-        print(f"  Final Audio Accuracy: {summary['current_metrics']['audio_accuracy']:.4f}")
-        print(f"  Final VL Retention: {summary['current_metrics']['vl_retention']:.4f}")
+        print(f"\n📋 Curriculum Summary:", flush=True)
+        print(f"  Total Epochs: {summary['total_epochs']}", flush=True)
+        print(f"  Stages Completed: {summary['current_stage_idx']}/{summary['total_stages']}", flush=True)
+        print(f"  Final Audio Accuracy: {summary['current_metrics']['audio_accuracy']:.4f}", flush=True)
+        print(f"  Final VL Retention: {summary['current_metrics']['vl_retention']:.4f}", flush=True)
         
         return final_metrics
     
