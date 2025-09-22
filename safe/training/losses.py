@@ -306,24 +306,37 @@ class AudioTaskLoss(nn.Module):
         # Flatten for loss computation
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
-        
+
         if attention_mask is not None:
             shift_mask = attention_mask[..., 1:].contiguous()
             
-            # Mask out padded tokens
-            active_loss = shift_mask.view(-1) == 1
-            if not torch.any(active_loss):
+            seq_len = min(shift_logits.size(1), shift_labels.size(1), shift_mask.size(1))
+            shift_logits = shift_logits[:, :seq_len, :]
+            shift_labels = shift_labels[:, :seq_len]
+            shift_mask = shift_mask[:, :seq_len]
+
+            flat_logits = shift_logits.reshape(-1, shift_logits.size(-1))
+            flat_labels = shift_labels.reshape(-1)
+            flat_mask = shift_mask.reshape(-1) == 1
+
+            # Also ignore label positions explicitly marked as -100
+            valid = flat_mask & (flat_labels != -100)
+            if not torch.any(valid):
                 return torch.tensor(0.0, device=logits.device, requires_grad=True)
 
-            active_logits = shift_logits.view(-1, shift_logits.size(-1))[active_loss]
-            active_labels = shift_labels.view(-1)[active_loss]
-
-            loss = self.loss_fn(active_logits.float(), active_labels)
+            loss = self.loss_fn(flat_logits[valid].float(), flat_labels[valid])
         else:
-            loss = self.loss_fn(
-                shift_logits.view(-1, shift_logits.size(-1)).float(),
-                shift_labels.view(-1)
-            )
+            seq_len = min(shift_logits.size(1), shift_labels.size(1))
+            shift_logits = shift_logits[:, :seq_len, :]
+            shift_labels = shift_labels[:, :seq_len]
+
+            flat_logits = shift_logits.reshape(-1, shift_logits.size(-1))
+            flat_labels = shift_labels.reshape(-1)
+            valid = flat_labels != -100
+            if not torch.any(valid):
+                return torch.tensor(0.0, device=logits.device, requires_grad=True)
+
+            loss = self.loss_fn(flat_logits[valid].float(), flat_labels[valid])
         
         return loss
 
