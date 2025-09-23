@@ -1312,6 +1312,11 @@ class SAFEModel(nn.Module):
         self.base_vl = self.base_vl.to(device)
         base_vl_device = next(self.base_vl.parameters()).device
         print(f"[SAFEModel] base_vl now on device: {base_vl_device}", flush=True)
+
+        # Determine target dtype from base model embeddings for consistency
+        base_embeddings = self.base_vl.llm.get_input_embeddings()
+        target_dtype = base_embeddings.weight.dtype
+        print(f"[SAFEModel] Target dtype from base model: {target_dtype}", flush=True)
         
         print(f"[SAFEModel] Moving audio_encoder to device...", flush=True)
         self.audio_encoder = self.audio_encoder.to(device)
@@ -1319,25 +1324,30 @@ class SAFEModel(nn.Module):
         print(f"[SAFEModel] audio_encoder now on device: {audio_enc_device}", flush=True)
         
         print(f"[SAFEModel] Moving audio_projector to device...", flush=True)
-        self.audio_projector = self.audio_projector.to(device)
-        proj_device = next(self.audio_projector.parameters()).device
-        print(f"[SAFEModel] audio_projector now on device: {proj_device}", flush=True)
+        self.audio_projector = self.audio_projector.to(device=device, dtype=target_dtype)
+        proj_param = next(self.audio_projector.parameters())
+        proj_device = proj_param.device
+        proj_dtype = proj_param.dtype
+        print(f"[SAFEModel] audio_projector now on device: {proj_device}, dtype: {proj_dtype}", flush=True)
         
         if hasattr(self, 'fusion_adapter') and self.fusion_adapter is not None:
             print(f"[SAFEModel] Moving fusion_adapter to device...", flush=True)
-            self.fusion_adapter = self.fusion_adapter.to(device)
-            fusion_device = next(self.fusion_adapter.parameters()).device
-            print(f"[SAFEModel] fusion_adapter now on device: {fusion_device}", flush=True)
-        
+            self.fusion_adapter = self.fusion_adapter.to(device=device, dtype=target_dtype)
+            fusion_param = next(self.fusion_adapter.parameters())
+            fusion_device = fusion_param.device
+            fusion_dtype = fusion_param.dtype
+            print(f"[SAFEModel] fusion_adapter now on device: {fusion_device}, dtype: {fusion_dtype}", flush=True)
+
         if hasattr(self, 'audio_token_embeddings') and self.audio_token_embeddings is not None:
             print(f"[SAFEModel] Moving audio_token_embeddings to device...", flush=True)
             # Ensure audio token embeddings match base model dtype
-            base_embeddings = self.base_vl.llm.get_input_embeddings()
-            target_dtype = base_embeddings.weight.dtype
             self.audio_token_embeddings = self.audio_token_embeddings.to(device=device, dtype=target_dtype)
             embed_device = self.audio_token_embeddings.weight.device
             embed_dtype = self.audio_token_embeddings.weight.dtype
             print(f"[SAFEModel] audio_token_embeddings now on device: {embed_device}, dtype: {embed_dtype}", flush=True)
+
+        # Final consistency check to ensure everything shares the target dtype
+        self.ensure_dtype_consistency()
         
         print(f"[SAFEModel] All components moved to device successfully", flush=True)
         return self
