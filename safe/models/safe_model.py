@@ -978,10 +978,19 @@ class SAFEModel(nn.Module):
 
         device = audio_tokens.device
         dtype = audio_tokens.dtype
-        full = audio_tokens.new_zeros((batch_size,) + audio_tokens.shape[1:])
+        
+        # Ensure we have a tensor of indices on the correct device
+        if isinstance(indices, torch.Tensor):
+            index_tensor = indices.to(device=device, dtype=torch.long)
+        else:
+            index_tensor = torch.tensor(list(indices), device=device, dtype=torch.long)
 
-        for pos, token in zip(indices, audio_tokens):
-            full[pos] = torch.nan_to_num(token, nan=0.0, posinf=1e4, neginf=-1e4)
+        # Sanitize tokens but keep gradient connectivity
+        safe_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e4, neginf=-1e4)
+
+        # Scatter the tokens back into their original batch slots using a differentiable op
+        full = torch.zeros((batch_size,) + safe_tokens.shape[1:], device=device, dtype=dtype)
+        full.index_copy_(0, index_tensor, safe_tokens)
 
         return full
 

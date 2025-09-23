@@ -25,8 +25,8 @@ class CrossAttentionBlock(nn.Module):
         super().__init__()
         
         self.hidden_size = hidden_size
-        self.num_attention_heads = num_attention_heads
-        self.attention_head_size = hidden_size // num_attention_heads
+        self.num_attention_heads = max(num_attention_heads, 1)  # Prevent division by zero
+        self.attention_head_size = max(hidden_size // self.num_attention_heads, 1)  # Ensure >= 1
         self.all_head_size = self.num_attention_heads * self.attention_head_size
         self.debug_logging = False
         self._last_attention_summary: Optional[dict] = None
@@ -91,20 +91,30 @@ class CrossAttentionBlock(nn.Module):
         key_layer = torch.nan_to_num(key_layer, nan=0.0, posinf=1e4, neginf=-1e4).to(torch.float32)
         value_layer = torch.nan_to_num(value_layer, nan=0.0, posinf=1e4, neginf=-1e4).to(torch.float32)
 
-        # Compute attention scores
+        # Compute attention scores with numerical stability
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        attention_scores = torch.nan_to_num(attention_scores, nan=0.0, posinf=1e4, neginf=-1e4)
+        
+        # Prevent division by zero and ensure numerical stability
+        scale_factor = max(math.sqrt(self.attention_head_size), 1e-8)
+        attention_scores = attention_scores / scale_factor
+        
+        # Clamp scores to prevent softmax overflow (-50 to 50 is safe range for float32)
+        attention_scores = torch.clamp(attention_scores, min=-50.0, max=50.0)
+        attention_scores = torch.nan_to_num(attention_scores, nan=0.0, posinf=50.0, neginf=-50.0)
         
         # Apply attention mask if provided
         if attention_mask is not None:
             # Reshape mask for broadcasting: (batch_size, 1, 1, num_audio_tokens)
             attention_mask = attention_mask.to(attention_scores.dtype).unsqueeze(1).unsqueeze(1)
-            attention_scores = attention_scores + (attention_mask * -10000.0)
+            # Use safer masking value that won't cause overflow
+            attention_scores = attention_scores + (attention_mask * -1e9)
 
-        # Normalize attention scores
+        # Stable softmax computation
         attention_probs = F.softmax(attention_scores, dim=-1)
+        # Clean any NaN/Inf that might have appeared and ensure valid probability range
         attention_probs = torch.nan_to_num(attention_probs, nan=0.0, posinf=1.0, neginf=0.0)
+        # Renormalize to ensure probabilities sum to 1 after cleaning
+        attention_probs = attention_probs / (attention_probs.sum(dim=-1, keepdim=True) + 1e-8)
         attention_probs = self.attention_dropout(attention_probs)
 
         # Apply attention to values

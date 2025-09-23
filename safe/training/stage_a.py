@@ -1280,12 +1280,29 @@ class StageATrainer:
             self.null_space_projector.observe(step=self.global_step, has_audio=has_audio)
             self.null_space_projector.project()
 
-        # Gradient clipping
+        # Gradient clipping with NaN detection and prevention
         if self.trainable_param_list:
-            torch.nn.utils.clip_grad_norm_(
+            # Check for and handle NaN/Inf gradients
+            nan_grad_count = 0
+            for param in self.trainable_param_list:
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        print(f"[GradClip] WARNING: NaN/Inf gradient detected, zeroing grad for param shape {param.shape}", flush=True)
+                        param.grad.zero_()
+                        nan_grad_count += 1
+            
+            if nan_grad_count > 0:
+                print(f"[GradClip] step {self.global_step}: Zeroed {nan_grad_count} NaN/Inf gradients", flush=True)
+            
+            # Apply gradient clipping
+            grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.trainable_param_list,
                 self.config["max_grad_norm"]
             )
+            
+            # Log if gradient norm is unusually high
+            if grad_norm > self.config["max_grad_norm"]:
+                print(f"[GradClip] step {self.global_step}: Clipped gradient norm from {grad_norm:.4f} to {self.config['max_grad_norm']}", flush=True)
 
         # Store pre-update parameters for update norm calculation
         pre_update_params = {}
