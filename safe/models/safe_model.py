@@ -186,9 +186,10 @@ class SAFEModel(nn.Module):
         
         # Create output tensor using actual embedding dimension
         actual_hidden_size = base_embeddings.weight.size(1)
+        target_dtype = base_embeddings.weight.dtype
         embeddings = torch.zeros(
             batch_size, seq_len, actual_hidden_size,
-            dtype=base_embeddings.weight.dtype,
+            dtype=target_dtype,
             device=device
         )
         
@@ -207,6 +208,8 @@ class SAFEModel(nn.Module):
             # Map audio token IDs to indices in audio_token_embeddings
             audio_ids = input_ids[audio_mask] - self.original_vocab_size
             audio_embeds = self.audio_token_embeddings(audio_ids)
+            # Ensure audio embeddings match target dtype
+            audio_embeds = audio_embeds.to(dtype=target_dtype)
             embeddings[audio_mask] = audio_embeds
         
         return embeddings
@@ -275,13 +278,15 @@ class SAFEModel(nn.Module):
         embedding_weight = self.base_vl.llm.get_input_embeddings().weight
         target_dtype = embedding_weight.dtype
         target_device = embedding_weight.device
+        
         if self.projector_type == "adaptive":
             audio_tokens = self.audio_projector(audio_features, num_tokens)
         else:
             if not isinstance(audio_features, torch.Tensor):
                 audio_features = torch.tensor(audio_features)
             device = next(self.audio_projector.parameters()).device
-            audio_features = audio_features.to(device)
+            dtype = next(self.audio_projector.parameters()).dtype
+            audio_features = audio_features.to(device=device, dtype=dtype)
             if audio_features.dim() > 2:
                 if getattr(self, "debug_logging", False):
                     print(
@@ -298,6 +303,7 @@ class SAFEModel(nn.Module):
                 )
             audio_tokens = self.audio_projector(audio_features)
 
+        # Ensure audio tokens match the target dtype and device
         audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
 
         return audio_tokens, transcripts
@@ -1325,11 +1331,52 @@ class SAFEModel(nn.Module):
         
         if hasattr(self, 'audio_token_embeddings') and self.audio_token_embeddings is not None:
             print(f"[SAFEModel] Moving audio_token_embeddings to device...", flush=True)
-            self.audio_token_embeddings = self.audio_token_embeddings.to(device)
+            # Ensure audio token embeddings match base model dtype
+            base_embeddings = self.base_vl.llm.get_input_embeddings()
+            target_dtype = base_embeddings.weight.dtype
+            self.audio_token_embeddings = self.audio_token_embeddings.to(device=device, dtype=target_dtype)
             embed_device = self.audio_token_embeddings.weight.device
-            print(f"[SAFEModel] audio_token_embeddings now on device: {embed_device}", flush=True)
+            embed_dtype = self.audio_token_embeddings.weight.dtype
+            print(f"[SAFEModel] audio_token_embeddings now on device: {embed_device}, dtype: {embed_dtype}", flush=True)
         
         print(f"[SAFEModel] All components moved to device successfully", flush=True)
+        return self
+    
+    def ensure_dtype_consistency(self):
+        """Ensure all model components use consistent dtypes."""
+        print(f"[SAFEModel] Ensuring dtype consistency across all components", flush=True)
+        
+        # Get target dtype from base model
+        base_embeddings = self.base_vl.llm.get_input_embeddings()
+        target_dtype = base_embeddings.weight.dtype
+        print(f"[SAFEModel] Target dtype: {target_dtype}", flush=True)
+        
+        # Ensure audio components match
+        if hasattr(self, 'audio_token_embeddings') and self.audio_token_embeddings is not None:
+            current_dtype = self.audio_token_embeddings.weight.dtype
+            if current_dtype != target_dtype:
+                print(f"[SAFEModel] Converting audio_token_embeddings from {current_dtype} to {target_dtype}", flush=True)
+                self.audio_token_embeddings = self.audio_token_embeddings.to(dtype=target_dtype)
+        
+        # Ensure projector components match if possible
+        try:
+            proj_dtype = next(self.audio_projector.parameters()).dtype
+            if proj_dtype != target_dtype:
+                print(f"[SAFEModel] Converting audio_projector from {proj_dtype} to {target_dtype}", flush=True)
+                self.audio_projector = self.audio_projector.to(dtype=target_dtype)
+        except:
+            print(f"[SAFEModel] Could not convert audio_projector dtype", flush=True)
+        
+        # Ensure fusion adapter components match
+        try:
+            fusion_dtype = next(self.fusion_adapter.parameters()).dtype
+            if fusion_dtype != target_dtype:
+                print(f"[SAFEModel] Converting fusion_adapter from {fusion_dtype} to {target_dtype}", flush=True)
+                self.fusion_adapter = self.fusion_adapter.to(dtype=target_dtype)
+        except:
+            print(f"[SAFEModel] Could not convert fusion_adapter dtype", flush=True)
+        
+        print(f"[SAFEModel] Dtype consistency check completed", flush=True)
         return self
     
     def verify_device_placement(self, expected_device):
