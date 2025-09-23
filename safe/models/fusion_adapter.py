@@ -68,27 +68,41 @@ class CrossAttentionBlock(nn.Module):
         Returns:
             output: (batch_size, seq_len, hidden_size) - Fused representations
         """
+        # Clean inputs to avoid propagating NaNs/Infs from upstream modules
+        hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=1e4, neginf=-1e4)
+        audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e4, neginf=-1e4)
+
+        input_dtype = hidden_states.dtype
+
         # Compute query, key, value
         query_layer = self.transpose_for_scores(self.query(hidden_states))  # (B, H, seq_len, d)
         key_layer = self.transpose_for_scores(self.key(audio_tokens))       # (B, H, audio_len, d)
         value_layer = self.transpose_for_scores(self.value(audio_tokens))   # (B, H, audio_len, d)
-        
+
+        # Cast to float32 for numerically stable attention computation
+        query_layer = torch.nan_to_num(query_layer, nan=0.0, posinf=1e4, neginf=-1e4).to(torch.float32)
+        key_layer = torch.nan_to_num(key_layer, nan=0.0, posinf=1e4, neginf=-1e4).to(torch.float32)
+        value_layer = torch.nan_to_num(value_layer, nan=0.0, posinf=1e4, neginf=-1e4).to(torch.float32)
+
         # Compute attention scores
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        attention_scores = torch.nan_to_num(attention_scores, nan=0.0, posinf=1e4, neginf=-1e4)
         
         # Apply attention mask if provided
         if attention_mask is not None:
             # Reshape mask for broadcasting: (batch_size, 1, 1, num_audio_tokens)
-            attention_mask = attention_mask.unsqueeze(1).unsqueeze(1)
+            attention_mask = attention_mask.to(attention_scores.dtype).unsqueeze(1).unsqueeze(1)
             attention_scores = attention_scores + (attention_mask * -10000.0)
-        
+
         # Normalize attention scores
         attention_probs = F.softmax(attention_scores, dim=-1)
+        attention_probs = torch.nan_to_num(attention_probs, nan=0.0, posinf=1.0, neginf=0.0)
         attention_probs = self.attention_dropout(attention_probs)
-        
+
         # Apply attention to values
         context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = context_layer.to(input_dtype)
         
         # Reshape and transpose back
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
@@ -97,9 +111,12 @@ class CrossAttentionBlock(nn.Module):
         
         # Output projection
         output = self.output_dense(context_layer)
+        output = torch.nan_to_num(output, nan=0.0, posinf=1e4, neginf=-1e4)
         output = self.output_dropout(output)
-        
+        output = output.to(input_dtype)
+
         # Residual connection and layer norm
+        hidden_states = hidden_states.to(output.dtype)
         output = self.layer_norm(output + hidden_states)
         
         return output

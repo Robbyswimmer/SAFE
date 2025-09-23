@@ -279,11 +279,17 @@ class SAFEModel(nn.Module):
         target_dtype = embedding_weight.dtype
         target_device = embedding_weight.device
         
+        if not isinstance(audio_features, torch.Tensor):
+            audio_features = torch.tensor(audio_features)
+
+        audio_features = torch.nan_to_num(audio_features, nan=0.0, posinf=1e4, neginf=-1e4)
+
         if self.projector_type == "adaptive":
+            device = next(self.audio_projector.parameters()).device
+            dtype = next(self.audio_projector.parameters()).dtype
+            audio_features = audio_features.to(device=device, dtype=dtype)
             audio_tokens = self.audio_projector(audio_features, num_tokens)
         else:
-            if not isinstance(audio_features, torch.Tensor):
-                audio_features = torch.tensor(audio_features)
             device = next(self.audio_projector.parameters()).device
             dtype = next(self.audio_projector.parameters()).dtype
             audio_features = audio_features.to(device=device, dtype=dtype)
@@ -303,8 +309,10 @@ class SAFEModel(nn.Module):
                 )
             audio_tokens = self.audio_projector(audio_features)
 
-        # Ensure audio tokens match the target dtype and device
+        # Ensure audio tokens match the target dtype and device and are finite
+        audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e4, neginf=-1e4)
         audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
+        audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e4, neginf=-1e4)
 
         return audio_tokens, transcripts
 
@@ -925,10 +933,10 @@ class SAFEModel(nn.Module):
 
         device = audio_tokens.device
         dtype = audio_tokens.dtype
-        full = torch.zeros((batch_size,) + audio_tokens.shape[1:], device=device, dtype=dtype)
+        full = audio_tokens.new_zeros((batch_size,) + audio_tokens.shape[1:])
 
         for pos, token in zip(indices, audio_tokens):
-            full[pos] = token
+            full[pos] = torch.nan_to_num(token, nan=0.0, posinf=1e4, neginf=-1e4)
 
         return full
 
