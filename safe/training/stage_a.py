@@ -285,6 +285,25 @@ class StageATrainer:
         labels = base_inputs.get("labels")
         pixel_values = base_inputs.get("pixel_values")
 
+        # LLaVA checkpoints often run in fp16. Ensure any floating point inputs
+        # that we pass to the frozen teacher (e.g. pixel values) match the
+        # underlying model dtype to avoid matmul dtype mismatches inside the
+        # HuggingFace layers.
+        model_dtype = getattr(self.safe_model.base_vl.llm, "dtype", None)
+        if model_dtype is None:
+            try:
+                model_dtype = next(self.safe_model.base_vl.llm.parameters()).dtype
+            except StopIteration:
+                model_dtype = None
+
+        if model_dtype is not None:
+            for key in ("pixel_values", "inputs_embeds"):
+                value = base_inputs.get(key)
+                if torch.is_tensor(value) and value.is_floating_point() and value.dtype != model_dtype:
+                    base_inputs[key] = value.to(dtype=model_dtype)
+                    if key == "pixel_values":
+                        pixel_values = base_inputs[key]
+
         if input_ids is None:
             return self.safe_model.base_vl(**base_inputs)
 
