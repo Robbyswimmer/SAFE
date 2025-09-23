@@ -910,7 +910,7 @@ class StageATrainer:
             print(f"[ParamVerify] 🚨 CRITICAL: NO LORA PARAMETERS TRAINABLE!", flush=True)
         else:
             print(f"[ParamVerify] ✅ Audio training setup looks good", flush=True)
-        print()
+        print(flush=True)
 
     def _check_gradient_flow(self) -> None:
         """Check if gradients are actually flowing to key parameters."""
@@ -968,7 +968,7 @@ class StageATrainer:
         self.safe_model.enable_audio_training()  # Only train audio components
 
         # Verify trainable parameters (debug gradient flow issues)
-        if self.global_step % 10 == 0:  # Check every 10 steps
+        if self.global_step % 10 == 0 or self.global_step < 5:  # Check every 10 steps or first 5 steps
             self._verify_trainable_parameters()
 
         step_timer_start = None
@@ -1271,7 +1271,7 @@ class StageATrainer:
         total_loss.backward()
 
         # Verify gradients are flowing (debug)
-        if self.global_step % 5 == 0:
+        if self.global_step % 5 == 0 or self.global_step < 3:
             self._check_gradient_flow()
 
         self._log_grad_norms()
