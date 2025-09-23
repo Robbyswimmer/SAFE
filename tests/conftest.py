@@ -7,6 +7,54 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Any, List
 from unittest.mock import MagicMock
+import sys
+import types
+import numpy as np
+
+
+def _install_test_audio_stubs():
+    """Install lightweight stand-ins for heavy audio dependencies during tests."""
+
+    if "laion_clap" not in sys.modules:
+        dummy_clap = types.ModuleType("laion_clap")
+
+        class _DummyClapModule:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def load_ckpt(self, *args, **kwargs):
+                return None
+
+            def get_audio_embedding_from_data(self, x, use_tensor=False):
+                import numpy as np
+
+                batch = len(x) if isinstance(x, (list, tuple)) else 1
+                return np.zeros((batch, 512), dtype=np.float32)
+
+        dummy_clap.CLAP_Module = lambda *args, **kwargs: _DummyClapModule()
+        sys.modules["laion_clap"] = dummy_clap
+
+    if "whisper" not in sys.modules:
+        dummy_whisper = types.ModuleType("whisper")
+
+        class _DummyWhisperModel:
+            def __init__(self):
+                self.dims = types.SimpleNamespace(n_audio_state=512)
+
+            def parameters(self):
+                return []
+
+            def eval(self):
+                return self
+
+        def _load_model(*args, **kwargs):
+            return _DummyWhisperModel()
+
+        dummy_whisper.load_model = _load_model
+        sys.modules["whisper"] = dummy_whisper
+
+
+_install_test_audio_stubs()
 
 from safe.models.safe_model import SAFEModel
 from configs.model_configs import get_config
