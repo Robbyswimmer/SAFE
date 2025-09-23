@@ -1,6 +1,6 @@
 import torch
-import torch.nn as nn
 import numpy as np
+import torch.nn as nn
 import librosa
 from typing import Optional, Union, List, Tuple
 import laion_clap
@@ -21,11 +21,14 @@ class CLAPAudioEncoder(nn.Module):
         max_length: float = 10.0  # seconds
     ):
         super().__init__()
-        
+
         self.sample_rate = sample_rate
         self.max_length = max_length
         self.max_samples = int(sample_rate * max_length)
-        
+        self.debug_logging = False
+        self._waveform_log_limit = 5
+        self._waveform_logs_emitted = 0
+
         # Load CLAP model (suppress verbose output)
         import logging
         import sys
@@ -51,7 +54,40 @@ class CLAPAudioEncoder(nn.Module):
             
         # Get audio embedding dimension
         self.audio_embed_dim = 512  # CLAP audio embedding dimension
-        
+
+    def set_debug_logging(self, enabled: bool, max_waveform_logs: int = 5) -> None:
+        """Enable or disable verbose waveform statistics logging."""
+
+        self.debug_logging = bool(enabled)
+        self._waveform_log_limit = int(max(0, max_waveform_logs))
+        self._waveform_logs_emitted = 0
+
+    # ------------------------------------------------------------------
+    def _log_waveform_stats(self, audio_data: np.ndarray, source: str) -> None:
+        if not self.debug_logging:
+            return
+        if self._waveform_logs_emitted >= self._waveform_log_limit:
+            return
+
+        flattened = audio_data.astype(np.float32).ravel()
+        if flattened.size == 0:
+            print(f"[AudioDebug] {source}: empty waveform")
+            self._waveform_logs_emitted += 1
+            return
+
+        max_val = float(np.max(flattened))
+        min_val = float(np.min(flattened))
+        mean_val = float(np.mean(flattened))
+        mean_abs = float(np.mean(np.abs(flattened)))
+        zero_fraction = float(np.mean(np.isclose(flattened, 0.0)))
+
+        print(
+            f"[AudioDebug] {source}: max={max_val:.6f} min={min_val:.6f} "
+            f"mean={mean_val:.6f} mean|x|={mean_abs:.6f} zero_frac={zero_fraction:.3f}",
+            flush=True,
+        )
+        self._waveform_logs_emitted += 1
+
     def preprocess_audio(self, audio: Union[torch.Tensor, np.ndarray, str]) -> torch.Tensor:
         """
         Preprocess audio to the format expected by CLAP.
@@ -68,20 +104,22 @@ class CLAPAudioEncoder(nn.Module):
         elif isinstance(audio, np.ndarray):
             audio_data = audio
         elif isinstance(audio, torch.Tensor):
-            audio_data = audio.cpu().numpy()
+            audio_data = audio.detach().cpu().numpy()
         else:
             raise ValueError(f"Unsupported audio type: {type(audio)}")
-            
+
         # Ensure correct sample rate
         if len(audio_data.shape) > 1:
             audio_data = audio_data.mean(axis=0)  # Convert to mono
-            
+
         # Truncate or pad to max_length
         if len(audio_data) > self.max_samples:
             audio_data = audio_data[:self.max_samples]
         else:
             audio_data = np.pad(audio_data, (0, self.max_samples - len(audio_data)))
-            
+
+        self._log_waveform_stats(audio_data, "CLAP.preprocess_audio")
+
         return torch.from_numpy(audio_data).float().unsqueeze(0)  # (1, max_samples)
     
     def forward(self, audio: Union[torch.Tensor, List[str], List[np.ndarray]]) -> torch.Tensor:
@@ -97,7 +135,7 @@ class CLAPAudioEncoder(nn.Module):
         if isinstance(audio, list):
             # Process batch of audio files/arrays
             processed_audio = []
-            for a in audio:
+            for idx, a in enumerate(audio):
                 processed = self.preprocess_audio(a)
                 processed_audio.append(processed)
             audio_batch = torch.stack(processed_audio)  # (batch_size, 1, max_samples)
@@ -125,7 +163,7 @@ class CLAPAudioEncoder(nn.Module):
                 audio_numpy = audio_batch.detach().cpu().numpy()
             else:
                 audio_numpy = audio_batch
-                
+
             audio_embeddings = self.model.get_audio_embedding_from_data(
                 x=audio_numpy,
                 use_tensor=False
@@ -157,11 +195,14 @@ class WhisperAudioEncoder(nn.Module):
         max_length: float = 30.0  # seconds
     ):
         super().__init__()
-        
+
         self.sample_rate = sample_rate
         self.max_length = max_length
         self.extract_transcript = extract_transcript
         self.max_samples = int(sample_rate * max_length)
+        self.debug_logging = False
+        self._waveform_log_limit = 5
+        self._waveform_logs_emitted = 0
         
         # Load Whisper model
         self.model = whisper.load_model(model_name)
@@ -174,6 +215,36 @@ class WhisperAudioEncoder(nn.Module):
             
         # Get embedding dimension from Whisper encoder
         self.audio_embed_dim = self.model.dims.n_audio_state  # 512 for small, 768 for base, etc.
+
+    def set_debug_logging(self, enabled: bool, max_waveform_logs: int = 5) -> None:
+        self.debug_logging = bool(enabled)
+        self._waveform_log_limit = int(max(0, max_waveform_logs))
+        self._waveform_logs_emitted = 0
+
+    def _log_waveform_stats(self, audio_data: np.ndarray, source: str) -> None:
+        if not self.debug_logging:
+            return
+        if self._waveform_logs_emitted >= self._waveform_log_limit:
+            return
+
+        flattened = audio_data.astype(np.float32).ravel()
+        if flattened.size == 0:
+            print(f"[AudioDebug] {source}: empty waveform", flush=True)
+            self._waveform_logs_emitted += 1
+            return
+
+        max_val = float(np.max(flattened))
+        min_val = float(np.min(flattened))
+        mean_val = float(np.mean(flattened))
+        mean_abs = float(np.mean(np.abs(flattened)))
+        zero_fraction = float(np.mean(np.isclose(flattened, 0.0)))
+
+        print(
+            f"[AudioDebug] {source}: max={max_val:.6f} min={min_val:.6f} "
+            f"mean={mean_val:.6f} mean|x|={mean_abs:.6f} zero_frac={zero_fraction:.3f}",
+            flush=True,
+        )
+        self._waveform_logs_emitted += 1
         
     def preprocess_audio(self, audio: Union[torch.Tensor, np.ndarray, str]) -> np.ndarray:
         """
@@ -188,7 +259,7 @@ class WhisperAudioEncoder(nn.Module):
         if isinstance(audio, str):
             audio_data, sr = librosa.load(audio, sr=self.sample_rate)
         elif isinstance(audio, torch.Tensor):
-            audio_data = audio.cpu().numpy()
+            audio_data = audio.detach().cpu().numpy()
         else:
             audio_data = audio
             
@@ -201,7 +272,9 @@ class WhisperAudioEncoder(nn.Module):
             audio_data = audio_data[:self.max_samples]
         else:
             audio_data = np.pad(audio_data, (0, self.max_samples - len(audio_data)))
-            
+
+        self._log_waveform_stats(audio_data, "Whisper.preprocess_audio")
+
         return audio_data
     
     def forward(
