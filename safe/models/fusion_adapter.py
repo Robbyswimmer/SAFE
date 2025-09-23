@@ -173,6 +173,14 @@ class LoRAFusionAdapter(nn.Module):
             # Skip audio fusion entirely
             return hidden_states
             
+        weight = self.cross_attention.base_model.query.weight
+        target_dtype = weight.dtype
+        target_device = weight.device
+        if hidden_states.dtype != target_dtype or hidden_states.device != target_device:
+            hidden_states = hidden_states.to(device=target_device, dtype=target_dtype)
+        if audio_tokens.dtype != target_dtype or audio_tokens.device != target_device:
+            audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
+
         # Apply cross-attention with LoRA
         fused_states = self.cross_attention(
             hidden_states=hidden_states,
