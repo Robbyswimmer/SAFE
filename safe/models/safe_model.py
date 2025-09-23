@@ -1015,6 +1015,7 @@ class SAFEModel(nn.Module):
         # For BLIP2/LLaVA models, fuse audio by prefixing projected tokens
         if self.base_vl.model_type in ["blip2", "llava"]:
             pixel_values = kwargs.pop("pixel_values", None)
+            audio_attention_mask = kwargs.pop("audio_attention_mask", None)
             filtered_kwargs = kwargs
 
             if attention_mask is None:
@@ -1022,27 +1023,22 @@ class SAFEModel(nn.Module):
 
             inputs_embeds = self.get_input_embeddings(input_ids)
             if audio_tokens is not None and gate > 0.0:
-                audio_tokens = audio_tokens.to(inputs_embeds.dtype)
+                audio_tokens = audio_tokens.to(
+                    device=inputs_embeds.device,
+                    dtype=inputs_embeds.dtype,
+                )
                 if gate != 1.0:
                     audio_tokens = audio_tokens * gate
 
-                audio_mask = torch.ones(
-                    audio_tokens.size(0),
-                    audio_tokens.size(1),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
+                if audio_attention_mask is not None:
+                    audio_attention_mask = audio_attention_mask.to(attention_mask.device)
+
+                inputs_embeds = self.fusion_adapter(
+                    hidden_states=inputs_embeds,
+                    audio_tokens=audio_tokens,
+                    attention_mask=audio_attention_mask,
+                    gate=gate,
                 )
-                inputs_embeds = torch.cat([audio_tokens, inputs_embeds], dim=1)
-                attention_mask = torch.cat([audio_mask, attention_mask], dim=1)
-                
-                if labels is not None:
-                    audio_label_pad = torch.full(
-                        (labels.size(0), audio_tokens.size(1)),
-                        -100,
-                        dtype=labels.dtype,
-                        device=labels.device,
-                    )
-                    labels = torch.cat([audio_label_pad, labels], dim=1)
 
             model_inputs = {
                 "inputs_embeds": inputs_embeds,

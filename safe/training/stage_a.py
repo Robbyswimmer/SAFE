@@ -61,9 +61,11 @@ class StageATrainer:
         self.config = {
             "learning_rate_projector": 2e-4,
             "learning_rate_adapter": 1e-4,
+            "learning_rate_audio_embeddings": 1e-4,
             "weight_decay": 0.01,
             "num_epochs": 10 if not self.use_curriculum else None,  # Curriculum controls epochs
             "warmup_steps": 1000,
+            "warmup_ratio": 0.1,
             "max_grad_norm": 1.0,
             "audio_loss_weight": 10.0,
             "retention_loss_weight": 1.0,
@@ -86,7 +88,8 @@ class StageATrainer:
             "null_space_max_samples": 128,
             "null_space_audio_threshold": 0.25,
             "null_space_refresh_interval": 2000,
-            "null_space_verbose": False
+            "null_space_verbose": False,
+            "audio_label_smoothing": 0.1,
         }
 
         if config:
@@ -106,14 +109,29 @@ class StageATrainer:
         
         # Setup optimizer
         self._setup_optimizer()
-        
+
+        # Derive a dataset-aware warmup schedule so tiny overfit packs are not stuck in warmup
+        nominal_epochs = self.config.get("num_epochs") or 1
+        self.total_train_steps = max(1, len(train_dataloader) * max(1, int(nominal_epochs)))
+        warmup_ratio = float(self.config.get("warmup_ratio", 0.0))
+        ratio_warmup = int(self.total_train_steps * warmup_ratio) if warmup_ratio > 0 else self.config["warmup_steps"]
+        effective_warmup = max(1, min(self.config["warmup_steps"], ratio_warmup))
+        effective_warmup = min(effective_warmup, self.total_train_steps)
+        if effective_warmup != self.config["warmup_steps"]:
+            print(
+                f"[StageATrainer] Adjusted warmup steps from {self.config['warmup_steps']} to {effective_warmup} based on dataset size.",
+                flush=True,
+            )
+        self.warmup_steps = effective_warmup
+        self.config["warmup_steps"] = effective_warmup
+
         # Setup scheduler (will be updated by curriculum if needed)
         if self.use_curriculum:
             # Curriculum will manage learning rate
             self.scheduler = None
         else:
-            total_steps = len(train_dataloader) * self.config["num_epochs"]
-            cold_steps = max(1, total_steps - self.config["warmup_steps"])
+            total_steps = self.total_train_steps
+            cold_steps = max(1, total_steps - self.warmup_steps)
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=cold_steps)
         
         # Training state
@@ -379,7 +397,10 @@ class StageATrainer:
             use_fisher_information=use_fisher
         )
 
-        self.audio_task_loss = AudioTaskLoss(task_type="qa")
+        self.audio_task_loss = AudioTaskLoss(
+            task_type="qa",
+            label_smoothing=float(self.config.get("audio_label_smoothing", 0.1))
+        )
 
         self.combined_loss = CombinedStageLoss(
             retention_loss=self.retention_loss,
@@ -447,7 +468,25 @@ class StageATrainer:
                 "base_lr": adapter_lr,  # Store base learning rate for warmup
                 "name": "adapter"
             })
-        
+
+        # Audio token embedding parameters (if present)
+        audio_token_module = getattr(self.safe_model, "audio_token_embeddings", None)
+        if audio_token_module is not None:
+            audio_token_params = [
+                p for p in audio_token_module.parameters() if p.requires_grad
+            ]
+            if audio_token_params:
+                token_lr = self.config.get(
+                    "learning_rate_audio_embeddings",
+                    self.config["learning_rate_projector"],
+                )
+                param_groups.append({
+                    "params": audio_token_params,
+                    "lr": token_lr,
+                    "base_lr": token_lr,
+                    "name": "audio_tokens"
+                })
+
         if not param_groups:
             raise ValueError("No trainable parameters found!")
         
@@ -461,7 +500,7 @@ class StageATrainer:
     
     def _apply_warmup(self, step: int):
         """Apply learning rate warmup (assign, don't multiply)."""
-        factor = min(1.0, step / max(1, self.config["warmup_steps"]))
+        factor = min(1.0, step / max(1, getattr(self, "warmup_steps", self.config["warmup_steps"])))
         for g in self.optimizer.param_groups:
             base_lr = g.get("base_lr", g["lr"])
             # Ensure base_lr is a number, not a sequence
@@ -537,94 +576,99 @@ class StageATrainer:
                 flush=True,
             )
         
+        safe_logits = safe_outputs.get("logits") if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits", None)
+        base_outputs = None
+
         # Forward pass through base VL model (for retention loss)
-        with torch.no_grad():
-            sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
-            sanitized_labels = self.safe_model.sanitize_labels_for_base(
-                inputs.get("labels")
-            )
-            base_inputs = {
-                "attention_mask": inputs["attention_mask"],
-            }
-            if sanitized_ids is not None:
-                base_inputs["input_ids"] = sanitized_ids
-            elif "inputs_embeds" in inputs:
-                base_inputs["inputs_embeds"] = inputs["inputs_embeds"]
-            if sanitized_labels is not None:
-                base_inputs["labels"] = sanitized_labels
-            if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
-                base_inputs["pixel_values"] = inputs["pixel_values"]
+        if self.combined_loss.retention_enabled:
+            with torch.no_grad():
+                sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
+                sanitized_labels = self.safe_model.sanitize_labels_for_base(
+                    inputs.get("labels")
+                )
+                base_inputs = {
+                    "attention_mask": inputs["attention_mask"],
+                }
+                if sanitized_ids is not None:
+                    base_inputs["input_ids"] = sanitized_ids
+                elif "inputs_embeds" in inputs:
+                    base_inputs["inputs_embeds"] = inputs["inputs_embeds"]
+                if sanitized_labels is not None:
+                    base_inputs["labels"] = sanitized_labels
+                if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
+                    base_inputs["pixel_values"] = inputs["pixel_values"]
 
-            if self.safe_model.base_vl.model_type == "llava":
-                # Debug: Log input shapes before calling teacher
-                if not getattr(self, "_train_debug_logged", False):
-                    print(f"[TrainDebug] Base inputs keys: {list(base_inputs.keys())}", flush=True)
-                    if "input_ids" in base_inputs:
-                        print(f"[TrainDebug] Base input_ids shape: {base_inputs['input_ids'].shape}", flush=True)
-                    if "pixel_values" in base_inputs:
-                        print(f"[TrainDebug] Base pixel_values shape: {base_inputs['pixel_values'].shape}", flush=True)
-                    self._train_debug_logged = True
-                
-                base_outputs = self._forward_llava_teacher(base_inputs)
-                
-                # Debug: Log output shapes
-                if not getattr(self, "_train_output_logged", False):
-                    print(f"[TrainDebug] Teacher output logits shape: {base_outputs['logits'].shape}", flush=True)
-                    self._train_output_logged = True
+                if self.safe_model.base_vl.model_type == "llava":
+                    # Debug: Log input shapes before calling teacher
+                    if not getattr(self, "_train_debug_logged", False):
+                        print(f"[TrainDebug] Base inputs keys: {list(base_inputs.keys())}", flush=True)
+                        if "input_ids" in base_inputs:
+                            print(f"[TrainDebug] Base input_ids shape: {base_inputs['input_ids'].shape}", flush=True)
+                        if "pixel_values" in base_inputs:
+                            print(f"[TrainDebug] Base pixel_values shape: {base_inputs['pixel_values'].shape}", flush=True)
+                        self._train_debug_logged = True
 
-            elif self.safe_model.base_vl.model_type == "blip2":
-                # BLIP-2: use directly without splitting
-                base_outputs = self.safe_model.base_vl(**base_inputs)
-            else:
-                # For custom models, use vision features
-                base_inputs["vision_features"] = inputs.get("vision_features")
-                base_outputs = self.safe_model.base_vl(**base_inputs)
+                    base_outputs = self._forward_llava_teacher(base_inputs)
 
-            if not self._shape_debug_once:
-                input_shape = None if inputs.get("input_ids") is None else tuple(inputs["input_ids"].shape)
-                sanitized_shape = None if base_inputs.get("input_ids") is None else tuple(base_inputs["input_ids"].shape)
-                print(f"[ShapeDebug] SAFE input_ids: {input_shape}; teacher input_ids: {sanitized_shape}", flush=True)
-                self._shape_debug_once = True
+                    # Debug: Log output shapes
+                    if not getattr(self, "_train_output_logged", False):
+                        print(f"[TrainDebug] Teacher output logits shape: {base_outputs['logits'].shape}", flush=True)
+                        self._train_output_logged = True
 
-            student_logits = safe_outputs.get("logits") if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits", None)
-            teacher_logits = base_outputs.get("logits") if isinstance(base_outputs, dict) else getattr(base_outputs, "logits", None)
-            if student_logits is not None and teacher_logits is not None:
-                trim_len = min(student_logits.size(1), teacher_logits.size(1))
-                if student_logits.size(1) != trim_len:
-                    trimmed_student = student_logits[:, -trim_len:, :]
-                    if isinstance(safe_outputs, dict):
-                        safe_outputs["logits"] = trimmed_student
-                    else:
-                        safe_outputs.logits = trimmed_student
-                    student_logits = trimmed_student
-                    if inputs.get("labels") is not None and inputs["labels"].size(1) != trim_len:
-                        inputs["labels"] = inputs["labels"][:, -trim_len:]
-                    if inputs.get("attention_mask") is not None and inputs["attention_mask"].size(1) != trim_len:
-                        inputs["attention_mask"] = inputs["attention_mask"][:, -trim_len:]
-                if teacher_logits.size(1) != trim_len:
-                    trimmed_teacher = teacher_logits[:, -trim_len:, :]
-                    if isinstance(base_outputs, dict):
-                        base_outputs["logits"] = trimmed_teacher
-                    else:
-                        base_outputs.logits = trimmed_teacher
-                    teacher_logits = trimmed_teacher
-
-            if student_logits is not None and teacher_logits is not None and teacher_logits.size(0) != student_logits.size(0):
-                if teacher_logits.size(0) == 1:
-                    if not getattr(self, "_teacher_broadcast_warned", False):
-                        print(
-                            f"[Warn] Teacher batch={teacher_logits.size(0)} but student batch={student_logits.size(0)}; expanding teacher logits",
-                            flush=True
-                        )
-                        self._teacher_broadcast_warned = True
-                    teacher_logits = teacher_logits.expand_as(student_logits)
-                    if isinstance(base_outputs, dict):
-                        base_outputs["logits"] = teacher_logits
+                elif self.safe_model.base_vl.model_type == "blip2":
+                    # BLIP-2: use directly without splitting
+                    base_outputs = self.safe_model.base_vl(**base_inputs)
                 else:
-                    raise RuntimeError(
-                        f"Teacher/student batch mismatch: {teacher_logits.size(0)} vs {student_logits.size(0)}"
-                    )
-        if self.debug_logging:
+                    # For custom models, use vision features
+                    base_inputs["vision_features"] = inputs.get("vision_features")
+                    base_outputs = self.safe_model.base_vl(**base_inputs)
+
+                if not self._shape_debug_once:
+                    input_shape = None if inputs.get("input_ids") is None else tuple(inputs["input_ids"].shape)
+                    sanitized_shape = None if base_inputs.get("input_ids") is None else tuple(base_inputs["input_ids"].shape)
+                    print(f"[ShapeDebug] SAFE input_ids: {input_shape}; teacher input_ids: {sanitized_shape}", flush=True)
+                    self._shape_debug_once = True
+
+                teacher_logits = base_outputs.get("logits") if isinstance(base_outputs, dict) else getattr(base_outputs, "logits", None)
+                if safe_logits is not None and teacher_logits is not None:
+                    trim_len = min(safe_logits.size(1), teacher_logits.size(1))
+                    if safe_logits.size(1) != trim_len:
+                        trimmed_student = safe_logits[:, -trim_len:, :]
+                        if isinstance(safe_outputs, dict):
+                            safe_outputs["logits"] = trimmed_student
+                        else:
+                            safe_outputs.logits = trimmed_student
+                        safe_logits = trimmed_student
+                        if inputs.get("labels") is not None and inputs["labels"].size(1) != trim_len:
+                            inputs["labels"] = inputs["labels"][:, -trim_len:]
+                        if inputs.get("attention_mask") is not None and inputs["attention_mask"].size(1) != trim_len:
+                            inputs["attention_mask"] = inputs["attention_mask"][:, -trim_len:]
+                    if teacher_logits.size(1) != trim_len:
+                        trimmed_teacher = teacher_logits[:, -trim_len:, :]
+                        if isinstance(base_outputs, dict):
+                            base_outputs["logits"] = trimmed_teacher
+                        else:
+                            base_outputs.logits = trimmed_teacher
+                        teacher_logits = trimmed_teacher
+
+                if safe_logits is not None and teacher_logits is not None and teacher_logits.size(0) != safe_logits.size(0):
+                    if teacher_logits.size(0) == 1:
+                        if not getattr(self, "_teacher_broadcast_warned", False):
+                            print(
+                                f"[Warn] Teacher batch={teacher_logits.size(0)} but student batch={safe_logits.size(0)}; expanding teacher logits",
+                                flush=True
+                            )
+                            self._teacher_broadcast_warned = True
+                        teacher_logits = teacher_logits.expand_as(safe_logits)
+                        if isinstance(base_outputs, dict):
+                            base_outputs["logits"] = teacher_logits
+                    else:
+                        raise RuntimeError(
+                            f"Teacher/student batch mismatch: {teacher_logits.size(0)} vs {safe_logits.size(0)}"
+                        )
+        else:
+            base_outputs = {"logits": safe_logits.detach() if safe_logits is not None else None}
+        if self.debug_logging and self.combined_loss.retention_enabled:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             elapsed_teacher = time.time() - step_timer_start if step_timer_start is not None else 0.0
@@ -710,7 +754,7 @@ class StageATrainer:
         # Learning rate scheduling (fixed: use local_step, assign don't multiply)
         local_step = self.global_step + 1  # because caller increments after train_step returns
         
-        if local_step <= self.config["warmup_steps"]:
+        if local_step <= self.warmup_steps:
             self._apply_warmup(local_step)
         elif self.scheduler is not None:
             self.scheduler.step()
