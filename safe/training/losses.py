@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional, Tuple
 import numpy as np
+import logging
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RetentionLoss(nn.Module):
@@ -324,11 +327,45 @@ class AudioTaskLoss(nn.Module):
             if not torch.any(valid):
                 return torch.tensor(0.0, device=logits.device, requires_grad=True)
 
+            # Ensure labels fall inside the model vocabulary to avoid NaNs from
+            # cross-entropy when label smoothing is enabled.
+            vocab_size = flat_logits.size(-1)
+            in_vocab = (flat_labels >= 0) & (flat_labels < vocab_size)
+            invalid_positions = valid & ~in_vocab
+            if torch.any(invalid_positions):
+                invalid_count = invalid_positions.sum().item()
+                LOGGER.warning(
+                    "AudioTaskLoss: filtering %d labels outside vocab range [0, %d). "
+                    "This may indicate tokenization issues.",
+                    invalid_count, vocab_size
+                )
+                valid &= in_vocab
+
+            if not torch.any(valid):
+                return torch.tensor(0.0, device=logits.device, requires_grad=True)
+
             loss = self.loss_fn(flat_logits[valid].float(), flat_labels[valid])
         else:
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
             flat_labels = shift_labels.reshape(-1)
             valid = flat_labels != -100
+            if not torch.any(valid):
+                return torch.tensor(0.0, device=logits.device, requires_grad=True)
+
+            # Ensure labels fall inside the model vocabulary to avoid NaNs from
+            # cross-entropy when label smoothing is enabled.
+            vocab_size = flat_logits.size(-1)
+            in_vocab = (flat_labels >= 0) & (flat_labels < vocab_size)
+            invalid_positions = valid & ~in_vocab
+            if torch.any(invalid_positions):
+                invalid_count = invalid_positions.sum().item()
+                LOGGER.warning(
+                    "AudioTaskLoss: filtering %d labels outside vocab range [0, %d). "
+                    "This may indicate tokenization issues.",
+                    invalid_count, vocab_size
+                )
+                valid &= in_vocab
+
             if not torch.any(valid):
                 return torch.tensor(0.0, device=logits.device, requires_grad=True)
 
