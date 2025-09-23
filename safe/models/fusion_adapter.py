@@ -122,7 +122,11 @@ class CrossAttentionBlock(nn.Module):
         output = self.output_dropout(output)
         output = output.to(input_dtype)
 
-        # Optional layer norm on residual update only
+        # Apply residual connection BEFORE layer norm and gating
+        hidden_states = hidden_states.to(output.dtype)
+        output = output + hidden_states
+
+        # Optional layer norm on the full fused output
         if self.layer_norm is not None:
             output = self.layer_norm(output)
 
@@ -254,8 +258,8 @@ class LoRAFusionAdapter(nn.Module):
         if audio_tokens.dtype != target_dtype or audio_tokens.device != target_device:
             audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
 
-        # Apply cross-attention with LoRA
-        residual_update = self.cross_attention(
+        # Apply cross-attention with LoRA (returns hidden_states + attention_output)
+        fused_states = self.cross_attention(
             hidden_states=hidden_states,
             audio_tokens=audio_tokens,
             attention_mask=attention_mask,
@@ -283,16 +287,18 @@ class LoRAFusionAdapter(nn.Module):
                 print(msg, flush=True)
                 self._attention_logs_emitted += 1
 
-        # Apply gating directly on the residual update so gate=0 is an exact no-op
+        # Apply gating: interpolate between original and fused states
+        # gate=0 -> return hidden_states (no audio), gate=1 -> return fused_states (full audio)
         if isinstance(gate, torch.Tensor):
             gate = gate.to(device=hidden_states.device, dtype=hidden_states.dtype)
-            while gate.dim() < residual_update.dim():
+            while gate.dim() < fused_states.dim():
                 gate = gate.unsqueeze(-1)
-            residual_update = residual_update * gate
+            output = gate * fused_states + (1.0 - gate) * hidden_states
         else:
-            residual_update = residual_update * float(gate)
+            gate = float(gate)
+            output = gate * fused_states + (1.0 - gate) * hidden_states
 
-        return hidden_states + residual_update
+        return output
 
 
 class MultiLayerFusionAdapter(nn.Module):

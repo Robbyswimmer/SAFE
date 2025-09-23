@@ -809,7 +809,7 @@ class StageATrainer:
             return has_audio if has_audio is not None else torch.tensor([])
         
         # Check for silent audio (all zeros or near-zero values)
-        silent_threshold = 1e-6
+        silent_threshold = 1e-8  # Lowered threshold for better detection
         for i, audio_tensor in enumerate(audio_data):
             if isinstance(audio_tensor, torch.Tensor):
                 max_amplitude = torch.abs(audio_tensor).max().item()
@@ -867,6 +867,92 @@ class StageATrainer:
             ),
             flush=True,
         )
+
+    def _verify_trainable_parameters(self) -> None:
+        """Verify which parameters are trainable to debug gradient flow issues."""
+        audio_trainable = 0
+        audio_total = 0
+        lora_trainable = 0
+        lora_total = 0
+        other_trainable = 0
+        
+        print(f"\n[ParamVerify] step {self.global_step}: Checking parameter status...", flush=True)
+        
+        for name, param in self.safe_model.named_parameters():
+            lower_name = name.lower()
+            
+            # Count audio-related parameters
+            if any(x in lower_name for x in ["audio_projector", "fusion_adapter", "audio_token"]):
+                audio_total += 1
+                if param.requires_grad:
+                    audio_trainable += 1
+                    
+            # Count LoRA parameters specifically
+            if "lora" in lower_name:
+                lora_total += 1
+                if param.requires_grad:
+                    lora_trainable += 1
+                    print(f"[ParamVerify] ✓ LoRA param trainable: {name}", flush=True)
+                else:
+                    print(f"[ParamVerify] ✗ LoRA param FROZEN: {name}", flush=True)
+                    
+            # Count other trainable parameters
+            elif param.requires_grad:
+                other_trainable += 1
+                
+        print(f"[ParamVerify] Audio components: {audio_trainable}/{audio_total} trainable", flush=True)
+        print(f"[ParamVerify] LoRA components: {lora_trainable}/{lora_total} trainable", flush=True)
+        print(f"[ParamVerify] Other components: {other_trainable} trainable", flush=True)
+        
+        if audio_trainable == 0:
+            print(f"[ParamVerify] 🚨 CRITICAL: NO AUDIO PARAMETERS TRAINABLE!", flush=True)
+        elif lora_trainable == 0:
+            print(f"[ParamVerify] 🚨 CRITICAL: NO LORA PARAMETERS TRAINABLE!", flush=True)
+        else:
+            print(f"[ParamVerify] ✅ Audio training setup looks good", flush=True)
+        print()
+
+    def _check_gradient_flow(self) -> None:
+        """Check if gradients are actually flowing to key parameters."""
+        audio_with_grads = 0
+        lora_with_grads = 0
+        total_audio = 0
+        total_lora = 0
+        
+        print(f"[GradFlow] step {self.global_step}: Checking gradient presence...", flush=True)
+        
+        for name, param in self.safe_model.named_parameters():
+            if not param.requires_grad:
+                continue
+                
+            lower_name = name.lower()
+            has_grad = param.grad is not None and torch.any(param.grad != 0)
+            
+            if any(x in lower_name for x in ["audio_projector", "fusion_adapter"]):
+                total_audio += 1
+                if has_grad:
+                    audio_with_grads += 1
+                else:
+                    print(f"[GradFlow] ✗ NO GRADIENT: {name}", flush=True)
+                    
+            if "lora" in lower_name:
+                total_lora += 1
+                if has_grad:
+                    lora_with_grads += 1
+                    grad_norm = param.grad.norm().item()
+                    print(f"[GradFlow] ✓ LoRA gradient: {name}, norm={grad_norm:.6f}", flush=True)
+                else:
+                    print(f"[GradFlow] ✗ NO LoRA GRADIENT: {name}", flush=True)
+        
+        print(f"[GradFlow] Audio params with gradients: {audio_with_grads}/{total_audio}", flush=True)
+        print(f"[GradFlow] LoRA params with gradients: {lora_with_grads}/{total_lora}", flush=True)
+        
+        if audio_with_grads == 0:
+            print(f"[GradFlow] 🚨 GRADIENT FLOW BROKEN: No audio gradients!", flush=True)
+        elif lora_with_grads == 0:
+            print(f"[GradFlow] 🚨 GRADIENT FLOW BROKEN: No LoRA gradients!", flush=True)
+        else:
+            print(f"[GradFlow] ✅ Gradients flowing correctly", flush=True)
     
     def train_step(self, batch: Dict) -> Dict[str, float]:
         """
@@ -880,6 +966,10 @@ class StageATrainer:
         """
         self.safe_model.train()
         self.safe_model.enable_audio_training()  # Only train audio components
+
+        # Verify trainable parameters (debug gradient flow issues)
+        if self.global_step % 10 == 0:  # Check every 10 steps
+            self._verify_trainable_parameters()
 
         step_timer_start = None
         if self.debug_logging:
@@ -1179,6 +1269,10 @@ class StageATrainer:
         
         # Backward pass
         total_loss.backward()
+
+        # Verify gradients are flowing (debug)
+        if self.global_step % 5 == 0:
+            self._check_gradient_flow()
 
         self._log_grad_norms()
 
