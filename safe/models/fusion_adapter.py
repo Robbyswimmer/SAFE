@@ -44,7 +44,7 @@ class CrossAttentionBlock(nn.Module):
         self.output_dense = nn.Linear(hidden_size, hidden_size)
         self.output_dropout = nn.Dropout(output_dropout)
         
-        # Layer normalization
+        # Optional stabilization on residual update (kept for checkpoint compatibility)
         self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
         
         # Attention dropout
@@ -122,9 +122,9 @@ class CrossAttentionBlock(nn.Module):
         output = self.output_dropout(output)
         output = output.to(input_dtype)
 
-        # Residual connection and layer norm
-        hidden_states = hidden_states.to(output.dtype)
-        output = self.layer_norm(output + hidden_states)
+        # Optional layer norm on residual update only
+        if self.layer_norm is not None:
+            output = self.layer_norm(output)
 
         if getattr(self, "debug_logging", False):
             summary = {
@@ -246,10 +246,6 @@ class LoRAFusionAdapter(nn.Module):
         Returns:
             fused_states: (batch_size, seq_len, hidden_size) - Fused representations
         """
-        if gate == 0.0:
-            # Skip audio fusion entirely
-            return hidden_states
-            
         weight = self.cross_attention.base_model.query.weight
         target_dtype = weight.dtype
         target_device = weight.device
@@ -259,7 +255,7 @@ class LoRAFusionAdapter(nn.Module):
             audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
 
         # Apply cross-attention with LoRA
-        fused_states = self.cross_attention(
+        residual_update = self.cross_attention(
             hidden_states=hidden_states,
             audio_tokens=audio_tokens,
             attention_mask=attention_mask,
@@ -287,11 +283,16 @@ class LoRAFusionAdapter(nn.Module):
                 print(msg, flush=True)
                 self._attention_logs_emitted += 1
 
-        # Apply gating: interpolate between original and fused states
-        if gate != 1.0:
-            fused_states = gate * fused_states + (1.0 - gate) * hidden_states
-            
-        return fused_states
+        # Apply gating directly on the residual update so gate=0 is an exact no-op
+        if isinstance(gate, torch.Tensor):
+            gate = gate.to(device=hidden_states.device, dtype=hidden_states.dtype)
+            while gate.dim() < residual_update.dim():
+                gate = gate.unsqueeze(-1)
+            residual_update = residual_update * gate
+        else:
+            residual_update = residual_update * float(gate)
+
+        return hidden_states + residual_update
 
 
 class MultiLayerFusionAdapter(nn.Module):
