@@ -101,6 +101,7 @@ class StageATrainer:
             "grad_log_limit": 20,
             "sanitize_nan_gradients": True,
             "grad_sanitize_clip": 1e3,
+            "param_sanitize_clip": 1e3,
         }
 
         if config:
@@ -812,6 +813,36 @@ class StageATrainer:
                 flush=True,
             )
 
+    def _sanitize_audio_parameters(self) -> None:
+        """Clamp/sanitize audio pathway parameters if they ever contain NaNs/Infs."""
+        clip_value = float(self.config.get("param_sanitize_clip", 1e3))
+        sanitized_any = False
+
+        for name, param in self.safe_model.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            lower = name.lower()
+            if (
+                "audio_projector" not in lower
+                and "fusion_adapter" not in lower
+                and "lora" not in lower
+                and "audio_token_embeddings" not in lower
+            ):
+                continue
+
+            data = param.data
+            if torch.isnan(data).any() or torch.isinf(data).any():
+                torch.nan_to_num_(data, nan=0.0, posinf=clip_value, neginf=-clip_value)
+                data.clamp_(-clip_value, clip_value)
+                sanitized_any = True
+
+        if sanitized_any and self.debug_logging:
+            print(
+                f"[ParamSanitize] step {self.global_step}: repaired audio parameters containing NaN/Inf",
+                flush=True,
+            )
+
     def _run_periodic_ablation_check(self, inputs: Dict, has_audio: torch.Tensor) -> None:
         """Run periodic ablation check to monitor gate=1.0 vs gate=0.0 performance."""
         audio_indices = torch.nonzero(has_audio, as_tuple=False).flatten()
@@ -1310,6 +1341,7 @@ class StageATrainer:
 
         # Clean up NaN/Inf gradients from audio pathway before diagnostics
         self._sanitize_audio_gradients()
+        self._sanitize_audio_parameters()
 
         # Verify gradients are flowing (debug)
         if self.global_step % 5 == 0 or self.global_step < 3:
@@ -1325,15 +1357,27 @@ class StageATrainer:
         if self.trainable_param_list:
             # Check for and handle NaN/Inf gradients
             nan_grad_count = 0
+            sanitized_grad_count = 0
             for param in self.trainable_param_list:
                 if param.grad is not None:
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        print(f"[GradClip] WARNING: NaN/Inf gradient detected, zeroing grad for param shape {param.shape}", flush=True)
-                        param.grad.zero_()
-                        nan_grad_count += 1
-            
+                    grad = param.grad
+                    if torch.isnan(grad).any() or torch.isinf(grad).any():
+                        torch.nan_to_num_(grad, nan=0.0, posinf=self.config["grad_sanitize_clip"], neginf=-self.config["grad_sanitize_clip"])
+                        grad.clamp_(-self.config["grad_sanitize_clip"], self.config["grad_sanitize_clip"])
+                        if torch.isnan(grad).any() or torch.isinf(grad).any():
+                            print(f"[GradClip] WARNING: NaN/Inf gradient detected, zeroing grad for param shape {param.shape}", flush=True)
+                            grad.zero_()
+                            nan_grad_count += 1
+                        else:
+                            sanitized_grad_count += 1
+
             if nan_grad_count > 0:
                 print(f"[GradClip] step {self.global_step}: Zeroed {nan_grad_count} NaN/Inf gradients", flush=True)
+            if sanitized_grad_count > 0 and self.debug_logging:
+                print(
+                    f"[GradClip] step {self.global_step}: sanitized {sanitized_grad_count} gradients before clipping",
+                    flush=True,
+                )
             
             # Apply gradient clipping
             grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -1354,6 +1398,7 @@ class StageATrainer:
 
         # Optimizer step
         self.optimizer.step()
+        self._sanitize_audio_parameters()
         
         # Log parameter update norms
         if self.config.get("log_update_norms", True) and self.global_step % self.config.get("grad_log_interval", 1) == 0:
