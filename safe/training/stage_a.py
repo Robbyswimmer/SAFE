@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -90,6 +91,14 @@ class StageATrainer:
             "null_space_refresh_interval": 2000,
             "null_space_verbose": False,
             "audio_label_smoothing": 0.1,
+            "enable_audio_sanity_checks": True,
+            "log_waveform_stats": True,
+            "waveform_log_limit": 8,
+            "log_attention_probe": True,
+            "attention_probe_log_limit": 8,
+            "log_grad_norms": True,
+            "grad_log_interval": 1,
+            "grad_log_limit": 20,
         }
 
         if config:
@@ -148,7 +157,25 @@ class StageATrainer:
         self._teacher_broadcast_warned = False
         self._shape_debug_once = False
         self._eval_shape_debug_once = False
-        setattr(self.safe_model, "debug_logging", self.debug_logging)
+        self._sanity_checks_completed = False
+        self._attention_logs_emitted = 0
+        self._grad_logs_emitted = 0
+
+        waveform_logs = int(self.config.get("waveform_log_limit", 8))
+        waveform_debug = bool(self.config.get("log_waveform_stats", False))
+        attention_probe = bool(self.config.get("log_attention_probe", False))
+        attention_log_limit = int(self.config.get("attention_probe_log_limit", 5))
+
+        if hasattr(self.safe_model, "set_debug_logging"):
+            self.safe_model.set_debug_logging(self.debug_logging)
+        else:
+            setattr(self.safe_model, "debug_logging", self.debug_logging)
+
+        if hasattr(self.safe_model, "configure_audio_debug"):
+            self.safe_model.configure_audio_debug(waveform_debug, waveform_logs)
+
+        if hasattr(self.safe_model, "configure_attention_probe"):
+            self.safe_model.configure_attention_probe(attention_probe, attention_log_limit)
 
         # Move model to GPU if available
         if torch.cuda.is_available():
@@ -544,6 +571,202 @@ class StageATrainer:
                 print(f"Warning: base_lr is a sequence: {base_lr}, using first element", flush=True)
                 base_lr = base_lr[0]
             g["lr"] = float(base_lr) * factor
+
+    def _clone_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        cloned: Dict[str, Any] = {}
+        for key, value in inputs.items():
+            if isinstance(value, torch.Tensor):
+                cloned[key] = value.detach().clone()
+            elif isinstance(value, list):
+                cloned[key] = list(value)
+            else:
+                cloned[key] = value
+        return cloned
+
+    def _select_batch_indices(
+        self,
+        inputs: Dict[str, Any],
+        indices: torch.Tensor,
+        clone: bool = True,
+    ) -> Dict[str, Any]:
+        if indices.numel() == 0:
+            return {}
+
+        if indices.dtype != torch.long:
+            indices = indices.to(torch.long)
+
+        base_tensor = inputs.get("input_ids")
+        if not isinstance(base_tensor, torch.Tensor):
+            base_tensor = next(
+                (v for v in inputs.values() if isinstance(v, torch.Tensor) and v.dim() > 0),
+                None,
+            )
+        batch_size = base_tensor.size(0) if isinstance(base_tensor, torch.Tensor) else None
+
+        subset: Dict[str, Any] = {}
+        index_list = indices.tolist()
+
+        for key, value in inputs.items():
+            if isinstance(value, torch.Tensor) and batch_size is not None and value.size(0) == batch_size:
+                device_indices = indices.to(value.device)
+                sliced = value.index_select(0, device_indices)
+                subset[key] = sliced.detach().clone() if clone else sliced
+            elif isinstance(value, list) and batch_size is not None and len(value) == batch_size:
+                subset[key] = [value[int(i)] for i in index_list]
+            else:
+                if isinstance(value, torch.Tensor) and clone:
+                    subset[key] = value.detach().clone()
+                else:
+                    subset[key] = value
+
+        return subset
+
+    def _compute_audio_loss(self, inputs: Dict[str, Any], gate: float) -> Optional[float]:
+        labels = inputs.get("labels")
+        attention_mask = inputs.get("attention_mask")
+        if labels is None:
+            return None
+
+        was_training = self.safe_model.training
+        self.safe_model.eval()
+        try:
+            with torch.no_grad():
+                outputs = self.safe_model(**inputs, gate=gate)
+                logits = outputs.get("logits") if isinstance(outputs, dict) else getattr(outputs, "logits", None)
+                if logits is None:
+                    return None
+                loss = self.audio_task_loss(logits, labels, attention_mask)
+                return float(loss.detach().item())
+        finally:
+            if was_training:
+                self.safe_model.train()
+
+    def _run_audio_sanity_checks(self, inputs: Dict[str, Any], has_audio: torch.Tensor) -> None:
+        if self._sanity_checks_completed:
+            return
+        if not self.config.get("enable_audio_sanity_checks", False):
+            self._sanity_checks_completed = True
+            return
+
+        if has_audio.numel() == 0 or not torch.any(has_audio):
+            print("[SanityCheck] Skipping audio sanity checks: no audio samples in batch.", flush=True)
+            self._sanity_checks_completed = True
+            return
+
+        audio_indices = torch.nonzero(has_audio, as_tuple=False).flatten()
+        audio_inputs = self._select_batch_indices(inputs, audio_indices)
+        if not audio_inputs or audio_inputs.get("audio_tokens") is None:
+            print("[SanityCheck] Audio tokens missing; cannot run sanity checks.", flush=True)
+            self._sanity_checks_completed = True
+            return
+
+        print("\n[SanityCheck] Running audio fusion ablations on first audio batch...", flush=True)
+
+        baseline_loss = self._compute_audio_loss(self._clone_inputs(audio_inputs), gate=1.0)
+        gate_off_loss = self._compute_audio_loss(self._clone_inputs(audio_inputs), gate=0.0)
+
+        shuffled_inputs = self._clone_inputs(audio_inputs)
+        audio_tokens = shuffled_inputs.get("audio_tokens")
+        if isinstance(audio_tokens, torch.Tensor):
+            perm = torch.randperm(audio_tokens.size(0)).to(audio_tokens.device)
+            shuffled_inputs["audio_tokens"] = audio_tokens.index_select(0, perm)
+        shuffled_loss = self._compute_audio_loss(shuffled_inputs, gate=1.0)
+
+        zero_inputs = self._clone_inputs(audio_inputs)
+        if isinstance(zero_inputs.get("audio_tokens"), torch.Tensor):
+            zero_inputs["audio_tokens"] = torch.zeros_like(zero_inputs["audio_tokens"])
+        zero_loss = self._compute_audio_loss(zero_inputs, gate=1.0)
+
+        def fmt(value: Optional[float]) -> str:
+            return "N/A" if value is None else f"{value:.6f}"
+
+        print("[SanityCheck] Loss comparison (lower is better):", flush=True)
+        print(f"  gate=1.0 (baseline): {fmt(baseline_loss)}", flush=True)
+        print(f"  gate=0.0: {fmt(gate_off_loss)}", flush=True)
+        print(f"  shuffled audio: {fmt(shuffled_loss)}", flush=True)
+        print(f"  zeroed audio: {fmt(zero_loss)}", flush=True)
+
+        self._sanity_checks_completed = True
+
+    def _log_attention_probe(self) -> None:
+        if not self.config.get("log_attention_probe", False):
+            return
+        log_limit = int(self.config.get("attention_probe_log_limit", 0))
+        if log_limit and self._attention_logs_emitted >= log_limit:
+            return
+
+        summary = None
+        if hasattr(self.safe_model, "get_last_attention_summary"):
+            summary = self.safe_model.get_last_attention_summary()
+        elif hasattr(self.safe_model, "fusion_adapter"):
+            summary = getattr(self.safe_model.fusion_adapter, "last_attention_summary", None)
+
+        if not summary:
+            return
+
+        msg = f"[AttentionProbe][step {self.global_step}]"
+        if "overall_mean" in summary:
+            msg += f" overall_mean={summary['overall_mean']:.6f}"
+        if "overall_max" in summary:
+            msg += f" overall_max={summary['overall_max']:.6f}"
+        if "supervised_mean" in summary:
+            msg += f" supervised_mean={summary['supervised_mean']:.6f}"
+        print(msg, flush=True)
+        self._attention_logs_emitted += 1
+
+    def _log_grad_norms(self) -> None:
+        if not self.config.get("log_grad_norms", False):
+            return
+        log_limit = int(self.config.get("grad_log_limit", 0))
+        if log_limit and self._grad_logs_emitted >= log_limit:
+            return
+        interval = max(1, int(self.config.get("grad_log_interval", 1)))
+        if self.global_step % interval != 0:
+            return
+
+        projector_sq = 0.0
+        fusion_sq = 0.0
+        token_sq = 0.0
+        overall_sq = 0.0
+        projector_params = fusion_params = token_params = overall_params = 0
+
+        for name, param in self.safe_model.named_parameters():
+            if not param.requires_grad or param.grad is None:
+                continue
+            grad = param.grad.detach()
+            norm = grad.norm(2).item()
+            overall_sq += norm ** 2
+            overall_params += 1
+            lower = name.lower()
+            if "audio_projector" in lower:
+                projector_sq += norm ** 2
+                projector_params += 1
+            elif "fusion_adapter" in lower or "lora" in lower:
+                fusion_sq += norm ** 2
+                fusion_params += 1
+            elif "audio_token_embeddings" in lower:
+                token_sq += norm ** 2
+                token_params += 1
+
+        def safe_sqrt(value: float) -> float:
+            return float(math.sqrt(value)) if value > 0 else 0.0
+
+        print(
+            "[GradDebug] step {}: projector_norm={:.6f} (n={}) fusion_norm={:.6f} (n={}) "
+            "audio_token_norm={:.6f} (n={}) overall_norm={:.6f} (n={})".format(
+                self.global_step,
+                safe_sqrt(projector_sq),
+                projector_params,
+                safe_sqrt(fusion_sq),
+                fusion_params,
+                safe_sqrt(token_sq),
+                token_params,
+                safe_sqrt(overall_sq),
+                overall_params,
+            ),
+            flush=True,
+        )
+        self._grad_logs_emitted += 1
     
     def train_step(self, batch: Dict) -> Dict[str, float]:
         """
@@ -605,7 +828,14 @@ class StageATrainer:
                 print(f"[AUDIO_DEBUG] Answers data type: {type(answers_data)}", flush=True)
         
         # Prepare inputs for SAFE model (device-consistent masks)
-        has_audio = batch.get("has_audio", torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device))
+        has_audio = batch.get(
+            "has_audio",
+            torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device),
+        )
+        if isinstance(has_audio, torch.Tensor):
+            has_audio = has_audio.to(device=device, dtype=torch.bool)
+        else:
+            has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
         print(f"[AUDIO_DEBUG] has_audio flag: {has_audio.sum().item()}/{len(has_audio)} samples marked as having audio", flush=True)
         
         # Create input tensors for training - apply answers for supervised learning
@@ -638,13 +868,16 @@ class StageATrainer:
                 f"[TrainDebug] step {self.global_step}: prepared inputs input_ids={input_shape} has_audio={int(has_audio.sum().item())}",
                 flush=True,
             )
-        
+
+        self._run_audio_sanity_checks(inputs, has_audio)
+
         # Optional debug: Check multimodal input preparation (disabled for clean logs)
         # print(f"DEBUG: After prepare_multimodal_inputs, keys: {inputs.keys()}")
         # print(f"DEBUG: Has pixel_values: {'pixel_values' in inputs}")
-        
+
         # Forward pass through SAFE model
         safe_outputs = self.safe_model(**inputs)
+        self._log_attention_probe()
         if self.debug_logging:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -824,6 +1057,8 @@ class StageATrainer:
         # Backward pass
         total_loss.backward()
 
+        self._log_grad_norms()
+
         if self.null_space_projector is not None:
             self.null_space_projector.observe(step=self.global_step, has_audio=has_audio)
             self.null_space_projector.project()
@@ -929,7 +1164,14 @@ class StageATrainer:
                     if isinstance(batch[key], torch.Tensor):
                         batch[key] = batch[key].to(device)
                 
-                has_audio = batch.get("has_audio", torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device))
+                has_audio = batch.get(
+                    "has_audio",
+                    torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device),
+                )
+                if isinstance(has_audio, torch.Tensor):
+                    has_audio = has_audio.to(device=device, dtype=torch.bool)
+                else:
+                    has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
                 
                 # Prepare inputs - always pass images/audio if available, don't gate on flags
                 if self.debug_logging:
