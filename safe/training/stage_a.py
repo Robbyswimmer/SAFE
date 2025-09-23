@@ -67,7 +67,7 @@ class StageATrainer:
             "warmup_steps": 1000,
             "warmup_ratio": 0.1,
             "max_grad_norm": 1.0,
-            "audio_loss_weight": 10.0,
+            "audio_loss_weight": 1.0,
             "retention_loss_weight": 1.0,
             "distillation_weight": 1.0,
             "distillation_temperature": 3.0,
@@ -771,6 +771,7 @@ class StageATrainer:
         retention_val = retention_loss.item() if isinstance(retention_loss, torch.Tensor) else retention_loss
         total_val = total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
         print(f"[DEBUG] Loss breakdown: audio={audio_val:.4f}, retention={retention_val:.4f}, total={total_val:.4f}", flush=True)
+        print(f"[DEBUG] audio_weight = {self.combined_loss.audio_weight}, retention_weight = {self.combined_loss.retention_weight}", flush=True)
         if self.debug_logging:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -1811,7 +1812,7 @@ class StageATrainer:
             max_eval_batches = self.config.get("max_eval_batches", None)
 
             # eval every n epochs
-            if self.epoch % 5 == 0:
+            if self.epoch % 10 == 0:
                 eval_metrics = self.evaluate(max_batches=max_eval_batches)
             
             # Calculate curriculum-specific metrics
