@@ -344,6 +344,11 @@ class AudioTaskLoss(nn.Module):
             if not torch.any(valid):
                 return torch.tensor(0.0, device=logits.device, requires_grad=True)
 
+            # Debug: Log supervised token count and label distribution
+            valid_count = valid.sum().item()
+            unique_labels = flat_labels[valid].unique() if torch.any(valid) else torch.tensor([])
+            LOGGER.info(f"AudioTaskLoss: valid_tokens={valid_count}, unique_labels={len(unique_labels)}")
+
             loss = self.loss_fn(flat_logits[valid].float(), flat_labels[valid])
         else:
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
@@ -368,6 +373,11 @@ class AudioTaskLoss(nn.Module):
 
             if not torch.any(valid):
                 return torch.tensor(0.0, device=logits.device, requires_grad=True)
+
+            # Debug: Log supervised token count and label distribution
+            valid_count = valid.sum().item()
+            unique_labels = flat_labels[valid].unique() if torch.any(valid) else torch.tensor([])
+            LOGGER.info(f"AudioTaskLoss: valid_tokens={valid_count}, unique_labels={len(unique_labels)}")
 
             loss = self.loss_fn(flat_logits[valid].float(), flat_labels[valid])
         

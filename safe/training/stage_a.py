@@ -521,6 +521,17 @@ class StageATrainer:
             betas=(0.9, 0.999)
         )
         
+        # Debug: Parameter validation
+        trainable_count = sum(p.numel() for group in param_groups for p in group["params"] if p.requires_grad)
+        print(f"[DEBUG] Trainable parameters: {trainable_count:,}", flush=True)
+        
+        # Sample parameter names
+        param_names = []
+        for name, param in self.safe_model.named_parameters():
+            if param.requires_grad:
+                param_names.append(name)
+        print(f"[DEBUG] Sample trainable params: {param_names[:10]}", flush=True)
+        
         # base_lr is already set in parameter groups above
     
     def _apply_warmup(self, step: int):
@@ -709,6 +720,15 @@ class StageATrainer:
             batch=inputs,
             has_audio=has_audio
         )
+        
+        # Debug: Log loss components
+        audio_loss = loss_dict.get('audio_task_loss', 0.0)
+        retention_loss = loss_dict.get('retention_loss', 0.0)
+        total_loss = loss_dict.get('total_loss', 0.0)
+        audio_val = audio_loss.item() if isinstance(audio_loss, torch.Tensor) else audio_loss
+        retention_val = retention_loss.item() if isinstance(retention_loss, torch.Tensor) else retention_loss
+        total_val = total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
+        print(f"[DEBUG] Loss breakdown: audio={audio_val:.4f}, retention={retention_val:.4f}, total={total_val:.4f}", flush=True)
         if self.debug_logging:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()

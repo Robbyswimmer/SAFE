@@ -1042,6 +1042,8 @@ class SAFEModel(nn.Module):
 
             inputs_embeds = self.get_input_embeddings(input_ids)
             if audio_tokens is not None and gate > 0.0:
+                print(f"[DEBUG] Fusion path: audio_tokens.shape={audio_tokens.shape}, gate={gate}", flush=True)
+                print(f"[DEBUG] Fusion type: {self.fusion_type}", flush=True)
                 audio_tokens = audio_tokens.to(
                     device=inputs_embeds.device,
                     dtype=inputs_embeds.dtype,
