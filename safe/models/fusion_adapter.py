@@ -1,9 +1,11 @@
 import torch
+import math
+from typing import Optional, Tuple
+
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model, LoraModel
-from typing import Optional, Tuple
-import math
 
 
 class CrossAttentionBlock(nn.Module):
@@ -26,6 +28,10 @@ class CrossAttentionBlock(nn.Module):
         self.num_attention_heads = num_attention_heads
         self.attention_head_size = hidden_size // num_attention_heads
         self.all_head_size = self.num_attention_heads * self.attention_head_size
+        self.debug_logging = False
+        self._last_attention_summary: Optional[dict] = None
+        self._attention_log_limit = 5
+        self._attention_logs_emitted = 0
         
         # Query projection (from LLM hidden states)
         self.query = nn.Linear(hidden_size, self.all_head_size)
@@ -55,7 +61,8 @@ class CrossAttentionBlock(nn.Module):
         hidden_states: torch.Tensor,
         audio_tokens: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        **kwargs  # Accept and ignore extra kwargs to prevent PEFT errors
+        supervised_mask: Optional[torch.Tensor] = None,
+        **kwargs,  # Accept and ignore extra kwargs to prevent PEFT errors
     ) -> torch.Tensor:
         """
         Forward pass of cross-attention.
@@ -118,7 +125,41 @@ class CrossAttentionBlock(nn.Module):
         # Residual connection and layer norm
         hidden_states = hidden_states.to(output.dtype)
         output = self.layer_norm(output + hidden_states)
-        
+
+        if getattr(self, "debug_logging", False):
+            summary = {
+                "overall_mean": float(attention_probs.mean().item()),
+                "overall_max": float(attention_probs.max().item()),
+            }
+
+            if supervised_mask is not None:
+                mask = supervised_mask
+                if mask.dim() == 2:
+                    mask = mask.unsqueeze(1).unsqueeze(-1)
+                elif mask.dim() == 3:
+                    mask = mask.unsqueeze(-1)
+                mask = mask.to(attention_probs.device, attention_probs.dtype)
+                denom = mask.sum(dim=(1, 2, 3)).clamp_min(1e-6)
+                weighted = (attention_probs * mask).sum(dim=(1, 2, 3)) / denom
+                summary["supervised_mean_per_sample"] = weighted.detach().cpu()
+                summary["supervised_mean"] = float(weighted.mean().item())
+            else:
+                per_sample = attention_probs.mean(dim=(1, 2, 3))
+                summary["per_sample_mean"] = per_sample.detach().cpu()
+
+            self._last_attention_summary = summary
+            if self._attention_logs_emitted < self._attention_log_limit:
+                message = (
+                    f"[AttentionProbe] mean={summary['overall_mean']:.6f} "
+                    f"max={summary['overall_max']:.6f}"
+                )
+                if "supervised_mean" in summary:
+                    message += f" supervised_mean={summary['supervised_mean']:.6f}"
+                print(message, flush=True)
+                self._attention_logs_emitted += 1
+        else:
+            self._last_attention_summary = None
+
         return output
 
 
@@ -143,6 +184,10 @@ class LoRAFusionAdapter(nn.Module):
         self.hidden_size = hidden_size
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
+        self.debug_logging = False
+        self.last_attention_summary: Optional[dict] = None
+        self._attention_log_limit = 5
+        self._attention_logs_emitted = 0
         
         # Base cross-attention block
         self.cross_attention = CrossAttentionBlock(
@@ -163,16 +208,31 @@ class LoRAFusionAdapter(nn.Module):
             bias="none",
             task_type="FEATURE_EXTRACTION"
         )
-        
+
         # Apply LoRA to cross-attention
         self.cross_attention = get_peft_model(self.cross_attention, self.lora_config)
-        
+
+    def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
+        self.debug_logging = bool(enabled)
+        self._attention_log_limit = int(max(0, log_limit))
+        self._attention_logs_emitted = 0
+
+        base_model = getattr(self.cross_attention, "base_model", None)
+        if base_model is not None:
+            base_model.debug_logging = self.debug_logging
+            base_model._attention_log_limit = self._attention_log_limit
+            base_model._attention_logs_emitted = 0
+
+    def configure_attention_probe(self, enabled: bool, log_limit: int = 5) -> None:
+        self.set_debug_logging(enabled, log_limit)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         audio_tokens: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        gate: float = 1.0
+        gate: float = 1.0,
+        supervised_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Forward pass with LoRA fusion and gating.
@@ -202,9 +262,31 @@ class LoRAFusionAdapter(nn.Module):
         fused_states = self.cross_attention(
             hidden_states=hidden_states,
             audio_tokens=audio_tokens,
-            attention_mask=attention_mask
+            attention_mask=attention_mask,
+            supervised_mask=supervised_mask,
         )
-        
+
+        base_model = getattr(self.cross_attention, "base_model", None)
+        if base_model is not None:
+            self.last_attention_summary = getattr(base_model, "_last_attention_summary", None)
+        else:
+            self.last_attention_summary = None
+        if self.debug_logging and self.last_attention_summary is not None:
+            if self._attention_logs_emitted < self._attention_log_limit:
+                summary = self.last_attention_summary
+                msg = "[AttentionProbe]"
+                overall_mean = summary.get("overall_mean")
+                overall_max = summary.get("overall_max")
+                if overall_mean is not None:
+                    msg += f" mean={overall_mean:.6f}"
+                if overall_max is not None:
+                    msg += f" max={overall_max:.6f}"
+                supervised_mean = summary.get("supervised_mean")
+                if supervised_mean is not None:
+                    msg += f" supervised_mean={supervised_mean:.6f}"
+                print(msg, flush=True)
+                self._attention_logs_emitted += 1
+
         # Apply gating: interpolate between original and fused states
         if gate != 1.0:
             fused_states = gate * fused_states + (1.0 - gate) * hidden_states
@@ -257,7 +339,8 @@ class MultiLayerFusionAdapter(nn.Module):
         layer_idx: int,
         attention_mask: Optional[torch.Tensor] = None,
         gate: float = 1.0,
-        active_fusion_layer: Optional[int] = None
+        active_fusion_layer: Optional[int] = None,
+        supervised_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Apply fusion at specified layer.
@@ -288,10 +371,18 @@ class MultiLayerFusionAdapter(nn.Module):
             hidden_states=hidden_states,
             audio_tokens=audio_tokens,
             attention_mask=attention_mask,
-            gate=gate
+            gate=gate,
+            supervised_mask=supervised_mask,
         )
-        
+
         return fused_states
+
+    def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
+        for adapter in self.fusion_adapters.values():
+            adapter.set_debug_logging(enabled, log_limit)
+
+    def configure_attention_probe(self, enabled: bool, log_limit: int = 5) -> None:
+        self.set_debug_logging(enabled, log_limit)
 
 
 class GatedFusionAdapter(nn.Module):
@@ -334,7 +425,8 @@ class GatedFusionAdapter(nn.Module):
         hidden_states: torch.Tensor,
         audio_tokens: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        force_gate: Optional[float] = None
+        force_gate: Optional[float] = None,
+        supervised_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward with learnable gating.
@@ -365,11 +457,18 @@ class GatedFusionAdapter(nn.Module):
             # Batch-wise gating
             fused_states = []
             for i in range(hidden_states.shape[0]):
+                sample_attention = (
+                    attention_mask[i:i+1]
+                    if attention_mask is not None
+                    else None
+                )
+                sample_mask = supervised_mask[i:i+1] if supervised_mask is not None else None
                 sample_fused = self.fusion_adapter(
                     hidden_states=hidden_states[i:i+1],
                     audio_tokens=audio_tokens[i:i+1],
-                    attention_mask=attention_mask[i:i+1] if attention_mask is not None else None,
-                    gate=gate[i].item()
+                    attention_mask=sample_attention,
+                    gate=gate[i].item(),
+                    supervised_mask=sample_mask,
                 )
                 fused_states.append(sample_fused)
             fused_states = torch.cat(fused_states, dim=0)
@@ -379,7 +478,14 @@ class GatedFusionAdapter(nn.Module):
                 hidden_states=hidden_states,
                 audio_tokens=audio_tokens,
                 attention_mask=attention_mask,
-                gate=gate.item() if isinstance(gate, torch.Tensor) else gate
+                gate=gate.item() if isinstance(gate, torch.Tensor) else gate,
+                supervised_mask=supervised_mask,
             )
-        
+
         return fused_states, gate
+
+    def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
+        self.fusion_adapter.set_debug_logging(enabled, log_limit)
+
+    def configure_attention_probe(self, enabled: bool, log_limit: int = 5) -> None:
+        self.set_debug_logging(enabled, log_limit)

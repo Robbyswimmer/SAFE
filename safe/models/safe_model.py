@@ -159,6 +159,40 @@ class SAFEModel(nn.Module):
             
             # Update our stored hidden size to match the actual model
             self.llm_hidden_size = actual_hidden_size
+
+        self.debug_logging = False
+
+    def set_debug_logging(self, enabled: bool) -> None:
+        """Enable or disable verbose debugging across SAFE components."""
+
+        self.debug_logging = bool(enabled)
+
+        if hasattr(self.audio_projector, "debug_logging"):
+            self.audio_projector.debug_logging = self.debug_logging
+
+        if hasattr(self.audio_encoder, "set_debug_logging") and not self.debug_logging:
+            # Reset waveform logging counter when disabling global debug
+            self.audio_encoder.set_debug_logging(False)
+
+        if hasattr(self.fusion_adapter, "set_debug_logging"):
+            self.fusion_adapter.set_debug_logging(self.debug_logging)
+
+    def configure_audio_debug(
+        self,
+        waveform_stats: bool = False,
+        waveform_log_limit: int = 5,
+    ) -> None:
+        """Configure waveform statistics logging for the audio encoder."""
+
+        if hasattr(self.audio_encoder, "set_debug_logging"):
+            self.audio_encoder.set_debug_logging(waveform_stats, waveform_log_limit)
+
+    def configure_attention_probe(self, enabled: bool, log_limit: int = 5) -> None:
+        if hasattr(self.fusion_adapter, "configure_attention_probe"):
+            self.fusion_adapter.configure_attention_probe(enabled, log_limit)
+
+    def get_last_attention_summary(self) -> Optional[dict]:
+        return getattr(self.fusion_adapter, "last_attention_summary", None)
     
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         """
@@ -1065,11 +1099,16 @@ class SAFEModel(nn.Module):
                 if audio_attention_mask is not None:
                     audio_attention_mask = audio_attention_mask.to(attention_mask.device)
 
+                supervised_mask = None
+                if labels is not None:
+                    supervised_mask = (labels != -100).to(inputs_embeds.device)
+
                 inputs_embeds = self.fusion_adapter(
                     hidden_states=inputs_embeds,
                     audio_tokens=audio_tokens,
                     attention_mask=audio_attention_mask,
                     gate=gate,
+                    supervised_mask=supervised_mask,
                 )
 
             model_inputs = {
@@ -1139,10 +1178,13 @@ class SAFEModel(nn.Module):
         # Forward through LLM with audio fusion (simplified implementation)
         if hasattr(self.base_vl.llm, 'transformer'):
             hidden_states = inputs_embeds
-            
+            supervised_mask = None
+            if labels is not None:
+                supervised_mask = (labels != -100).to(hidden_states.device)
+
             for i, layer in enumerate(self.base_vl.llm.transformer.h):
                 hidden_states = layer(hidden_states)[0]
-                
+
                 # Apply audio fusion at appropriate layers
                 if self.fusion_type == "multilayer":
                     hidden_states = self.fusion_adapter(
@@ -1151,21 +1193,24 @@ class SAFEModel(nn.Module):
                         layer_idx=i,
                         attention_mask=None,
                         gate=gate,
-                        active_fusion_layer=fusion_layer
+                        active_fusion_layer=fusion_layer,
+                        supervised_mask=supervised_mask,
                     )
                 elif i == len(self.base_vl.llm.transformer.h) // 2:  # Mid-layer fusion
                     if self.fusion_type == "gated":
                         hidden_states, _ = self.fusion_adapter(
                             hidden_states=hidden_states,
                             audio_tokens=audio_tokens,
-                            force_gate=gate if gate != 1.0 else None
+                            force_gate=gate if gate != 1.0 else None,
+                            supervised_mask=supervised_mask,
                         )
                     else:
                         hidden_states = self.fusion_adapter(
                             hidden_states,
                             audio_tokens,
                             None,
-                            gate
+                            gate,
+                            supervised_mask=supervised_mask,
                         )
             
             hidden_states = self.base_vl.llm.transformer.ln_f(hidden_states)
