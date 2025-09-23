@@ -160,6 +160,12 @@ class StageATrainer:
         self._sanity_checks_completed = False
         self._attention_logs_emitted = 0
         self._grad_logs_emitted = 0
+        
+        # EMA tracking for learning curves
+        self.audio_loss_ema = None
+        self.ema_decay = 0.98  # 30-50 step EMA (alpha = 1 - decay = 0.02)
+        self.ablation_check_interval = 100
+        self.last_ablation_step = -1
 
         waveform_logs = int(self.config.get("waveform_log_limit", 8))
         waveform_debug = bool(self.config.get("log_waveform_stats", False))
@@ -767,6 +773,100 @@ class StageATrainer:
             flush=True,
         )
         self._grad_logs_emitted += 1
+
+    def _run_periodic_ablation_check(self, inputs: Dict, has_audio: torch.Tensor) -> None:
+        """Run periodic ablation check to monitor gate=1.0 vs gate=0.0 performance."""
+        audio_indices = torch.nonzero(has_audio, as_tuple=False).flatten()
+        if len(audio_indices) == 0:
+            return
+            
+        audio_inputs = self._select_batch_indices(inputs, audio_indices)
+        if not audio_inputs or audio_inputs.get("audio_tokens") is None:
+            return
+
+        print(f"\n[PeriodicAblation] step {self.global_step}: Checking gate=1.0 vs gate=0.0 performance...", flush=True)
+        
+        baseline_loss = self._compute_audio_loss(self._clone_inputs(audio_inputs), gate=1.0)
+        gate_off_loss = self._compute_audio_loss(self._clone_inputs(audio_inputs), gate=0.0)
+        
+        improvement = gate_off_loss - baseline_loss if (baseline_loss is not None and gate_off_loss is not None) else None
+        
+        if improvement is not None:
+            print(f"[PeriodicAblation] gate=1.0: {baseline_loss:.4f}, gate=0.0: {gate_off_loss:.4f}, improvement: {improvement:+.4f}", flush=True)
+            if improvement < 0:
+                print(f"[PeriodicAblation] ✓ Audio fusion is helping! (lower loss with gate=1.0)", flush=True)
+            else:
+                print(f"[PeriodicAblation] ⚠ Audio fusion still hurting performance", flush=True)
+        else:
+            print(f"[PeriodicAblation] Could not compute comparison", flush=True)
+
+    def _check_silent_audio(self, batch: Dict) -> torch.Tensor:
+        """Check for silent/zero audio clips and return has_audio mask."""
+        has_audio = batch.get("has_audio", None)
+        audio_data = batch.get("audio", None)
+        
+        if has_audio is None or audio_data is None:
+            return has_audio if has_audio is not None else torch.tensor([])
+        
+        # Check for silent audio (all zeros or near-zero values)
+        silent_threshold = 1e-6
+        for i, audio_tensor in enumerate(audio_data):
+            if isinstance(audio_tensor, torch.Tensor):
+                max_amplitude = torch.abs(audio_tensor).max().item()
+                if max_amplitude < silent_threshold:
+                    if has_audio[i]:
+                        print(f"[SilentAudioFilter] Sample {i}: marking silent audio as has_audio=False (max_amp={max_amplitude:.2e})", flush=True)
+                    has_audio[i] = False
+        
+        return has_audio
+
+    def _log_update_norms(self, pre_update_params: Dict[str, torch.Tensor]) -> None:
+        """Log parameter update norms to track learning progress."""
+        projector_sq = 0.0
+        fusion_sq = 0.0
+        token_sq = 0.0
+        overall_sq = 0.0
+        projector_params = fusion_params = token_params = overall_params = 0
+
+        for name, param in self.safe_model.named_parameters():
+            if not param.requires_grad or name not in pre_update_params:
+                continue
+            
+            # Compute update norm: ||θ_t - θ_{t-1}||
+            update = param.data - pre_update_params[name]
+            update_norm = update.norm(2).item()
+            overall_sq += update_norm ** 2
+            overall_params += 1
+            
+            lower = name.lower()
+            if "audio_projector" in lower:
+                projector_sq += update_norm ** 2
+                projector_params += 1
+            elif "fusion_adapter" in lower or "lora" in lower:
+                fusion_sq += update_norm ** 2
+                fusion_params += 1
+            elif "audio_token_embeddings" in lower:
+                token_sq += update_norm ** 2
+                token_params += 1
+
+        def safe_sqrt(value: float) -> float:
+            return float(math.sqrt(value)) if value > 0 else 0.0
+
+        print(
+            "[UpdateDebug] step {}: projector_update={:.6f} (n={}) fusion_update={:.6f} (n={}) "
+            "audio_token_update={:.6f} (n={}) overall_update={:.6f} (n={})".format(
+                self.global_step,
+                safe_sqrt(projector_sq),
+                projector_params,
+                safe_sqrt(fusion_sq),
+                fusion_params,
+                safe_sqrt(token_sq),
+                token_params,
+                safe_sqrt(overall_sq),
+                overall_params,
+            ),
+            flush=True,
+        )
     
     def train_step(self, batch: Dict) -> Dict[str, float]:
         """
@@ -837,6 +937,12 @@ class StageATrainer:
         else:
             has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
         print(f"[AUDIO_DEBUG] has_audio flag: {has_audio.sum().item()}/{len(has_audio)} samples marked as having audio", flush=True)
+        
+        # Filter silent audio clips
+        if self.config.get("filter_silent_audio", True):
+            has_audio = self._check_silent_audio(batch)
+            if isinstance(has_audio, torch.Tensor):
+                has_audio = has_audio.to(device=device, dtype=torch.bool)
         
         # Create input tensors for training - apply answers for supervised learning
         inputs = self.safe_model.prepare_multimodal_inputs(
@@ -1005,6 +1111,23 @@ class StageATrainer:
         total_val = total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
         print(f"[DEBUG] Loss breakdown: audio={audio_val:.4f}, retention={retention_val:.4f}, total={total_val:.4f}", flush=True)
         print(f"[DEBUG] audio_weight = {self.combined_loss.audio_weight}, retention_weight = {self.combined_loss.retention_weight}", flush=True)
+        
+        # Update EMA for audio loss learning curves
+        if audio_val > 0:  # Only track when we have audio loss
+            if self.audio_loss_ema is None:
+                self.audio_loss_ema = audio_val
+            else:
+                self.audio_loss_ema = self.ema_decay * self.audio_loss_ema + (1 - self.ema_decay) * audio_val
+            
+            # Log EMA every 10 steps and run ablation every 100 steps
+            if self.global_step % 10 == 0:
+                print(f"[LearningCurve] step {self.global_step}: audio_loss={audio_val:.4f}, audio_ema={self.audio_loss_ema:.4f}", flush=True)
+            
+            # Run ablation check periodically
+            if (self.global_step - self.last_ablation_step >= self.ablation_check_interval and 
+                self.global_step > 0 and torch.any(has_audio)):
+                self._run_periodic_ablation_check(inputs, has_audio)
+                self.last_ablation_step = self.global_step
         if self.debug_logging:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -1070,8 +1193,20 @@ class StageATrainer:
                 self.config["max_grad_norm"]
             )
 
+        # Store pre-update parameters for update norm calculation
+        pre_update_params = {}
+        if self.config.get("log_update_norms", True):
+            for name, param in self.safe_model.named_parameters():
+                if param.requires_grad:
+                    pre_update_params[name] = param.data.clone()
+
         # Optimizer step
         self.optimizer.step()
+        
+        # Log parameter update norms
+        if self.config.get("log_update_norms", True) and self.global_step % self.config.get("grad_log_interval", 1) == 0:
+            self._log_update_norms(pre_update_params)
+        
         self.optimizer.zero_grad()
         
         # Learning rate scheduling (fixed: use local_step, assign don't multiply)
