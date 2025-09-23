@@ -1747,7 +1747,10 @@ class StageATrainer:
             # End of epoch evaluation
             print(f"\n📊 End of Epoch {self.epoch} (Stage {stage_name}, Epoch {epoch_in_stage})", flush=True)
             max_eval_batches = self.config.get("max_eval_batches", None)
-            eval_metrics = self.evaluate(max_batches=max_eval_batches)
+
+            # eval every n epochs
+            if self.epoch % 5 == 0:
+                eval_metrics = self.evaluate(max_batches=max_eval_batches)
             
             # Calculate curriculum-specific metrics
             curriculum_metrics = {
