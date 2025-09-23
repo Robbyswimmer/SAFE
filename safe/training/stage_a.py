@@ -437,6 +437,12 @@ class StageATrainer:
                     param_group["lr"] = self.config["learning_rate_projector"] * lr_multiplier
                 elif param_group["name"] == "adapter":
                     param_group["lr"] = self.config["learning_rate_adapter"] * lr_multiplier
+                elif param_group["name"] == "audio_tokens":
+                    base_lr = self.config.get(
+                        "learning_rate_audio_embeddings",
+                        self.config["learning_rate_projector"],
+                    )
+                    param_group["lr"] = base_lr * lr_multiplier
         
         print(f"Updated to curriculum stage: {stage_config['stage_name']}", flush=True)
         print(f"  Audio ratio: {stage_config['audio_ratio']:.2f}", flush=True)
@@ -898,38 +904,48 @@ class StageATrainer:
                         flush=True,
                     )
                 
-                # Base VL model forward pass
-                teacher_t0 = time.time()
-                sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
-                sanitized_labels = self.safe_model.sanitize_labels_for_base(inputs.get("labels"))
-                base_inputs = {
-                    "attention_mask": inputs["attention_mask"],
-                }
-                if sanitized_ids is not None:
-                    base_inputs["input_ids"] = sanitized_ids
-                elif "inputs_embeds" in inputs:
-                    base_inputs["inputs_embeds"] = inputs["inputs_embeds"]
-                if sanitized_labels is not None:
-                    base_inputs["labels"] = sanitized_labels
-                if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
-                    base_inputs["pixel_values"] = inputs["pixel_values"]
+                # Base VL model forward pass (skip when retention disabled)
+                if self.combined_loss.retention_enabled:
+                    teacher_t0 = time.time()
+                    sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
+                    sanitized_labels = self.safe_model.sanitize_labels_for_base(inputs.get("labels"))
+                    base_inputs = {
+                        "attention_mask": inputs["attention_mask"],
+                    }
+                    if sanitized_ids is not None:
+                        base_inputs["input_ids"] = sanitized_ids
+                    elif "inputs_embeds" in inputs:
+                        base_inputs["inputs_embeds"] = inputs["inputs_embeds"]
+                    if sanitized_labels is not None:
+                        base_inputs["labels"] = sanitized_labels
+                    if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
+                        base_inputs["pixel_values"] = inputs["pixel_values"]
 
-                if self.safe_model.base_vl.model_type == "llava":
-                    base_outputs = self._forward_llava_teacher(base_inputs)
-                elif self.safe_model.base_vl.model_type == "blip2":
-                    # BLIP-2: use directly without splitting
-                    base_outputs = self.safe_model.base_vl(**base_inputs)
+                    if self.safe_model.base_vl.model_type == "llava":
+                        base_outputs = self._forward_llava_teacher(base_inputs)
+                    elif self.safe_model.base_vl.model_type == "blip2":
+                        # BLIP-2: use directly without splitting
+                        base_outputs = self.safe_model.base_vl(**base_inputs)
+                    else:
+                        # For custom models, use vision features
+                        base_inputs["vision_features"] = inputs.get("vision_features")
+                        base_outputs = self.safe_model.base_vl(**base_inputs)
+                    if self.debug_logging:
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                        print(
+                            f"[EvalDebug] batch {batch_idx}: teacher forward done in {time.time() - teacher_t0:.2f}s",
+                            flush=True,
+                        )
                 else:
-                    # For custom models, use vision features
-                    base_inputs["vision_features"] = inputs.get("vision_features")
-                    base_outputs = self.safe_model.base_vl(**base_inputs)
-                if self.debug_logging:
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                    print(
-                        f"[EvalDebug] batch {batch_idx}: teacher forward done in {time.time() - teacher_t0:.2f}s",
-                        flush=True,
-                    )
+                    base_inputs = {}
+                    if isinstance(safe_outputs, dict):
+                        safe_logits = safe_outputs.get("logits")
+                    else:
+                        safe_logits = getattr(safe_outputs, "logits", None)
+                    base_outputs = {
+                        "logits": safe_logits.detach() if safe_logits is not None else None
+                    }
 
                 if not getattr(self, "_eval_shape_debug_once", False):
                     input_shape = None if inputs.get("input_ids") is None else tuple(inputs["input_ids"].shape)
@@ -1155,8 +1171,15 @@ class StageATrainer:
             gen_inputs = {k: v for k, v in inputs.items() if k != "labels"}
             print(f"[PROGRESS] Generating SAFE predictions...", flush=True)
             safe_pred_tokens = self._generate_predictions(gen_inputs, "safe")
-            print(f"[PROGRESS] Generating base predictions...", flush=True)
-            base_pred_tokens = self._generate_predictions(gen_inputs, "base")
+            if self.combined_loss.retention_enabled:
+                print(f"[PROGRESS] Generating base predictions...", flush=True)
+                base_pred_tokens = self._generate_predictions(gen_inputs, "base")
+            else:
+                print(f"[PROGRESS] Skipping base generation (retention disabled)", flush=True)
+                base_pred_tokens = [
+                    pred.clone() if isinstance(pred, torch.Tensor) else torch.as_tensor(pred)
+                    for pred in safe_pred_tokens
+                ]
             print(f"[PROGRESS] Generation complete", flush=True)
             
             for i in range(batch_size):
@@ -1504,7 +1527,13 @@ class StageATrainer:
             gen_inputs = {k: v for k, v in inputs.items() if k != "labels"}
             try:
                 safe_sequences = self._generate_predictions(gen_inputs, "safe")
-                base_sequences = self._generate_predictions(gen_inputs, "base")
+                if self.combined_loss.retention_enabled:
+                    base_sequences = self._generate_predictions(gen_inputs, "base")
+                else:
+                    base_sequences = [
+                        seq.clone() if isinstance(seq, torch.Tensor) else torch.as_tensor(seq)
+                        for seq in safe_sequences
+                    ]
             except Exception as exc:
                 self.logger.debug(f"Generation for logging failed: {exc}")
                 safe_sequences = torch.argmax(safe_outputs["logits"], dim=-1)
