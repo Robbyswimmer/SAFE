@@ -379,7 +379,18 @@ class CombinedStageLoss(nn.Module):
         Returns:
             Dictionary with loss components
         """
-        device = safe_outputs["logits"].device
+        safe_logits = safe_outputs["logits"] if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits")
+        if safe_logits is None:
+            raise ValueError("SAFE outputs must contain logits for loss computation")
+
+        base_logits = None
+        if base_outputs is not None:
+            if isinstance(base_outputs, dict):
+                base_logits = base_outputs.get("logits")
+            else:
+                base_logits = getattr(base_outputs, "logits", None)
+
+        device = safe_logits.device
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)
         loss_dict = {}
         
@@ -394,14 +405,13 @@ class CombinedStageLoss(nn.Module):
         if torch.any(has_audio):
             audio_indices = torch.where(has_audio)[0]
             # Ensure indices are within bounds of both logits and labels tensors
-            safe_logits = safe_outputs["logits"] if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits")
             max_safe = safe_logits.size(0) if safe_logits is not None else 0
             labels = batch.get("labels")
             max_labels = labels.size(0) if labels is not None else 0
             max_bound = min(max_safe, max_labels)
             audio_indices = audio_indices[audio_indices < max_bound]
             if len(audio_indices) > 0:
-                audio_logits = safe_outputs["logits"][audio_indices]
+                audio_logits = safe_logits[audio_indices]
                 audio_labels = batch["labels"][audio_indices]
                 audio_mask = batch.get("attention_mask", None)
                 if audio_mask is not None:
@@ -425,10 +435,12 @@ class CombinedStageLoss(nn.Module):
             loss_dict["audio_task_loss"] = torch.tensor(0.0, device=device)
         
         # Retention loss (for all samples, especially VL-only)
-        if self.retention_enabled:
+        retention_active = self.retention_enabled and base_logits is not None
+
+        if retention_active:
             retention_losses = self.retention_loss(
-                safe_logits=safe_outputs["logits"],
-                base_logits=base_outputs["logits"]
+                safe_logits=safe_logits,
+                base_logits=base_logits
             )
             retention_loss = retention_losses["retention_loss"]
         else:
@@ -443,7 +455,7 @@ class CombinedStageLoss(nn.Module):
         # print(f"Distillation loss: {retention_losses['distillation_loss'].item():.6f}")
         # print(f"Fisher loss: {retention_losses['fisher_loss'].item():.6f}")
         
-        if self.retention_enabled:
+        if retention_active:
             total_loss = total_loss + self.retention_weight * retention_loss
 
         loss_dict.update({
