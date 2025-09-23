@@ -575,8 +575,38 @@ class StageATrainer:
             if isinstance(batch[key], torch.Tensor):
                 batch[key] = batch[key].to(device)
         
+        # Debug: Validate training batch composition
+        batch_size = len(batch.get("questions", []))
+        audio_data = batch.get("audio", None)
+        answers_data = batch.get("answers", None)
+        has_audio_field = batch.get("has_audio", None)
+        
+        print(f"[AUDIO_DEBUG] Step {self.global_step}: batch_size={batch_size}", flush=True)
+        print(f"[AUDIO_DEBUG] Has 'audio' field: {audio_data is not None}", flush=True)
+        print(f"[AUDIO_DEBUG] Has 'answers' field: {answers_data is not None}", flush=True)
+        print(f"[AUDIO_DEBUG] Has 'has_audio' field: {has_audio_field is not None}", flush=True)
+        
+        if audio_data is not None:
+            if isinstance(audio_data, (list, tuple)):
+                non_none_audio = [a for a in audio_data if a is not None]
+                print(f"[AUDIO_DEBUG] Audio data: {len(non_none_audio)}/{len(audio_data)} non-None audio samples", flush=True)
+                if non_none_audio:
+                    print(f"[AUDIO_DEBUG] Sample audio paths: {non_none_audio[:3]}", flush=True)
+            else:
+                print(f"[AUDIO_DEBUG] Audio data type: {type(audio_data)}", flush=True)
+        
+        if answers_data is not None:
+            if isinstance(answers_data, (list, tuple)):
+                non_none_answers = [a for a in answers_data if a is not None and a != ""]
+                print(f"[AUDIO_DEBUG] Answers data: {len(non_none_answers)}/{len(answers_data)} non-empty answers", flush=True)
+                if non_none_answers:
+                    print(f"[AUDIO_DEBUG] Sample answers: {non_none_answers[:3]}", flush=True)
+            else:
+                print(f"[AUDIO_DEBUG] Answers data type: {type(answers_data)}", flush=True)
+        
         # Prepare inputs for SAFE model (device-consistent masks)
         has_audio = batch.get("has_audio", torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device))
+        print(f"[AUDIO_DEBUG] has_audio flag: {has_audio.sum().item()}/{len(has_audio)} samples marked as having audio", flush=True)
         
         # Create input tensors for training - apply answers for supervised learning
         inputs = self.safe_model.prepare_multimodal_inputs(
@@ -587,6 +617,18 @@ class StageATrainer:
             device=device,
             training_mode=True  # Apply answers during training
         )
+
+        # Debug: Check what prepare_multimodal_inputs produced
+        audio_tokens = inputs.get("audio_tokens", None)
+        labels = inputs.get("labels", None)
+        print(f"[AUDIO_DEBUG] After prepare_multimodal_inputs:", flush=True)
+        print(f"[AUDIO_DEBUG]   audio_tokens: {audio_tokens.shape if audio_tokens is not None else None}", flush=True)
+        print(f"[AUDIO_DEBUG]   labels: {labels.shape if labels is not None else None}", flush=True)
+        if labels is not None:
+            unique_labels = labels.unique()
+            non_ignore_labels = unique_labels[unique_labels != -100]
+            print(f"[AUDIO_DEBUG]   labels unique (non-ignore): {len(non_ignore_labels)} different tokens", flush=True)
+            print(f"[AUDIO_DEBUG]   labels sample: {non_ignore_labels[:10].tolist() if len(non_ignore_labels) > 0 else 'all ignored'}", flush=True)
 
         if self.debug_logging:
             input_shape = None

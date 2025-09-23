@@ -449,14 +449,17 @@ class CombinedStageLoss(nn.Module):
         # print(f"Device: {device}")
         
         # Audio task loss (for samples with audio)
+        print(f"[LOSS_DEBUG] has_audio.any(): {torch.any(has_audio)}, has_audio: {has_audio}", flush=True)
         if torch.any(has_audio):
             audio_indices = torch.where(has_audio)[0]
+            print(f"[LOSS_DEBUG] audio_indices: {audio_indices}", flush=True)
             # Ensure indices are within bounds of both logits and labels tensors
             max_safe = safe_logits.size(0) if safe_logits is not None else 0
             labels = batch.get("labels")
             max_labels = labels.size(0) if labels is not None else 0
             max_bound = min(max_safe, max_labels)
             audio_indices = audio_indices[audio_indices < max_bound]
+            print(f"[LOSS_DEBUG] audio_indices after bounds check: {audio_indices}, max_bound: {max_bound}", flush=True)
             if len(audio_indices) > 0:
                 audio_logits = safe_logits[audio_indices]
                 audio_labels = batch["labels"][audio_indices]
@@ -464,21 +467,22 @@ class CombinedStageLoss(nn.Module):
                 if audio_mask is not None:
                     audio_mask = audio_mask[audio_indices]
                 
-                # print(f"Computing audio loss for {len(audio_indices)} samples...")
+                print(f"[LOSS_DEBUG] Calling AudioTaskLoss for {len(audio_indices)} samples...", flush=True)
                 audio_loss = self.audio_task_loss(
                     logits=audio_logits,
                     labels=audio_labels,
                     attention_mask=audio_mask
                 )
+                print(f"[LOSS_DEBUG] AudioTaskLoss returned: {audio_loss.item():.6f}", flush=True)
                 # print(f"Audio loss computed: {audio_loss.item():.6f}")
                 
                 total_loss = total_loss + self.audio_weight * audio_loss
                 loss_dict["audio_task_loss"] = audio_loss
             else:
-                # print("No valid audio indices after bounds check")
+                print(f"[LOSS_DEBUG] No valid audio indices after bounds check", flush=True)
                 loss_dict["audio_task_loss"] = torch.tensor(0.0, device=device)
         else:
-            # print("No audio samples in batch")
+            print(f"[LOSS_DEBUG] No audio samples in batch", flush=True)
             loss_dict["audio_task_loss"] = torch.tensor(0.0, device=device)
         
         # Retention loss (for all samples, especially VL-only)

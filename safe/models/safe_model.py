@@ -343,7 +343,9 @@ class SAFEModel(nn.Module):
         answers: Optional[Union[str, Sequence[Any]]],
         device: torch.device,
     ) -> None:
+        print(f"[ANSWER_DEBUG] _apply_answers_to_inputs called with answers: {answers is not None}", flush=True)
         if answers is None:
+            print(f"[ANSWER_DEBUG] No answers provided - early return", flush=True)
             return
 
         tokenizer = self.base_vl.tokenizer
@@ -354,14 +356,20 @@ class SAFEModel(nn.Module):
         attention_mask = inputs["attention_mask"].to(device)
 
         batch_size = input_ids.size(0)
+        print(f"[ANSWER_DEBUG] batch_size: {batch_size}, answers type: {type(answers)}", flush=True)
 
         if isinstance(answers, str):
             answer_list = [answers] * batch_size
         else:
             answer_list = list(answers) if answers is not None else []
 
+        print(f"[ANSWER_DEBUG] Initial answer_list length: {len(answer_list)}", flush=True)
+        if answer_list:
+            print(f"[ANSWER_DEBUG] Sample answers: {answer_list[:3]}", flush=True)
+
         if len(answer_list) == 0:
             answer_list = [""] * batch_size
+            print(f"[ANSWER_DEBUG] No answers - filled with empty strings", flush=True)
         elif len(answer_list) == 1 and batch_size > 1:
             answer_list = answer_list * batch_size
         elif len(answer_list) != batch_size:
@@ -369,6 +377,9 @@ class SAFEModel(nn.Module):
                 answer_list.extend([""] * (batch_size - len(answer_list)))
             else:
                 answer_list = answer_list[:batch_size]
+        
+        non_empty_answers = [a for a in answer_list if a and str(a).strip()]
+        print(f"[ANSWER_DEBUG] Final answer_list: {len(non_empty_answers)}/{len(answer_list)} non-empty", flush=True)
 
         new_input_ids: List[torch.Tensor] = []
         new_attention: List[torch.Tensor] = []
