@@ -99,6 +99,8 @@ class StageATrainer:
             "log_grad_norms": True,
             "grad_log_interval": 1,
             "grad_log_limit": 20,
+            "sanitize_nan_gradients": True,
+            "grad_sanitize_clip": 1e3,
         }
 
         if config:
@@ -774,6 +776,42 @@ class StageATrainer:
         )
         self._grad_logs_emitted += 1
 
+    def _sanitize_audio_gradients(self) -> None:
+        """Replace NaN/Inf grads on audio modules to keep optimization stable."""
+        if not self.config.get("sanitize_nan_gradients", True):
+            return
+
+        clip_value = float(self.config.get("grad_sanitize_clip", 1e3))
+        sanitized_any = False
+
+        for name, param in self.safe_model.named_parameters():
+            if param.grad is None or not param.requires_grad:
+                continue
+
+            lower = name.lower()
+            if (
+                "audio_projector" not in lower
+                and "fusion_adapter" not in lower
+                and "lora" not in lower
+                and "audio_token_embeddings" not in lower
+            ):
+                continue
+
+            grad = param.grad
+            if not grad.dtype.is_floating_point:
+                continue
+
+            if torch.isnan(grad).any() or torch.isinf(grad).any():
+                torch.nan_to_num_(grad, nan=0.0, posinf=clip_value, neginf=-clip_value)
+                grad.clamp_(-clip_value, clip_value)
+                sanitized_any = True
+
+        if sanitized_any and self.debug_logging:
+            print(
+                f"[GradSanitize] step {self.global_step}: sanitized NaN/Inf gradients in audio pathway",
+                flush=True,
+            )
+
     def _run_periodic_ablation_check(self, inputs: Dict, has_audio: torch.Tensor) -> None:
         """Run periodic ablation check to monitor gate=1.0 vs gate=0.0 performance."""
         audio_indices = torch.nonzero(has_audio, as_tuple=False).flatten()
@@ -1269,6 +1307,9 @@ class StageATrainer:
         
         # Backward pass
         total_loss.backward()
+
+        # Clean up NaN/Inf gradients from audio pathway before diagnostics
+        self._sanitize_audio_gradients()
 
         # Verify gradients are flowing (debug)
         if self.global_step % 5 == 0 or self.global_step < 3:

@@ -68,7 +68,11 @@ class AudioProjector(nn.Module):
         
         # Project through MLP
         projected = self.projector(audio_features)  # (batch_size, llm_hidden_size * num_audio_tokens)
-        
+
+        # Guard against numerical blow-ups producing NaNs/Infs
+        torch.nan_to_num_(projected, nan=0.0, posinf=1e3, neginf=-1e3)
+        projected = projected.clamp_(-1e3, 1e3)
+
         # Reshape to token format
         audio_tokens = projected.view(
             batch_size, 
@@ -182,7 +186,10 @@ class AdaptiveAudioProjector(nn.Module):
         # Generate tokens
         generator = self.token_generators[str(most_common_tokens)]
         projected = generator(features)  # (batch_size, llm_hidden_size * k)
-        
+
+        torch.nan_to_num_(projected, nan=0.0, posinf=1e3, neginf=-1e3)
+        projected = projected.clamp_(-1e3, 1e3)
+
         audio_tokens = projected.view(
             batch_size,
             most_common_tokens,

@@ -316,7 +316,8 @@ class SAFEModel(nn.Module):
         if not isinstance(audio_features, torch.Tensor):
             audio_features = torch.tensor(audio_features)
 
-        audio_features = torch.nan_to_num(audio_features, nan=0.0, posinf=1e4, neginf=-1e4)
+        audio_features = torch.nan_to_num(audio_features, nan=0.0, posinf=1e3, neginf=-1e3)
+        audio_features = audio_features.clamp(-1e3, 1e3)
 
         if self.projector_type == "adaptive":
             device = next(self.audio_projector.parameters()).device
@@ -343,10 +344,11 @@ class SAFEModel(nn.Module):
                 )
             audio_tokens = self.audio_projector(audio_features)
 
-        # Ensure audio tokens match the target dtype and device and are finite
-        audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e4, neginf=-1e4)
+        # Ensure audio tokens match the target dtype/device and remain finite
+        audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e3, neginf=-1e3)
+        audio_tokens = audio_tokens.clamp(-1e3, 1e3)
         audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
-        audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e4, neginf=-1e4)
+        audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e3, neginf=-1e3)
 
         return audio_tokens, transcripts
 
@@ -589,6 +591,11 @@ class SAFEModel(nn.Module):
                 audio_tokens = self._scatter_audio_tokens(audio_tokens, audio_indices, batch_size)
                 if transcripts is not None:
                     transcripts = self._scatter_transcripts(transcripts, audio_indices, batch_size)
+
+            # Ensure projected audio tokens are finite before fusion
+            if torch.is_tensor(audio_tokens):
+                torch.nan_to_num_(audio_tokens, nan=0.0, posinf=1e3, neginf=-1e3)
+                audio_tokens = audio_tokens.clamp_(-1e3, 1e3)
 
             audio_tokens = audio_tokens.to(device)
             result["audio_tokens"] = audio_tokens
