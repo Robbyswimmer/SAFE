@@ -71,7 +71,7 @@ class CLAPAudioEncoder(nn.Module):
 
         flattened = audio_data.astype(np.float32).ravel()
         if flattened.size == 0:
-            print(f"[AudioDebug] {source}: empty waveform")
+            print(f"[AudioDebug] {source}: empty waveform", flush=True)
             self._waveform_logs_emitted += 1
             return
 

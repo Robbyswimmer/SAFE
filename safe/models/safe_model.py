@@ -821,11 +821,11 @@ class SAFEModel(nn.Module):
         if pil_images and any(img is not None for img in pil_images):
             image_token_id = self._get_image_token_id()
             if not (inputs["input_ids"] == image_token_id).any():
-                print(f"WARNING: No <image> token (ID: {image_token_id}) found in input_ids for LLaVA!")
-                print(f"Prompt sample: {prompts[0][:200]}...")
+                print(f"WARNING: No <image> token (ID: {image_token_id}) found in input_ids for LLaVA!", flush=True)
+                print(f"Prompt sample: {prompts[0][:200]}...", flush=True)
             
             if "pixel_values" not in inputs or inputs["pixel_values"] is None:
-                print(f"WARNING: pixel_values missing for LLaVA with images!")
+                print(f"WARNING: pixel_values missing for LLaVA with images!", flush=True)
         
         return inputs
     
