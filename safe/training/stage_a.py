@@ -92,6 +92,8 @@ class StageATrainer:
         if config:
             self.config.update(config)
 
+        self.debug_logging = bool(self.config.get("debug_logging", False))
+
         self.logger = logging.getLogger(__name__)
         if not self.logger.handlers:
             logging.basicConfig(level=logging.INFO)
@@ -128,7 +130,6 @@ class StageATrainer:
         self._teacher_broadcast_warned = False
         self._shape_debug_once = False
         self._eval_shape_debug_once = False
-        self.debug_logging = bool(self.config.get("debug_logging", False))
         setattr(self.safe_model, "debug_logging", self.debug_logging)
 
         # Move model to GPU if available
