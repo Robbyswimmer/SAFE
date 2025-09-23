@@ -67,6 +67,7 @@ class StageATrainer:
             "max_grad_norm": 1.0,
             "audio_loss_weight": 10.0,
             "retention_loss_weight": 1.0,
+            "distillation_weight": 1.0,
             "distillation_temperature": 3.0,
             "fisher_weight": 0.1,
             "save_steps": 5000,
@@ -366,19 +367,31 @@ class StageATrainer:
         else:
             loss_weights = {}
             
+        dist_weight = loss_weights.get("distillation_loss", self.config.get("distillation_weight", 1.0))
+        fisher_weight = loss_weights.get("fisher_loss", self.config["fisher_weight"])
+        use_fisher = fisher_weight > 0
+
         self.retention_loss = RetentionLoss(
+            distillation_weight=dist_weight,
+            fisher_weight=fisher_weight,
             temperature=self.config["distillation_temperature"],
-            fisher_weight=loss_weights.get("fisher_loss", self.config["fisher_weight"])
+            use_fisher_information=use_fisher
         )
-        
+
         self.audio_task_loss = AudioTaskLoss(task_type="qa")
-        
+
         self.combined_loss = CombinedStageLoss(
             retention_loss=self.retention_loss,
             audio_task_loss=self.audio_task_loss,
             audio_weight=loss_weights.get("audio_task_loss", self.config["audio_loss_weight"]),
             retention_weight=loss_weights.get("retention_loss", self.config["retention_loss_weight"])
         )
+
+        if self.debug_logging:
+            print(
+                f"[LossSetup] retention_weight={self.config['retention_loss_weight']}, distillation_weight={dist_weight}, audio_weight={self.config['audio_loss_weight']}",
+                flush=True,
+            )
     
     def update_curriculum_config(self):
         """Update training configuration based on current curriculum stage."""
@@ -1172,6 +1185,13 @@ class StageATrainer:
         }
         for key, value in contractions.items():
             answer = answer.replace(key, value)
+
+        # Remove leading stop words/prepositions commonly added by the model
+        stop_words = {"a", "an", "the", "on", "in", "at", "of"}
+        tokens = [tok for tok in answer.split() if tok]
+        while tokens and tokens[0] in stop_words:
+            tokens.pop(0)
+        answer = " ".join(tokens)
 
         number_map = {
             "zero": "0",

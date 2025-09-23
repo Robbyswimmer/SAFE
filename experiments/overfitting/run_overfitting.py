@@ -49,6 +49,7 @@ class ExperimentConfig:
     learning_rate_adapter: float
     fisher_weight: float
     retention_loss_weight: float
+    distillation_weight: float
     enable_null_space: bool
     null_space_rank: int
     null_space_min_samples: int
@@ -330,6 +331,7 @@ def build_stage_a_config(config: ExperimentConfig) -> Dict[str, float | int | bo
         "max_eval_batches": max_eval_batches,
         "debug_logging": config.debug_logging,
         "retention_loss_weight": config.retention_loss_weight,
+        "distillation_weight": config.distillation_weight,
         "fisher_weight": config.fisher_weight,
         "enable_null_space": config.enable_null_space,
         "null_space_rank": config.null_space_rank,
@@ -396,14 +398,17 @@ def configure_variant(variant: str, base_config: ExperimentConfig) -> Experiment
 
     if variant == "no_retention":
         cfg.retention_loss_weight = 0.0
+        cfg.distillation_weight = 0.0
         cfg.fisher_weight = 0.0
         cfg.enable_null_space = False
     elif variant == "soft_retention":
-        cfg.retention_loss_weight = 1.0
-        cfg.fisher_weight = 0.1
+        cfg.retention_loss_weight = 0.2
+        cfg.distillation_weight = 0.2
+        cfg.fisher_weight = 0.0
         cfg.enable_null_space = False
     elif variant == "full_safe":
         cfg.retention_loss_weight = 1.0
+        cfg.distillation_weight = 1.0
         cfg.fisher_weight = 0.1
         cfg.enable_null_space = True
     else:
@@ -513,6 +518,7 @@ def run_experiment(args: argparse.Namespace) -> None:
         learning_rate_adapter=args.lr_adapter,
         fisher_weight=0.0,
         retention_loss_weight=0.0,
+        distillation_weight=1.0,
         enable_null_space=False,
         null_space_rank=args.null_space_rank,
         null_space_min_samples=args.null_space_min_samples,

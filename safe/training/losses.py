@@ -355,7 +355,11 @@ class CombinedStageLoss(nn.Module):
         self.audio_task_loss = audio_task_loss
         self.audio_weight = audio_weight
         self.retention_weight = retention_weight
-    
+        self.retention_enabled = (
+            retention_weight > 0.0
+            and getattr(retention_loss, "distillation_weight", 0.0) > 0.0
+        )
+
     def forward(
         self,
         safe_outputs: Dict[str, torch.Tensor],
@@ -421,19 +425,27 @@ class CombinedStageLoss(nn.Module):
             loss_dict["audio_task_loss"] = torch.tensor(0.0, device=device)
         
         # Retention loss (for all samples, especially VL-only)
-        # print("Computing retention loss...")
-        retention_losses = self.retention_loss(
-            safe_logits=safe_outputs["logits"],
-            base_logits=base_outputs["logits"]
-        )
-        
-        retention_loss = retention_losses["retention_loss"]
+        if self.retention_enabled:
+            retention_losses = self.retention_loss(
+                safe_logits=safe_outputs["logits"],
+                base_logits=base_outputs["logits"]
+            )
+            retention_loss = retention_losses["retention_loss"]
+        else:
+            zero = torch.tensor(0.0, device=device)
+            retention_losses = {
+                "retention_loss": zero,
+                "distillation_loss": zero,
+                "fisher_loss": zero,
+            }
+            retention_loss = zero
         # print(f"Retention loss computed: {retention_loss.item():.6f}")
         # print(f"Distillation loss: {retention_losses['distillation_loss'].item():.6f}")
         # print(f"Fisher loss: {retention_losses['fisher_loss'].item():.6f}")
         
-        total_loss = total_loss + self.retention_weight * retention_loss
-        
+        if self.retention_enabled:
+            total_loss = total_loss + self.retention_weight * retention_loss
+
         loss_dict.update({
             "retention_loss": retention_loss,
             "distillation_loss": retention_losses["distillation_loss"],
