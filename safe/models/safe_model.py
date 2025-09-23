@@ -272,6 +272,9 @@ class SAFEModel(nn.Module):
             audio_features, transcripts = self.audio_encoder(audio)
             
         # Project to token space
+        embedding_weight = self.base_vl.llm.get_input_embeddings().weight
+        target_dtype = embedding_weight.dtype
+        target_device = embedding_weight.device
         if self.projector_type == "adaptive":
             audio_tokens = self.audio_projector(audio_features, num_tokens)
         else:
@@ -294,6 +297,8 @@ class SAFEModel(nn.Module):
                     flush=True,
                 )
             audio_tokens = self.audio_projector(audio_features)
+
+        audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
 
         return audio_tokens, transcripts
 
