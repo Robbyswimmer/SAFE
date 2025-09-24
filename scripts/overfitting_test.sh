@@ -41,6 +41,8 @@ NUM_WORKERS=${NUM_WORKERS:-0}
 SEED=${SEED:-42}
 MODEL_CONFIG=${MODEL_CONFIG:-full}
 MAX_EVAL_BATCHES=${MAX_EVAL_BATCHES:-8}
+MAX_AUDIO_EVAL_BATCHES=${MAX_AUDIO_EVAL_BATCHES:-4}
+MAX_VL_EVAL_BATCHES=${MAX_VL_EVAL_BATCHES:-4}
 EVAL_LOGGING_STEPS=${EVAL_LOGGING_STEPS:-1}
 DEBUG_LOGGING=${DEBUG_LOGGING:-0}
 
@@ -81,6 +83,10 @@ for variant in "${variants[@]}"; do
     --null-space-refresh 2000 \
     --model-config "${MODEL_CONFIG}" \
     --max-eval-batches "${MAX_EVAL_BATCHES}" \
+    --max-audio-eval-batches "${MAX_AUDIO_EVAL_BATCHES}" \
+    --max-vl-eval-batches "${MAX_VL_EVAL_BATCHES}" \
+    --eval-with-audio-gate \
+    --eval-audio-gate-comparison \
     --eval-logging-steps "${EVAL_LOGGING_STEPS}" \
     "${debug_flag[@]}"
   echo "=== Completed variant: ${variant} ===\n"
