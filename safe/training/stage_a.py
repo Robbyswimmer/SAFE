@@ -2218,28 +2218,39 @@ class StageATrainer:
             generated = torch.as_tensor(generated)
         generated = generated.to(device)
 
+        # Calculate per-sample prompt lengths using attention mask to handle left padding
+        attention_mask = inputs.get("attention_mask", None)
+        if attention_mask is not None:
+            # For left-padded sequences, count actual tokens per sample
+            prompt_lengths = attention_mask.sum(dim=1)  # Per-sample actual lengths
+        else:
+            # Fallback: assume no padding
+            prompt_source = sanitized_ids if model_choice == "base" and 'sanitized_ids' in locals() and sanitized_ids is not None else input_ids
+            prompt_lengths = torch.full((generated.size(0),), prompt_source.shape[1], 
+                                       dtype=torch.long, device=generated.device)
+
         audio_prefix = audio_tokens.size(1) if isinstance(audio_tokens, torch.Tensor) else 0
-        prompt_source = sanitized_ids if model_choice == "base" and 'sanitized_ids' in locals() and sanitized_ids is not None else input_ids
-        prompt_len = prompt_source.shape[1]
         
         if self.debug_logging:
             print(f"[GenDebug] Generated shape: {generated.shape}", flush=True)
-            print(f"[GenDebug] Audio prefix: {audio_prefix}, Prompt len: {prompt_len}", flush=True)
-            print(f"[GenDebug] Extraction start index: {audio_prefix + prompt_len}", flush=True)
+            print(f"[GenDebug] Audio prefix: {audio_prefix}", flush=True)
+            print(f"[GenDebug] Per-sample prompt lengths: {prompt_lengths.tolist()}", flush=True)
         
-        # Extract only the newly generated tokens (after prompt)
+        # Extract only the newly generated tokens (after prompt) using per-sample lengths
         extracted_tokens = []
         for i in range(generated.size(0)):
-            # Extract new tokens after the prompt
-            start_idx = audio_prefix + prompt_len
+            # Use per-sample prompt length to handle left padding correctly
+            sample_prompt_len = prompt_lengths[i].item()
+            start_idx = audio_prefix + sample_prompt_len
+            
             if start_idx < generated.shape[1]:
                 new_tokens = generated[i, start_idx:]
                 if self.debug_logging:
-                    print(f"[GenDebug] Sample {i}: extracted {len(new_tokens)} new tokens", flush=True)
+                    print(f"[GenDebug] Sample {i}: start_idx={start_idx}, extracted {len(new_tokens)} new tokens", flush=True)
                 extracted_tokens.append(new_tokens)
             else:
                 if self.debug_logging:
-                    print(f"[GenDebug] Sample {i}: no new tokens generated (start_idx={start_idx} >= seq_len={generated.shape[1]})", flush=True)
+                    print(f"[GenDebug] Sample {i}: start_idx={start_idx} >= gen_len={generated.shape[1]}, returning empty", flush=True)
                 extracted_tokens.append(torch.tensor([], dtype=torch.long, device=generated.device))
         
         return extracted_tokens
