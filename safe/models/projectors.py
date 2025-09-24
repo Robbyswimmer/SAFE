@@ -126,6 +126,7 @@ class AudioProjector(nn.Module):
             output_norm = audio_tokens.norm(dim=-1).mean().item()
             output_max = audio_tokens.abs().max().item()
             print(f"[ProjectorDebug] Output norm={output_norm:.6f}, max_abs={output_max:.6f}", flush=True)
+            self._projector_logs_emitted += 1
         
         return audio_tokens
 

@@ -115,8 +115,10 @@ class CrossAttentionBlock(nn.Module):
                 mask = 1.0 - mask  # was likely 1=mask
                 if self.debug_logging and self._attention_logs_emitted < self._attention_log_limit:
                     print(f"[AttentionMask] Detected 1=mask convention, inverted", flush=True)
+                    self._attention_logs_emitted += 1
             elif self.debug_logging and self._attention_logs_emitted < self._attention_log_limit:
                 print(f"[AttentionMask] Using 1=keep convention", flush=True)
+                self._attention_logs_emitted += 1
 
             # 3) Expand to (B,1,1,L) for broadcasting
             while mask.dim() < attention_scores.dim():
@@ -134,6 +136,7 @@ class CrossAttentionBlock(nn.Module):
                 masked_tokens = mask_bool.sum().item()
                 total_tokens = mask_bool.numel()
                 print(f"[AttentionMask] Masked {masked_tokens}/{total_tokens} tokens", flush=True)
+                self._attention_logs_emitted += 1
 
         # Stable softmax computation
         attention_probs = F.softmax(attention_scores, dim=-1)
