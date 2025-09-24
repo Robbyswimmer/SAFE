@@ -102,44 +102,38 @@ class CrossAttentionBlock(nn.Module):
         attention_scores = torch.clamp(attention_scores, min=-50.0, max=50.0)
         attention_scores = torch.nan_to_num(attention_scores, nan=0.0, posinf=50.0, neginf=-50.0)
         
-        # Apply attention mask if provided with robust convention handling
+        # Apply attention mask robustly
         if attention_mask is not None:
-            # Convert to float and handle NaNs
+            # 1) Coerce to float, scrub NaNs
             mask = attention_mask.to(attention_scores.dtype)
             mask = torch.nan_to_num(mask, nan=0.0, posinf=1.0, neginf=0.0)
-            
-            # Detect mask convention: check if mask has more 1s or 0s
-            # If mostly 1s, likely 1=keep convention; if mostly 0s, likely 1=mask convention
-            ones_count = (mask == 1.0).sum().item()
-            zeros_count = (mask == 0.0).sum().item()
-            
-            # Convert to consistent 1=keep convention (1=attend, 0=mask)
-            if zeros_count > ones_count:
-                # Likely 1=mask convention, invert it
-                mask = 1.0 - mask
+
+            # 2) Normalize to 1=keep, 0=mask (heuristic based on majority)
+            ones = (mask > 0.5).sum().item()
+            zeros = (mask <= 0.5).sum().item()
+            if zeros > ones:
+                mask = 1.0 - mask  # was likely 1=mask
                 if self.debug_logging and self._attention_logs_emitted < self._attention_log_limit:
-                    print(f"[AttentionMask] Detected 1=mask convention, inverted mask", flush=True)
-            elif ones_count > zeros_count:
-                # Likely 1=keep convention, use as-is
-                if self.debug_logging and self._attention_logs_emitted < self._attention_log_limit:
-                    print(f"[AttentionMask] Detected 1=keep convention, using mask as-is", flush=True)
-            else:
-                # Equal 1s and 0s or all same value - use as-is but warn
-                if self.debug_logging and self._attention_logs_emitted < self._attention_log_limit:
-                    print(f"[AttentionMask] Ambiguous mask convention (1s={ones_count}, 0s={zeros_count}), using as-is", flush=True)
+                    print(f"[AttentionMask] Detected 1=mask convention, inverted", flush=True)
+            elif self.debug_logging and self._attention_logs_emitted < self._attention_log_limit:
+                print(f"[AttentionMask] Using 1=keep convention", flush=True)
+
+            # 3) Expand to (B,1,1,L) for broadcasting
+            while mask.dim() < attention_scores.dim():
+                mask = mask.unsqueeze(-2)
+
+            # 4) Boolean "mask out" tensor
+            mask_bool = (mask <= 0.5)
+
+            # 5) Use moderate negative, then clamp back to safe softmax range
+            attention_scores = attention_scores.masked_fill(mask_bool, -1e4)
+            attention_scores = torch.clamp(attention_scores, min=-50.0, max=50.0)
             
             # Log mask statistics for debugging
             if self.debug_logging and self._attention_logs_emitted < self._attention_log_limit:
-                mask_mean = mask.mean().item()
-                print(f"[AttentionMask] Final mask stats: mean={mask_mean:.3f}, shape={mask.shape}", flush=True)
-            
-            # Reshape mask for broadcasting: (batch_size, 1, 1, num_audio_tokens)
-            while mask.dim() < attention_scores.dim():
-                mask = mask.unsqueeze(-2)
-            
-            # Apply mask: 0 means mask out (set to large negative), 1 means keep
-            mask_value = -1e9  # Safe masking value that won't cause overflow
-            attention_scores = attention_scores + ((1.0 - mask) * mask_value)
+                masked_tokens = mask_bool.sum().item()
+                total_tokens = mask_bool.numel()
+                print(f"[AttentionMask] Masked {masked_tokens}/{total_tokens} tokens", flush=True)
 
         # Stable softmax computation
         attention_probs = F.softmax(attention_scores, dim=-1)

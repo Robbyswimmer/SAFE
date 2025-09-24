@@ -65,6 +65,16 @@ class AudioProjector(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+        
+        # Force last linear of projector to zero init to prevent inf updates
+        last = None
+        for m in self.projector.modules():
+            if isinstance(m, nn.Linear):
+                last = m
+        if last is not None:
+            nn.init.zeros_(last.weight)
+            if last.bias is not None:
+                nn.init.zeros_(last.bias)
     
     def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
         """Enable or disable projector debug logging."""
@@ -182,6 +192,15 @@ class AdaptiveAudioProjector(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+        
+        # Zero-init each generator's final linear to prevent inf updates
+        for generator in self.token_generators.values():
+            for m in generator.modules():
+                if isinstance(m, nn.Linear):
+                    # This is the final layer (since generator is Sequential with one Linear)
+                    nn.init.zeros_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
     
     def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
         """Enable or disable projector debug logging."""

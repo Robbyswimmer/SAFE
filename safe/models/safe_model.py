@@ -161,6 +161,13 @@ class SAFEModel(nn.Module):
             self.llm_hidden_size = actual_hidden_size
 
         self.debug_logging = False
+        
+        # Gate default and setter for warmup
+        self._default_gate = 1.0
+
+    def set_gate(self, value: float) -> None:
+        """Set default gate value for fusion (useful for warmup)."""
+        self._default_gate = float(value)
 
     def set_debug_logging(self, enabled: bool) -> None:
         """Enable or disable verbose debugging across SAFE components."""
@@ -616,10 +623,31 @@ class SAFEModel(nn.Module):
                 if transcripts is not None:
                     transcripts = self._scatter_transcripts(transcripts, audio_indices, batch_size)
 
-            # Ensure projected audio tokens are finite before fusion
+            # Gentle finite guards and build audio attention mask
             if torch.is_tensor(audio_tokens):
-                torch.nan_to_num_(audio_tokens, nan=0.0, posinf=1e3, neginf=-1e3)
-                audio_tokens = audio_tokens.clamp_(-1e3, 1e3)
+                # Add finite guards where it matters
+                assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens after encode_audio"
+                
+                # Remove hard clamps, use gentle cleaning only
+                audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                # Build audio attention mask: 1=keep, 0=mask
+                B, T, _ = audio_tokens.shape
+                audio_attention_mask = torch.ones(B, T,
+                                                  dtype=torch.long,  # Match typical attention mask dtype
+                                                  device=audio_tokens.device)
+                
+                # Mark truly silent samples as masked-out (all tokens for that sample)
+                # Tight threshold as projector is now softly bounded
+                sample_absmax = audio_tokens.abs().amax(dim=(1, 2))  # (B,)
+                silent = sample_absmax < 1e-8
+                if silent.any():
+                    audio_attention_mask[silent] = 0
+                    if getattr(self, "debug_logging", False):
+                        silent_count = silent.sum().item()
+                        print(f"[AudioMask] Masked {silent_count}/{B} silent audio samples (threshold=1e-8)", flush=True)
+                
+                result["audio_attention_mask"] = audio_attention_mask
 
             audio_tokens = audio_tokens.to(device)
             result["audio_tokens"] = audio_tokens
@@ -1111,11 +1139,14 @@ class SAFEModel(nn.Module):
         vision_features: Optional[torch.Tensor] = None,
         audio_tokens: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
-        gate: float = 1.0,
+        gate: Optional[float] = None,
         fusion_layer: Optional[int] = None,
         **kwargs
     ) -> Dict[str, torch.Tensor]:
         """Forward pass through SAFE model."""
+        # Use default gate if none provided
+        if gate is None:
+            gate = self._default_gate
         # For BLIP2/LLaVA models, fuse audio by prefixing projected tokens
         if self.base_vl.model_type in ["blip2", "llava"]:
             pixel_values = kwargs.pop("pixel_values", None)
@@ -1129,6 +1160,10 @@ class SAFEModel(nn.Module):
             if audio_tokens is not None and gate > 0.0:
                 print(f"[DEBUG] Fusion path: audio_tokens.shape={audio_tokens.shape}, gate={gate}", flush=True)
                 print(f"[DEBUG] Fusion type: {self.fusion_type}", flush=True)
+                
+                # Add finite guards before fusion
+                assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens before fusion"
+                
                 audio_tokens = audio_tokens.to(
                     device=inputs_embeds.device,
                     dtype=inputs_embeds.dtype,
@@ -1429,16 +1464,16 @@ class SAFEModel(nn.Module):
         audio_enc_device = next(self.audio_encoder.parameters()).device
         print(f"[SAFEModel] audio_encoder now on device: {audio_enc_device}", flush=True)
         
-        print(f"[SAFEModel] Moving audio_projector to device...", flush=True)
-        self.audio_projector = self.audio_projector.to(device=device, dtype=target_dtype)
+        print(f"[SAFEModel] Moving audio_projector to device (keeping fp32)...", flush=True)
+        self.audio_projector = self.audio_projector.to(device=device)  # Device only, keep fp32
         proj_param = next(self.audio_projector.parameters())
         proj_device = proj_param.device
         proj_dtype = proj_param.dtype
         print(f"[SAFEModel] audio_projector now on device: {proj_device}, dtype: {proj_dtype}", flush=True)
         
         if hasattr(self, 'fusion_adapter') and self.fusion_adapter is not None:
-            print(f"[SAFEModel] Moving fusion_adapter to device...", flush=True)
-            self.fusion_adapter = self.fusion_adapter.to(device=device, dtype=target_dtype)
+            print(f"[SAFEModel] Moving fusion_adapter to device (keeping fp32)...", flush=True)
+            self.fusion_adapter = self.fusion_adapter.to(device=device)  # Device only, keep fp32
             fusion_param = next(self.fusion_adapter.parameters())
             fusion_device = fusion_param.device
             fusion_dtype = fusion_param.dtype
@@ -1474,23 +1509,19 @@ class SAFEModel(nn.Module):
                 print(f"[SAFEModel] Converting audio_token_embeddings from {current_dtype} to {target_dtype}", flush=True)
                 self.audio_token_embeddings = self.audio_token_embeddings.to(dtype=target_dtype)
         
-        # Ensure projector components match if possible
+        # Keep projector in fp32 for numerical stability - do NOT convert dtype
         try:
             proj_dtype = next(self.audio_projector.parameters()).dtype
-            if proj_dtype != target_dtype:
-                print(f"[SAFEModel] Converting audio_projector from {proj_dtype} to {target_dtype}", flush=True)
-                self.audio_projector = self.audio_projector.to(dtype=target_dtype)
+            print(f"[SAFEModel] audio_projector staying in {proj_dtype} for stability", flush=True)
         except:
-            print(f"[SAFEModel] Could not convert audio_projector dtype", flush=True)
+            print(f"[SAFEModel] Could not check audio_projector dtype", flush=True)
         
-        # Ensure fusion adapter components match
+        # Keep fusion adapter in fp32 for numerical stability - do NOT convert dtype
         try:
             fusion_dtype = next(self.fusion_adapter.parameters()).dtype
-            if fusion_dtype != target_dtype:
-                print(f"[SAFEModel] Converting fusion_adapter from {fusion_dtype} to {target_dtype}", flush=True)
-                self.fusion_adapter = self.fusion_adapter.to(dtype=target_dtype)
+            print(f"[SAFEModel] fusion_adapter staying in {fusion_dtype} for stability", flush=True)
         except:
-            print(f"[SAFEModel] Could not convert fusion_adapter dtype", flush=True)
+            print(f"[SAFEModel] Could not check fusion_adapter dtype", flush=True)
         
         print(f"[SAFEModel] Dtype consistency check completed", flush=True)
         return self
