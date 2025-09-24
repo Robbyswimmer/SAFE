@@ -197,6 +197,55 @@ class ManifestVQADataset(Dataset):
         }
 
 
+class MixedValidationDataset(Dataset):
+    """Mixed validation dataset combining audio and VL samples."""
+
+    def __init__(self, pack_root: Path, total_size: int = 100, audio_ratio: float = 0.5, seed: int = 42):
+        self.pack_root = pack_root
+        self.total_size = total_size
+        self.audio_ratio = audio_ratio
+        self.seed = seed
+        
+        # Calculate split sizes
+        self.audio_size = int(total_size * audio_ratio)
+        self.vl_size = total_size - self.audio_size
+        
+        # Load audio samples from training manifest
+        self.audio_dataset = ManifestAudioCapsDataset(pack_root=pack_root)
+        audio_indices = list(range(min(self.audio_size, len(self.audio_dataset))))
+        self.audio_subset = Subset(self.audio_dataset, audio_indices)
+        
+        # Load VL samples from VL manifest
+        manifest_path = pack_root / "val_manifest.json"
+        self.vl_dataset = ManifestVQADataset(manifest_path, pack_root=pack_root)
+        vl_indices = list(range(min(self.vl_size, len(self.vl_dataset))))
+        self.vl_subset = Subset(self.vl_dataset, vl_indices)
+        
+        # Create combined index mapping
+        self.indices = []
+        # Add audio indices
+        for i in range(len(self.audio_subset)):
+            self.indices.append(('audio', i))
+        # Add VL indices  
+        for i in range(len(self.vl_subset)):
+            self.indices.append(('vl', i))
+            
+        # Shuffle with fixed seed for reproducibility
+        import random
+        rng = random.Random(seed)
+        rng.shuffle(self.indices)
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, idx: int) -> Dict[str, object]:
+        dataset_type, dataset_idx = self.indices[idx]
+        if dataset_type == 'audio':
+            return self.audio_subset[dataset_idx]
+        else:
+            return self.vl_subset[dataset_idx]
+
+
 def _load_mock_dataset(size: int, seed: int, modality_distribution: Optional[Dict[str, float]] = None):
     from tests.fixtures.mock_datasets import MockSAFEDataset
 
@@ -324,6 +373,12 @@ def build_val_dataset(
         val_size = min(size or 100, len(dataset), 100)  # Cap at 100 samples
         indices = list(range(val_size))
         return Subset(dataset, indices)
+    elif source == "pack_mixed":
+        if pack_root is None:
+            raise ValueError("pack_root must be provided when val-source='pack_mixed'")
+        # Mixed validation with both audio and VL samples
+        total_size = size or 100
+        return MixedValidationDataset(pack_root=pack_root, total_size=total_size, audio_ratio=0.5, seed=seed)
     else:
         raise ValueError(f"Unsupported val-source '{source}'")
 
@@ -603,7 +658,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-source", type=str, default="mock",
                         help="Training dataset source (mock, audiocaps, avqa)")
     parser.add_argument("--val-source", type=str, default="pack_vl",
-                        help="Validation dataset source (mock_vl, vqa, pack_vl, pack_audio, pack_train_audio)")
+                        help="Validation dataset source (mock_vl, vqa, pack_vl, pack_audio, pack_train_audio, pack_mixed)")
     parser.add_argument("--val-size", type=int, default=500,
                         help="Number of validation samples (if applicable)")
     parser.add_argument("--train-batch-size", type=int, default=8,

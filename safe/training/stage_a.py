@@ -1598,12 +1598,21 @@ class StageATrainer:
                             f"[EvalDebug] batch {batch_idx}: preparing multimodal inputs (has_audio={int(has_audio.sum().item())})",
                             flush=True,
                         )
+                    # Hard assert audio presence for audio batches
+                    if batch_label.startswith("AUDIO"):
+                        assert batch.get("audio_tokens", None) is not None or (batch.get("has_audio", torch.zeros(1))).any(), \
+                            f"Eval set has no usable audio (tokens/mask missing) for batch {batch_label}"
+                        print(f"[AUDIO_EVAL] Audio batch confirmed: {batch_label}", flush=True)
+                    
+                    # Ensure include_audio_tokens=True for audio samples to guarantee audio placeholders in prompts
+                    has_audio_data = batch.get("audio", None) is not None
                     inputs = self.safe_model.prepare_multimodal_inputs(
                         text=batch["questions"],
                         images=batch.get("images", None),
                         audio=batch.get("audio", None),
                         answers=None,  # Do NOT pass answers during evaluation to prevent contamination
                         device=device,
+                        include_audio_tokens=has_audio_data,  # Critical: ensure audio placeholders for audio samples
                         training_mode=False  # Inference mode - no answer application
                     )
                     
@@ -1657,7 +1666,12 @@ class StageATrainer:
                             f"[EvalDebug] {batch_label} batch {batch_idx}: SAFE forward start",
                             flush=True,
                         )
-                    safe_outputs = self.safe_model(**inputs)
+                    # Force gate=1.0 for audio evaluation sanity testing
+                    if batch_label.startswith("AUDIO"):
+                        print(f"[EvalDebug] Forcing gate=1.0 for audio batch {batch_label}", flush=True)
+                        safe_outputs = self.safe_model(**inputs, gate=1.0)
+                    else:
+                        safe_outputs = self.safe_model(**inputs)
                     if self.debug_logging:
                         if torch.cuda.is_available():
                             torch.cuda.synchronize()
@@ -2144,10 +2158,20 @@ class StageATrainer:
 
         device = next(self.safe_model.parameters()).device
 
+        # Debug logging with audio token verification
         if self.debug_logging:
             print(f"[GenDebug] Input shape: {input_ids.shape}", flush=True)
             sample_input_text = tok.decode(input_ids[0], skip_special_tokens=True)
             print(f"[GenDebug] Sample input text: '{sample_input_text[:200]}...'", flush=True)
+            
+        # Audio debug logging before generation  
+        if audio_tokens is not None:
+            atok_shape = tuple(audio_tokens.shape)
+            amask = inputs.get("audio_attention_mask", None)
+            amask_zeros = (amask==0).sum().item() if amask is not None else 'n/a'
+            print(f"[AUDIO_EVAL] tokens={atok_shape} masked_zeros={amask_zeros}", flush=True)
+        else:
+            print("[AUDIO_EVAL] No audio_tokens in generation inputs!", flush=True)
 
         # Ensure model config has proper pad/eos tokens
         if hasattr(self.safe_model.base_vl.llm, 'config'):
@@ -2158,10 +2182,10 @@ class StageATrainer:
             self.safe_model.base_vl.llm.generation_config.eos_token_id = getattr(tok, "eos_token_id", None)
 
         gen_kwargs = dict(
-            max_new_tokens=3,  # Reduced for single word/number answers
-            do_sample=False,   # Greedy decoding for deterministic results
-            temperature=None,
-            top_p=None,
+            max_new_tokens=20,  # Increased from 3 to allow for better answer generation
+            do_sample=True,     # Enable sampling fallback
+            temperature=0.7,    # Add temperature sampling
+            top_p=0.9,          # Add top-p sampling
             num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
