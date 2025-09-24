@@ -1162,8 +1162,35 @@ class SAFEModel(nn.Module):
             if attention_mask is None:
                 attention_mask = torch.ones_like(input_ids, dtype=torch.long)
 
+            # LLaVA requires <image> tokens to accompany pixel inputs; drop them if missing
+            if (
+                self.base_vl.model_type == "llava"
+                and pixel_values is not None
+                and input_ids is not None
+            ):
+                try:
+                    image_token_id = self._get_image_token_id()
+                    has_image_tokens = (input_ids == image_token_id).any()
+                except Exception:
+                    has_image_tokens = True
+
+                if not has_image_tokens:
+                    if self.training:
+                        print(
+                            "[SAFEModel] Dropping pixel_values during training because "
+                            "no <image> tokens were found in the batch.",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            "[SAFEModel] Warning: pixel_values provided without <image> tokens. "
+                            "Removing pixel_values to avoid LLaVA placeholder mismatch during inference.",
+                            flush=True,
+                        )
+                    pixel_values = None
+
             inputs_embeds = self.get_input_embeddings(input_ids)
-            
+
             # Determine base dtype from the language model weights
             base_dtype = next(self.base_vl.llm.parameters()).dtype
             
