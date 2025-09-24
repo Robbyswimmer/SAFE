@@ -315,6 +315,15 @@ def build_val_dataset(
             indices = list(range(size))
             return Subset(dataset, indices)
         return dataset
+    elif source == "pack_train_audio":
+        if pack_root is None:
+            raise ValueError("pack_root must be provided when val-source='pack_train_audio'")
+        # Use training audio manifest for validation subset
+        dataset = ManifestAudioCapsDataset(pack_root=pack_root)
+        # Take first 50-100 samples for consistent validation subset
+        val_size = min(size or 100, len(dataset), 100)  # Cap at 100 samples
+        indices = list(range(val_size))
+        return Subset(dataset, indices)
     else:
         raise ValueError(f"Unsupported val-source '{source}'")
 
@@ -594,7 +603,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-source", type=str, default="mock",
                         help="Training dataset source (mock, audiocaps, avqa)")
     parser.add_argument("--val-source", type=str, default="pack_vl",
-                        help="Validation dataset source (mock_vl, vqa, pack_vl, pack_audio)")
+                        help="Validation dataset source (mock_vl, vqa, pack_vl, pack_audio, pack_train_audio)")
     parser.add_argument("--val-size", type=int, default=500,
                         help="Number of validation samples (if applicable)")
     parser.add_argument("--train-batch-size", type=int, default=8,
