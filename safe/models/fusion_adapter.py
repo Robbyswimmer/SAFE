@@ -75,16 +75,25 @@ class CrossAttentionBlock(nn.Module):
         Returns:
             output: (batch_size, seq_len, hidden_size) - Fused representations
         """
-        # Clean inputs to avoid propagating NaNs/Infs from upstream modules
-        hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=1e4, neginf=-1e4)
-        audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e4, neginf=-1e4)
+        # Remember incoming dtype for final output
+        orig_dtype = hidden_states.dtype
+        
+        # Clean inputs and upcast to fp32 for numerically stable computation
+        hs = torch.nan_to_num(hidden_states, nan=0.0, posinf=1e4, neginf=-1e4)
+        at = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e4, neginf=-1e4)
+        
+        # Upcast to fp32 for stable attention math
+        if hs.dtype != torch.float32:
+            hs = hs.float()
+        if at.dtype != torch.float32:
+            at = at.float()
 
-        input_dtype = hidden_states.dtype
+        input_dtype = torch.float32  # All computation now in fp32
 
-        # Compute query, key, value
-        query_layer = self.transpose_for_scores(self.query(hidden_states))  # (B, H, seq_len, d)
-        key_layer = self.transpose_for_scores(self.key(audio_tokens))       # (B, H, audio_len, d)
-        value_layer = self.transpose_for_scores(self.value(audio_tokens))   # (B, H, audio_len, d)
+        # Compute query, key, value (using cleaned fp32 inputs)
+        query_layer = self.transpose_for_scores(self.query(hs))  # (B, H, seq_len, d)
+        key_layer = self.transpose_for_scores(self.key(at))       # (B, H, audio_len, d)
+        value_layer = self.transpose_for_scores(self.value(at))   # (B, H, audio_len, d)
 
         # Cast to float32 for numerically stable attention computation
         query_layer = torch.nan_to_num(query_layer, nan=0.0, posinf=1e4, neginf=-1e4).to(torch.float32)
@@ -161,13 +170,15 @@ class CrossAttentionBlock(nn.Module):
         output = self.output_dropout(output)
         output = output.to(input_dtype)
 
-        # Apply residual connection BEFORE layer norm and gating
-        hidden_states = hidden_states.to(output.dtype)
-        output = output + hidden_states
+        # Apply residual connection BEFORE layer norm and gating (using cleaned fp32 hs)
+        output = output + hs
 
         # Optional layer norm on the full fused output
         if self.layer_norm is not None:
             output = self.layer_norm(output)
+
+        # Cast back to the original dtype expected by the LM stack
+        output = output.to(orig_dtype)
 
         if getattr(self, "debug_logging", False):
             summary = {
@@ -289,6 +300,8 @@ class LoRAFusionAdapter(nn.Module):
         Returns:
             fused_states: (batch_size, seq_len, hidden_size) - Fused representations
         """
+        # Remember incoming dtype for final output
+        orig_dtype = hidden_states.dtype
         weight = self.cross_attention.base_model.query.weight
         target_dtype = weight.dtype
         target_device = weight.device
@@ -336,6 +349,9 @@ class LoRAFusionAdapter(nn.Module):
         else:
             gate = float(gate)
             output = gate * fused_states + (1.0 - gate) * hidden_states
+
+        # Cast back to the original dtype expected by the LM stack
+        output = output.to(orig_dtype)
 
         return output
 

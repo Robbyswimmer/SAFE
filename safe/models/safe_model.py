@@ -358,11 +358,11 @@ class SAFEModel(nn.Module):
             feat_norm = audio_features.norm(dim=-1).mean().item() if audio_features.numel() > 0 else 0.0
             print(f"[MixedPrecisionDebug] Stage2 projector_input: norm={feat_norm:.6f}, dtype={audio_features.dtype}", flush=True)
 
-        # Apply projector
+        # Apply projector with target dtype for LM compatibility
         if self.projector_type == "adaptive":
-            audio_tokens = self.audio_projector(audio_features, num_tokens)
+            audio_tokens = self.audio_projector(audio_features, num_tokens=num_tokens, out_dtype=target_dtype)
         else:
-            audio_tokens = self.audio_projector(audio_features)
+            audio_tokens = self.audio_projector(audio_features, out_dtype=target_dtype)
 
         # Stage 3: Final dtype/device conversion with validation
         # Ensure tokens are finite before final conversion
@@ -1157,12 +1157,23 @@ class SAFEModel(nn.Module):
                 attention_mask = torch.ones_like(input_ids, dtype=torch.long)
 
             inputs_embeds = self.get_input_embeddings(input_ids)
+            
+            # Determine base dtype from the language model weights
+            base_dtype = next(self.base_vl.llm.parameters()).dtype
+            
+            # Ensure inputs_embeds matches base dtype
+            inputs_embeds = inputs_embeds.to(base_dtype)
+            
             if audio_tokens is not None and gate > 0.0:
                 print(f"[DEBUG] Fusion path: audio_tokens.shape={audio_tokens.shape}, gate={gate}", flush=True)
                 print(f"[DEBUG] Fusion type: {self.fusion_type}", flush=True)
                 
                 # Add finite guards before fusion
                 assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens before fusion"
+                
+                # Debug asserts to catch dtype mismatches early
+                assert audio_tokens.dtype == base_dtype, f"audio_tokens {audio_tokens.dtype} != LM dtype {base_dtype}"
+                assert inputs_embeds.dtype == base_dtype, f"inputs_embeds {inputs_embeds.dtype} != LM dtype {base_dtype}"
                 
                 audio_tokens = audio_tokens.to(
                     device=inputs_embeds.device,
@@ -1185,6 +1196,9 @@ class SAFEModel(nn.Module):
                     gate=gate,
                     supervised_mask=supervised_mask,
                 )
+
+            # Final guard: ensure fusion output matches LM dtype
+            assert inputs_embeds.dtype == base_dtype, f"Fusion output {inputs_embeds.dtype} != LM dtype {base_dtype}"
 
             model_inputs = {
                 "inputs_embeds": inputs_embeds,

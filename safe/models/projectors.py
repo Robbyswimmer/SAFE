@@ -82,20 +82,26 @@ class AudioProjector(nn.Module):
         self._projector_log_limit = int(max(0, log_limit))
         self._projector_logs_emitted = 0
 
-    def forward(self, audio_features: torch.Tensor) -> torch.Tensor:
+    def forward(self, audio_features: torch.Tensor, out_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
         Project audio features to LLM token space.
         
         Args:
             audio_features: (batch_size, audio_embed_dim) audio embeddings
+            out_dtype: Target dtype for output tokens (to match LM weights)
             
         Returns:
             audio_tokens: (batch_size, num_audio_tokens, llm_hidden_size)
         """
         batch_size = audio_features.shape[0]
         
+        # Sanitize inputs and compute in fp32 for numerical stability
+        x = torch.nan_to_num(audio_features, nan=0.0, posinf=0.0, neginf=0.0)
+        if x.dtype != torch.float32:
+            x = x.float()
+        
         # Normalize input for stability
-        normalized_input = self.input_norm(audio_features)
+        normalized_input = self.input_norm(x)
         
         # Log input statistics for debugging
         if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
@@ -127,6 +133,12 @@ class AudioProjector(nn.Module):
             output_max = audio_tokens.abs().max().item()
             print(f"[ProjectorDebug] Output norm={output_norm:.6f}, max_abs={output_max:.6f}", flush=True)
             self._projector_logs_emitted += 1
+        
+        # Cast to requested/output dtype (the LM/base dtype)
+        if out_dtype is not None:
+            audio_tokens = audio_tokens.to(out_dtype)
+            if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
+                print(f"[ProjectorDebug] Cast to {out_dtype}", flush=True)
         
         return audio_tokens
 
@@ -212,7 +224,8 @@ class AdaptiveAudioProjector(nn.Module):
     def forward(
         self, 
         audio_features: torch.Tensor, 
-        num_tokens: Optional[int] = None
+        num_tokens: Optional[int] = None,
+        out_dtype: Optional[torch.dtype] = None
     ) -> torch.Tensor:
         """
         Project audio features with adaptive token count.
@@ -220,14 +233,20 @@ class AdaptiveAudioProjector(nn.Module):
         Args:
             audio_features: (batch_size, audio_embed_dim)
             num_tokens: Fixed number of tokens (if None, predict automatically)
+            out_dtype: Target dtype for output tokens (to match LM weights)
             
         Returns:
             audio_tokens: (batch_size, num_tokens, llm_hidden_size)
         """
         batch_size = audio_features.shape[0]
         
+        # Sanitize inputs and compute in fp32 for numerical stability
+        x = torch.nan_to_num(audio_features, nan=0.0, posinf=0.0, neginf=0.0)
+        if x.dtype != torch.float32:
+            x = x.float()
+        
         # Normalize input for stability
-        normalized_input = self.input_norm(audio_features)
+        normalized_input = self.input_norm(x)
         
         # Extract shared features
         features = self.feature_extractor(normalized_input)  # (batch_size, llm_hidden_size)
@@ -283,6 +302,12 @@ class AdaptiveAudioProjector(nn.Module):
             output_max = audio_tokens.abs().max().item()
             print(f"[AdaptiveProjectorDebug] Output norm={output_norm:.6f}, max_abs={output_max:.6f}", flush=True)
             self._projector_logs_emitted += 1
+        
+        # Cast to requested/output dtype (the LM/base dtype)
+        if out_dtype is not None:
+            audio_tokens = audio_tokens.to(out_dtype)
+            if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
+                print(f"[AdaptiveProjectorDebug] Cast to {out_dtype}", flush=True)
         
         return audio_tokens
 
