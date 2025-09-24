@@ -136,7 +136,7 @@ class AudioProjector(nn.Module):
         # Cast to requested/output dtype (the LM/base dtype)
         if out_dtype is not None:
             audio_tokens = audio_tokens.to(out_dtype)
-            if self.debug_logging and self._projector_logs_emitted < (self._projector_log_limit + 2):  # Allow extra logs for dtype info
+            if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
                 print(f"[ProjectorDebug] Cast to {out_dtype}", flush=True)
                 self._projector_logs_emitted += 1
         
@@ -305,7 +305,7 @@ class AdaptiveAudioProjector(nn.Module):
         # Cast to requested/output dtype (the LM/base dtype)
         if out_dtype is not None:
             audio_tokens = audio_tokens.to(out_dtype)
-            if self.debug_logging and self._projector_logs_emitted < (self._projector_log_limit + 2):  # Allow extra logs for dtype info
+            if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
                 print(f"[AdaptiveProjectorDebug] Cast to {out_dtype}", flush=True)
                 self._projector_logs_emitted += 1
         
