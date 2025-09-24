@@ -1482,6 +1482,26 @@ class StageATrainer:
         eval_with_audio_gate = self.config.get("eval_with_audio_gate", True)
         eval_audio_gate_comparison = self.config.get("eval_audio_gate_comparison", False)
         
+        # Save current gate state to restore after evaluation
+        saved_gate = None
+        if hasattr(self.safe_model, 'get_gate'):
+            try:
+                saved_gate = self.safe_model.get_gate()
+                if self.debug_logging:
+                    print(f"[EvalGate] Saved current gate state: {saved_gate}", flush=True)
+            except:
+                saved_gate = 1.0  # Default fallback
+                if self.debug_logging:
+                    print(f"[EvalGate] Could not read gate, using fallback: {saved_gate}", flush=True)
+        elif hasattr(self.safe_model, '_default_gate'):
+            saved_gate = self.safe_model._default_gate
+            if self.debug_logging:
+                print(f"[EvalGate] Saved _default_gate: {saved_gate}", flush=True)
+        else:
+            saved_gate = 1.0  # Safe default
+            if self.debug_logging:
+                print(f"[EvalGate] No gate found, using default: {saved_gate}", flush=True)
+        
         try:
             with torch.no_grad():
                 # Separate audio and VL batches if split evaluation is configured
@@ -1821,7 +1841,11 @@ class StageATrainer:
                             flush=True,
                         )
             
+        except Exception as e:
+            print(f"ERROR during evaluation: {e}", flush=True)
+            raise
         finally:
+            # Always restore original gate state to prevent regression in training
             if saved_gate is not None:
                 try:
                     if hasattr(self.safe_model, 'set_gate'):
@@ -1830,8 +1854,11 @@ class StageATrainer:
                         self.safe_model._default_gate = saved_gate
                     if self.debug_logging:
                         print(f"[EvalGate] Restored gate state to {saved_gate}", flush=True)
+                    else:
+                        print(f"🔧 Restored audio gate to: {saved_gate}", flush=True)
                 except Exception as exc:
                     print(f"[EvalGate] WARNING: Failed to restore gate state ({exc})", flush=True)
+        
         # Normalize losses (avoid division by zero)
         if total_samples > 0:
             for key in eval_losses:
