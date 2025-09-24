@@ -167,7 +167,10 @@ class SAFEModel(nn.Module):
 
         self.debug_logging = bool(enabled)
 
-        if hasattr(self.audio_projector, "debug_logging"):
+        # Enable projector debugging
+        if hasattr(self.audio_projector, "set_debug_logging"):
+            self.audio_projector.set_debug_logging(self.debug_logging)
+        elif hasattr(self.audio_projector, "debug_logging"):
             self.audio_projector.debug_logging = self.debug_logging
 
         if hasattr(self.audio_encoder, "set_debug_logging") and not self.debug_logging:
@@ -308,47 +311,68 @@ class SAFEModel(nn.Module):
         else:  # whisper
             audio_features, transcripts = self.audio_encoder(audio)
             
-        # Project to token space
+        # Establish consistent dtype/device pipeline
         embedding_weight = self.base_vl.llm.get_input_embeddings().weight
         target_dtype = embedding_weight.dtype
         target_device = embedding_weight.device
         
+        # Stage 1: Convert to tensor and ensure finite values
         if not isinstance(audio_features, torch.Tensor):
-            audio_features = torch.tensor(audio_features)
-
-        audio_features = torch.nan_to_num(audio_features, nan=0.0, posinf=1e3, neginf=-1e3)
-        audio_features = audio_features.clamp(-1e3, 1e3)
-
-        if self.projector_type == "adaptive":
-            device = next(self.audio_projector.parameters()).device
-            dtype = next(self.audio_projector.parameters()).dtype
-            audio_features = audio_features.to(device=device, dtype=dtype)
-            audio_tokens = self.audio_projector(audio_features, num_tokens)
+            audio_features = torch.tensor(audio_features, dtype=torch.float32)
         else:
-            device = next(self.audio_projector.parameters()).device
-            dtype = next(self.audio_projector.parameters()).dtype
-            audio_features = audio_features.to(device=device, dtype=dtype)
+            audio_features = audio_features.float()  # Start with float32 for numerical stability
+        
+        # Clean NaNs/Infs early in pipeline
+        audio_features = torch.nan_to_num(audio_features, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        # Log stage 1 for debugging
+        if getattr(self, "debug_logging", False):
+            feat_norm = audio_features.norm(dim=-1).mean().item() if audio_features.numel() > 0 else 0.0
+            print(f"[MixedPrecisionDebug] Stage1 audio_features: norm={feat_norm:.6f}, dtype={audio_features.dtype}", flush=True)
+
+        # Stage 2: Projector processing with consistent dtype
+        projector_dtype = next(self.audio_projector.parameters()).dtype
+        projector_device = next(self.audio_projector.parameters()).device
+        
+        # Convert to projector's dtype/device
+        audio_features = audio_features.to(device=projector_device, dtype=projector_dtype)
+        
+        # Handle dimensionality for standard projector
+        if self.projector_type != "adaptive":
             if audio_features.dim() > 2:
                 if getattr(self, "debug_logging", False):
-                    print(
-                        f"[AudioDebug] audio_features dim={audio_features.dim()} shape={audio_features.shape}; reducing via mean",
-                        flush=True,
-                    )
+                    print(f"[AudioDebug] Reducing audio_features from dim={audio_features.dim()} via mean", flush=True)
                 audio_features = audio_features.mean(dim=1)
             elif audio_features.dim() == 1:
                 audio_features = audio_features.unsqueeze(0)
-            if getattr(self, "debug_logging", False):
-                print(
-                    f"[AudioDebug] Projector input shape={audio_features.shape}",
-                    flush=True,
-                )
+        
+        # Log stage 2 for debugging
+        if getattr(self, "debug_logging", False):
+            feat_norm = audio_features.norm(dim=-1).mean().item() if audio_features.numel() > 0 else 0.0
+            print(f"[MixedPrecisionDebug] Stage2 projector_input: norm={feat_norm:.6f}, dtype={audio_features.dtype}", flush=True)
+
+        # Apply projector
+        if self.projector_type == "adaptive":
+            audio_tokens = self.audio_projector(audio_features, num_tokens)
+        else:
             audio_tokens = self.audio_projector(audio_features)
 
-        # Ensure audio tokens match the target dtype/device and remain finite
-        audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e3, neginf=-1e3)
-        audio_tokens = audio_tokens.clamp(-1e3, 1e3)
+        # Stage 3: Final dtype/device conversion with validation
+        # Ensure tokens are finite before final conversion
+        if not torch.isfinite(audio_tokens).all():
+            if getattr(self, "debug_logging", False):
+                nan_count = (~torch.isfinite(audio_tokens)).sum().item()
+                print(f"[MixedPrecisionDebug] Found {nan_count} non-finite values in audio_tokens, cleaning", flush=True)
+            audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=0.1, neginf=-0.1)
+
+        # Convert to target dtype/device
         audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
-        audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e3, neginf=-1e3)
+        
+        # Final validation and normalization
+        if getattr(self, "debug_logging", False):
+            token_norm = audio_tokens.norm(dim=-1).mean().item() if audio_tokens.numel() > 0 else 0.0
+            token_max = audio_tokens.abs().max().item() if audio_tokens.numel() > 0 else 0.0
+            print(f"[MixedPrecisionDebug] Final audio_tokens: norm={token_norm:.6f}, max_abs={token_max:.6f}, dtype={audio_tokens.dtype}", flush=True)
 
         return audio_tokens, transcripts
 

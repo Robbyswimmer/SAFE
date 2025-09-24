@@ -35,13 +35,25 @@ class AudioProjector(nn.Module):
         else:
             raise ValueError(f"Unsupported activation: {activation}")
         
-        # 2-layer MLP
+        # Input normalization for stability
+        self.input_norm = nn.LayerNorm(audio_embed_dim, eps=1e-6)
+        
+        # 2-layer MLP with improved stability
         self.projector = nn.Sequential(
             nn.Linear(audio_embed_dim, llm_hidden_size),
             self.activation,
             nn.Dropout(dropout),
-            nn.Linear(llm_hidden_size, llm_hidden_size * num_audio_tokens)
+            nn.Linear(llm_hidden_size, llm_hidden_size * num_audio_tokens),
+            nn.Tanh()  # Soft bounding to prevent saturation
         )
+        
+        # Output normalization
+        self.output_norm = nn.LayerNorm(llm_hidden_size, eps=1e-6)
+        
+        # Debug logging
+        self.debug_logging = False
+        self._projector_log_limit = 5
+        self._projector_logs_emitted = 0
         
         # Initialize weights
         self._init_weights()
@@ -54,6 +66,12 @@ class AudioProjector(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
     
+    def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
+        """Enable or disable projector debug logging."""
+        self.debug_logging = bool(enabled)
+        self._projector_log_limit = int(max(0, log_limit))
+        self._projector_logs_emitted = 0
+
     def forward(self, audio_features: torch.Tensor) -> torch.Tensor:
         """
         Project audio features to LLM token space.
@@ -66,12 +84,22 @@ class AudioProjector(nn.Module):
         """
         batch_size = audio_features.shape[0]
         
-        # Project through MLP
-        projected = self.projector(audio_features)  # (batch_size, llm_hidden_size * num_audio_tokens)
+        # Normalize input for stability
+        normalized_input = self.input_norm(audio_features)
+        
+        # Log input statistics for debugging
+        if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
+            input_norm = normalized_input.norm(dim=-1).mean().item()
+            input_max = normalized_input.abs().max().item()
+            print(f"[ProjectorDebug] Input norm={input_norm:.6f}, max_abs={input_max:.6f}", flush=True)
+            self._projector_logs_emitted += 1
+        
+        # Project through MLP with soft bounding
+        projected = self.projector(normalized_input)  # (batch_size, llm_hidden_size * num_audio_tokens)
 
-        # Guard against numerical blow-ups producing NaNs/Infs
-        torch.nan_to_num_(projected, nan=0.0, posinf=1e3, neginf=-1e3)
-        projected = projected.clamp_(-1e3, 1e3)
+        # Scale to reasonable range (tanh outputs [-1,1], scale to match typical embedding ranges)
+        scale_factor = 0.1  # Conservative scaling to prevent saturation
+        projected = projected * scale_factor
 
         # Reshape to token format
         audio_tokens = projected.view(
@@ -79,6 +107,15 @@ class AudioProjector(nn.Module):
             self.num_audio_tokens, 
             self.llm_hidden_size
         )
+        
+        # Apply output normalization per token
+        audio_tokens = self.output_norm(audio_tokens)
+        
+        # Log output statistics for debugging
+        if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
+            output_norm = audio_tokens.norm(dim=-1).mean().item()
+            output_max = audio_tokens.abs().max().item()
+            print(f"[ProjectorDebug] Output norm={output_norm:.6f}, max_abs={output_max:.6f}", flush=True)
         
         return audio_tokens
 
@@ -103,6 +140,9 @@ class AdaptiveAudioProjector(nn.Module):
         self.max_audio_tokens = max_audio_tokens
         self.min_audio_tokens = min_audio_tokens
         
+        # Input normalization for stability
+        self.input_norm = nn.LayerNorm(audio_embed_dim, eps=1e-6)
+        
         # Shared feature extractor
         self.feature_extractor = nn.Sequential(
             nn.Linear(audio_embed_dim, llm_hidden_size),
@@ -117,13 +157,21 @@ class AdaptiveAudioProjector(nn.Module):
             nn.Linear(64, max_audio_tokens - min_audio_tokens + 1)  # Predict offset from min
         )
         
-        # Token generators for each possible count
+        # Token generators for each possible count with soft bounding
         self.token_generators = nn.ModuleDict()
         for k in range(min_audio_tokens, max_audio_tokens + 1):
-            self.token_generators[str(k)] = nn.Linear(
-                llm_hidden_size, 
-                llm_hidden_size * k
+            self.token_generators[str(k)] = nn.Sequential(
+                nn.Linear(llm_hidden_size, llm_hidden_size * k),
+                nn.Tanh()  # Soft bounding to prevent saturation
             )
+        
+        # Output normalization
+        self.output_norm = nn.LayerNorm(llm_hidden_size, eps=1e-6)
+        
+        # Debug logging
+        self.debug_logging = False
+        self._projector_log_limit = 5
+        self._projector_logs_emitted = 0
         
         self._init_weights()
     
@@ -135,6 +183,12 @@ class AdaptiveAudioProjector(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
     
+    def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
+        """Enable or disable projector debug logging."""
+        self.debug_logging = bool(enabled)
+        self._projector_log_limit = int(max(0, log_limit))
+        self._projector_logs_emitted = 0
+
     def forward(
         self, 
         audio_features: torch.Tensor, 
@@ -152,8 +206,11 @@ class AdaptiveAudioProjector(nn.Module):
         """
         batch_size = audio_features.shape[0]
         
+        # Normalize input for stability
+        normalized_input = self.input_norm(audio_features)
+        
         # Extract shared features
-        features = self.feature_extractor(audio_features)  # (batch_size, llm_hidden_size)
+        features = self.feature_extractor(normalized_input)  # (batch_size, llm_hidden_size)
         
         if num_tokens is None:
             # Predict optimal token count
@@ -183,18 +240,29 @@ class AdaptiveAudioProjector(nn.Module):
         most_common_tokens = max(self.min_audio_tokens, 
                                 min(self.max_audio_tokens, most_common_tokens))
         
-        # Generate tokens
+        # Generate tokens with soft bounding
         generator = self.token_generators[str(most_common_tokens)]
         projected = generator(features)  # (batch_size, llm_hidden_size * k)
 
-        torch.nan_to_num_(projected, nan=0.0, posinf=1e3, neginf=-1e3)
-        projected = projected.clamp_(-1e3, 1e3)
+        # Scale to reasonable range (tanh outputs [-1,1], scale to match typical embedding ranges)
+        scale_factor = 0.1  # Conservative scaling to prevent saturation
+        projected = projected * scale_factor
 
         audio_tokens = projected.view(
             batch_size,
             most_common_tokens,
             self.llm_hidden_size
         )
+        
+        # Apply output normalization per token
+        audio_tokens = self.output_norm(audio_tokens)
+        
+        # Log output statistics for debugging
+        if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
+            output_norm = audio_tokens.norm(dim=-1).mean().item()
+            output_max = audio_tokens.abs().max().item()
+            print(f"[AdaptiveProjectorDebug] Output norm={output_norm:.6f}, max_abs={output_max:.6f}", flush=True)
+            self._projector_logs_emitted += 1
         
         return audio_tokens
 
