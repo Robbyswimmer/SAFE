@@ -1166,11 +1166,14 @@ class SAFEModel(nn.Module):
             if (
                 self.base_vl.model_type == "llava"
                 and pixel_values is not None
-                and input_ids is not None
             ):
+                has_image_tokens = False
                 try:
                     image_token_id = self._get_image_token_id()
-                    has_image_tokens = (input_ids == image_token_id).any()
+                    if input_ids is not None:
+                        has_image_tokens = (input_ids == image_token_id).any()
+                    else:
+                        has_image_tokens = True  # Fallback when we cannot inspect tokens directly
                 except Exception:
                     has_image_tokens = True
 
@@ -1245,7 +1248,23 @@ class SAFEModel(nn.Module):
 
             import sys
             sys.stdout.flush()
-            outputs = self.base_vl.llm(**model_inputs)
+            try:
+                outputs = self.base_vl.llm(**model_inputs)
+            except ValueError as exc:
+                if (
+                    self.base_vl.model_type == "llava"
+                    and "Image features and image tokens do not match" in str(exc)
+                    and "pixel_values" in model_inputs
+                ):
+                    print(
+                        "[SAFEModel] Caught placeholder mismatch from LLaVA; retrying forward pass without pixel_values.",
+                        flush=True,
+                    )
+                    retry_inputs = dict(model_inputs)
+                    retry_inputs.pop("pixel_values", None)
+                    outputs = self.base_vl.llm(**retry_inputs)
+                else:
+                    raise
             logits = outputs.logits
             loss = outputs.loss if labels is not None else None
             return {"logits": logits, "loss": loss, "hidden_states": None}
