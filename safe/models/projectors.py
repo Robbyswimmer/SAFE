@@ -66,13 +66,13 @@ class AudioProjector(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
         
-        # Force last linear of projector to zero init to prevent inf updates
+        # Force last linear of projector to tiny init to allow gradient flow
         last = None
         for m in self.projector.modules():
             if isinstance(m, nn.Linear):
                 last = m
         if last is not None:
-            nn.init.zeros_(last.weight)
+            nn.init.normal_(last.weight, mean=0.0, std=1e-5)  # Safer tiny init
             if last.bias is not None:
                 nn.init.zeros_(last.bias)
     
@@ -113,9 +113,8 @@ class AudioProjector(nn.Module):
         # Project through MLP with soft bounding
         projected = self.projector(normalized_input)  # (batch_size, llm_hidden_size * num_audio_tokens)
 
-        # Scale to reasonable range (tanh outputs [-1,1], scale to match typical embedding ranges)
-        scale_factor = 0.1  # Conservative scaling to prevent saturation
-        projected = projected * scale_factor
+        # Apply tanh and much softer scaling to start nearly invisible
+        projected = torch.tanh(projected) * 2.0  # Much gentler than previous 0.1 scale factor
 
         # Reshape to token format
         audio_tokens = projected.view(
@@ -137,7 +136,7 @@ class AudioProjector(nn.Module):
         # Cast to requested/output dtype (the LM/base dtype)
         if out_dtype is not None:
             audio_tokens = audio_tokens.to(out_dtype)
-            if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
+            if self.debug_logging and self._projector_logs_emitted < (self._projector_log_limit + 2):  # Allow extra logs for dtype info
                 print(f"[ProjectorDebug] Cast to {out_dtype}", flush=True)
         
         return audio_tokens
@@ -206,12 +205,12 @@ class AdaptiveAudioProjector(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
         
-        # Zero-init each generator's final linear to prevent inf updates
+        # Tiny-init each generator's final linear to allow gradient flow
         for generator in self.token_generators.values():
             for m in generator.modules():
                 if isinstance(m, nn.Linear):
                     # This is the final layer (since generator is Sequential with one Linear)
-                    nn.init.zeros_(m.weight)
+                    nn.init.normal_(m.weight, mean=0.0, std=1e-5)  # Safer tiny init
                     if m.bias is not None:
                         nn.init.zeros_(m.bias)
     
@@ -283,9 +282,8 @@ class AdaptiveAudioProjector(nn.Module):
         generator = self.token_generators[str(most_common_tokens)]
         projected = generator(features)  # (batch_size, llm_hidden_size * k)
 
-        # Scale to reasonable range (tanh outputs [-1,1], scale to match typical embedding ranges)
-        scale_factor = 0.1  # Conservative scaling to prevent saturation
-        projected = projected * scale_factor
+        # Apply softer scaling to start nearly invisible
+        projected = projected * 2.0  # Much gentler scaling (tanh already applied in generator)
 
         audio_tokens = projected.view(
             batch_size,
@@ -306,7 +304,7 @@ class AdaptiveAudioProjector(nn.Module):
         # Cast to requested/output dtype (the LM/base dtype)
         if out_dtype is not None:
             audio_tokens = audio_tokens.to(out_dtype)
-            if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
+            if self.debug_logging and self._projector_logs_emitted < (self._projector_log_limit + 2):  # Allow extra logs for dtype info
                 print(f"[AdaptiveProjectorDebug] Cast to {out_dtype}", flush=True)
         
         return audio_tokens

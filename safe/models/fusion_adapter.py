@@ -50,6 +50,9 @@ class CrossAttentionBlock(nn.Module):
         # Attention dropout
         self.attention_dropout = nn.Dropout(attention_dropout)
         
+        # Residual scaling for gentle fusion start
+        self.residual_scale = nn.Parameter(torch.tensor(0.05), requires_grad=False)
+        
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         """Transpose tensor for multi-head attention computation."""
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -155,6 +158,16 @@ class CrossAttentionBlock(nn.Module):
         attention_probs = attention_probs / (attention_probs.sum(dim=-1, keepdim=True) + 1e-8)
         attention_probs = self.attention_dropout(attention_probs)
 
+        # Add attention diagnostics (sample to avoid spam)
+        with torch.no_grad():
+            if self.training and torch.rand(1).item() < 0.01:  # 1% sample rate
+                # How much total attention flows INTO audio per head
+                attn_to_audio = attention_probs.sum(dim=-1).mean().item()  # average over audio dim, then global mean
+                # Entropy of attention over audio tokens (high = diffuse; low = peaky)
+                p = attention_probs.clamp_min(1e-9)
+                ent = (-p * p.log()).sum(dim=-1).mean().item()
+                print(f"[AttnDiag] to_audio={attn_to_audio:.4f} entropy={ent:.4f}", flush=True)
+
         # Apply attention to values
         context_layer = torch.matmul(attention_probs, value_layer)
         context_layer = context_layer.to(input_dtype)
@@ -170,8 +183,8 @@ class CrossAttentionBlock(nn.Module):
         output = self.output_dropout(output)
         output = output.to(input_dtype)
 
-        # Apply residual connection BEFORE layer norm and gating (using cleaned fp32 hs)
-        output = output + hs
+        # Apply scaled residual connection BEFORE layer norm and gating (using cleaned fp32 hs)
+        output = hs + (self.residual_scale * output)
 
         # Optional layer norm on the full fused output
         if self.layer_norm is not None:
@@ -229,7 +242,7 @@ class LoRAFusionAdapter(nn.Module):
         num_attention_heads: int = 8,
         lora_rank: int = 8,
         lora_alpha: float = 16.0,
-        lora_dropout: float = 0.1,
+        lora_dropout: float = 0.0,  # Disabled for stable gradient flow during bring-up
         attention_dropout: float = 0.1,
         target_modules: list = None
     ):

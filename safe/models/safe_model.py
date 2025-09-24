@@ -168,6 +168,11 @@ class SAFEModel(nn.Module):
     def set_gate(self, value: float) -> None:
         """Set default gate value for fusion (useful for warmup)."""
         self._default_gate = float(value)
+    
+    def set_gate_warmup(self, global_step: int, warmup_steps: int = 2000) -> None:
+        """Set gate using warmup schedule: 0 → 1 over warmup_steps."""
+        gate = min(1.0, global_step / warmup_steps)
+        self.set_gate(gate)
 
     def set_debug_logging(self, enabled: bool) -> None:
         """Enable or disable verbose debugging across SAFE components."""
