@@ -1616,31 +1616,6 @@ class StageATrainer:
                         training_mode=False  # Inference mode - no answer application
                     )
                     
-                    # Handle pixel_values based on model type
-                    if self.safe_model.base_vl.model_type == "llava":
-                        # Only LLaVA uses <image> tokens - check for image token presence
-                        image_token_id = self._get_image_token_id()
-                        input_ids = inputs.get("input_ids")
-                        if input_ids is not None:
-                            if input_ids.dim() == 1:
-                                input_ids = input_ids.unsqueeze(0)
-                            
-                            has_img_tokens = (input_ids == image_token_id).any(dim=1)
-                            
-                            # If no samples have image tokens but we have pixel_values, remove them
-                            if not torch.any(has_img_tokens) and "pixel_values" in inputs:
-                                inputs.pop("pixel_values")
-                            # If image tokens are present but pixel_values missing, log warning and skip
-                            elif torch.any(has_img_tokens) and "pixel_values" not in inputs:
-                                print(
-                                    "Warning: Found <image> tokens but no pixel_values. Skipping multimodal processing.",
-                                    flush=True
-                                )
-                    elif self.safe_model.base_vl.model_type == "blip2":
-                        # BLIP-2 doesn't use <image> tokens, so keep pixel_values as-is if they exist
-                        pass
-                    
-                    
                     # Apply audio gate control if configured
                     if eval_audio_gate_comparison and hasattr(self.safe_model, 'set_gate'):
                         # Run evaluation with both audio gate on/off to measure VL drift
@@ -1660,18 +1635,38 @@ class StageATrainer:
                         if self.debug_logging:
                             print(f"[EvalGate] {batch_label}: Audio disabled (gate=0.0)", flush=True)
                     
+                    # Handle pixel_values based on model type (AFTER gate settings)
+                    if self.safe_model.base_vl.model_type == "llava":
+                        # Only LLaVA uses <image> tokens - check for image token presence
+                        image_token_id = self._get_image_token_id()
+                        input_ids = inputs.get("input_ids")
+                        if input_ids is not None:
+                            if input_ids.dim() == 1:
+                                input_ids = input_ids.unsqueeze(0)
+                            
+                            has_img_tokens = (input_ids == image_token_id).any(dim=1)
+                            
+                            # If no samples have image tokens but we have pixel_values, remove them
+                            if not torch.any(has_img_tokens) and "pixel_values" in inputs:
+                                print(f"[EvalDebug] Removing pixel_values for batch without image tokens: {batch_label}", flush=True)
+                                inputs.pop("pixel_values")
+                            # If image tokens are present but pixel_values missing, log warning and skip
+                            elif torch.any(has_img_tokens) and "pixel_values" not in inputs:
+                                print(
+                                    f"Warning: Found <image> tokens but no pixel_values in {batch_label}. Skipping multimodal processing.",
+                                    flush=True
+                                )
+                    elif self.safe_model.base_vl.model_type == "blip2":
+                        # BLIP-2 doesn't use <image> tokens, so keep pixel_values as-is if they exist
+                        pass
+                    
                     # SAFE model forward pass
                     if self.debug_logging:
                         print(
                             f"[EvalDebug] {batch_label} batch {batch_idx}: SAFE forward start",
                             flush=True,
                         )
-                    # Force gate=1.0 for audio evaluation sanity testing
-                    if batch_label.startswith("AUDIO"):
-                        print(f"[EvalDebug] Forcing gate=1.0 for audio batch {batch_label}", flush=True)
-                        safe_outputs = self.safe_model(**inputs, gate=1.0)
-                    else:
-                        safe_outputs = self.safe_model(**inputs)
+                    safe_outputs = self.safe_model(**inputs)
                     if self.debug_logging:
                         if torch.cuda.is_available():
                             torch.cuda.synchronize()
