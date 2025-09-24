@@ -1482,22 +1482,87 @@ class StageATrainer:
         eval_with_audio_gate = self.config.get("eval_with_audio_gate", True)
         eval_audio_gate_comparison = self.config.get("eval_audio_gate_comparison", False)
         
-        with torch.no_grad():
-            # Separate audio and VL batches if split evaluation is configured
-            if max_audio_eval_batches > 0 or max_vl_eval_batches > 0:
-                print(f"Using split evaluation: {max_audio_eval_batches} audio + {max_vl_eval_batches} VL batches", flush=True)
-                audio_batches = []
-                vl_batches = []
-                
-                # Collect batches and separate them
-                batch_count = 0
-                for batch in self.val_dataloader:
-                    # Move batch to device
-                    for key in batch:
-                        if isinstance(batch[key], torch.Tensor):
-                            batch[key] = batch[key].to(device)
+        try:
+            with torch.no_grad():
+                # Separate audio and VL batches if split evaluation is configured
+                if max_audio_eval_batches > 0 or max_vl_eval_batches > 0:
+                    print(f"Using split evaluation: {max_audio_eval_batches} audio + {max_vl_eval_batches} VL batches", flush=True)
+                    audio_batches = []
+                    vl_batches = []
                     
-                    # Determine if batch has audio samples
+                    # Collect batches and separate them
+                    batch_count = 0
+                    for batch in self.val_dataloader:
+                        # Move batch to device
+                        for key in batch:
+                            if isinstance(batch[key], torch.Tensor):
+                                batch[key] = batch[key].to(device)
+                        
+                        # Determine if batch has audio samples
+                        has_audio = batch.get(
+                            "has_audio",
+                            torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device),
+                        )
+                        if isinstance(has_audio, torch.Tensor):
+                            has_audio = has_audio.to(device=device, dtype=torch.bool)
+                        else:
+                            has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
+                        
+                        # Separate into audio vs VL batches
+                        if has_audio.any() and len(audio_batches) < max_audio_eval_batches:
+                            audio_batches.append(batch)
+                            print(f"[EvalSplit] Added audio batch {len(audio_batches)}/{max_audio_eval_batches}", flush=True)
+                        elif not has_audio.any() and len(vl_batches) < max_vl_eval_batches:
+                            vl_batches.append(batch)
+                            print(f"[EvalSplit] Added VL batch {len(vl_batches)}/{max_vl_eval_batches}", flush=True)
+                        
+                        batch_count += 1
+                        if len(audio_batches) >= max_audio_eval_batches and len(vl_batches) >= max_vl_eval_batches:
+                            break
+                            
+                    # Create combined evaluation list
+                    eval_batch_list = []
+                    for i, batch in enumerate(audio_batches):
+                        eval_batch_list.append((f"AUDIO-{i+1}", batch))
+                    for i, batch in enumerate(vl_batches):
+                        eval_batch_list.append((f"VL-{i+1}", batch))
+                        
+                    dataloader = eval_batch_list
+                    total_eval_batches = len(eval_batch_list)
+                    print(f"Split evaluation: {len(audio_batches)} audio + {len(vl_batches)} VL = {total_eval_batches} batches", flush=True)
+                else:
+                    # Original evaluation logic
+                    dataloader = self.val_dataloader
+                    total_eval_batches = max_batches if max_batches else len(self.val_dataloader)
+                    if max_batches:
+                        from itertools import islice
+                        dataloader = islice(self.val_dataloader, max_batches)
+                    print(f"Standard evaluation on {total_eval_batches} batches...", flush=True)
+                
+                for batch_idx, batch_data in enumerate(dataloader, start=1):
+                    batch_t0 = time.time()
+                    
+                    # Handle both split evaluation format (batch_label, batch) and standard format
+                    if isinstance(batch_data, tuple) and len(batch_data) == 2:
+                        batch_label, batch = batch_data
+                        if self.debug_logging:
+                            print(
+                                f"[EvalDebug] {batch_label} batch {batch_idx}/{total_eval_batches}: processing",
+                                flush=True,
+                            )
+                    else:
+                        batch = batch_data
+                        batch_label = f"batch"
+                        if self.debug_logging:
+                            print(
+                                f"[EvalDebug] batch {batch_idx}/{total_eval_batches}: loading batch",
+                                flush=True,
+                            )
+                        # Move batch to device for standard evaluation
+                        for key in batch:
+                            if isinstance(batch[key], torch.Tensor):
+                                batch[key] = batch[key].to(device)
+                    
                     has_audio = batch.get(
                         "has_audio",
                         torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device),
@@ -1507,319 +1572,266 @@ class StageATrainer:
                     else:
                         has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
                     
-                    # Separate into audio vs VL batches
-                    if has_audio.any() and len(audio_batches) < max_audio_eval_batches:
-                        audio_batches.append(batch)
-                        print(f"[EvalSplit] Added audio batch {len(audio_batches)}/{max_audio_eval_batches}", flush=True)
-                    elif not has_audio.any() and len(vl_batches) < max_vl_eval_batches:
-                        vl_batches.append(batch)
-                        print(f"[EvalSplit] Added VL batch {len(vl_batches)}/{max_vl_eval_batches}", flush=True)
-                    
-                    batch_count += 1
-                    if len(audio_batches) >= max_audio_eval_batches and len(vl_batches) >= max_vl_eval_batches:
-                        break
-                        
-                # Create combined evaluation list
-                eval_batch_list = []
-                for i, batch in enumerate(audio_batches):
-                    eval_batch_list.append((f"AUDIO-{i+1}", batch))
-                for i, batch in enumerate(vl_batches):
-                    eval_batch_list.append((f"VL-{i+1}", batch))
-                    
-                dataloader = eval_batch_list
-                total_eval_batches = len(eval_batch_list)
-                print(f"Split evaluation: {len(audio_batches)} audio + {len(vl_batches)} VL = {total_eval_batches} batches", flush=True)
-            else:
-                # Original evaluation logic
-                dataloader = self.val_dataloader
-                total_eval_batches = max_batches if max_batches else len(self.val_dataloader)
-                if max_batches:
-                    from itertools import islice
-                    dataloader = islice(self.val_dataloader, max_batches)
-                print(f"Standard evaluation on {total_eval_batches} batches...", flush=True)
-            
-            for batch_idx, batch_data in enumerate(dataloader, start=1):
-                batch_t0 = time.time()
-                
-                # Handle both split evaluation format (batch_label, batch) and standard format
-                if isinstance(batch_data, tuple) and len(batch_data) == 2:
-                    batch_label, batch = batch_data
+                    # Prepare inputs - always pass images/audio if available, don't gate on flags
                     if self.debug_logging:
                         print(
-                            f"[EvalDebug] {batch_label} batch {batch_idx}/{total_eval_batches}: processing",
+                            f"[EvalDebug] batch {batch_idx}: preparing multimodal inputs (has_audio={int(has_audio.sum().item())})",
                             flush=True,
                         )
-                else:
-                    batch = batch_data
-                    batch_label = f"batch"
-                    if self.debug_logging:
-                        print(
-                            f"[EvalDebug] batch {batch_idx}/{total_eval_batches}: loading batch",
-                            flush=True,
-                        )
-                    # Move batch to device for standard evaluation
-                    for key in batch:
-                        if isinstance(batch[key], torch.Tensor):
-                            batch[key] = batch[key].to(device)
-                
-                has_audio = batch.get(
-                    "has_audio",
-                    torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device),
-                )
-                if isinstance(has_audio, torch.Tensor):
-                    has_audio = has_audio.to(device=device, dtype=torch.bool)
-                else:
-                    has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
-                
-                # Prepare inputs - always pass images/audio if available, don't gate on flags
-                if self.debug_logging:
-                    print(
-                        f"[EvalDebug] batch {batch_idx}: preparing multimodal inputs (has_audio={int(has_audio.sum().item())})",
-                        flush=True,
+                    inputs = self.safe_model.prepare_multimodal_inputs(
+                        text=batch["questions"],
+                        images=batch.get("images", None),
+                        audio=batch.get("audio", None),
+                        answers=None,  # Do NOT pass answers during evaluation to prevent contamination
+                        device=device,
+                        training_mode=False  # Inference mode - no answer application
                     )
-                inputs = self.safe_model.prepare_multimodal_inputs(
-                    text=batch["questions"],
-                    images=batch.get("images", None),
-                    audio=batch.get("audio", None),
-                    answers=None,  # Do NOT pass answers during evaluation to prevent contamination
-                    device=device,
-                    training_mode=False  # Inference mode - no answer application
-                )
-                
-                # Handle pixel_values based on model type
-                if self.safe_model.base_vl.model_type == "llava":
-                    # Only LLaVA uses <image> tokens - check for image token presence
-                    image_token_id = self._get_image_token_id()
-                    input_ids = inputs.get("input_ids")
-                    if input_ids is not None:
-                        if input_ids.dim() == 1:
-                            input_ids = input_ids.unsqueeze(0)
-                        
-                        has_img_tokens = (input_ids == image_token_id).any(dim=1)
-                        
-                        # If no samples have image tokens but we have pixel_values, remove them
-                        if not torch.any(has_img_tokens) and "pixel_values" in inputs:
-                            inputs.pop("pixel_values")
-                        # If image tokens are present but pixel_values missing, log warning and skip
-                        elif torch.any(has_img_tokens) and "pixel_values" not in inputs:
-                            print(
-                                "Warning: Found <image> tokens but no pixel_values. Skipping multimodal processing.",
-                                flush=True
-                            )
-                elif self.safe_model.base_vl.model_type == "blip2":
-                    # BLIP-2 doesn't use <image> tokens, so keep pixel_values as-is if they exist
-                    pass
-                
-                
-                # Apply audio gate control if configured
-                if eval_audio_gate_comparison and hasattr(self.safe_model, 'set_gate'):
-                    # Run evaluation with both audio gate on/off to measure VL drift
-                    if batch_label.startswith("AUDIO"):
-                        # For audio batches, use gate=1.0 (with audio)
-                        self.safe_model.set_gate(1.0)
-                        if self.debug_logging:
-                            print(f"[EvalGate] {batch_label}: Using gate=1.0 (audio enabled)", flush=True)
-                    else:
-                        # For VL batches, use gate=0.0 (without audio) to measure drift
+                    
+                    # Handle pixel_values based on model type
+                    if self.safe_model.base_vl.model_type == "llava":
+                        # Only LLaVA uses <image> tokens - check for image token presence
+                        image_token_id = self._get_image_token_id()
+                        input_ids = inputs.get("input_ids")
+                        if input_ids is not None:
+                            if input_ids.dim() == 1:
+                                input_ids = input_ids.unsqueeze(0)
+                            
+                            has_img_tokens = (input_ids == image_token_id).any(dim=1)
+                            
+                            # If no samples have image tokens but we have pixel_values, remove them
+                            if not torch.any(has_img_tokens) and "pixel_values" in inputs:
+                                inputs.pop("pixel_values")
+                            # If image tokens are present but pixel_values missing, log warning and skip
+                            elif torch.any(has_img_tokens) and "pixel_values" not in inputs:
+                                print(
+                                    "Warning: Found <image> tokens but no pixel_values. Skipping multimodal processing.",
+                                    flush=True
+                                )
+                    elif self.safe_model.base_vl.model_type == "blip2":
+                        # BLIP-2 doesn't use <image> tokens, so keep pixel_values as-is if they exist
+                        pass
+                    
+                    
+                    # Apply audio gate control if configured
+                    if eval_audio_gate_comparison and hasattr(self.safe_model, 'set_gate'):
+                        # Run evaluation with both audio gate on/off to measure VL drift
+                        if batch_label.startswith("AUDIO"):
+                            # For audio batches, use gate=1.0 (with audio)
+                            self.safe_model.set_gate(1.0)
+                            if self.debug_logging:
+                                print(f"[EvalGate] {batch_label}: Using gate=1.0 (audio enabled)", flush=True)
+                        else:
+                            # For VL batches, use gate=0.0 (without audio) to measure drift
+                            self.safe_model.set_gate(0.0)
+                            if self.debug_logging:
+                                print(f"[EvalGate] {batch_label}: Using gate=0.0 (audio disabled)", flush=True)
+                    elif not eval_with_audio_gate and hasattr(self.safe_model, 'set_gate'):
+                        # Disable audio entirely if configured
                         self.safe_model.set_gate(0.0)
                         if self.debug_logging:
-                            print(f"[EvalGate] {batch_label}: Using gate=0.0 (audio disabled)", flush=True)
-                elif not eval_with_audio_gate and hasattr(self.safe_model, 'set_gate'):
-                    # Disable audio entirely if configured
-                    self.safe_model.set_gate(0.0)
+                            print(f"[EvalGate] {batch_label}: Audio disabled (gate=0.0)", flush=True)
+                    
+                    # SAFE model forward pass
                     if self.debug_logging:
-                        print(f"[EvalGate] {batch_label}: Audio disabled (gate=0.0)", flush=True)
-                
-                # SAFE model forward pass
-                if self.debug_logging:
-                    print(
-                        f"[EvalDebug] {batch_label} batch {batch_idx}: SAFE forward start",
-                        flush=True,
-                    )
-                safe_outputs = self.safe_model(**inputs)
-                if self.debug_logging:
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                    print(
-                        f"[EvalDebug] batch {batch_idx}: SAFE forward done in {time.time() - batch_t0:.2f}s",
-                        flush=True,
-                    )
-                
-                # Base VL model forward pass (skip when retention disabled)
-                if self.combined_loss.retention_enabled:
-                    teacher_t0 = time.time()
-                    sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
-                    sanitized_labels = self.safe_model.sanitize_labels_for_base(inputs.get("labels"))
-                    base_inputs = {
-                        "attention_mask": inputs["attention_mask"],
-                    }
-                    if sanitized_ids is not None:
-                        base_inputs["input_ids"] = sanitized_ids
-                    elif "inputs_embeds" in inputs:
-                        base_inputs["inputs_embeds"] = inputs["inputs_embeds"]
-                    if sanitized_labels is not None:
-                        base_inputs["labels"] = sanitized_labels
-                    if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
-                        base_inputs["pixel_values"] = inputs["pixel_values"]
-
-                    if self.safe_model.base_vl.model_type == "llava":
-                        base_outputs = self._forward_llava_teacher(base_inputs)
-                    elif self.safe_model.base_vl.model_type == "blip2":
-                        # BLIP-2: use directly without splitting
-                        base_outputs = self.safe_model.base_vl(**base_inputs)
-                    else:
-                        # For custom models, use vision features
-                        base_inputs["vision_features"] = inputs.get("vision_features")
-                        base_outputs = self.safe_model.base_vl(**base_inputs)
+                        print(
+                            f"[EvalDebug] {batch_label} batch {batch_idx}: SAFE forward start",
+                            flush=True,
+                        )
+                    safe_outputs = self.safe_model(**inputs)
                     if self.debug_logging:
                         if torch.cuda.is_available():
                             torch.cuda.synchronize()
                         print(
-                            f"[EvalDebug] batch {batch_idx}: teacher forward done in {time.time() - teacher_t0:.2f}s",
+                            f"[EvalDebug] batch {batch_idx}: SAFE forward done in {time.time() - batch_t0:.2f}s",
                             flush=True,
                         )
-                else:
-                    base_inputs = {}
-                    if isinstance(safe_outputs, dict):
-                        safe_logits = safe_outputs.get("logits")
-                    else:
-                        safe_logits = getattr(safe_outputs, "logits", None)
-                    base_outputs = {
-                        "logits": safe_logits.detach() if safe_logits is not None else None
-                    }
-
-                if not getattr(self, "_eval_shape_debug_once", False):
-                    input_shape = None if inputs.get("input_ids") is None else tuple(inputs["input_ids"].shape)
-                    sanitized_shape = None if base_inputs.get("input_ids") is None else tuple(base_inputs["input_ids"].shape)
-                    print(f"[EvalShapeDebug] SAFE input_ids: {input_shape}; teacher input_ids: {sanitized_shape}", flush=True)
-                    self._eval_shape_debug_once = True
-
-                student_logits = safe_outputs.get("logits") if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits", None)
-                teacher_logits = base_outputs.get("logits") if isinstance(base_outputs, dict) else getattr(base_outputs, "logits", None)
-                if student_logits is not None and teacher_logits is not None:
-                    trim_len = min(student_logits.size(1), teacher_logits.size(1))
-                    if student_logits.size(1) != trim_len:
-                        trimmed_student = student_logits[:, -trim_len:, :]
-                        if isinstance(safe_outputs, dict):
-                            safe_outputs["logits"] = trimmed_student
+                    
+                    # Base VL model forward pass (skip when retention disabled)
+                    if self.combined_loss.retention_enabled:
+                        teacher_t0 = time.time()
+                        sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
+                        sanitized_labels = self.safe_model.sanitize_labels_for_base(inputs.get("labels"))
+                        base_inputs = {
+                            "attention_mask": inputs["attention_mask"],
+                        }
+                        if sanitized_ids is not None:
+                            base_inputs["input_ids"] = sanitized_ids
+                        elif "inputs_embeds" in inputs:
+                            base_inputs["inputs_embeds"] = inputs["inputs_embeds"]
+                        if sanitized_labels is not None:
+                            base_inputs["labels"] = sanitized_labels
+                        if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
+                            base_inputs["pixel_values"] = inputs["pixel_values"]
+    
+                        if self.safe_model.base_vl.model_type == "llava":
+                            base_outputs = self._forward_llava_teacher(base_inputs)
+                        elif self.safe_model.base_vl.model_type == "blip2":
+                            # BLIP-2: use directly without splitting
+                            base_outputs = self.safe_model.base_vl(**base_inputs)
                         else:
-                            safe_outputs.logits = trimmed_student
-                        student_logits = trimmed_student
-                        if inputs.get("labels") is not None and inputs["labels"].size(1) != trim_len:
-                            inputs["labels"] = inputs["labels"][:, -trim_len:]
-                        if inputs.get("attention_mask") is not None and inputs["attention_mask"].size(1) != trim_len:
-                            inputs["attention_mask"] = inputs["attention_mask"][:, -trim_len:]
-                    if teacher_logits.size(1) != trim_len:
-                        trimmed_teacher = teacher_logits[:, -trim_len:, :]
-                        if isinstance(base_outputs, dict):
-                            base_outputs["logits"] = trimmed_teacher
-                        else:
-                            base_outputs.logits = trimmed_teacher
-                        teacher_logits = trimmed_teacher
-
-                if student_logits is not None and teacher_logits is not None and teacher_logits.size(0) != student_logits.size(0):
-                    if teacher_logits.size(0) == 1:
-                        if not getattr(self, "_teacher_broadcast_warned", False):
+                            # For custom models, use vision features
+                            base_inputs["vision_features"] = inputs.get("vision_features")
+                            base_outputs = self.safe_model.base_vl(**base_inputs)
+                        if self.debug_logging:
+                            if torch.cuda.is_available():
+                                torch.cuda.synchronize()
                             print(
-                                f"[Warn] Teacher batch={teacher_logits.size(0)} but student batch={student_logits.size(0)}; expanding teacher logits",
-                                flush=True
+                                f"[EvalDebug] batch {batch_idx}: teacher forward done in {time.time() - teacher_t0:.2f}s",
+                                flush=True,
                             )
-                            self._teacher_broadcast_warned = True
-                        teacher_logits = teacher_logits.expand_as(student_logits)
-                        if isinstance(base_outputs, dict):
-                            base_outputs["logits"] = teacher_logits
                     else:
-                        raise RuntimeError(
-                            f"Teacher/student batch mismatch: {teacher_logits.size(0)} vs {student_logits.size(0)}"
-                        )
-
-                # Compute losses
-                batch_losses = self.combined_loss(
-                    safe_outputs=safe_outputs,
-                    base_outputs=base_outputs,
-                    batch=inputs,
-                    has_audio=has_audio
-                )
-                
-                # Accumulate losses
-                batch_size = len(batch["questions"])
-                for key in eval_losses:
-                    if key in batch_losses:
-                        eval_losses[key] += batch_losses[key].item() * batch_size
-                
-                # Compute accuracy metrics using robust methods
-                # Generate predictions and compute answer-level accuracy
-                print(f"[PROGRESS] Starting robust accuracy for batch {batch_idx}", flush=True)
-                if self.debug_logging:
-                    print(
-                        f"[EvalDebug] batch {batch_idx}: computing robust accuracy",
-                        flush=True,
+                        base_inputs = {}
+                        if isinstance(safe_outputs, dict):
+                            safe_logits = safe_outputs.get("logits")
+                        else:
+                            safe_logits = getattr(safe_outputs, "logits", None)
+                        base_outputs = {
+                            "logits": safe_logits.detach() if safe_logits is not None else None
+                        }
+    
+                    if not getattr(self, "_eval_shape_debug_once", False):
+                        input_shape = None if inputs.get("input_ids") is None else tuple(inputs["input_ids"].shape)
+                        sanitized_shape = None if base_inputs.get("input_ids") is None else tuple(base_inputs["input_ids"].shape)
+                        print(f"[EvalShapeDebug] SAFE input_ids: {input_shape}; teacher input_ids: {sanitized_shape}", flush=True)
+                        self._eval_shape_debug_once = True
+    
+                    student_logits = safe_outputs.get("logits") if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits", None)
+                    teacher_logits = base_outputs.get("logits") if isinstance(base_outputs, dict) else getattr(base_outputs, "logits", None)
+                    if student_logits is not None and teacher_logits is not None:
+                        trim_len = min(student_logits.size(1), teacher_logits.size(1))
+                        if student_logits.size(1) != trim_len:
+                            trimmed_student = student_logits[:, -trim_len:, :]
+                            if isinstance(safe_outputs, dict):
+                                safe_outputs["logits"] = trimmed_student
+                            else:
+                                safe_outputs.logits = trimmed_student
+                            student_logits = trimmed_student
+                            if inputs.get("labels") is not None and inputs["labels"].size(1) != trim_len:
+                                inputs["labels"] = inputs["labels"][:, -trim_len:]
+                            if inputs.get("attention_mask") is not None and inputs["attention_mask"].size(1) != trim_len:
+                                inputs["attention_mask"] = inputs["attention_mask"][:, -trim_len:]
+                        if teacher_logits.size(1) != trim_len:
+                            trimmed_teacher = teacher_logits[:, -trim_len:, :]
+                            if isinstance(base_outputs, dict):
+                                base_outputs["logits"] = trimmed_teacher
+                            else:
+                                base_outputs.logits = trimmed_teacher
+                            teacher_logits = trimmed_teacher
+    
+                    if student_logits is not None and teacher_logits is not None and teacher_logits.size(0) != student_logits.size(0):
+                        if teacher_logits.size(0) == 1:
+                            if not getattr(self, "_teacher_broadcast_warned", False):
+                                print(
+                                    f"[Warn] Teacher batch={teacher_logits.size(0)} but student batch={student_logits.size(0)}; expanding teacher logits",
+                                    flush=True
+                                )
+                                self._teacher_broadcast_warned = True
+                            teacher_logits = teacher_logits.expand_as(student_logits)
+                            if isinstance(base_outputs, dict):
+                                base_outputs["logits"] = teacher_logits
+                        else:
+                            raise RuntimeError(
+                                f"Teacher/student batch mismatch: {teacher_logits.size(0)} vs {student_logits.size(0)}"
+                            )
+    
+                    # Compute losses
+                    batch_losses = self.combined_loss(
+                        safe_outputs=safe_outputs,
+                        base_outputs=base_outputs,
+                        batch=inputs,
+                        has_audio=has_audio
                     )
-                robust_t0 = time.time()
-                safe_accuracy_batch, base_accuracy_batch = self._compute_robust_accuracy(
-                    safe_outputs, base_outputs, inputs, has_audio, batch
-                )
-                print(f"[PROGRESS] Finished robust accuracy for batch {batch_idx}", flush=True)
-                if self.debug_logging:
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                    print(
-                        f"[EvalDebug] batch {batch_idx}: robust accuracy done in {time.time() - robust_t0:.2f}s",
-                        flush=True,
-                    )
-                    if safe_accuracy_batch:
+                    
+                    # Accumulate losses
+                    batch_size = len(batch["questions"])
+                    for key in eval_losses:
+                        if key in batch_losses:
+                            eval_losses[key] += batch_losses[key].item() * batch_size
+                    
+                    # Compute accuracy metrics using robust methods
+                    # Generate predictions and compute answer-level accuracy
+                    print(f"[PROGRESS] Starting robust accuracy for batch {batch_idx}", flush=True)
+                    if self.debug_logging:
                         print(
-                            f"[EvalDebug] batch {batch_idx}: sample SAFE acc={safe_accuracy_batch[0]:.3f}, base acc={base_accuracy_batch[0]:.3f}",
+                            f"[EvalDebug] batch {batch_idx}: computing robust accuracy",
                             flush=True,
                         )
-                
-                if self._should_log_sample():
-                    try:
-                        self._log_sample_predictions(
-                            safe_outputs=safe_outputs,
-                            base_outputs=base_outputs,
-                            inputs=inputs,
-                            batch=batch,
-                            safe_accuracies=safe_accuracy_batch,
-                            base_accuracies=base_accuracy_batch,
-                            context="eval"
+                    robust_t0 = time.time()
+                    safe_accuracy_batch, base_accuracy_batch = self._compute_robust_accuracy(
+                        safe_outputs, base_outputs, inputs, has_audio, batch
+                    )
+                    print(f"[PROGRESS] Finished robust accuracy for batch {batch_idx}", flush=True)
+                    if self.debug_logging:
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                        print(
+                            f"[EvalDebug] batch {batch_idx}: robust accuracy done in {time.time() - robust_t0:.2f}s",
+                            flush=True,
                         )
-                    except Exception as exc:
-                        self.logger.debug(f"Sample logging skipped during eval due to error: {exc}")
-                
-                # Audio-dependent accuracy
-                if torch.any(has_audio):
-                    audio_indices = torch.where(has_audio)[0]
-                    if len(audio_indices) > 0:
-                        # Use answer-level accuracy for audio samples (fix tensor indexing)
-                        audio_correct += sum(safe_accuracy_batch[int(i)] for i in audio_indices)
-                        audio_total += len(audio_indices)
-                        audio_samples += len(audio_indices)
-                
-                # VL retention accuracy  
-                vl_indices = torch.where(~has_audio)[0] if torch.any(~has_audio) else torch.arange(len(has_audio))
-                if len(vl_indices) > 0:
-                    # Use answer-level accuracy for VL samples (fix tensor indexing)
-                    vl_safe_correct += sum(safe_accuracy_batch[int(i)] for i in vl_indices)
-                    vl_base_correct += sum(base_accuracy_batch[int(i)] for i in vl_indices)
-                    vl_total += len(vl_indices)
-                    vl_samples += len(vl_indices)
-                
-                total_samples += batch_size
-
-                if eval_logging_steps and (batch_idx % eval_logging_steps == 0 or batch_idx == total_eval_batches):
-                    print(
-                        f"[Eval] Processed {batch_idx}/{total_eval_batches} batches",
-                        flush=True
-                    )
-                if self.debug_logging:
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                    print(
-                        f"[EvalDebug] batch {batch_idx}: total time {time.time() - batch_t0:.2f}s",
-                        flush=True,
-                    )
-        
+                        if safe_accuracy_batch:
+                            print(
+                                f"[EvalDebug] batch {batch_idx}: sample SAFE acc={safe_accuracy_batch[0]:.3f}, base acc={base_accuracy_batch[0]:.3f}",
+                                flush=True,
+                            )
+                    
+                    if self._should_log_sample():
+                        try:
+                            self._log_sample_predictions(
+                                safe_outputs=safe_outputs,
+                                base_outputs=base_outputs,
+                                inputs=inputs,
+                                batch=batch,
+                                safe_accuracies=safe_accuracy_batch,
+                                base_accuracies=base_accuracy_batch,
+                                context="eval"
+                            )
+                        except Exception as exc:
+                            self.logger.debug(f"Sample logging skipped during eval due to error: {exc}")
+                    
+                    # Audio-dependent accuracy
+                    if torch.any(has_audio):
+                        audio_indices = torch.where(has_audio)[0]
+                        if len(audio_indices) > 0:
+                            # Use answer-level accuracy for audio samples (fix tensor indexing)
+                            audio_correct += sum(safe_accuracy_batch[int(i)] for i in audio_indices)
+                            audio_total += len(audio_indices)
+                            audio_samples += len(audio_indices)
+                    
+                    # VL retention accuracy  
+                    vl_indices = torch.where(~has_audio)[0] if torch.any(~has_audio) else torch.arange(len(has_audio))
+                    if len(vl_indices) > 0:
+                        # Use answer-level accuracy for VL samples (fix tensor indexing)
+                        vl_safe_correct += sum(safe_accuracy_batch[int(i)] for i in vl_indices)
+                        vl_base_correct += sum(base_accuracy_batch[int(i)] for i in vl_indices)
+                        vl_total += len(vl_indices)
+                        vl_samples += len(vl_indices)
+                    
+                    total_samples += batch_size
+    
+                    if eval_logging_steps and (batch_idx % eval_logging_steps == 0 or batch_idx == total_eval_batches):
+                        print(
+                            f"[Eval] Processed {batch_idx}/{total_eval_batches} batches",
+                            flush=True
+                        )
+                    if self.debug_logging:
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                        print(
+                            f"[EvalDebug] batch {batch_idx}: total time {time.time() - batch_t0:.2f}s",
+                            flush=True,
+                        )
+            
+        finally:
+            if saved_gate is not None:
+                try:
+                    if hasattr(self.safe_model, 'set_gate'):
+                        self.safe_model.set_gate(saved_gate)
+                    elif hasattr(self.safe_model, '_default_gate'):
+                        self.safe_model._default_gate = saved_gate
+                    if self.debug_logging:
+                        print(f"[EvalGate] Restored gate state to {saved_gate}", flush=True)
+                except Exception as exc:
+                    print(f"[EvalGate] WARNING: Failed to restore gate state ({exc})", flush=True)
         # Normalize losses (avoid division by zero)
         if total_samples > 0:
             for key in eval_losses:
