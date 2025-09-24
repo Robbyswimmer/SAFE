@@ -56,6 +56,10 @@ class ExperimentConfig:
     null_space_refresh_interval: int
     output_dir: str
     max_eval_batches: Optional[int]
+    max_audio_eval_batches: int
+    max_vl_eval_batches: int
+    eval_with_audio_gate: bool
+    eval_audio_gate_comparison: bool
     eval_logging_steps: int
     debug_logging: bool
 
@@ -525,6 +529,10 @@ def run_experiment(args: argparse.Namespace) -> None:
         null_space_refresh_interval=args.null_space_refresh,
         output_dir=str(run_dir / "checkpoints"),
         max_eval_batches=None if args.max_eval_batches <= 0 else args.max_eval_batches,
+        max_audio_eval_batches=args.max_audio_eval_batches,
+        max_vl_eval_batches=args.max_vl_eval_batches,
+        eval_with_audio_gate=args.eval_with_audio_gate,
+        eval_audio_gate_comparison=args.eval_audio_gate_comparison,
         eval_logging_steps=max(1, args.eval_logging_steps),
         debug_logging=args.debug_logging,
     )
@@ -625,6 +633,29 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=4,
         help="Limit number of validation batches during evaluation (<=0 uses full set)",
+    )
+    parser.add_argument(
+        "--max-audio-eval-batches",
+        type=int,
+        default=4,
+        help="Maximum number of audio evaluation batches (samples with has_audio=True)",
+    )
+    parser.add_argument(
+        "--max-vl-eval-batches",
+        type=int,
+        default=4,
+        help="Maximum number of VL evaluation batches (samples with has_audio=False)",
+    )
+    parser.add_argument(
+        "--eval-with-audio-gate",
+        action="store_true",
+        default=True,
+        help="Enable audio during evaluation",
+    )
+    parser.add_argument(
+        "--eval-audio-gate-comparison",
+        action="store_true",
+        help="Run evaluation with both audio gate on/off to measure VL drift",
     )
     parser.add_argument(
         "--eval-logging-steps",
