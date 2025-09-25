@@ -2363,38 +2363,70 @@ class StageATrainer:
         return self._normalize_answer(s)
     
     def _extract_answer(self, generated_text):
-        """Extract answer from generated text handling chat-style prefixes."""
+        """Extract a concise VQA-style answer from generated text."""
         if not generated_text:
             return ""
 
-        answer = generated_text.strip()
+        import re
+
+        # Normalise whitespace early so downstream parsing is easier.
+        answer = str(generated_text).strip()
+        answer = re.sub(r"[\r\n]+", " ", answer)
+        answer = re.sub(r"\s+", " ", answer).strip()
+        if not answer:
+            return ""
+
         lower_answer = answer.lower()
 
-        # Common assistant style prefixes that should be ignored when extracting.
-        for marker in ["answer:", "assistant:", "assistant :", "assistant-", "ans:", "ant:", "response:"]:
-            idx = lower_answer.find(marker)
-            if idx != -1:
-                answer = answer[idx + len(marker):].strip()
+        # Remove obvious assistant-style prefixes (including truncated variants).
+        prefix_patterns = [
+            r"^assistant\s*[:\-]\s*",
+            r"^ssistant\s*[:\-]\s*",  # Handles truncated "Assistant"
+            r"^ans(?:wer)?\s*[:\-]\s*",
+            r"^ant\s*[:\-]\s*",
+            r"^response\s*[:\-]\s*",
+            r"^reply\s*[:\-]\s*",
+        ]
+        for pattern in prefix_patterns:
+            if re.match(pattern, lower_answer):
+                answer = re.sub(pattern, "", answer, count=1, flags=re.IGNORECASE).strip()
                 lower_answer = answer.lower()
                 break
 
-        # Generic "prefix: value" handling for short prefixes like "ANT" or "A".
+        # Generic "prefix: value" handling for other short alphabetic prefixes.
         if ":" in answer:
             prefix, remainder = answer.split(":", 1)
             prefix_clean = prefix.strip().lower()
             if (
                 prefix_clean
-                and len(prefix_clean.split()) <= 2
+                and len(prefix_clean.split()) <= 3
                 and all(ch.isalpha() for ch in prefix_clean.replace(" ", ""))
             ):
                 answer = remainder.strip()
+                lower_answer = answer.lower()
 
-        # Extract first few words as answer (VQA answers are usually short)
-        answer_words = answer.split()
-        if not answer_words:
+        # Remove leading markdown bullets or numbering artefacts.
+        answer = re.sub(r"^(?:[\-\*\u2022]+|\d+\.)\s*", "", answer)
+
+        # Trim trailing sentence once we hit strong punctuation to keep VQA answers short.
+        sentence_chunks = re.split(r"[\.?!]", answer)
+        if sentence_chunks:
+            answer = sentence_chunks[0].strip()
+
+        if not answer:
             return ""
 
-        return " ".join(answer_words[:4]).strip()
+        # Split into tokens, strip punctuation per token, and cap at 3 tokens.
+        tokens = []
+        for raw_token in answer.split():
+            token = re.sub(r"^[^a-z0-9]+", "", raw_token, flags=re.IGNORECASE)
+            token = re.sub(r"[^a-z0-9]+$", "", token, flags=re.IGNORECASE)
+            if token:
+                tokens.append(token)
+            if len(tokens) >= 3:
+                break
+
+        return " ".join(tokens)
     
     def _should_log_sample(self) -> bool:
         if self.sample_logs_emitted >= self.sample_log_limit:
