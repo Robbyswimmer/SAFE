@@ -1450,7 +1450,13 @@ class SAFEModel(nn.Module):
                 sanitized_ids = sanitized_ids.to(input_ids.device)
 
             if audio_tokens is not None and gate > 0.0 and hasattr(self, "fusion_adapter") and self.fusion_adapter is not None:
-                embed_source = sanitized_ids if sanitized_ids is not None else input_ids
+                # When fusing audio we must retain the custom audio token embeddings.
+                # Using the sanitized ids would replace <audio> placeholders with padding tokens
+                # which prevents get_input_embeddings from routing through audio_token_embeddings.
+                if sanitized_ids is not None and input_ids is not None and not torch.equal(sanitized_ids, input_ids):
+                    embed_source = input_ids
+                else:
+                    embed_source = sanitized_ids if sanitized_ids is not None else input_ids
                 embeds = self.get_input_embeddings(embed_source)
                 base_dtype = next(self.base_vl.llm.parameters()).dtype
                 embeds = embeds.to(base_dtype)
@@ -1461,7 +1467,12 @@ class SAFEModel(nn.Module):
 
                 attention_arg = None
                 if audio_attention_mask is not None:
-                    attention_arg = audio_attention_mask.to(audio_tokens.device)
+                    target_device = (
+                        attention_mask.device
+                        if attention_mask is not None
+                        else audio_tokens.device
+                    )
+                    attention_arg = audio_attention_mask.to(device=target_device)
 
                 fused_embeds = self.fusion_adapter(
                     hidden_states=embeds,
@@ -1469,6 +1480,22 @@ class SAFEModel(nn.Module):
                     attention_mask=attention_arg,
                     gate=gate,
                 )
+
+                if self.debug_logging:
+                    audio_token_norm = audio_tokens.norm(dim=-1).mean().item()
+                    prompt_delta = (fused_embeds - embeds).abs().mean().item()
+                    print(
+                        "[GenerateDebug] audio_tokens active during fusion | "
+                        f"mean_token_norm={audio_token_norm:.4f} "
+                        f"prompt_delta={prompt_delta:.6f}",
+                        flush=True,
+                    )
+
+                    if gate == 0.0:
+                        print(
+                            "[GenerateDebug] Warning: gate=0 disables audio influence during generation",
+                            flush=True,
+                        )
 
                 base_inputs["inputs_embeds"] = fused_embeds
             else:
