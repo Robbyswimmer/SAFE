@@ -2231,6 +2231,19 @@ class StageATrainer:
             output_scores=False,
             return_dict_in_generate=False
         )
+
+        pixel_present = pixel_values is not None and (
+            isinstance(pixel_values, torch.Tensor) or isinstance(pixel_values, (list, tuple))
+        )
+
+        if pixel_present:
+            # VQA answers should be concise. Force deterministic decoding and a tight
+            # generation window so that "ASSISTANT:" style prefixes do not drown out
+            # the short answer tokens we care about.
+            gen_kwargs["max_new_tokens"] = min(gen_kwargs["max_new_tokens"], 4)
+            gen_kwargs["do_sample"] = False
+            gen_kwargs.pop("temperature", None)
+            gen_kwargs.pop("top_p", None)
         if self.debug_logging:
             print(f"[GenDebug] Generation kwargs: {gen_kwargs}", flush=True)
 
@@ -2240,6 +2253,7 @@ class StageATrainer:
                 attention_mask=attention_mask.to(device) if isinstance(attention_mask, torch.Tensor) else None,
                 pixel_values=pixel_values.to(device) if isinstance(pixel_values, torch.Tensor) else None,
                 audio_tokens=audio_tokens.to(device) if isinstance(audio_tokens, torch.Tensor) else None,
+                audio_attention_mask=inputs.get("audio_attention_mask"),
                 **gen_kwargs,
             )
         else:
@@ -2347,15 +2361,38 @@ class StageATrainer:
         return self._normalize_answer(s)
     
     def _extract_answer(self, generated_text):
-        """Extract answer from generated text after 'Answer:'"""
-        if "Answer:" in generated_text:
-            answer = generated_text.split("Answer:")[-1].strip()
-        else:
-            answer = generated_text.strip()
-        
+        """Extract answer from generated text handling chat-style prefixes."""
+        if not generated_text:
+            return ""
+
+        answer = generated_text.strip()
+        lower_answer = answer.lower()
+
+        # Common assistant style prefixes that should be ignored when extracting.
+        for marker in ["answer:", "assistant:", "assistant :", "assistant-", "ans:", "ant:", "response:"]:
+            idx = lower_answer.find(marker)
+            if idx != -1:
+                answer = answer[idx + len(marker):].strip()
+                lower_answer = answer.lower()
+                break
+
+        # Generic "prefix: value" handling for short prefixes like "ANT" or "A".
+        if ":" in answer:
+            prefix, remainder = answer.split(":", 1)
+            prefix_clean = prefix.strip().lower()
+            if (
+                prefix_clean
+                and len(prefix_clean.split()) <= 2
+                and all(ch.isalpha() for ch in prefix_clean.replace(" ", ""))
+            ):
+                answer = remainder.strip()
+
         # Extract first few words as answer (VQA answers are usually short)
-        answer_words = answer.split()[:5]  # Max 5 words
-        return " ".join(answer_words).strip()
+        answer_words = answer.split()
+        if not answer_words:
+            return ""
+
+        return " ".join(answer_words[:4]).strip()
     
     def _should_log_sample(self) -> bool:
         if self.sample_logs_emitted >= self.sample_log_limit:

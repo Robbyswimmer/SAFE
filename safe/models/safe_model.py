@@ -1438,6 +1438,7 @@ class SAFEModel(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
         audio_tokens: Optional[torch.Tensor] = None,
+        audio_attention_mask: Optional[torch.Tensor] = None,
         **generation_kwargs
     ) -> Union[str, torch.Tensor]:
         """Generate text response given multimodal inputs."""
@@ -1447,30 +1448,56 @@ class SAFEModel(nn.Module):
             sanitized_ids = self.sanitize_input_ids_for_base(input_ids)
             if sanitized_ids is not None:
                 sanitized_ids = sanitized_ids.to(input_ids.device)
-            if audio_tokens is not None and gate > 0.0:
-                embeds = self.get_input_embeddings(input_ids)
-                audio_tokens = audio_tokens.to(embeds.dtype)
+
+            if audio_tokens is not None and gate > 0.0 and hasattr(self, "fusion_adapter") and self.fusion_adapter is not None:
+                # When fusing audio we must retain the custom audio token embeddings.
+                # Using the sanitized ids would replace <audio> placeholders with padding tokens
+                # which prevents get_input_embeddings from routing through audio_token_embeddings.
+                if sanitized_ids is not None and input_ids is not None and not torch.equal(sanitized_ids, input_ids):
+                    embed_source = input_ids
+                else:
+                    embed_source = sanitized_ids if sanitized_ids is not None else input_ids
+                embeds = self.get_input_embeddings(embed_source)
+                base_dtype = next(self.base_vl.llm.parameters()).dtype
+                embeds = embeds.to(base_dtype)
+
+                audio_tokens = audio_tokens.to(device=embeds.device, dtype=base_dtype)
                 if gate != 1.0:
                     audio_tokens = audio_tokens * gate
-                embeds = torch.cat([audio_tokens, embeds], dim=1)
 
-                if attention_mask is None:
-                    attention_mask = torch.ones(
-                        input_ids.size(0),
-                        input_ids.size(1),
-                        dtype=torch.long,
-                        device=input_ids.device,
+                attention_arg = None
+                if audio_attention_mask is not None:
+                    target_device = (
+                        attention_mask.device
+                        if attention_mask is not None
+                        else audio_tokens.device
+                    )
+                    attention_arg = audio_attention_mask.to(device=target_device)
+
+                fused_embeds = self.fusion_adapter(
+                    hidden_states=embeds,
+                    audio_tokens=audio_tokens,
+                    attention_mask=attention_arg,
+                    gate=gate,
+                )
+
+                if self.debug_logging:
+                    audio_token_norm = audio_tokens.norm(dim=-1).mean().item()
+                    prompt_delta = (fused_embeds - embeds).abs().mean().item()
+                    print(
+                        "[GenerateDebug] audio_tokens active during fusion | "
+                        f"mean_token_norm={audio_token_norm:.4f} "
+                        f"prompt_delta={prompt_delta:.6f}",
+                        flush=True,
                     )
 
-                audio_mask = torch.ones(
-                    audio_tokens.size(0),
-                    audio_tokens.size(1),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
-                attention_mask = torch.cat([audio_mask, attention_mask], dim=1)
+                    if gate == 0.0:
+                        print(
+                            "[GenerateDebug] Warning: gate=0 disables audio influence during generation",
+                            flush=True,
+                        )
 
-                base_inputs["inputs_embeds"] = embeds
+                base_inputs["inputs_embeds"] = fused_embeds
             else:
                 base_inputs["input_ids"] = sanitized_ids if sanitized_ids is not None else input_ids
 
@@ -1509,6 +1536,7 @@ class SAFEModel(nn.Module):
         )
 
         audio_tokens_tensor = inputs.pop("audio_tokens", None)
+        audio_attention_mask_tensor = inputs.pop("audio_attention_mask", None)
         labels = inputs.pop("labels", None)
         if labels is not None:
             inputs["labels"] = labels  # keep alignment for recursion safety
@@ -1521,6 +1549,7 @@ class SAFEModel(nn.Module):
             attention_mask=inputs.get("attention_mask"),
             pixel_values=inputs.get("pixel_values"),
             audio_tokens=audio_tokens_tensor,
+            audio_attention_mask=audio_attention_mask_tensor,
             **generation_kwargs,
         )
     
