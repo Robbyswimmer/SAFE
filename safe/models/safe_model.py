@@ -808,6 +808,20 @@ class SAFEModel(nn.Module):
         input_id_seqs = [enc["input_ids"].squeeze(0) for enc in sample_encodings]
         attention_masks = [enc["attention_mask"].squeeze(0) for enc in sample_encodings]
         max_len = max(seq.size(0) for seq in input_id_seqs)
+        tokenizer = getattr(processor, "tokenizer", None)
+        tokenizer_max_len = None
+        if tokenizer is not None:
+            tokenizer_max_len = getattr(tokenizer, "model_max_length", None)
+        if not tokenizer_max_len and getattr(self.base_vl, "tokenizer", None) is not None:
+            tokenizer_max_len = getattr(self.base_vl.tokenizer, "model_max_length", None)
+        if tokenizer_max_len and tokenizer_max_len > 0:
+            if max_len > tokenizer_max_len:
+                print(
+                    f"[LLaVAPrep] Clamping padded sequence length from {max_len} to tokenizer max {tokenizer_max_len}",
+                    flush=True,
+                )
+            max_len = min(max_len, tokenizer_max_len)
+        max_len = max(1, int(max_len))
 
         input_ids = torch.full(
             (num_samples, max_len),
@@ -821,6 +835,10 @@ class SAFEModel(nn.Module):
 
         for idx, (seq, mask) in enumerate(zip(input_id_seqs, attention_masks)):
             length = seq.size(0)
+            if length > max_len:
+                seq = seq[-max_len:]
+                mask = mask[-max_len:]
+                length = max_len
             start = max_len - length
             input_ids[idx, start:] = seq
             attention_mask[idx, start:] = mask
@@ -854,6 +872,9 @@ class SAFEModel(nn.Module):
                     if val is None:
                         continue
                     length = val.size(0)
+                    if length > max_len:
+                        val = val[-max_len:]
+                        length = max_len
                     start = max_len - length
                     padded[idx, start:] = val
                 inputs[key] = padded.to(device)
@@ -1458,7 +1479,22 @@ class SAFEModel(nn.Module):
             if pixel_values is not None:
                 base_inputs["pixel_values"] = pixel_values
 
-            return self.base_vl.llm.generate(**base_inputs)
+            try:
+                return self.base_vl.llm.generate(**base_inputs)
+            except ValueError as exc:
+                if (
+                    self.base_vl.model_type == "llava"
+                    and "Image features and image tokens do not match" in str(exc)
+                    and "pixel_values" in base_inputs
+                ):
+                    print(
+                        "[SAFEModel] Generation fallback: removing pixel_values after LLaVA mismatch.",
+                        flush=True,
+                    )
+                    retry_inputs = dict(base_inputs)
+                    retry_inputs.pop("pixel_values", None)
+                    return self.base_vl.llm.generate(**retry_inputs)
+                raise
 
         # High-level API: text and multimodal inputs
         if text is None:
