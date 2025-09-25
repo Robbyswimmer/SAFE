@@ -643,15 +643,16 @@ class SAFEModel(nn.Module):
                                                   device=audio_tokens.device)
                 
                 # Mark truly silent samples as masked-out (all tokens for that sample)
-                # Relaxed threshold to prevent masking valid audio during early training
+                # Further relaxed threshold - many samples were being over-masked
                 sample_absmax = audio_tokens.abs().amax(dim=(1, 2))  # (B,)
-                silent = sample_absmax < 1e-6  # Relaxed from 1e-8 to 1e-6
+                silent = sample_absmax < 1e-4  # Further relaxed from 1e-6 to 1e-4
+                print(f"[AudioMask] Sample absmax values: min={sample_absmax.min().item():.6e}, max={sample_absmax.max().item():.6e}, mean={sample_absmax.mean().item():.6e}", flush=True)
                 if silent.any():
                     audio_attention_mask[silent] = 0
                     silent_count = silent.sum().item()
-                    print(f"[AudioMask] Masked {silent_count}/{B} silent audio samples (threshold=1e-6)", flush=True)
+                    print(f"[AudioMask] Masked {silent_count}/{B} silent audio samples (threshold=1e-4)", flush=True)
                 else:
-                    print(f"[AudioMask] No silent audio samples detected (threshold=1e-6, max_absmax={sample_absmax.max().item():.6e})", flush=True)
+                    print(f"[AudioMask] No silent audio samples detected (threshold=1e-4)", flush=True)
                 
                 result["audio_attention_mask"] = audio_attention_mask
 

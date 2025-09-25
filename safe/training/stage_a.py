@@ -1528,6 +1528,11 @@ class StageATrainer:
                         else:
                             has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
                         
+                        # Debug batch composition
+                        audio_count = has_audio.sum().item() if isinstance(has_audio, torch.Tensor) else sum(has_audio)
+                        total_count = len(has_audio) if isinstance(has_audio, torch.Tensor) else len(has_audio)
+                        print(f"[BatchDebug] Batch {batch_count}: {audio_count}/{total_count} samples have audio, has_audio.any()={has_audio.any()}", flush=True)
+                        
                         # Separate into audio vs VL batches
                         if has_audio.any() and len(audio_batches) < max_audio_eval_batches:
                             audio_batches.append(batch)
@@ -1535,6 +1540,12 @@ class StageATrainer:
                         elif not has_audio.any() and len(vl_batches) < max_vl_eval_batches:
                             vl_batches.append(batch)
                             print(f"[EvalSplit] Added VL batch {len(vl_batches)}/{max_vl_eval_batches}", flush=True)
+                        else:
+                            # Debug why batch was skipped
+                            if has_audio.any():
+                                print(f"[BatchDebug] Skipping audio batch {batch_count}: already have {len(audio_batches)}/{max_audio_eval_batches} audio batches", flush=True)
+                            else:
+                                print(f"[BatchDebug] Skipping VL batch {batch_count}: already have {len(vl_batches)}/{max_vl_eval_batches} VL batches", flush=True)
                         
                         batch_count += 1
                         if len(audio_batches) >= max_audio_eval_batches and len(vl_batches) >= max_vl_eval_batches:
@@ -1615,6 +1626,18 @@ class StageATrainer:
                         include_audio_tokens=has_audio_data,  # Critical: ensure audio placeholders for audio samples
                         training_mode=False  # Inference mode - no answer application
                     )
+                    
+                    # Debug multimodal input preparation
+                    if "attention_mask" in inputs:
+                        attn_shape = inputs["attention_mask"].shape
+                        attn_sum_per_sample = inputs["attention_mask"].sum(dim=1) if len(attn_shape) > 1 else [inputs["attention_mask"].sum()]
+                        print(f"[AttentionDebug] attention_mask shape: {attn_shape}, sum per sample: {attn_sum_per_sample.tolist()}", flush=True)
+                    if "input_ids" in inputs:
+                        input_shape = inputs["input_ids"].shape  
+                        print(f"[AttentionDebug] input_ids shape: {input_shape}", flush=True)
+                    if "audio_tokens" in inputs:
+                        audio_shape = inputs["audio_tokens"].shape
+                        print(f"[AttentionDebug] audio_tokens shape: {audio_shape}", flush=True)
                     
                     # Apply audio gate control if configured
                     if eval_audio_gate_comparison and hasattr(self.safe_model, 'set_gate'):

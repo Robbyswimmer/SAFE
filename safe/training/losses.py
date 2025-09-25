@@ -321,8 +321,10 @@ class AudioTaskLoss(nn.Module):
 
         if attention_mask is not None:
             print(f"[AUDIOTASK_DEBUG] Using attention_mask branch", flush=True)
+            print(f"[AUDIOTASK_DEBUG] Original attention_mask shape: {attention_mask.shape}, sum per sample: {attention_mask.sum(dim=1).tolist()}", flush=True)
             shift_mask = attention_mask[..., 1:]
             shift_mask = shift_mask[..., :seq_len].contiguous()
+            print(f"[AUDIOTASK_DEBUG] shift_mask shape: {shift_mask.shape}, sum per sample: {shift_mask.sum(dim=1).tolist()}", flush=True)
 
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
             flat_labels = shift_labels.reshape(-1)
