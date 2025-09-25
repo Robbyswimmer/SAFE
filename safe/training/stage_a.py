@@ -2211,13 +2211,15 @@ class StageATrainer:
         else:
             print("[AUDIO_EVAL] No audio_tokens in generation inputs!", flush=True)
 
-        # Ensure model config has proper pad/eos tokens
+        # Ensure model config has proper pad/eos tokens and respects max_new_tokens
         if hasattr(self.safe_model.base_vl.llm, 'config'):
             self.safe_model.base_vl.llm.config.pad_token_id = tok.pad_token_id
             self.safe_model.base_vl.llm.config.eos_token_id = getattr(tok, "eos_token_id", None)
         if hasattr(self.safe_model.base_vl.llm, 'generation_config'):
             self.safe_model.base_vl.llm.generation_config.pad_token_id = tok.pad_token_id
             self.safe_model.base_vl.llm.generation_config.eos_token_id = getattr(tok, "eos_token_id", None)
+            # Override max_length to respect max_new_tokens limit
+            self.safe_model.base_vl.llm.generation_config.max_length = None
 
         gen_kwargs = dict(
             max_new_tokens=3,   # Optimal for VQA short answers
