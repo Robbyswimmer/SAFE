@@ -2220,10 +2220,10 @@ class StageATrainer:
             self.safe_model.base_vl.llm.generation_config.eos_token_id = getattr(tok, "eos_token_id", None)
 
         gen_kwargs = dict(
-            max_new_tokens=20,  # Increased from 3 to allow for better answer generation
-            do_sample=True,     # Enable sampling fallback
-            temperature=0.7,    # Add temperature sampling
-            top_p=0.9,          # Add top-p sampling
+            max_new_tokens=3,   # Optimal for VQA short answers
+            do_sample=False,    # Greedy decoding for deterministic results
+            temperature=None,
+            top_p=None,
             num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),

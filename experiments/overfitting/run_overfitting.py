@@ -621,7 +621,7 @@ def run_experiment(args: argparse.Namespace) -> None:
     print(f"[DEBUG] trainer.train() completed", flush=True)
 
     # Save variant-specific model parameters (only what was actually trained)
-    _save_variant_checkpoint(model, variant, run_dir)
+    _save_variant_checkpoint(model, args.variant, run_dir)
 
     # Persist artefacts
     config_path = run_dir / "config.json"
