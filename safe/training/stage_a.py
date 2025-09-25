@@ -1517,7 +1517,7 @@ class StageATrainer:
                         for key in batch:
                             if isinstance(batch[key], torch.Tensor):
                                 batch[key] = batch[key].to(device)
-                        
+
                         # Determine if batch has audio samples
                         has_audio = batch.get(
                             "has_audio",
@@ -1527,26 +1527,46 @@ class StageATrainer:
                             has_audio = has_audio.to(device=device, dtype=torch.bool)
                         else:
                             has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
-                        
+
                         # Debug batch composition
-                        audio_count = has_audio.sum().item() if isinstance(has_audio, torch.Tensor) else sum(has_audio)
-                        total_count = len(has_audio) if isinstance(has_audio, torch.Tensor) else len(has_audio)
-                        print(f"[BatchDebug] Batch {batch_count}: {audio_count}/{total_count} samples have audio, has_audio.any()={has_audio.any()}", flush=True)
-                        
-                        # Separate into audio vs VL batches
-                        if has_audio.any() and len(audio_batches) < max_audio_eval_batches:
-                            audio_batches.append(batch)
-                            print(f"[EvalSplit] Added audio batch {len(audio_batches)}/{max_audio_eval_batches}", flush=True)
-                        elif not has_audio.any() and len(vl_batches) < max_vl_eval_batches:
-                            vl_batches.append(batch)
-                            print(f"[EvalSplit] Added VL batch {len(vl_batches)}/{max_vl_eval_batches}", flush=True)
-                        else:
-                            # Debug why batch was skipped
-                            if has_audio.any():
-                                print(f"[BatchDebug] Skipping audio batch {batch_count}: already have {len(audio_batches)}/{max_audio_eval_batches} audio batches", flush=True)
-                            else:
-                                print(f"[BatchDebug] Skipping VL batch {batch_count}: already have {len(vl_batches)}/{max_vl_eval_batches} VL batches", flush=True)
-                        
+                        audio_count = int(has_audio.sum().item())
+                        total_count = int(has_audio.numel())
+                        has_audio_any = bool(has_audio.any().item()) if has_audio.numel() > 0 else False
+                        print(
+                            f"[BatchDebug] Batch {batch_count}: {audio_count}/{total_count} samples have audio, has_audio.any()={has_audio_any}",
+                            flush=True,
+                        )
+
+                        audio_indices = torch.nonzero(has_audio, as_tuple=False).flatten()
+                        vl_indices = torch.nonzero(~has_audio, as_tuple=False).flatten()
+
+                        # Separate into audio vs VL subsets within the mixed batch
+                        if audio_indices.numel() > 0 and len(audio_batches) < max_audio_eval_batches:
+                            audio_subset = self._select_batch_indices(batch, audio_indices, clone=True)
+                            audio_batches.append(audio_subset)
+                            print(
+                                f"[EvalSplit] Added audio subset ({audio_indices.numel()} samples) {len(audio_batches)}/{max_audio_eval_batches}",
+                                flush=True,
+                            )
+                        elif audio_indices.numel() > 0:
+                            print(
+                                f"[BatchDebug] Skipping audio samples in batch {batch_count}: already have {len(audio_batches)}/{max_audio_eval_batches} audio batches",
+                                flush=True,
+                            )
+
+                        if vl_indices.numel() > 0 and len(vl_batches) < max_vl_eval_batches:
+                            vl_subset = self._select_batch_indices(batch, vl_indices, clone=True)
+                            vl_batches.append(vl_subset)
+                            print(
+                                f"[EvalSplit] Added VL subset ({vl_indices.numel()} samples) {len(vl_batches)}/{max_vl_eval_batches}",
+                                flush=True,
+                            )
+                        elif vl_indices.numel() > 0 and max_vl_eval_batches > 0:
+                            print(
+                                f"[BatchDebug] Skipping VL samples in batch {batch_count}: already have {len(vl_batches)}/{max_vl_eval_batches} VL batches",
+                                flush=True,
+                            )
+
                         batch_count += 1
                         if len(audio_batches) >= max_audio_eval_batches and len(vl_batches) >= max_vl_eval_batches:
                             break
