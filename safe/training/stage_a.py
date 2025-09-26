@@ -1194,7 +1194,12 @@ class StageATrainer:
         interval = int(self.config.get("train_accuracy_interval", 0) or 0)
         warmup = int(self.config.get("train_accuracy_warmup", 0) or 0)
         step_index = self.global_step + 1
-        if interval > 0 and (step_index <= max(1, warmup) or step_index % interval == 0):
+        should_compute = interval > 0 and (step_index <= max(1, warmup) or step_index % interval == 0)
+        
+        if self.debug_logging and interval > 0:
+            print(f"[TrainAccDebug] step {step_index}: interval={interval}, warmup={warmup}, should_compute={should_compute}", flush=True)
+        
+        if should_compute:
             try:
                 prev_mode = self.safe_model.training
                 with torch.no_grad():
