@@ -116,33 +116,35 @@ class CrossAttentionBlock(nn.Module):
         
         # Apply attention mask robustly
         if attention_mask is not None:
-            # 1) Coerce to float, scrub NaNs
-            mask = attention_mask.to(attention_scores.dtype)
-            mask = torch.nan_to_num(mask, nan=0.0, posinf=1.0, neginf=0.0)
+            # 1) Coerce to float, scrub NaNs and move to correct device
+            mask = attention_mask.to(device=attention_scores.device)
+            if mask.dtype == torch.bool:
+                keep_mask = mask
+            else:
+                mask = mask.to(attention_scores.dtype)
+                mask = torch.nan_to_num(mask, nan=0.0, posinf=1.0, neginf=0.0)
 
-            # 2) Normalize to 1=keep, 0=mask (heuristic based on majority)
-            ones = (mask > 0.5).sum().item()
-            zeros = (mask <= 0.5).sum().item()
-            if zeros > ones:
-                mask = 1.0 - mask  # was likely 1=mask
-                if self.debug_logging and self._attention_logs_emitted < self._attention_log_limit:
-                    print(f"[AttentionMask] Detected 1=mask convention, inverted", flush=True)
-                    self._attention_logs_emitted += 1
-            elif self.debug_logging and self._attention_logs_emitted < self._attention_log_limit:
-                print(f"[AttentionMask] Using 1=keep convention", flush=True)
-                self._attention_logs_emitted += 1
+                # Interpret values based on range:
+                mask_min = float(mask.min().item()) if mask.numel() > 0 else 0.0
+                mask_max = float(mask.max().item()) if mask.numel() > 0 else 1.0
 
-            # 3) Expand to (B,1,1,L) for broadcasting
-            while mask.dim() < attention_scores.dim():
-                mask = mask.unsqueeze(-2)
+                if mask_min < -1e-2:  # Additive mask style (0 keep, -inf mask)
+                    keep_mask = mask > (mask_min * 0.5)
+                elif mask_max <= 1.0 and mask_min >= 0.0:
+                    keep_mask = mask > 0.5
+                else:
+                    keep_mask = mask > 0.0
 
-            # 4) Boolean "mask out" tensor
-            mask_bool = (mask <= 0.5)
+            # 2) Expand to (B,1,1,L) for broadcasting
+            while keep_mask.dim() < attention_scores.dim():
+                keep_mask = keep_mask.unsqueeze(-2)
 
-            # 5) Use moderate negative, then clamp back to safe softmax range
+            mask_bool = ~keep_mask
+
+            # 3) Use moderate negative, then clamp back to safe softmax range
             attention_scores = attention_scores.masked_fill(mask_bool, -1e4)
             attention_scores = torch.clamp(attention_scores, min=-50.0, max=50.0)
-            
+
             # Log mask statistics for debugging
             if self.debug_logging and self._attention_logs_emitted < self._attention_log_limit:
                 masked_tokens = mask_bool.sum().item()

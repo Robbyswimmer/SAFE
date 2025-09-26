@@ -62,6 +62,10 @@ class ExperimentConfig:
     eval_audio_gate_comparison: bool
     eval_logging_steps: int
     debug_logging: bool
+    train_accuracy_interval: int
+    train_accuracy_warmup: int
+    train_eval_batches: int
+    generation_max_new_tokens: int
 
 
 def set_random_seeds(seed: int) -> None:
@@ -405,6 +409,13 @@ def build_stage_a_config(config: ExperimentConfig) -> Dict[str, float | int | bo
         "null_space_rank": config.null_space_rank,
         "null_space_min_samples": config.null_space_min_samples,
         "null_space_refresh_interval": config.null_space_refresh_interval,
+        "max_audio_eval_batches": config.max_audio_eval_batches,
+        "max_vl_eval_batches": config.max_vl_eval_batches,
+        "eval_with_audio_gate": config.eval_with_audio_gate,
+        "eval_audio_gate_comparison": config.eval_audio_gate_comparison,
+        "train_accuracy_interval": config.train_accuracy_interval,
+        "train_accuracy_warmup": config.train_accuracy_warmup,
+        "generation_max_new_tokens": config.generation_max_new_tokens,
         "output_dir": config.output_dir,
     }
 
@@ -599,6 +610,10 @@ def run_experiment(args: argparse.Namespace) -> None:
         eval_audio_gate_comparison=args.eval_audio_gate_comparison,
         eval_logging_steps=max(1, args.eval_logging_steps),
         debug_logging=args.debug_logging,
+        train_accuracy_interval=max(0, args.train_accuracy_interval),
+        train_accuracy_warmup=max(0, args.train_accuracy_warmup),
+        train_eval_batches=args.train_eval_batches,
+        generation_max_new_tokens=max(1, args.generation_max_new_tokens),
     )
 
     print(f"[DEBUG] Configuring variant: {args.variant}", flush=True)
@@ -620,6 +635,17 @@ def run_experiment(args: argparse.Namespace) -> None:
     final_metrics = trainer.train()
     print(f"[DEBUG] trainer.train() completed", flush=True)
 
+    train_eval_batches = args.train_eval_batches if args.train_eval_batches > 0 else None
+    train_metrics: Optional[Dict[str, float]] = None
+    if train_eval_batches is not None:
+        print(f"[DEBUG] Evaluating training accuracy over {train_eval_batches} batches...", flush=True)
+        train_metrics = trainer.evaluate(
+            max_batches=train_eval_batches,
+            dataloader=train_loader,
+            description="Training",
+            split_batches=False,
+        )
+
     # Save variant-specific model parameters (only what was actually trained)
     _save_variant_checkpoint(model, args.variant, run_dir)
 
@@ -631,8 +657,12 @@ def run_experiment(args: argparse.Namespace) -> None:
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(asdict(variant_config), f, indent=2)
 
+    metrics_payload: Dict[str, Dict[str, float]] = {"validation": final_metrics}
+    if train_metrics is not None:
+        metrics_payload["training"] = train_metrics
+
     with open(metrics_path, "w", encoding="utf-8") as f:
-        json.dump(final_metrics, f, indent=2)
+        json.dump(metrics_payload, f, indent=2)
 
     # Store the absolute indices from the parent dataset for reproducibility
     subset: Subset = train_dataset  # type: ignore[assignment]
@@ -726,6 +756,30 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Number of eval batches between progress messages",
+    )
+    parser.add_argument(
+        "--train-accuracy-interval",
+        type=int,
+        default=10,
+        help="Steps between on-the-fly training accuracy checks (0 disables)",
+    )
+    parser.add_argument(
+        "--train-accuracy-warmup",
+        type=int,
+        default=5,
+        help="Number of initial steps to always compute training accuracy",
+    )
+    parser.add_argument(
+        "--train-eval-batches",
+        type=int,
+        default=4,
+        help="Number of training batches to evaluate after training (<=0 disables)",
+    )
+    parser.add_argument(
+        "--generation-max-new-tokens",
+        type=int,
+        default=12,
+        help="Max new tokens to use during accuracy generation sweeps",
     )
     parser.add_argument(
         "--debug-logging",

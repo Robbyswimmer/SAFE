@@ -45,6 +45,10 @@ MAX_AUDIO_EVAL_BATCHES=${MAX_AUDIO_EVAL_BATCHES:-4}
 MAX_VL_EVAL_BATCHES=${MAX_VL_EVAL_BATCHES:-4}
 EVAL_LOGGING_STEPS=${EVAL_LOGGING_STEPS:-1}
 DEBUG_LOGGING=${DEBUG_LOGGING:-0}
+TRAIN_ACCURACY_INTERVAL=${TRAIN_ACCURACY_INTERVAL:-10}
+TRAIN_ACCURACY_WARMUP=${TRAIN_ACCURACY_WARMUP:-5}
+TRAIN_EVAL_BATCHES=${TRAIN_EVAL_BATCHES:-4}
+GEN_MAX_NEW_TOKENS=${GEN_MAX_NEW_TOKENS:-16}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_ROOT"
@@ -88,6 +92,10 @@ for variant in "${variants[@]}"; do
     --eval-with-audio-gate \
     --eval-audio-gate-comparison \
     --eval-logging-steps "${EVAL_LOGGING_STEPS}" \
+    --train-accuracy-interval "${TRAIN_ACCURACY_INTERVAL}" \
+    --train-accuracy-warmup "${TRAIN_ACCURACY_WARMUP}" \
+    --train-eval-batches "${TRAIN_EVAL_BATCHES}" \
+    --generation-max-new-tokens "${GEN_MAX_NEW_TOKENS}" \
     "${debug_flag[@]}"
   echo "=== Completed variant: ${variant} ===\n"
 done
