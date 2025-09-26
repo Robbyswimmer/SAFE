@@ -13,6 +13,7 @@ import logging
 import textwrap
 import traceback
 import time
+from collections import defaultdict
 
 # Set CPU threads for predictable performance
 torch.set_num_threads(min(8, os.cpu_count() or 2))
@@ -102,6 +103,9 @@ class StageATrainer:
             "sanitize_nan_gradients": True,
             "grad_sanitize_clip": 1e3,
             "param_sanitize_clip": 1e3,
+            "train_accuracy_interval": 0,
+            "train_accuracy_warmup": 5,
+            "generation_max_new_tokens": 12,
         }
 
         if config:
@@ -1178,7 +1182,56 @@ class StageATrainer:
             batch=inputs,
             has_audio=has_audio
         )
-        
+
+        log_metrics: Dict[str, float] = {}
+        for key, value in loss_dict.items():
+            if isinstance(value, torch.Tensor):
+                log_metrics[key] = float(value.detach().cpu().item())
+            else:
+                log_metrics[key] = float(value)
+
+        train_metrics: Dict[str, float] = {}
+        interval = int(self.config.get("train_accuracy_interval", 0) or 0)
+        warmup = int(self.config.get("train_accuracy_warmup", 0) or 0)
+        step_index = self.global_step + 1
+        if interval > 0 and (step_index <= max(1, warmup) or step_index % interval == 0):
+            try:
+                prev_mode = self.safe_model.training
+                with torch.no_grad():
+                    self.safe_model.eval()
+                    safe_acc_list, _ = self._compute_robust_accuracy(
+                        safe_outputs=safe_outputs,
+                        base_outputs=base_outputs,
+                        inputs=inputs,
+                        has_audio=has_audio,
+                        batch=batch,
+                    )
+                if prev_mode:
+                    self.safe_model.train()
+                    self.safe_model.enable_audio_training()
+
+                has_audio_cpu = has_audio.detach().to(device="cpu")
+                audio_indices = has_audio_cpu.nonzero(as_tuple=False).view(-1).tolist()
+                vl_indices = (~has_audio_cpu).nonzero(as_tuple=False).view(-1).tolist()
+
+                if audio_indices:
+                    audio_acc = float(np.mean([safe_acc_list[i] for i in audio_indices]))
+                    train_metrics["train_audio_accuracy"] = audio_acc
+                if vl_indices:
+                    vl_acc = float(np.mean([safe_acc_list[i] for i in vl_indices]))
+                    train_metrics["train_vl_accuracy"] = vl_acc
+
+                if safe_acc_list:
+                    train_metrics["train_overall_accuracy"] = float(np.mean(safe_acc_list))
+
+                if train_metrics and self.debug_logging:
+                    metrics_str = ", ".join(f"{k}={v:.3f}" for k, v in train_metrics.items())
+                    print(f"[TrainAcc] step {step_index}: {metrics_str}", flush=True)
+            except Exception as exc:  # pragma: no cover - best effort logging
+                print(f"[TrainAcc] Warning: failed to compute training accuracy ({exc})", flush=True)
+
+        log_metrics.update(train_metrics)
+
         # Debug: Log loss components
         audio_loss = loss_dict.get('audio_task_loss', 0.0)
         retention_loss = loss_dict.get('retention_loss', 0.0)
@@ -1319,33 +1372,53 @@ class StageATrainer:
         elif self.scheduler is not None:
             self.scheduler.step()
         
-        # Convert losses to float
-        step_losses = {k: v.item() if isinstance(v, torch.Tensor) else v 
-                      for k, v in loss_dict.items()}
-
         if self.debug_logging:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             elapsed_total = time.time() - step_timer_start if step_timer_start is not None else 0.0
             print(
-                f"[TrainDebug] step {self.global_step}: total_loss={step_losses.get('total_loss')} elapsed={elapsed_total:.2f}s",
+                f"[TrainDebug] step {self.global_step}: total_loss={log_metrics.get('total_loss')} elapsed={elapsed_total:.2f}s",
                 flush=True,
             )
 
-        return step_losses
+        return log_metrics
     
-    def evaluate(self, max_batches: Optional[int] = None) -> Dict[str, float]:
+    def evaluate(
+        self,
+        max_batches: Optional[int] = None,
+        dataloader: Optional[DataLoader] = None,
+        description: str = "Validation",
+        split_batches: Optional[bool] = None,
+    ) -> Dict[str, float]:
         """
-        Evaluate model on validation set.
-        
+        Evaluate model on a specified dataset.
+
+        Args:
+            max_batches: Optional limit on number of batches to evaluate
+            dataloader: Optional dataloader to evaluate. Defaults to validation loader
+            description: Human readable description used in logs
+            split_batches: Override whether to perform audio/VL split evaluation
+
         Returns:
             Dictionary with evaluation metrics
         """
+        previous_mode = self.safe_model.training
         self.safe_model.eval()
-        
-        # Check if validation dataset has samples
-        if len(self.val_dataloader.dataset) == 0:
-            print("Warning: Validation dataset is empty!", flush=True)
+
+        data_source = dataloader if dataloader is not None else self.val_dataloader
+        if data_source is None:
+            raise ValueError("No dataloader available for evaluation")
+
+        dataset_len = None
+        dataset_obj = getattr(data_source, "dataset", None)
+        if dataset_obj is not None:
+            try:
+                dataset_len = len(dataset_obj)
+            except TypeError:
+                dataset_len = None
+
+        if dataset_len == 0:
+            print(f"Warning: {description} dataset is empty!", flush=True)
             return {
                 "loss": 0.0,
                 "audio_loss": 0.0,
@@ -1384,6 +1457,12 @@ class StageATrainer:
         # Get split batch evaluation parameters
         max_audio_eval_batches = self.config.get("max_audio_eval_batches", 4)
         max_vl_eval_batches = self.config.get("max_vl_eval_batches", 4)
+        if split_batches is None:
+            split_batches = (max_audio_eval_batches > 0) or (max_vl_eval_batches > 0)
+        if not split_batches:
+            max_audio_eval_batches = 0
+            max_vl_eval_batches = 0
+
         eval_with_audio_gate = self.config.get("eval_with_audio_gate", True)
         eval_audio_gate_comparison = self.config.get("eval_audio_gate_comparison", False)
         
@@ -1410,14 +1489,17 @@ class StageATrainer:
         try:
             with torch.no_grad():
                 # Separate audio and VL batches if split evaluation is configured
-                if max_audio_eval_batches > 0 or max_vl_eval_batches > 0:
-                    print(f"Using split evaluation: {max_audio_eval_batches} audio + {max_vl_eval_batches} VL batches", flush=True)
+                if split_batches and (max_audio_eval_batches > 0 or max_vl_eval_batches > 0):
+                    print(
+                        f"Using split evaluation on {description} set: {max_audio_eval_batches} audio + {max_vl_eval_batches} VL batches",
+                        flush=True,
+                    )
                     audio_batches = []
                     vl_batches = []
-                    
+
                     # Collect batches and separate them
                     batch_count = 0
-                    for batch in self.val_dataloader:
+                    for batch in data_source:
                         # Move batch to device
                         for key in batch:
                             if isinstance(batch[key], torch.Tensor):
@@ -1475,27 +1557,47 @@ class StageATrainer:
                         batch_count += 1
                         if len(audio_batches) >= max_audio_eval_batches and len(vl_batches) >= max_vl_eval_batches:
                             break
-                            
+
                     # Create combined evaluation list
                     eval_batch_list = []
                     for i, batch in enumerate(audio_batches):
                         eval_batch_list.append((f"AUDIO-{i+1}", batch))
                     for i, batch in enumerate(vl_batches):
                         eval_batch_list.append((f"VL-{i+1}", batch))
-                        
-                    dataloader = eval_batch_list
+
+                    batch_iterable = eval_batch_list
                     total_eval_batches = len(eval_batch_list)
-                    print(f"Split evaluation: {len(audio_batches)} audio + {len(vl_batches)} VL = {total_eval_batches} batches", flush=True)
+                    print(
+                        f"Split evaluation prepared {len(audio_batches)} audio + {len(vl_batches)} VL batches (total={total_eval_batches})",
+                        flush=True,
+                    )
                 else:
                     # Original evaluation logic
-                    dataloader = self.val_dataloader
-                    total_eval_batches = max_batches if max_batches else len(self.val_dataloader)
-                    if max_batches:
+                    batch_iterable = data_source
+                    if max_batches is not None and max_batches > 0:
                         from itertools import islice
-                        dataloader = islice(self.val_dataloader, max_batches)
-                    print(f"Standard evaluation on {total_eval_batches} batches...", flush=True)
-                
-                for batch_idx, batch_data in enumerate(dataloader, start=1):
+
+                        batch_iterable = islice(data_source, max_batches)
+                        total_eval_batches = max_batches
+                    else:
+                        total_eval_batches = len(data_source) if hasattr(data_source, "__len__") else None
+                    if max_batches:
+                        print(
+                            f"Standard evaluation on first {max_batches} {description.lower()} batches...",
+                            flush=True,
+                        )
+                    else:
+                        batch_msg = (
+                            f"{total_eval_batches}"
+                            if isinstance(total_eval_batches, int)
+                            else "an unknown number of"
+                        )
+                        print(
+                            f"Standard evaluation on {batch_msg} {description.lower()} batches...",
+                            flush=True,
+                        )
+
+                for batch_idx, batch_data in enumerate(batch_iterable, start=1):
                     batch_t0 = time.time()
                     
                     # Handle both split evaluation format (batch_label, batch) and standard format
@@ -1785,9 +1887,12 @@ class StageATrainer:
                     
                     total_samples += batch_size
     
-                    if eval_logging_steps and (batch_idx % eval_logging_steps == 0 or batch_idx == total_eval_batches):
+                    if eval_logging_steps and (
+                        batch_idx % eval_logging_steps == 0
+                        or (isinstance(total_eval_batches, int) and batch_idx == total_eval_batches)
+                    ):
                         print(
-                            f"[Eval] Processed {batch_idx}/{total_eval_batches} batches",
+                            f"[Eval] Processed {batch_idx}/{total_eval_batches if isinstance(total_eval_batches, int) else '?'} batches",
                             flush=True
                         )
                     if self.debug_logging:
@@ -1815,6 +1920,12 @@ class StageATrainer:
                         print(f"🔧 Restored audio gate to: {saved_gate}", flush=True)
                 except Exception as exc:
                     print(f"[EvalGate] WARNING: Failed to restore gate state ({exc})", flush=True)
+            if previous_mode:
+                try:
+                    self.safe_model.train()
+                    self.safe_model.enable_audio_training()
+                except Exception as exc:
+                    print(f"[Eval] WARNING: Failed to restore training mode ({exc})", flush=True)
         
         # Normalize losses (avoid division by zero)
         if total_samples > 0:
@@ -1846,8 +1957,8 @@ class StageATrainer:
         }
         
         # Report cumulative evaluation results
-        print(f"\n=== EVALUATION COMPLETE ===", flush=True)
-        if max_audio_eval_batches > 0 or max_vl_eval_batches > 0:
+        print(f"\n=== {description.upper()} EVALUATION COMPLETE ===", flush=True)
+        if split_batches and (max_audio_eval_batches > 0 or max_vl_eval_batches > 0):
             print(f"Split Evaluation Summary:", flush=True)
             print(f"  Audio batches: {max_audio_eval_batches}, samples: {audio_samples}", flush=True)
             print(f"  VL batches: {max_vl_eval_batches}, samples: {vl_samples}", flush=True)
@@ -2126,8 +2237,11 @@ class StageATrainer:
             # Override max_length to respect max_new_tokens limit
             self.safe_model.base_vl.llm.generation_config.max_length = None
 
+        configured_max_new_tokens = int(self.config.get("generation_max_new_tokens", 3) or 1)
+        configured_max_new_tokens = max(1, configured_max_new_tokens)
+
         gen_kwargs = dict(
-            max_new_tokens=3,   # Optimal for VQA short answers
+            max_new_tokens=configured_max_new_tokens,   # Configurable for short answers
             do_sample=False,    # Greedy decoding for deterministic results
             temperature=None,
             top_p=None,
@@ -2532,7 +2646,7 @@ class StageATrainer:
         while not self.curriculum_manager.is_completed:
             self.epoch += 1
             epoch_in_stage += 1
-            epoch_losses = {key: [] for key in ["total_loss", "audio_task_loss", "retention_loss"]}
+            epoch_losses = defaultdict(list)
             
             # Get current stage info
             stage_name = self.current_stage_config["stage_name"] if self.current_stage_config else "unknown"
@@ -2547,9 +2661,8 @@ class StageATrainer:
                 samples_in_stage += batch_size
                 
                 # Accumulate losses
-                for key in epoch_losses:
-                    if key in step_losses:
-                        epoch_losses[key].append(step_losses[key])
+                for key, value in step_losses.items():
+                    epoch_losses[key].append(float(value))
                 
                 # Update progress bar
                 if epoch_losses["total_loss"] and (step + 1) % self.config.get("logging_steps", 50) == 0:
@@ -2691,7 +2804,7 @@ class StageATrainer:
         
         for epoch in range(self.config["num_epochs"]):
             self.epoch = epoch
-            epoch_losses = {key: [] for key in ["total_loss", "audio_task_loss", "retention_loss"]}
+            epoch_losses = defaultdict(list)
             
             # Training loop
             progress_bar = self.train_dataloader
@@ -2709,9 +2822,8 @@ class StageATrainer:
                     print(f"First batch completed successfully! Loss: {step_losses.get('total_loss', 'N/A'):.4f}", flush=True)
                 
                 # Accumulate losses
-                for key in epoch_losses:
-                    if key in step_losses:
-                        epoch_losses[key].append(step_losses[key])
+                for key, value in step_losses.items():
+                    epoch_losses[key].append(float(value))
                 
                 # Update progress bar
                 if epoch_losses["total_loss"] and (step + 1) % self.config.get("logging_steps", 50) == 0:
