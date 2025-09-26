@@ -103,12 +103,6 @@ class AudioProjector(nn.Module):
         # Normalize input for stability
         normalized_input = self.input_norm(x)
         
-        # Log input statistics for debugging
-        if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
-            input_norm = normalized_input.norm(dim=-1).mean().item()
-            input_max = normalized_input.abs().max().item()
-            print(f"[ProjectorDebug] Input norm={input_norm:.6f}, max_abs={input_max:.6f}", flush=True)
-            self._projector_logs_emitted += 1
         
         # Project through MLP with soft bounding
         projected = self.projector(normalized_input)  # (batch_size, llm_hidden_size * num_audio_tokens)
@@ -126,19 +120,10 @@ class AudioProjector(nn.Module):
         # Apply output normalization per token
         audio_tokens = self.output_norm(audio_tokens)
         
-        # Log output statistics for debugging
-        if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
-            output_norm = audio_tokens.norm(dim=-1).mean().item()
-            output_max = audio_tokens.abs().max().item()
-            print(f"[ProjectorDebug] Output norm={output_norm:.6f}, max_abs={output_max:.6f}", flush=True)
-            self._projector_logs_emitted += 1
         
         # Cast to requested/output dtype (the LM/base dtype)
         if out_dtype is not None:
             audio_tokens = audio_tokens.to(out_dtype)
-            if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
-                print(f"[ProjectorDebug] Cast to {out_dtype}", flush=True)
-                self._projector_logs_emitted += 1
         
         return audio_tokens
 
@@ -295,19 +280,10 @@ class AdaptiveAudioProjector(nn.Module):
         # Apply output normalization per token
         audio_tokens = self.output_norm(audio_tokens)
         
-        # Log output statistics for debugging
-        if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
-            output_norm = audio_tokens.norm(dim=-1).mean().item()
-            output_max = audio_tokens.abs().max().item()
-            print(f"[AdaptiveProjectorDebug] Output norm={output_norm:.6f}, max_abs={output_max:.6f}", flush=True)
-            self._projector_logs_emitted += 1
         
         # Cast to requested/output dtype (the LM/base dtype)
         if out_dtype is not None:
             audio_tokens = audio_tokens.to(out_dtype)
-            if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
-                print(f"[AdaptiveProjectorDebug] Cast to {out_dtype}", flush=True)
-                self._projector_logs_emitted += 1
         
         return audio_tokens
 

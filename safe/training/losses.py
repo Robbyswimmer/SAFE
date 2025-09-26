@@ -306,38 +306,26 @@ class AudioTaskLoss(nn.Module):
         Returns:
             Task loss
         """
-        print(f"[AUDIOTASK_DEBUG] AudioTaskLoss.forward() ENTRY", flush=True)
-        print(f"[AUDIOTASK_DEBUG] Input shapes - logits: {logits.shape}, labels: {labels.shape}", flush=True)
-        print(f"[AUDIOTASK_DEBUG] attention_mask: {attention_mask.shape if attention_mask is not None else None}", flush=True)
         
         # Flatten for loss computation
         shift_logits = logits[..., :-1, :]
         shift_labels = labels[..., 1:]
 
         seq_len = min(shift_logits.size(-2), shift_labels.size(-1))
-        print(f"[AUDIOTASK_DEBUG] seq_len after min: {seq_len}", flush=True)
         shift_logits = shift_logits[..., :seq_len, :].contiguous()
         shift_labels = shift_labels[..., :seq_len].contiguous()
 
         if attention_mask is not None:
-            print(f"[AUDIOTASK_DEBUG] Using attention_mask branch", flush=True)
-            print(f"[AUDIOTASK_DEBUG] Original attention_mask shape: {attention_mask.shape}, sum per sample: {attention_mask.sum(dim=1).tolist()}", flush=True)
             shift_mask = attention_mask[..., 1:]
             shift_mask = shift_mask[..., :seq_len].contiguous()
-            print(f"[AUDIOTASK_DEBUG] shift_mask shape: {shift_mask.shape}, sum per sample: {shift_mask.sum(dim=1).tolist()}", flush=True)
 
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
             flat_labels = shift_labels.reshape(-1)
             flat_mask = shift_mask.reshape(-1).eq(1)
             
-            print(f"[AUDIOTASK_DEBUG] flat_mask: {flat_mask.sum().item()}/{flat_mask.numel()} True values", flush=True)
-            print(f"[AUDIOTASK_DEBUG] flat_labels: min={flat_labels.min().item()}, max={flat_labels.max().item()}, -100 count={(flat_labels == -100).sum().item()}", flush=True)
-            
             # Also ignore label positions explicitly marked as -100
             valid = flat_mask & (flat_labels != -100)
-            print(f"[AUDIOTASK_DEBUG] valid mask (attention_mask branch): {valid.sum().item()}/{valid.numel()} valid tokens", flush=True)
             if not torch.any(valid):
-                print(f"[AUDIOTASK_DEBUG] EARLY RETURN: no valid tokens (attention_mask branch)", flush=True)
                 return torch.tensor(0.0, device=logits.device, requires_grad=True)
 
             # Ensure labels fall inside the model vocabulary to avoid NaNs from
@@ -354,27 +342,20 @@ class AudioTaskLoss(nn.Module):
                 )
                 valid &= in_vocab
 
-            print(f"[AUDIOTASK_DEBUG] valid mask after vocab check (attention_mask branch): {valid.sum().item()}/{valid.numel()} valid tokens", flush=True)
             if not torch.any(valid):
-                print(f"[AUDIOTASK_DEBUG] EARLY RETURN: no valid tokens after vocab filtering (attention_mask branch)", flush=True)
                 return torch.tensor(0.0, device=logits.device, requires_grad=True)
 
             # Debug: Log supervised token count and label distribution
             valid_count = valid.sum().item()
             unique_labels = flat_labels[valid].unique() if torch.any(valid) else torch.tensor([])
-            print(f"[AUDIOTASK_DEBUG] SUCCESS: About to call loss_fn with {valid_count} valid tokens, {len(unique_labels)} unique labels (attention_mask branch)", flush=True)
             LOGGER.info(f"AudioTaskLoss: valid_tokens={valid_count}, unique_labels={len(unique_labels)}")
 
             loss = self.loss_fn(flat_logits[valid].float(), flat_labels[valid])
         else:
-            print(f"[AUDIOTASK_DEBUG] Using NO attention_mask branch", flush=True)
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
             flat_labels = shift_labels.reshape(-1)
             valid = flat_labels != -100
-            print(f"[AUDIOTASK_DEBUG] flat_labels: min={flat_labels.min().item()}, max={flat_labels.max().item()}, -100 count={(flat_labels == -100).sum().item()}", flush=True)
-            print(f"[AUDIOTASK_DEBUG] valid mask (no attention_mask branch): {valid.sum().item()}/{valid.numel()} valid tokens", flush=True)
             if not torch.any(valid):
-                print(f"[AUDIOTASK_DEBUG] EARLY RETURN: no valid tokens (no attention_mask branch)", flush=True)
                 return torch.tensor(0.0, device=logits.device, requires_grad=True)
 
             # Ensure labels fall inside the model vocabulary to avoid NaNs from
@@ -391,20 +372,16 @@ class AudioTaskLoss(nn.Module):
                 )
                 valid &= in_vocab
 
-            print(f"[AUDIOTASK_DEBUG] valid mask after vocab check (no attention_mask branch): {valid.sum().item()}/{valid.numel()} valid tokens", flush=True)
             if not torch.any(valid):
-                print(f"[AUDIOTASK_DEBUG] EARLY RETURN: no valid tokens after vocab filtering (no attention_mask branch)", flush=True)
                 return torch.tensor(0.0, device=logits.device, requires_grad=True)
 
             # Debug: Log supervised token count and label distribution
             valid_count = valid.sum().item()
             unique_labels = flat_labels[valid].unique() if torch.any(valid) else torch.tensor([])
-            print(f"[AUDIOTASK_DEBUG] SUCCESS: About to call loss_fn with {valid_count} valid tokens, {len(unique_labels)} unique labels (no attention_mask branch)", flush=True)
             LOGGER.info(f"AudioTaskLoss: valid_tokens={valid_count}, unique_labels={len(unique_labels)}")
 
             loss = self.loss_fn(flat_logits[valid].float(), flat_labels[valid])
         
-        print(f"[AUDIOTASK_DEBUG] AudioTaskLoss.forward() COMPLETED, returning loss: {loss.item():.6f}", flush=True)
         return loss
 
 
@@ -473,17 +450,14 @@ class CombinedStageLoss(nn.Module):
         # print(f"Device: {device}")
         
         # Audio task loss (for samples with audio)
-        print(f"[LOSS_DEBUG] has_audio.any(): {torch.any(has_audio)}, has_audio: {has_audio}", flush=True)
         if torch.any(has_audio):
             audio_indices = torch.where(has_audio)[0]
-            print(f"[LOSS_DEBUG] audio_indices: {audio_indices}", flush=True)
             # Ensure indices are within bounds of both logits and labels tensors
             max_safe = safe_logits.size(0) if safe_logits is not None else 0
             labels = batch.get("labels")
             max_labels = labels.size(0) if labels is not None else 0
             max_bound = min(max_safe, max_labels)
             audio_indices = audio_indices[audio_indices < max_bound]
-            print(f"[LOSS_DEBUG] audio_indices after bounds check: {audio_indices}, max_bound: {max_bound}", flush=True)
             if len(audio_indices) > 0:
                 audio_logits = safe_logits[audio_indices]
                 audio_labels = batch["labels"][audio_indices]
@@ -491,22 +465,18 @@ class CombinedStageLoss(nn.Module):
                 if audio_mask is not None:
                     audio_mask = audio_mask[audio_indices]
                 
-                print(f"[LOSS_DEBUG] Calling AudioTaskLoss for {len(audio_indices)} samples...", flush=True)
                 audio_loss = self.audio_task_loss(
                     logits=audio_logits,
                     labels=audio_labels,
                     attention_mask=audio_mask
                 )
-                print(f"[LOSS_DEBUG] AudioTaskLoss returned: {audio_loss.item():.6f}", flush=True)
                 # print(f"Audio loss computed: {audio_loss.item():.6f}")
                 
                 total_loss = total_loss + self.audio_weight * audio_loss
                 loss_dict["audio_task_loss"] = audio_loss
             else:
-                print(f"[LOSS_DEBUG] No valid audio indices after bounds check", flush=True)
                 loss_dict["audio_task_loss"] = torch.tensor(0.0, device=device)
         else:
-            print(f"[LOSS_DEBUG] No audio samples in batch", flush=True)
             loss_dict["audio_task_loss"] = torch.tensor(0.0, device=device)
         
         # Retention loss (for all samples, especially VL-only)

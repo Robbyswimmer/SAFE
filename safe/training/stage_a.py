@@ -557,16 +557,9 @@ class StageATrainer:
             betas=(0.9, 0.999)
         )
         
-        # Debug: Parameter validation
+        # Parameter validation
         trainable_count = sum(p.numel() for group in param_groups for p in group["params"] if p.requires_grad)
-        print(f"[DEBUG] Trainable parameters: {trainable_count:,}", flush=True)
-        
-        # Sample parameter names
-        param_names = []
-        for name, param in self.safe_model.named_parameters():
-            if param.requires_grad:
-                param_names.append(name)
-        print(f"[DEBUG] Sample trainable params: {param_names[:10]}", flush=True)
+        print(f"Trainable parameters: {trainable_count:,}", flush=True)
         
         # base_lr is already set in parameter groups above
     
@@ -658,18 +651,15 @@ class StageATrainer:
             return
 
         if has_audio.numel() == 0 or not torch.any(has_audio):
-            print("[SanityCheck] Skipping audio sanity checks: no audio samples in batch.", flush=True)
             self._sanity_checks_completed = True
             return
 
         audio_indices = torch.nonzero(has_audio, as_tuple=False).flatten()
         audio_inputs = self._select_batch_indices(inputs, audio_indices)
         if not audio_inputs or audio_inputs.get("audio_tokens") is None:
-            print("[SanityCheck] Audio tokens missing; cannot run sanity checks.", flush=True)
             self._sanity_checks_completed = True
             return
 
-        print("\n[SanityCheck] Running audio fusion ablations on first audio batch...", flush=True)
 
         baseline_loss = self._compute_audio_loss(self._clone_inputs(audio_inputs), gate=1.0)
         gate_off_loss = self._compute_audio_loss(self._clone_inputs(audio_inputs), gate=0.0)
@@ -689,9 +679,9 @@ class StageATrainer:
         def fmt(value: Optional[float]) -> str:
             return "N/A" if value is None else f"{value:.6f}"
 
-        print("[SanityCheck] Loss comparison (lower is better):", flush=True)
-        print(f"  gate=1.0 (baseline): {fmt(baseline_loss)}", flush=True)
-        print(f"  gate=0.0: {fmt(gate_off_loss)}", flush=True)
+        # Only log if audio fusion is significantly hurting performance
+        if gate_off_loss is not None and baseline_loss is not None and gate_off_loss < baseline_loss - 0.1:
+            print(f"WARNING: Audio fusion may be hurting (gate=1.0: {baseline_loss:.4f}, gate=0.0: {gate_off_loss:.4f})", flush=True)
         print(f"  shuffled audio: {fmt(shuffled_loss)}", flush=True)
         print(f"  zeroed audio: {fmt(zero_loss)}", flush=True)
 
@@ -945,8 +935,6 @@ class StageATrainer:
         lora_total = 0
         other_trainable = 0
         
-        print(f"\n[ParamVerify] step {self.global_step}: Checking parameter status...", flush=True)
-        
         for name, param in self.safe_model.named_parameters():
             lower_name = name.lower()
             
@@ -961,25 +949,16 @@ class StageATrainer:
                 lora_total += 1
                 if param.requires_grad:
                     lora_trainable += 1
-                    print(f"[ParamVerify] ✓ LoRA param trainable: {name}", flush=True)
-                else:
-                    print(f"[ParamVerify] ✗ LoRA param FROZEN: {name}", flush=True)
                     
             # Count other trainable parameters
             elif param.requires_grad:
                 other_trainable += 1
-                
-        print(f"[ParamVerify] Audio components: {audio_trainable}/{audio_total} trainable", flush=True)
-        print(f"[ParamVerify] LoRA components: {lora_trainable}/{lora_total} trainable", flush=True)
-        print(f"[ParamVerify] Other components: {other_trainable} trainable", flush=True)
         
-        if audio_trainable == 0:
-            print(f"[ParamVerify] 🚨 CRITICAL: NO AUDIO PARAMETERS TRAINABLE!", flush=True)
-        elif lora_trainable == 0:
-            print(f"[ParamVerify] 🚨 CRITICAL: NO LORA PARAMETERS TRAINABLE!", flush=True)
-        else:
-            print(f"[ParamVerify] ✅ Audio training setup looks good", flush=True)
-        print(flush=True)
+        # Only warn about critical issues
+        if audio_trainable == 0 and audio_total > 0:
+            print(f"CRITICAL: NO AUDIO PARAMETERS TRAINABLE! ({audio_trainable}/{audio_total})", flush=True)
+        elif lora_trainable == 0 and lora_total > 0:
+            print(f"CRITICAL: NO LORA PARAMETERS TRAINABLE! ({lora_trainable}/{lora_total})", flush=True)
 
     def _check_gradient_flow(self) -> None:
         """Check if gradients are actually flowing to key parameters."""
@@ -987,8 +966,6 @@ class StageATrainer:
         lora_with_grads = 0
         total_audio = 0
         total_lora = 0
-        
-        print(f"[GradFlow] step {self.global_step}: Checking gradient presence...", flush=True)
         
         for name, param in self.safe_model.named_parameters():
             if not param.requires_grad:
@@ -1001,27 +978,17 @@ class StageATrainer:
                 total_audio += 1
                 if has_grad:
                     audio_with_grads += 1
-                else:
-                    print(f"[GradFlow] ✗ NO GRADIENT: {name}", flush=True)
                     
             if "lora" in lower_name:
                 total_lora += 1
                 if has_grad:
                     lora_with_grads += 1
-                    grad_norm = param.grad.norm().item()
-                    print(f"[GradFlow] ✓ LoRA gradient: {name}, norm={grad_norm:.6f}", flush=True)
-                else:
-                    print(f"[GradFlow] ✗ NO LoRA GRADIENT: {name}", flush=True)
         
-        print(f"[GradFlow] Audio params with gradients: {audio_with_grads}/{total_audio}", flush=True)
-        print(f"[GradFlow] LoRA params with gradients: {lora_with_grads}/{total_lora}", flush=True)
-        
-        if audio_with_grads == 0:
-            print(f"[GradFlow] 🚨 GRADIENT FLOW BROKEN: No audio gradients!", flush=True)
-        elif lora_with_grads == 0:
-            print(f"[GradFlow] 🚨 GRADIENT FLOW BROKEN: No LoRA gradients!", flush=True)
-        else:
-            print(f"[GradFlow] ✅ Gradients flowing correctly", flush=True)
+        # Only warn if gradients are completely missing (critical issues)
+        if audio_with_grads == 0 and total_audio > 0:
+            print(f"WARNING: No audio gradients flowing ({audio_with_grads}/{total_audio})", flush=True)
+        elif lora_with_grads == 0 and total_lora > 0:
+            print(f"WARNING: No LoRA gradients flowing ({lora_with_grads}/{total_lora})", flush=True)
     
     def train_step(self, batch: Dict) -> Dict[str, float]:
         """
@@ -1057,34 +1024,8 @@ class StageATrainer:
             if isinstance(batch[key], torch.Tensor):
                 batch[key] = batch[key].to(device)
         
-        # Debug: Validate training batch composition
+        # Validate training batch composition
         batch_size = len(batch.get("questions", []))
-        audio_data = batch.get("audio", None)
-        answers_data = batch.get("answers", None)
-        has_audio_field = batch.get("has_audio", None)
-        
-        print(f"[AUDIO_DEBUG] Step {self.global_step}: batch_size={batch_size}", flush=True)
-        print(f"[AUDIO_DEBUG] Has 'audio' field: {audio_data is not None}", flush=True)
-        print(f"[AUDIO_DEBUG] Has 'answers' field: {answers_data is not None}", flush=True)
-        print(f"[AUDIO_DEBUG] Has 'has_audio' field: {has_audio_field is not None}", flush=True)
-        
-        if audio_data is not None:
-            if isinstance(audio_data, (list, tuple)):
-                non_none_audio = [a for a in audio_data if a is not None]
-                print(f"[AUDIO_DEBUG] Audio data: {len(non_none_audio)}/{len(audio_data)} non-None audio samples", flush=True)
-                if non_none_audio:
-                    print(f"[AUDIO_DEBUG] Sample audio paths: {non_none_audio[:3]}", flush=True)
-            else:
-                print(f"[AUDIO_DEBUG] Audio data type: {type(audio_data)}", flush=True)
-        
-        if answers_data is not None:
-            if isinstance(answers_data, (list, tuple)):
-                non_none_answers = [a for a in answers_data if a is not None and a != ""]
-                print(f"[AUDIO_DEBUG] Answers data: {len(non_none_answers)}/{len(answers_data)} non-empty answers", flush=True)
-                if non_none_answers:
-                    print(f"[AUDIO_DEBUG] Sample answers: {non_none_answers[:3]}", flush=True)
-            else:
-                print(f"[AUDIO_DEBUG] Answers data type: {type(answers_data)}", flush=True)
         
         # Prepare inputs for SAFE model (device-consistent masks)
         has_audio = batch.get(
@@ -1095,7 +1036,6 @@ class StageATrainer:
             has_audio = has_audio.to(device=device, dtype=torch.bool)
         else:
             has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
-        print(f"[AUDIO_DEBUG] has_audio flag: {has_audio.sum().item()}/{len(has_audio)} samples marked as having audio", flush=True)
         
         # Filter silent audio clips
         if self.config.get("filter_silent_audio", True):
@@ -1113,17 +1053,9 @@ class StageATrainer:
             training_mode=True  # Apply answers during training
         )
 
-        # Debug: Check what prepare_multimodal_inputs produced
+        # Get processed inputs
         audio_tokens = inputs.get("audio_tokens", None)
         labels = inputs.get("labels", None)
-        print(f"[AUDIO_DEBUG] After prepare_multimodal_inputs:", flush=True)
-        print(f"[AUDIO_DEBUG]   audio_tokens: {audio_tokens.shape if audio_tokens is not None else None}", flush=True)
-        print(f"[AUDIO_DEBUG]   labels: {labels.shape if labels is not None else None}", flush=True)
-        if labels is not None:
-            unique_labels = labels.unique()
-            non_ignore_labels = unique_labels[unique_labels != -100]
-            print(f"[AUDIO_DEBUG]   labels unique (non-ignore): {len(non_ignore_labels)} different tokens", flush=True)
-            print(f"[AUDIO_DEBUG]   labels sample: {non_ignore_labels[:10].tolist() if len(non_ignore_labels) > 0 else 'all ignored'}", flush=True)
 
         if self.debug_logging:
             input_shape = None
@@ -1268,8 +1200,6 @@ class StageATrainer:
         audio_val = audio_loss.item() if isinstance(audio_loss, torch.Tensor) else audio_loss
         retention_val = retention_loss.item() if isinstance(retention_loss, torch.Tensor) else retention_loss
         total_val = total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
-        print(f"[DEBUG] Loss breakdown: audio={audio_val:.4f}, retention={retention_val:.4f}, total={total_val:.4f}", flush=True)
-        print(f"[DEBUG] audio_weight = {self.combined_loss.audio_weight}, retention_weight = {self.combined_loss.retention_weight}", flush=True)
         
         # Update EMA for audio loss learning curves
         if audio_val > 0:  # Only track when we have audio loss

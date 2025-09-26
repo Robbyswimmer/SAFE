@@ -337,10 +337,6 @@ class SAFEModel(nn.Module):
         # Clean NaNs/Infs early in pipeline
         audio_features = torch.nan_to_num(audio_features, nan=0.0, posinf=1.0, neginf=-1.0)
         
-        # Log stage 1 for debugging
-        if getattr(self, "debug_logging", False):
-            feat_norm = audio_features.norm(dim=-1).mean().item() if audio_features.numel() > 0 else 0.0
-            print(f"[MixedPrecisionDebug] Stage1 audio_features: norm={feat_norm:.6f}, dtype={audio_features.dtype}", flush=True)
 
         # Stage 2: Projector processing with consistent dtype
         projector_dtype = next(self.audio_projector.parameters()).dtype
@@ -352,16 +348,10 @@ class SAFEModel(nn.Module):
         # Handle dimensionality for standard projector
         if self.projector_type != "adaptive":
             if audio_features.dim() > 2:
-                if getattr(self, "debug_logging", False):
-                    print(f"[AudioDebug] Reducing audio_features from dim={audio_features.dim()} via mean", flush=True)
                 audio_features = audio_features.mean(dim=1)
             elif audio_features.dim() == 1:
                 audio_features = audio_features.unsqueeze(0)
         
-        # Log stage 2 for debugging
-        if getattr(self, "debug_logging", False):
-            feat_norm = audio_features.norm(dim=-1).mean().item() if audio_features.numel() > 0 else 0.0
-            print(f"[MixedPrecisionDebug] Stage2 projector_input: norm={feat_norm:.6f}, dtype={audio_features.dtype}", flush=True)
 
         # Apply projector with target dtype for LM compatibility
         if self.projector_type == "adaptive":
@@ -372,19 +362,12 @@ class SAFEModel(nn.Module):
         # Stage 3: Final dtype/device conversion with validation
         # Ensure tokens are finite before final conversion
         if not torch.isfinite(audio_tokens).all():
-            if getattr(self, "debug_logging", False):
-                nan_count = (~torch.isfinite(audio_tokens)).sum().item()
-                print(f"[MixedPrecisionDebug] Found {nan_count} non-finite values in audio_tokens, cleaning", flush=True)
             audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=0.1, neginf=-0.1)
 
         # Convert to target dtype/device
         audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
         
-        # Final validation and normalization
-        if getattr(self, "debug_logging", False):
-            token_norm = audio_tokens.norm(dim=-1).mean().item() if audio_tokens.numel() > 0 else 0.0
-            token_max = audio_tokens.abs().max().item() if audio_tokens.numel() > 0 else 0.0
-            print(f"[MixedPrecisionDebug] Final audio_tokens: norm={token_norm:.6f}, max_abs={token_max:.6f}, dtype={audio_tokens.dtype}", flush=True)
+        # Final validation
 
         return audio_tokens, transcripts
 
@@ -415,9 +398,7 @@ class SAFEModel(nn.Module):
         answers: Optional[Union[str, Sequence[Any]]],
         device: torch.device,
     ) -> None:
-        print(f"[ANSWER_DEBUG] _apply_answers_to_inputs called with answers: {answers is not None}", flush=True)
         if answers is None:
-            print(f"[ANSWER_DEBUG] No answers provided - early return", flush=True)
             return
 
         tokenizer = self.base_vl.tokenizer
@@ -428,20 +409,15 @@ class SAFEModel(nn.Module):
         attention_mask = inputs["attention_mask"].to(device)
 
         batch_size = input_ids.size(0)
-        print(f"[ANSWER_DEBUG] batch_size: {batch_size}, answers type: {type(answers)}", flush=True)
 
         if isinstance(answers, str):
             answer_list = [answers] * batch_size
         else:
             answer_list = list(answers) if answers is not None else []
 
-        print(f"[ANSWER_DEBUG] Initial answer_list length: {len(answer_list)}", flush=True)
-        if answer_list:
-            print(f"[ANSWER_DEBUG] Sample answers: {answer_list[:3]}", flush=True)
 
         if len(answer_list) == 0:
             answer_list = [""] * batch_size
-            print(f"[ANSWER_DEBUG] No answers - filled with empty strings", flush=True)
         elif len(answer_list) == 1 and batch_size > 1:
             answer_list = answer_list * batch_size
         elif len(answer_list) != batch_size:
@@ -451,7 +427,6 @@ class SAFEModel(nn.Module):
                 answer_list = answer_list[:batch_size]
         
         non_empty_answers = [a for a in answer_list if a and str(a).strip()]
-        print(f"[ANSWER_DEBUG] Final answer_list: {len(non_empty_answers)}/{len(answer_list)} non-empty", flush=True)
 
         new_input_ids: List[torch.Tensor] = []
         new_attention: List[torch.Tensor] = []
@@ -646,13 +621,12 @@ class SAFEModel(nn.Module):
                 # Further relaxed threshold - many samples were being over-masked
                 sample_absmax = audio_tokens.abs().amax(dim=(1, 2))  # (B,)
                 silent = sample_absmax < 1e-4  # Further relaxed from 1e-6 to 1e-4
-                print(f"[AudioMask] Sample absmax values: min={sample_absmax.min().item():.6e}, max={sample_absmax.max().item():.6e}, mean={sample_absmax.mean().item():.6e}", flush=True)
                 if silent.any():
                     audio_attention_mask[silent] = 0
+                    # Only log if significant number of samples are masked
                     silent_count = silent.sum().item()
-                    print(f"[AudioMask] Masked {silent_count}/{B} silent audio samples (threshold=1e-4)", flush=True)
-                else:
-                    print(f"[AudioMask] No silent audio samples detected (threshold=1e-4)", flush=True)
+                    if silent_count > B // 4:  # More than 25% masked
+                        print(f"INFO: Masked {silent_count}/{B} silent audio samples", flush=True)
                 
                 result["audio_attention_mask"] = audio_attention_mask
 
@@ -1223,8 +1197,6 @@ class SAFEModel(nn.Module):
             inputs_embeds = inputs_embeds.to(base_dtype)
             
             if audio_tokens is not None and gate > 0.0:
-                print(f"[DEBUG] Fusion path: audio_tokens.shape={audio_tokens.shape}, gate={gate}", flush=True)
-                print(f"[DEBUG] Fusion type: {self.fusion_type}", flush=True)
                 
                 # Add finite guards before fusion
                 assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens before fusion"
@@ -1481,21 +1453,9 @@ class SAFEModel(nn.Module):
                     gate=gate,
                 )
 
-                if self.debug_logging:
-                    audio_token_norm = audio_tokens.norm(dim=-1).mean().item()
-                    prompt_delta = (fused_embeds - embeds).abs().mean().item()
-                    print(
-                        "[GenerateDebug] audio_tokens active during fusion | "
-                        f"mean_token_norm={audio_token_norm:.4f} "
-                        f"prompt_delta={prompt_delta:.6f}",
-                        flush=True,
-                    )
-
-                    if gate == 0.0:
-                        print(
-                            "[GenerateDebug] Warning: gate=0 disables audio influence during generation",
-                            flush=True,
-                        )
+                # Warn only if gate is zero (disabling audio)
+                if gate == 0.0:
+                    print("Warning: gate=0 disables audio influence during generation", flush=True)
 
                 base_inputs["inputs_embeds"] = fused_embeds
             else:
@@ -1581,116 +1541,60 @@ class SAFEModel(nn.Module):
         self.to(device)
         
         # Explicitly move all subcomponents with verification
-        print(f"[SAFEModel] Moving base_vl to device...", flush=True)
+        # Move all components to device
         self.base_vl = self.base_vl.to(device)
-        base_vl_device = next(self.base_vl.parameters()).device
-        print(f"[SAFEModel] base_vl now on device: {base_vl_device}", flush=True)
-
+        
         # Determine target dtype from base model embeddings for consistency
         base_embeddings = self.base_vl.llm.get_input_embeddings()
         target_dtype = base_embeddings.weight.dtype
-        print(f"[SAFEModel] Target dtype from base model: {target_dtype}", flush=True)
         
-        print(f"[SAFEModel] Moving audio_encoder to device...", flush=True)
         self.audio_encoder = self.audio_encoder.to(device)
-        audio_enc_device = next(self.audio_encoder.parameters()).device
-        print(f"[SAFEModel] audio_encoder now on device: {audio_enc_device}", flush=True)
-        
-        print(f"[SAFEModel] Moving audio_projector to device (keeping fp32)...", flush=True)
         self.audio_projector = self.audio_projector.to(device=device)  # Device only, keep fp32
-        proj_param = next(self.audio_projector.parameters())
-        proj_device = proj_param.device
-        proj_dtype = proj_param.dtype
-        print(f"[SAFEModel] audio_projector now on device: {proj_device}, dtype: {proj_dtype}", flush=True)
         
         if hasattr(self, 'fusion_adapter') and self.fusion_adapter is not None:
-            print(f"[SAFEModel] Moving fusion_adapter to device (keeping fp32)...", flush=True)
             self.fusion_adapter = self.fusion_adapter.to(device=device)  # Device only, keep fp32
-            fusion_param = next(self.fusion_adapter.parameters())
-            fusion_device = fusion_param.device
-            fusion_dtype = fusion_param.dtype
-            print(f"[SAFEModel] fusion_adapter now on device: {fusion_device}, dtype: {fusion_dtype}", flush=True)
 
         if hasattr(self, 'audio_token_embeddings') and self.audio_token_embeddings is not None:
-            print(f"[SAFEModel] Moving audio_token_embeddings to device...", flush=True)
             # Ensure audio token embeddings match base model dtype
             self.audio_token_embeddings = self.audio_token_embeddings.to(device=device, dtype=target_dtype)
-            embed_device = self.audio_token_embeddings.weight.device
-            embed_dtype = self.audio_token_embeddings.weight.dtype
-            print(f"[SAFEModel] audio_token_embeddings now on device: {embed_device}, dtype: {embed_dtype}", flush=True)
 
         # Final consistency check to ensure everything shares the target dtype
         self.ensure_dtype_consistency()
         
-        print(f"[SAFEModel] All components moved to device successfully", flush=True)
+        print(f"Model moved to device: {device}", flush=True)
         return self
     
     def ensure_dtype_consistency(self):
         """Ensure all model components use consistent dtypes."""
-        print(f"[SAFEModel] Ensuring dtype consistency across all components", flush=True)
-        
-        # Get target dtype from base model
+        # Ensure dtype consistency
         base_embeddings = self.base_vl.llm.get_input_embeddings()
         target_dtype = base_embeddings.weight.dtype
-        print(f"[SAFEModel] Target dtype: {target_dtype}", flush=True)
         
-        # Ensure audio components match
+        # Ensure audio components match target dtype
         if hasattr(self, 'audio_token_embeddings') and self.audio_token_embeddings is not None:
             current_dtype = self.audio_token_embeddings.weight.dtype
             if current_dtype != target_dtype:
-                print(f"[SAFEModel] Converting audio_token_embeddings from {current_dtype} to {target_dtype}", flush=True)
                 self.audio_token_embeddings = self.audio_token_embeddings.to(dtype=target_dtype)
-        
-        # Keep projector in fp32 for numerical stability - do NOT convert dtype
-        try:
-            proj_dtype = next(self.audio_projector.parameters()).dtype
-            print(f"[SAFEModel] audio_projector staying in {proj_dtype} for stability", flush=True)
-        except:
-            print(f"[SAFEModel] Could not check audio_projector dtype", flush=True)
-        
-        # Keep fusion adapter in fp32 for numerical stability - do NOT convert dtype
-        try:
-            fusion_dtype = next(self.fusion_adapter.parameters()).dtype
-            print(f"[SAFEModel] fusion_adapter staying in {fusion_dtype} for stability", flush=True)
-        except:
-            print(f"[SAFEModel] Could not check fusion_adapter dtype", flush=True)
-        
-        print(f"[SAFEModel] Dtype consistency check completed", flush=True)
         return self
     
     def verify_device_placement(self, expected_device):
         """Verify all components are on the expected device."""
-        print(f"[SAFEModel] Verifying device placement, expected: {expected_device}", flush=True)
-        
-        # Check main model
+        # Check device placement
         main_device = next(self.parameters()).device
-        print(f"[DeviceCheck] Main model device: {main_device}", flush=True)
-        
-        # Check base_vl
         base_vl_device = next(self.base_vl.parameters()).device
-        print(f"[DeviceCheck] base_vl device: {base_vl_device}", flush=True)
-        
-        # Check audio_encoder
         audio_enc_device = next(self.audio_encoder.parameters()).device
-        print(f"[DeviceCheck] audio_encoder device: {audio_enc_device}", flush=True)
-        
-        # Check audio_projector
         proj_device = next(self.audio_projector.parameters()).device
-        print(f"[DeviceCheck] audio_projector device: {proj_device}", flush=True)
         
-        # Check if all are on expected device
         devices = [main_device, base_vl_device, audio_enc_device, proj_device]
         expected = torch.device(expected_device)
         
         all_correct = all(d == expected for d in devices)
-        print(f"[DeviceCheck] All components on correct device: {all_correct}", flush=True)
         
         if not all_correct:
-            print(f"[DeviceCheck] ERROR: Device mismatch detected!", flush=True)
+            component_names = ['main', 'base_vl', 'audio_encoder', 'audio_projector']
             for i, d in enumerate(devices):
-                component_names = ['main', 'base_vl', 'audio_encoder', 'audio_projector']
                 if d != expected:
-                    print(f"[DeviceCheck] {component_names[i]} on wrong device: {d} (expected {expected})", flush=True)
+                    print(f"ERROR: {component_names[i]} on wrong device: {d} (expected {expected})", flush=True)
             return False
         
         return True
