@@ -2325,19 +2325,17 @@ class StageATrainer:
             # Use per-sample prompt length to handle left padding correctly
             sample_prompt_len = prompt_lengths[i].item()
 
-            # When audio tokens are prefixed via inputs_embeds the attention mask already
-            # accounts for them. Subtract the audio prefix so we only skip the textual
-            # portion of the prompt when slicing generated tokens. Clamp at zero in case the
-            # audio prefix is larger than the prompt length due to padding edge cases.
-            if audio_prefix > 0:
-                sample_prompt_len = max(0, sample_prompt_len - audio_prefix)
-
+            # The attention mask length already includes any audio placeholder tokens
+            # that were tokenized as part of the text input. We don't need to adjust
+            # for audio_tokens here since they are injected via inputs_embeds and
+            # don't affect the text token count.
             start_idx = sample_prompt_len
 
             if start_idx < generated.shape[1]:
                 new_tokens = generated[i, start_idx:]
                 if self.debug_logging:
-                    print(f"[GenDebug] Sample {i}: start_idx={start_idx}, extracted {len(new_tokens)} new tokens", flush=True)
+                    decoded_new = self.safe_model.base_vl.tokenizer.decode(new_tokens, skip_special_tokens=True)
+                    print(f"[GenDebug] Sample {i}: start_idx={start_idx}, extracted {len(new_tokens)} new tokens: '{decoded_new}'", flush=True)
                 extracted_tokens.append(new_tokens)
             else:
                 if self.debug_logging:
