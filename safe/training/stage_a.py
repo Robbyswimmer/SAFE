@@ -2033,7 +2033,53 @@ class StageATrainer:
             
             # Generate predictions using proper generation (without labels)
             print(f"[PROGRESS] Starting generation for robust accuracy", flush=True)
-            gen_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+            # During training we receive inputs where ground-truth answers have been
+            # appended directly to the prompt (teacher forcing). Generating from those
+            # tensors leaks the correct answer which leads to empty generations and
+            # zero accuracy. Build a clean copy of the prompt that strips answer
+            # tokens so that generation truly reflects model predictions.
+            gen_inputs = {}
+            clone_keys = {"input_ids", "attention_mask"}
+            for key, value in inputs.items():
+                if key == "labels":
+                    continue
+                if isinstance(value, torch.Tensor) and key in clone_keys:
+                    # Clone tensors we intend to mutate so the training graph remains
+                    # untouched for backpropagation.
+                    gen_inputs[key] = value.detach().clone()
+                else:
+                    gen_inputs[key] = value
+
+            labels = inputs.get("labels")
+            attention_mask = gen_inputs.get("attention_mask")
+            input_ids = gen_inputs.get("input_ids")
+
+            if (
+                isinstance(labels, torch.Tensor)
+                and isinstance(attention_mask, torch.Tensor)
+                and isinstance(input_ids, torch.Tensor)
+                # Training-mode batches have -100 for prompt tokens; evaluation batches
+                # copy the prompt into labels directly. Only adjust when we detect the
+                # -100 sentinel within the attended region.
+                and torch.any((labels == -100) & (attention_mask > 0))
+            ):
+                pad_token_id = self.safe_model.base_vl.tokenizer.pad_token_id
+                if pad_token_id is None:
+                    pad_token_id = getattr(self.safe_model.base_vl.tokenizer, "eos_token_id", 0)
+
+                # Strip answer tokens by truncating everything from the first
+                # supervised position onwards. The labels tensor marks answer tokens
+                # with their actual ids while the prompt remains -100.
+                answer_positions = (labels != -100) & (attention_mask > 0)
+                for row in range(labels.size(0)):
+                    row_positions = torch.nonzero(answer_positions[row], as_tuple=False)
+                    if row_positions.numel() == 0:
+                        continue
+                    first_answer_idx = int(row_positions[0].item())
+                    # Zero-out future attention so generation treats these slots as
+                    # padding and produce new tokens instead of echoing labels.
+                    attention_mask[row, first_answer_idx:] = 0
+                    input_ids[row, first_answer_idx:] = pad_token_id
             print(f"[PROGRESS] Generating SAFE predictions...", flush=True)
             safe_pred_tokens = self._generate_predictions(gen_inputs, "safe")
             if self.combined_loss.retention_enabled:
