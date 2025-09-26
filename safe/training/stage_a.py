@@ -911,21 +911,7 @@ class StageATrainer:
         def safe_sqrt(value: float) -> float:
             return float(math.sqrt(value)) if value > 0 else 0.0
 
-        print(
-            "[UpdateDebug] step {}: projector_update={:.6f} (n={}) fusion_update={:.6f} (n={}) "
-            "audio_token_update={:.6f} (n={}) overall_update={:.6f} (n={})".format(
-                self.global_step,
-                safe_sqrt(projector_sq),
-                projector_params,
-                safe_sqrt(fusion_sq),
-                fusion_params,
-                safe_sqrt(token_sq),
-                token_params,
-                safe_sqrt(overall_sq),
-                overall_params,
-            ),
-            flush=True,
-        )
+        # Removed verbose UpdateDebug logging
 
     def _verify_trainable_parameters(self) -> None:
         """Verify which parameters are trainable to debug gradient flow issues."""
@@ -1208,9 +1194,7 @@ class StageATrainer:
             else:
                 self.audio_loss_ema = self.ema_decay * self.audio_loss_ema + (1 - self.ema_decay) * audio_val
             
-            # Log EMA every 10 steps and run ablation every 100 steps
-            if self.global_step % 10 == 0:
-                print(f"[LearningCurve] step {self.global_step}: audio_loss={audio_val:.4f}, audio_ema={self.audio_loss_ema:.4f}", flush=True)
+            # Run ablation every 100 steps
             
             # Run ablation check periodically
             if (self.global_step - self.last_ablation_step >= self.ablation_check_interval and 
@@ -1295,19 +1279,12 @@ class StageATrainer:
                         torch.nan_to_num_(grad, nan=0.0, posinf=self.config["grad_sanitize_clip"], neginf=-self.config["grad_sanitize_clip"])
                         grad.clamp_(-self.config["grad_sanitize_clip"], self.config["grad_sanitize_clip"])
                         if torch.isnan(grad).any() or torch.isinf(grad).any():
-                            print(f"[GradClip] WARNING: NaN/Inf gradient detected, zeroing grad for param shape {param.shape}", flush=True)
                             grad.zero_()
                             nan_grad_count += 1
                         else:
                             sanitized_grad_count += 1
 
-            if nan_grad_count > 0:
-                print(f"[GradClip] step {self.global_step}: Zeroed {nan_grad_count} NaN/Inf gradients", flush=True)
-            if sanitized_grad_count > 0 and self.debug_logging:
-                print(
-                    f"[GradClip] step {self.global_step}: sanitized {sanitized_grad_count} gradients before clipping",
-                    flush=True,
-                )
+            # Keep track of sanitized gradients (logging removed)
             
             # Apply gradient clipping
             grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -1315,9 +1292,7 @@ class StageATrainer:
                 self.config["max_grad_norm"]
             )
             
-            # Log if gradient norm is unusually high
-            if grad_norm > self.config["max_grad_norm"]:
-                print(f"[GradClip] step {self.global_step}: Clipped gradient norm from {grad_norm:.4f} to {self.config['max_grad_norm']}", flush=True)
+            # Track gradient clipping (logging removed)
 
         # Store pre-update parameters for update norm calculation
         pre_update_params = {}
