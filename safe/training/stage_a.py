@@ -1196,7 +1196,7 @@ class StageATrainer:
         step_index = self.global_step + 1
         should_compute = interval > 0 and (step_index <= max(1, warmup) or step_index % interval == 0)
         
-        if self.debug_logging and interval > 0:
+        if interval > 0 and (should_compute or self.debug_logging):
             print(f"[TrainAccDebug] step {step_index}: interval={interval}, warmup={warmup}, should_compute={should_compute}", flush=True)
         
         if should_compute:
@@ -1229,11 +1229,14 @@ class StageATrainer:
                 if safe_acc_list:
                     train_metrics["train_overall_accuracy"] = float(np.mean(safe_acc_list))
 
-                if train_metrics and self.debug_logging:
+                if train_metrics:
                     metrics_str = ", ".join(f"{k}={v:.3f}" for k, v in train_metrics.items())
                     print(f"[TrainAcc] step {step_index}: {metrics_str}", flush=True)
             except Exception as exc:  # pragma: no cover - best effort logging
-                print(f"[TrainAcc] Warning: failed to compute training accuracy ({exc})", flush=True)
+                import traceback
+                print(f"[TrainAcc] ERROR: Failed to compute training accuracy: {exc}", flush=True)
+                if self.debug_logging:
+                    print(f"[TrainAcc] Traceback: {traceback.format_exc()}", flush=True)
 
         log_metrics.update(train_metrics)
 
