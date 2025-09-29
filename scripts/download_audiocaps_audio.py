@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 from tqdm import tqdm
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def check_ytdlp():
     """Check if yt-dlp is installed."""
@@ -55,50 +56,68 @@ def download_audio(youtube_id, output_path, max_retries=3):
     
     return False
 
-def process_audiocaps_csv(csv_path, output_dir, max_downloads=None):
-    """Process AudioCaps CSV and download audio files."""
+def download_single_clip(youtube_id, output_dir):
+    """Download a single audio clip. Returns (youtube_id, success)."""
+    # Skip if already downloaded
+    potential_files = list(output_dir.glob(f"{youtube_id}.*"))
+    if potential_files:
+        return (youtube_id, True, "already_exists")
+
+    # Download
+    success = download_audio(youtube_id, output_dir)
+    return (youtube_id, success, "success" if success else "failed")
+
+
+def process_audiocaps_csv(csv_path, output_dir, max_downloads=None, num_workers=8):
+    """Process AudioCaps CSV and download audio files in parallel."""
     print(f"Processing {csv_path}...")
-    
+
     if not csv_path.exists():
         print(f"CSV file not found: {csv_path}")
         return
-    
+
     # Read CSV
     df = pd.read_csv(csv_path)
-    
+
     # Limit downloads for testing
     if max_downloads:
         df = df.head(max_downloads)
-    
+
     print(f"Found {len(df)} audio clips to download")
-    
+    print(f"Using {num_workers} parallel workers")
+
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Track statistics
     successful = 0
     failed = 0
-    
-    # Download each audio file
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Downloading"):
-        youtube_id = row['youtube_id']
-        
-        # Skip if already downloaded
-        potential_files = list(output_dir.glob(f"{youtube_id}.*"))
-        if potential_files:
-            successful += 1
-            continue
-        
-        # Download
-        if download_audio(youtube_id, output_dir):
-            successful += 1
-        else:
-            failed += 1
-        
-        # Brief pause to avoid rate limiting
-        time.sleep(0.1)
-    
-    print(f"Download complete: {successful} successful, {failed} failed")
+    already_exists = 0
+
+    # Download files in parallel
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all download tasks
+        future_to_id = {
+            executor.submit(download_single_clip, row['youtube_id'], output_dir): row['youtube_id']
+            for idx, row in df.iterrows()
+        }
+
+        # Process completed downloads with progress bar
+        with tqdm(total=len(df), desc="Downloading") as pbar:
+            for future in as_completed(future_to_id):
+                youtube_id, success, status = future.result()
+
+                if status == "already_exists":
+                    already_exists += 1
+                    successful += 1
+                elif success:
+                    successful += 1
+                else:
+                    failed += 1
+
+                pbar.update(1)
+
+    print(f"Download complete: {successful} successful ({already_exists} already existed), {failed} failed")
 
 def main():
     """Main download function."""

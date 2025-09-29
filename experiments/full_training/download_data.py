@@ -416,6 +416,7 @@ def download_audiocaps_audio_from_youtube(
     *,
     splits: List[str],
     max_downloads: Optional[int],
+    num_workers: int = 8,
 ) -> None:
     """Fetch AudioCaps waveforms from YouTube using the project helper script."""
     try:
@@ -465,7 +466,7 @@ def download_audiocaps_audio_from_youtube(
         print(f"\n>>> Fetching AudioCaps audio for split '{split}'")
         print(f"    Metadata: {csv_path}")
         try:
-            downloader.process_audiocaps_csv(csv_path, destination, limit)
+            downloader.process_audiocaps_csv(csv_path, destination, limit, num_workers)
         except Exception as exc:  # noqa: BLE001 - keep script resilient
             print(f"  Failed to download audio for split '{split}': {exc}")
 
@@ -475,11 +476,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage with COCO images
+  # Basic usage with COCO images and parallel downloads
   python -m experiments.full_training.download_data \\
     --audiocaps-url "https://raw.githubusercontent.com/cdjkim/audiocaps/master/dataset/train.csv,..." \\
     --vqa-url "https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Questions_Train_mscoco.zip,..." \\
     --coco-url "http://images.cocodataset.org/zips/train2014.zip,http://images.cocodataset.org/zips/val2014.zip" \\
+    --audiocaps-workers 16 \\
+    --audiocaps-max-downloads 5000 \\
     --resume
 
   # Skip COCO if already downloaded
@@ -561,6 +564,12 @@ Examples:
         default="train,val,test",
         help="Comma-separated AudioCaps splits to download audio for (default: train,val,test)",
     )
+    parser.add_argument(
+        "--audiocaps-workers",
+        type=int,
+        default=8,
+        help="Number of parallel workers for AudioCaps YouTube downloads (default: 8)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -636,6 +645,7 @@ Examples:
                 audiocaps_dir,
                 splits=audio_splits,
                 max_downloads=args.audiocaps_max_downloads,
+                num_workers=args.audiocaps_workers,
             )
 
         # Process VQA URLs
