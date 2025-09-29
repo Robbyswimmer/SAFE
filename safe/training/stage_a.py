@@ -2446,6 +2446,17 @@ class StageATrainer:
 
         lower_answer = answer.lower()
 
+        # First, try to extract text after "ASSISTANT:" marker (case-insensitive)
+        # This handles cases like "reaching for? ASSISTANT: Ball"
+        assistant_match = re.search(r'(?:assistant|ssistant)\s*[:\-]\s*(.+)', lower_answer, re.IGNORECASE)
+        if assistant_match:
+            # Extract everything after ASSISTANT:
+            # Need to extract from original answer to preserve case
+            match_in_original = re.search(r'(?:assistant|ssistant)\s*[:\-]\s*(.+)', answer, re.IGNORECASE)
+            if match_in_original:
+                answer = match_in_original.group(1).strip()
+                lower_answer = answer.lower()
+
         # Remove obvious assistant-style prefixes (including truncated variants).
         prefix_patterns = [
             r"^assistant\s*[:\-]\s*",

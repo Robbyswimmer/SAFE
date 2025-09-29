@@ -57,6 +57,7 @@ DISABLE_EVAL_AUDIO_GATE=${DISABLE_EVAL_AUDIO_GATE:-0}
 EVAL_AUDIO_GATE_COMPARISON=${EVAL_AUDIO_GATE_COMPARISON:-0}
 DISABLE_TRAIN_SHUFFLE=${DISABLE_TRAIN_SHUFFLE:-0}
 DISABLE_VAL_SHUFFLE=${DISABLE_VAL_SHUFFLE:-0}
+VARIANT_ORDER=${VARIANT_ORDER:-"no_retention soft_retention"}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_ROOT"
@@ -66,7 +67,7 @@ if [[ ! -d "$DATA_ROOT" ]]; then
   exit 1
 fi
 
-variants=(no_retention soft_retention)
+variants=($VARIANT_ORDER)
 
 debug_flag=()
 if [[ "$DEBUG_LOGGING" != "0" ]]; then
