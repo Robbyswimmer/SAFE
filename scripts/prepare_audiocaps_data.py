@@ -11,14 +11,14 @@ import pandas as pd
 
 def convert_audiocaps_csv_to_jsonl(csv_path: Path, output_path: Path, audio_dir: Path, split: str):
     """Convert AudioCaps CSV to JSONL format."""
-    print(f"Converting {csv_path} to {output_path}")
+    print(f"Converting {csv_path} to {output_path}", flush=True)
 
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
     # Read CSV
     df = pd.read_csv(csv_path)
-    print(f"Found {len(df)} entries in CSV")
+    print(f"Found {len(df)} entries in CSV", flush=True)
 
     # Expected columns: youtube_id, start_time, caption, audiocap_id
     required_cols = ['youtube_id', 'caption']
@@ -71,9 +71,9 @@ def convert_audiocaps_csv_to_jsonl(csv_path: Path, output_path: Path, audio_dir:
             f.write(json.dumps(entry) + '\n')
             entries_written += 1
 
-    print(f"Wrote {entries_written} entries to {output_path}")
+    print(f"Wrote {entries_written} entries to {output_path}", flush=True)
     if entries_skipped > 0:
-        print(f"Skipped {entries_skipped} entries (no audio file found)")
+        print(f"Skipped {entries_skipped} entries (no audio file found)", flush=True)
 
     return entries_written
 
@@ -95,9 +95,15 @@ def main():
 
     args = parser.parse_args()
 
+    print("Starting AudioCaps CSV to JSONL conversion", flush=True)
+    print(f"Data root: {args.data_root}", flush=True)
+
     data_root = args.data_root.expanduser().resolve()
     audiocaps_dir = data_root / "audiocaps"
     audio_dir = audiocaps_dir / "audio"
+
+    print(f"AudioCaps directory: {audiocaps_dir}", flush=True)
+    print(f"Audio directory: {audio_dir}", flush=True)
 
     if not audiocaps_dir.exists():
         raise FileNotFoundError(f"AudioCaps directory not found: {audiocaps_dir}")
@@ -110,19 +116,19 @@ def main():
         output_path = audiocaps_dir / f"{split}.jsonl"
 
         if not csv_path.exists():
-            print(f"Skipping {split}: CSV not found at {csv_path}")
+            print(f"Skipping {split}: CSV not found at {csv_path}", flush=True)
             continue
 
         entries = convert_audiocaps_csv_to_jsonl(csv_path, output_path, audio_dir, split)
         total_entries += entries
-        print()
+        print(flush=True)
 
-    print(f"✓ Conversion complete! Total entries: {total_entries}")
-    print(f"\nGenerated files:")
+    print(f"✓ Conversion complete! Total entries: {total_entries}", flush=True)
+    print(f"\nGenerated files:", flush=True)
     for split in splits:
         jsonl_path = audiocaps_dir / f"{split}.jsonl"
         if jsonl_path.exists():
-            print(f"  - {jsonl_path}")
+            print(f"  - {jsonl_path}", flush=True)
 
 
 if __name__ == "__main__":
