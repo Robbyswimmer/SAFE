@@ -262,11 +262,11 @@ def validate_audiocaps(audiocaps_dir: Path) -> List[str]:
 def validate_vqa(vqa_dir: Path) -> List[str]:
     """Validate VQA dataset structure."""
     issues = []
-    
+
     if not vqa_dir.exists():
         issues.append(f"VQA directory not found: {vqa_dir}")
         return issues
-    
+
     found_files = list(vqa_dir.rglob('*.json'))
     if not found_files:
         issues.append("No JSON files found in VQA directory")
@@ -276,9 +276,46 @@ def validate_vqa(vqa_dir: Path) -> List[str]:
             issues.append("No question files found (did the zip extract correctly?)")
         if not any('annotation' in f.name.lower() for f in found_files):
             issues.append("No annotation files found")
-    
-    issues.append("Reminder: MSCOCO images (train2014/val2014) must be downloaded separately.")
-    
+
+    return issues
+
+
+def validate_coco(coco_dir: Path) -> List[str]:
+    """Validate MSCOCO dataset structure."""
+    issues = []
+
+    if not coco_dir.exists():
+        issues.append("MSCOCO directory not found (use --coco-url to download)")
+        return issues
+
+    # Check for train2014 and val2014 directories
+    train_dir = None
+    val_dir = None
+
+    for candidate in [coco_dir / "train2014", coco_dir / "images" / "train2014"]:
+        if candidate.exists() and candidate.is_dir():
+            train_dir = candidate
+            break
+
+    for candidate in [coco_dir / "val2014", coco_dir / "images" / "val2014"]:
+        if candidate.exists() and candidate.is_dir():
+            val_dir = candidate
+            break
+
+    if not train_dir:
+        issues.append("train2014 directory not found")
+    else:
+        train_images = list(train_dir.glob("*.jpg"))
+        if not train_images:
+            issues.append("No images found in train2014 directory")
+
+    if not val_dir:
+        issues.append("val2014 directory not found")
+    else:
+        val_images = list(val_dir.glob("*.jpg"))
+        if not val_images:
+            issues.append("No images found in val2014 directory")
+
     return issues
 
 
@@ -286,11 +323,13 @@ def validate_dataset_root(root: Path) -> None:
     """Validate the complete dataset structure."""
     audiocaps_dir = root / 'audiocaps'
     vqa_dir = root / 'vqa'
-    
+    coco_dir = root / 'coco'
+
     issues = []
     issues.extend(validate_audiocaps(audiocaps_dir))
     issues.extend(validate_vqa(vqa_dir))
-    
+    issues.extend(validate_coco(coco_dir))
+
     if issues:
         print("\n⚠️  Dataset validation warnings:")
         for issue in issues:
@@ -436,15 +475,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Single URLs
+  # Basic usage with COCO images
   python -m experiments.full_training.download_data \\
-    --audiocaps-url "https://example.com/audiocaps.tar.gz" \\
-    --vqa-url "https://example.com/vqa.zip"
-  
-  # Multiple URLs (comma-separated)
+    --audiocaps-url "https://raw.githubusercontent.com/cdjkim/audiocaps/master/dataset/train.csv,..." \\
+    --vqa-url "https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Questions_Train_mscoco.zip,..." \\
+    --coco-url "http://images.cocodataset.org/zips/train2014.zip,http://images.cocodataset.org/zips/val2014.zip" \\
+    --resume
+
+  # Skip COCO if already downloaded
   python -m experiments.full_training.download_data \\
-    --audiocaps-url "https://example.com/train.csv,https://example.com/val.csv,https://example.com/test.csv" \\
-    --vqa-url "https://example.com/questions.zip,https://example.com/annotations.zip"
+    --audiocaps-url "..." \\
+    --vqa-url "..." \\
+    --skip-coco
         """
     )
     
@@ -460,9 +502,19 @@ Examples:
         help="HTTP(S) URL(s) for AudioCaps data (comma-separated for multiple files)",
     )
     parser.add_argument(
-        "--vqa-url", 
+        "--vqa-url",
         type=str,
         help="HTTP(S) URL(s) for VQA data (comma-separated for multiple files)",
+    )
+    parser.add_argument(
+        "--coco-url",
+        type=str,
+        help="HTTP(S) URL(s) for MSCOCO images (comma-separated for multiple files)",
+    )
+    parser.add_argument(
+        "--skip-coco",
+        action="store_true",
+        help="Skip downloading MSCOCO images",
     )
     parser.add_argument(
         "--connect-timeout",
@@ -524,20 +576,32 @@ Examples:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
+    # COCO images are optional
+    coco_urls = []
+    if not args.skip_coco:
+        coco_arg = args.coco_url or os.environ.get("SAFE_FULL_COCO_URL")
+        if coco_arg:
+            coco_urls = parse_urls(coco_arg)
+        else:
+            print("\nNote: MSCOCO images not specified. Pass --coco-url or set SAFE_FULL_COCO_URL")
+            print("      to download train2014/val2014 images, or use --skip-coco to suppress this message.")
+
     destination = args.destination.expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    
+
     # Create dataset-specific directories
     audiocaps_dir = destination / "audiocaps"
     vqa_dir = destination / "vqa"
+    coco_dir = destination / "coco"
     archives_dir = destination / "archives"
     archives_dir.mkdir(exist_ok=True)
 
     timeout = (args.connect_timeout, args.read_timeout)
-    
+
     print(f"Downloading to: {destination}")
     print(f"AudioCaps URLs: {len(audiocaps_urls)} files")
     print(f"VQA URLs: {len(vqa_urls)} files")
+    print(f"COCO URLs: {len(coco_urls)} files")
     print(f"Timeout: {timeout}, Retries: {args.retries}")
 
     try:
@@ -578,25 +642,50 @@ Examples:
         print(f"\n=== Downloading VQA ({len(vqa_urls)} files) ===")
         for i, url in enumerate(vqa_urls, 1):
             print(f"\n[{i}/{len(vqa_urls)}] Processing: {url}")
-            
+
             filename = Path(urlparse(url).path).name
             if not filename:
                 filename = f"vqa_file_{i}"
-                
+
             download_path = archives_dir / filename
             downloaded_file = download_file(
                 url, download_path,
                 timeout=timeout,
-                resume=args.resume, 
+                resume=args.resume,
                 retries=args.retries
             )
-            
+
             if is_archive(downloaded_file):
                 extract_archive(downloaded_file, vqa_dir)
                 if not args.keep_archives:
                     downloaded_file.unlink(missing_ok=True)
             else:
                 place_plain_file(downloaded_file, vqa_dir)
+
+        # Process COCO URLs
+        if coco_urls:
+            print(f"\n=== Downloading MSCOCO images ({len(coco_urls)} files) ===")
+            for i, url in enumerate(coco_urls, 1):
+                print(f"\n[{i}/{len(coco_urls)}] Processing: {url}")
+
+                filename = Path(urlparse(url).path).name
+                if not filename:
+                    filename = f"coco_file_{i}"
+
+                download_path = archives_dir / filename
+                downloaded_file = download_file(
+                    url, download_path,
+                    timeout=timeout,
+                    resume=args.resume,
+                    retries=args.retries
+                )
+
+                if is_archive(downloaded_file):
+                    extract_archive(downloaded_file, coco_dir)
+                    if not args.keep_archives:
+                        downloaded_file.unlink(missing_ok=True)
+                else:
+                    place_plain_file(downloaded_file, coco_dir)
 
         # Clean up empty archives directory
         if not args.keep_archives and archives_dir.exists():
@@ -612,6 +701,8 @@ Examples:
         print(f"  Location: {destination}")
         print(f"  AudioCaps: {audiocaps_dir}")
         print(f"  VQA: {vqa_dir}")
+        if coco_urls:
+            print(f"  COCO: {coco_dir}")
         
         return 0
         
