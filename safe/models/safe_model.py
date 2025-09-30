@@ -726,15 +726,33 @@ class SAFEModel(nn.Module):
         # Apply chat template to get proper prompts with <image> tokens
         prompts = []
         for i, conv in enumerate(conversations):
+            print(f"[ChatTemplateDebug] Processing conversation {i}: {conv}", flush=True)
+
+            # Extract the actual question text from the conversation
+            question_text = conv[0]["content"]
+            if isinstance(question_text, list):
+                # Multimodal format: extract text from content list
+                question_text = question_text[1]["text"]
+
+            print(f"[ChatTemplateDebug] Extracted question text: '{question_text}'", flush=True)
+
             try:
                 # Try using processor's chat template first
                 prompt = processor.apply_chat_template(
-                    conv, 
-                    add_generation_prompt=True, 
+                    conv,
+                    add_generation_prompt=True,
                     tokenize=False
                 )
+                print(f"[ChatTemplateDebug] Processor template result: '{prompt}'", flush=True)
+
+                # CRITICAL CHECK: Verify the question text is actually in the prompt
+                if question_text not in prompt and len(prompt) < 50:
+                    print(f"[ChatTemplateDebug] WARNING: Chat template stripped question! Using manual format", flush=True)
+                    raise ValueError("Chat template produced empty or invalid prompt")
+
                 prompts.append(prompt)
-            except (AttributeError, NotImplementedError):
+            except Exception as e:
+                print(f"[ChatTemplateDebug] Processor template failed or invalid: {e}", flush=True)
                 # Fallback: use tokenizer's chat template
                 try:
                     tokenizer = getattr(processor, 'tokenizer', self.base_vl.tokenizer)
@@ -743,22 +761,29 @@ class SAFEModel(nn.Module):
                         add_generation_prompt=True,
                         tokenize=False
                     )
+                    print(f"[ChatTemplateDebug] Tokenizer template result: '{prompt}'", flush=True)
+
+                    # Same check for tokenizer template
+                    if question_text not in prompt and len(prompt) < 50:
+                        print(f"[ChatTemplateDebug] WARNING: Tokenizer template stripped question! Using manual format", flush=True)
+                        raise ValueError("Tokenizer template produced empty or invalid prompt")
+
                     # Manually insert image token if needed
                     if i < len(pil_images) and pil_images[i] is not None:
                         image_token = getattr(processor, 'image_token', '<image>')
-                        prompt = prompt.replace(conv[0]["content"][1]["text"], f"{image_token}\n{conv[0]['content'][1]['text']}")
+                        if image_token not in prompt:
+                            prompt = prompt.replace(question_text, f"{image_token}\n{question_text}")
                     prompts.append(prompt)
-                except (AttributeError, NotImplementedError):
-                    # Final fallback: minimal manual construction
-                    question_text = conv[0]["content"]
-                    if isinstance(question_text, list):
-                        question_text = question_text[1]["text"]
-                    
+                except Exception as e2:
+                    print(f"[ChatTemplateDebug] Tokenizer template also failed: {e2}, using manual format", flush=True)
+                    # Final fallback: simple manual construction like overfitting experiment
                     if i < len(pil_images) and pil_images[i] is not None:
                         image_token = getattr(processor, 'image_token', '<image>')
-                        prompts.append(f"{image_token}\n{question_text}")
+                        manual_prompt = f"USER: {image_token}\n{question_text} ASSISTANT:"
                     else:
-                        prompts.append(question_text)
+                        manual_prompt = f"USER: {question_text} ASSISTANT:"
+                    print(f"[ChatTemplateDebug] Manual format prompt: '{manual_prompt}'", flush=True)
+                    prompts.append(manual_prompt)
         
         num_samples = len(prompts)
         if not pil_images:
