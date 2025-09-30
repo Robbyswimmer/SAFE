@@ -74,6 +74,8 @@ class StageATrainer:
             "distillation_weight": 1.0,
             "distillation_temperature": 3.0,
             "fisher_weight": 0.1,
+            "compute_fisher_at_start": True,  # Compute Fisher information before training starts
+            "fisher_num_samples": 1000,  # Number of samples for Fisher computation
             "save_steps": 5000,
             "eval_steps": 1000,
             "logging_steps": 100,
@@ -718,11 +720,11 @@ class StageATrainer:
         self._attention_logs_emitted += 1
 
     def _log_grad_norms(self) -> None:
+        """Log gradient norms by component with warnings for issues."""
         if not self.config.get("log_grad_norms", False):
             return
         log_limit = int(self.config.get("grad_log_limit", 0))
-        if log_limit and self._grad_logs_emitted >= log_limit:
-            return
+        should_print = not (log_limit and self._grad_logs_emitted >= log_limit)
         interval = max(1, int(self.config.get("grad_log_interval", 1)))
         if self.global_step % interval != 0:
             return
@@ -730,8 +732,9 @@ class StageATrainer:
         projector_sq = 0.0
         fusion_sq = 0.0
         token_sq = 0.0
+        base_vl_sq = 0.0  # NEW: Track base VL gradients
         overall_sq = 0.0
-        projector_params = fusion_params = token_params = overall_params = 0
+        projector_params = fusion_params = token_params = base_vl_params = overall_params = 0
 
         for name, param in self.safe_model.named_parameters():
             if not param.requires_grad or param.grad is None:
@@ -750,26 +753,69 @@ class StageATrainer:
             elif "audio_token_embeddings" in lower:
                 token_sq += norm ** 2
                 token_params += 1
+            elif "base_vl" in lower or "vision_encoder" in lower or "language_model" in lower:
+                # NEW: Track base VL model gradients (should be ~0 if frozen)
+                base_vl_sq += norm ** 2
+                base_vl_params += 1
 
         def safe_sqrt(value: float) -> float:
             return float(math.sqrt(value)) if value > 0 else 0.0
 
-        print(
-            "[GradDebug] step {}: projector_norm={:.6f} (n={}) fusion_norm={:.6f} (n={}) "
-            "audio_token_norm={:.6f} (n={}) overall_norm={:.6f} (n={})".format(
-                self.global_step,
-                safe_sqrt(projector_sq),
-                projector_params,
-                safe_sqrt(fusion_sq),
-                fusion_params,
-                safe_sqrt(token_sq),
-                token_params,
-                safe_sqrt(overall_sq),
-                overall_params,
-            ),
-            flush=True,
-        )
-        self._grad_logs_emitted += 1
+        projector_norm = safe_sqrt(projector_sq)
+        fusion_norm = safe_sqrt(fusion_sq)
+        token_norm = safe_sqrt(token_sq)
+        base_vl_norm = safe_sqrt(base_vl_sq)
+        overall_norm = safe_sqrt(overall_sq)
+
+        # Store in metrics for logging to WandB/TensorBoard
+        if hasattr(self, 'metrics'):
+            self.metrics['grad_norm/projector'] = projector_norm
+            self.metrics['grad_norm/fusion'] = fusion_norm
+            self.metrics['grad_norm/audio_tokens'] = token_norm
+            self.metrics['grad_norm/base_vl'] = base_vl_norm
+            self.metrics['grad_norm/overall'] = overall_norm
+
+        # WARNING: Base VL should not have gradients if frozen
+        if base_vl_norm > 1e-6 and should_print:
+            print(
+                f"⚠️ [GradWarning] step {self.global_step}: Base VL has gradients "
+                f"(norm={base_vl_norm:.6f}, n={base_vl_params}) - should be frozen!",
+                flush=True
+            )
+
+        # WARNING: Vanishing gradients
+        if projector_norm < 1e-6 and projector_params > 0 and self.global_step > 10:
+            print(
+                f"⚠️ [GradWarning] step {self.global_step}: Projector gradients vanishing "
+                f"(norm={projector_norm:.6e})",
+                flush=True
+            )
+        if fusion_norm < 1e-6 and fusion_params > 0 and self.global_step > 10:
+            print(
+                f"⚠️ [GradWarning] step {self.global_step}: Fusion gradients vanishing "
+                f"(norm={fusion_norm:.6e})",
+                flush=True
+            )
+
+        if should_print:
+            print(
+                "[GradNorm] step {}: projector={:.6f} (n={}) fusion={:.6f} (n={}) "
+                "audio_token={:.6f} (n={}) base_vl={:.6f} (n={}) overall={:.6f} (n={})".format(
+                    self.global_step,
+                    projector_norm,
+                    projector_params,
+                    fusion_norm,
+                    fusion_params,
+                    token_norm,
+                    token_params,
+                    base_vl_norm,
+                    base_vl_params,
+                    overall_norm,
+                    overall_params,
+                ),
+                flush=True,
+            )
+            self._grad_logs_emitted += 1
 
     def _sanitize_audio_gradients(self) -> None:
         """Replace NaN/Inf grads on audio modules to keep optimization stable."""
@@ -1647,6 +1693,10 @@ class StageATrainer:
                             f"Eval set has no usable audio (tokens/mask missing) for batch {batch_label}"
                         print(f"[AUDIO_EVAL] Audio batch confirmed: {batch_label}", flush=True)
                     
+                    # IMPORTANT: Preserve original answers from batch BEFORE preprocessing
+                    # These are needed for accuracy computation after generation
+                    original_answers = batch.get("answers", [])
+
                     # Ensure include_audio_tokens=True for audio samples to guarantee audio placeholders in prompts
                     has_audio_data = batch.get("audio", None) is not None
                     inputs = self.safe_model.prepare_multimodal_inputs(
@@ -1658,6 +1708,9 @@ class StageATrainer:
                         include_audio_tokens=has_audio_data,  # Critical: ensure audio placeholders for audio samples
                         training_mode=False  # Inference mode - no answer application
                     )
+
+                    # Add preserved answers back to inputs for accuracy computation
+                    inputs["original_answers"] = original_answers
                     
                     # Debug multimodal input preparation
                     if "attention_mask" in inputs:
@@ -2205,14 +2258,19 @@ class StageATrainer:
         base_accuracies = [0.0] * batch_size
         
         try:
-            # Get ground truth answers
-            if "answers" in batch:
-                gt_answers = batch["answers"]
-                # Debug: Check what we're getting from the batch
+            # Get ground truth answers (preserved from original batch before preprocessing)
+            if "original_answers" in inputs:
+                gt_answers = inputs["original_answers"]
+                # Debug: Check what we're getting from the preserved answers
                 if self.debug_logging and len(gt_answers) > 0:
                     print(f"[AnswerDebug] Batch has {len(gt_answers)} answers", flush=True)
                     print(f"[AnswerDebug] First answer type: {type(gt_answers[0])}", flush=True)
                     print(f"[AnswerDebug] First answer value: '{gt_answers[0]}'", flush=True)
+            elif "answers" in batch:
+                # Fallback for backwards compatibility
+                gt_answers = batch["answers"]
+                if self.debug_logging and len(gt_answers) > 0:
+                    print(f"[AnswerDebug] Using batch['answers'] (fallback)", flush=True)
             elif "labels" in inputs:
                 # Decode labels to text (skip padding tokens)
                 labels = inputs["labels"]
@@ -2520,10 +2578,15 @@ class StageATrainer:
             num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
-            repetition_penalty=1.0,
+            repetition_penalty=1.2,  # Increased from 1.0 to prevent getting stuck repeating tokens
             output_scores=False,
             return_dict_in_generate=False
         )
+
+        # Debug: Verify tokenizer EOS setup
+        if self.debug_logging:
+            print(f"[GenDebug] Tokenizer EOS: token='{tok.eos_token}', id={tok.eos_token_id}", flush=True)
+            print(f"[GenDebug] Tokenizer PAD: token='{tok.pad_token}', id={tok.pad_token_id}", flush=True)
         if self.debug_logging:
             print(f"[GenDebug] Generation kwargs: {gen_kwargs}", flush=True)
 
@@ -2885,11 +2948,37 @@ class StageATrainer:
         else:
             return self._train_traditional()
     
+    def _compute_fisher_information(self):
+        """Compute Fisher information matrix before training starts."""
+        if not self.config.get("compute_fisher_at_start", False):
+            return
+        if self.config.get("fisher_weight", 0.0) <= 0:
+            print("Skipping Fisher computation (fisher_weight=0)", flush=True)
+            return
+
+        print("🔍 Computing Fisher information matrix for retention...", flush=True)
+        num_samples = self.config.get("fisher_num_samples", 1000)
+
+        try:
+            # Compute Fisher using VL validation data
+            fisher_info = self.retention_loss.compute_fisher_information(
+                self.safe_model.base_vl,
+                self.val_dataloader,
+                num_samples=num_samples
+            )
+            print(f"✓ Fisher information computed from {num_samples} samples", flush=True)
+        except Exception as e:
+            print(f"⚠️ Fisher computation failed: {e}", flush=True)
+            print("   Continuing without Fisher information", flush=True)
+
     def _train_with_curriculum(self):
         """Training loop with curriculum learning."""
         print("🎓 Starting Stage A training with curriculum learning...", flush=True)
         print(f"Curriculum has {self.curriculum_manager.config.get_num_stages()} stages", flush=True)
-        
+
+        # Compute Fisher information if enabled
+        self._compute_fisher_information()
+
         # Compute baseline metrics before training (quick evaluation)
         print("Computing baseline metrics (quick evaluation)...", flush=True)
         baseline_metrics = self.evaluate(max_batches=50)  # Only evaluate first 50 batches
@@ -3070,6 +3159,9 @@ class StageATrainer:
         """Traditional fixed-epoch training loop."""
         print(f"Starting Stage A training for {self.config['num_epochs']} epochs...", flush=True)
         print(f"Total training steps: {len(self.train_dataloader) * self.config['num_epochs']}", flush=True)
+
+        # Compute Fisher information if enabled
+        self._compute_fisher_information()
 
         # Compute baseline retention score
         print("Computing baseline metrics...", flush=True)

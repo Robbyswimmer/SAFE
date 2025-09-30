@@ -15,6 +15,7 @@ import torch
 from torch.utils.data import Dataset
 
 from configs.model_configs import DEMO_CONFIG, FULL_CONFIG, MULTIMODAL_CONFIG
+from configs.retention_variants import get_variant_config, RETENTION_VARIANTS
 from safe.data.datasets import AudioCapsDataset, VQADataset, create_safe_dataloader
 from safe.models.safe_model import SAFEModel
 from safe.training.stage_a import StageATrainer
@@ -98,21 +99,32 @@ def set_random_seeds(seed: int) -> None:
 
 
 def configure_variant(variant: str, base_config: TrainingConfig) -> TrainingConfig:
+    """
+    Configure training based on retention variant.
+
+    Uses centralized retention variant configs from configs/retention_variants.py
+    """
     variant = variant.lower()
     cfg = base_config
 
-    if variant == "no_retention":
-        cfg.retention_loss_weight = 0.0
-        cfg.distillation_weight = 0.0
-        cfg.fisher_weight = 0.0
-        cfg.enable_null_space = False
-    elif variant == "soft_retention":
-        cfg.retention_loss_weight = 0.2
-        cfg.distillation_weight = 0.2
-        cfg.fisher_weight = 0.0
-        cfg.enable_null_space = False
-    else:
-        raise ValueError(f"Unknown variant '{variant}'")
+    # Get retention variant configuration
+    try:
+        retention_config = get_variant_config(variant)
+    except ValueError as e:
+        # List available variants
+        available = ", ".join(RETENTION_VARIANTS.keys())
+        raise ValueError(
+            f"Unknown variant '{variant}'. Available variants: {available}"
+        ) from e
+
+    # Apply retention configuration
+    cfg.retention_loss_weight = retention_config.retention_loss_weight
+    cfg.distillation_weight = retention_config.distillation_weight
+    cfg.fisher_weight = retention_config.fisher_weight
+    cfg.enable_null_space = retention_config.enable_null_space
+    cfg.null_space_rank = retention_config.null_space_rank
+    cfg.null_space_min_samples = retention_config.null_space_min_samples
+    cfg.null_space_refresh_interval = retention_config.null_space_refresh_interval
 
     cfg.variant = variant
     return cfg

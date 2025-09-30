@@ -69,12 +69,15 @@ class CrossAttentionBlock(nn.Module):
     ) -> torch.Tensor:
         """
         Forward pass of cross-attention.
-        
+
         Args:
             hidden_states: (batch_size, seq_len, hidden_size) - LLM hidden states (Query)
             audio_tokens: (batch_size, num_audio_tokens, hidden_size) - Audio tokens (Key/Value)
-            attention_mask: Optional mask for audio tokens
-            
+            attention_mask: Optional mask for audio tokens in standard 0/1 format:
+                          - 1 = attend to this token
+                          - 0 = ignore/mask this token
+                          Can be boolean (True=attend, False=ignore) or float
+
         Returns:
             output: (batch_size, seq_len, hidden_size) - Fused representations
         """
@@ -114,32 +117,28 @@ class CrossAttentionBlock(nn.Module):
         attention_scores = torch.clamp(attention_scores, min=-50.0, max=50.0)
         attention_scores = torch.nan_to_num(attention_scores, nan=0.0, posinf=50.0, neginf=-50.0)
         
-        # Apply attention mask robustly
+        # Apply attention mask with standardized format
+        # STANDARD FORMAT: attention_mask uses 0/1 where 1=attend, 0=ignore
         if attention_mask is not None:
-            # 1) Coerce to float, scrub NaNs and move to correct device
+            # Standardize mask to boolean tensor
             mask = attention_mask.to(device=attention_scores.device)
+
             if mask.dtype == torch.bool:
-                keep_mask = mask
+                # Already boolean: True=attend, False=ignore
+                attend_mask = mask
             else:
+                # Convert to float and clean NaNs
                 mask = mask.to(attention_scores.dtype)
                 mask = torch.nan_to_num(mask, nan=0.0, posinf=1.0, neginf=0.0)
+                # Standard interpretation: 1=attend, 0=ignore
+                attend_mask = mask > 0.5
 
-                # Interpret values based on range:
-                mask_min = float(mask.min().item()) if mask.numel() > 0 else 0.0
-                mask_max = float(mask.max().item()) if mask.numel() > 0 else 1.0
+            # Expand to (B,1,1,L) for broadcasting across heads and sequence
+            while attend_mask.dim() < attention_scores.dim():
+                attend_mask = attend_mask.unsqueeze(-2)
 
-                if mask_min < -1e-2:  # Additive mask style (0 keep, -inf mask)
-                    keep_mask = mask > (mask_min * 0.5)
-                elif mask_max <= 1.0 and mask_min >= 0.0:
-                    keep_mask = mask > 0.5
-                else:
-                    keep_mask = mask > 0.0
-
-            # 2) Expand to (B,1,1,L) for broadcasting
-            while keep_mask.dim() < attention_scores.dim():
-                keep_mask = keep_mask.unsqueeze(-2)
-
-            mask_bool = ~keep_mask
+            # Mask out positions that should be ignored (attend_mask=False)
+            mask_bool = ~attend_mask
 
             # 3) Use moderate negative, then clamp back to safe softmax range
             attention_scores = attention_scores.masked_fill(mask_bool, -1e4)

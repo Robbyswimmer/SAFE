@@ -87,13 +87,20 @@ RL Policy: Should we use audio for this query?
 - **Total trainable**: 52M parameters (1.08% of model)
 
 ### Training Safety Net
-1. **Knowledge distillation** (KL divergence): Maintains base VL behavior when gate=0 *[Active in soft_retention variant]*
-2. **Fisher Information regularization**: Prevents drift in frozen components *[Implemented but currently disabled]*
-3. **Null-space gradient projection**: Protects VL directions *[Implemented but currently disabled]*
+1. **Knowledge distillation** (KL divergence): Maintains base VL behavior when gate=0 *[Active in all retention variants]*
+2. **Fisher Information regularization**: Prevents drift in frozen components *[Active in fisher_retention and full_retention variants]*
+3. **Null-space gradient projection**: Protects VL directions *[Active in nullspace_retention and full_retention variants]*
 4. **Curriculum learning**: Gradual audio exposure (25% → 100%) *[Planned]*
 5. **Lagrangian constraints**: Hard performance floors on VL tasks *[For Stage B RL training]*
 
-**Current Experiments**: Focus on comparing `no_retention` (no distillation) vs `soft_retention` (KL divergence weight=0.2) variants.
+**Retention Variants Available:**
+| Variant | KL Distillation | Fisher Info | Null-Space | Description |
+|---------|----------------|-------------|------------|-------------|
+| `no_retention` | ✗ | ✗ | ✗ | Baseline (no retention) |
+| `soft_retention` | ✓ | ✗ | ✗ | KL divergence only |
+| `fisher_retention` | ✓ | ✓ | ✗ | KL + Fisher weighting |
+| `nullspace_retention` | ✓ | ✗ | ✓ | KL + gradient projection |
+| `full_retention` | ✓ | ✓ | ✓ | All mechanisms enabled |
 
 ### Parameter Efficiency
 - **Traditional fine-tuning**: 7B+ parameters at risk

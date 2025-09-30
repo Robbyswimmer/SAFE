@@ -23,7 +23,7 @@ class NullSpaceConfig:
     max_rank: int = 8
     min_samples: int = 32
     max_samples: int = 128
-    audio_ratio_threshold: float = 0.25
+    audio_ratio_threshold: float = 0.01  # Collect from VL-only batches (0% audio, with small tolerance)
     refresh_interval: Optional[int] = 2000
     verbose: bool = False
 
@@ -62,9 +62,17 @@ class NullSpaceProjector:
             print("[NullSpace] Resetting protected subspace")
 
     def _collectable(self, has_audio: torch.Tensor) -> bool:
+        """
+        Determine if this batch should be used for collecting VL retention gradients.
+
+        We want to protect VL-only directions, so we collect from VL-only batches
+        (audio_ratio ≈ 0), NOT from mixed batches.
+        """
         if has_audio is None or has_audio.numel() == 0:
+            # Empty batch - treat as VL-only for safety
             return True
         audio_ratio = has_audio.float().mean().item()
+        # Collect only from VL-only batches (with small tolerance for floating point)
         return audio_ratio <= self.config.audio_ratio_threshold
 
     def _maybe_refresh(self, step: int) -> None:
