@@ -222,17 +222,21 @@ class AudioCapsDataset(_BaseQADataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
         entry = self.examples[idx]
         question = entry.get("question") or "What is happening in the audio?"
-        answers = entry.get("answers") or entry.get("caption") or entry.get("captions")
 
-        # Debug: Log first few samples to diagnose missing answers
+        # Try multiple field names for answers (datasets use different conventions)
+        answers = (
+            entry.get("answers") or      # Plural form
+            entry.get("answer") or        # Singular form (what full_training data uses)
+            entry.get("caption") or       # AudioCaps caption field
+            entry.get("captions")         # Plural captions
+        )
+
+        # Debug: Log first few samples to verify answer loading
         if idx < 3:
             print(f"[AudioCapsDebug] Sample {idx}:", flush=True)
             print(f"  Entry keys: {list(entry.keys())}", flush=True)
-            print(f"  'answers' field: {entry.get('answers')}", flush=True)
-            print(f"  'caption' field: {entry.get('caption')}", flush=True)
-            print(f"  'captions' field: {entry.get('captions')}", flush=True)
+            print(f"  'answer' field: {entry.get('answer')}", flush=True)
             print(f"  Final answers value: {answers}", flush=True)
-            print(f"  Answer type: {type(answers)}", flush=True)
 
         sample = {
             "sample_id": entry.get("id") or entry.get("ytid"),
