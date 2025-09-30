@@ -194,10 +194,21 @@ class _BaseQADataset(Dataset):
     # ------------------------------------------------------------------
     def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
         entry = self.examples[idx]
+        answer_value = entry.get("answers") or entry.get("answer")
+
+        # Debug: Log first sample to verify data loading
+        if idx == 0:
+            import sys
+            print(f"[DatasetDebug] First sample loaded:", file=sys.stderr, flush=True)
+            print(f"  Entry keys: {list(entry.keys())}", file=sys.stderr, flush=True)
+            print(f"  Question: '{entry.get('question', '')[:50]}'", file=sys.stderr, flush=True)
+            print(f"  Answer: '{answer_value}'", file=sys.stderr, flush=True)
+            print(f"  Audio path: '{entry.get('audio_path', entry.get('audio', 'N/A'))}'", file=sys.stderr, flush=True)
+
         sample = {
             "sample_id": entry.get("id") or entry.get("sample_id"),
             "question": entry.get("question") or entry.get("prompt") or "",
-            "answers": entry.get("answers") or entry.get("answer"),
+            "answers": answer_value,
             "audio": self._load_audio(entry),
             "images": self._load_image(entry),
             "difficulty": entry.get("difficulty"),

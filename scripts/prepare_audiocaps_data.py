@@ -81,10 +81,10 @@ def convert_audiocaps_csv_to_jsonl(csv_path: Path, output_path: Path, audio_dir:
 def main():
     parser = argparse.ArgumentParser(description="Convert AudioCaps CSV to JSONL")
     parser.add_argument(
-        "--data-root",
+        "--audiocaps-dir",
         type=Path,
-        default=Path("experiments/full_training/data"),
-        help="Root directory containing audiocaps data"
+        default=None,
+        help="AudioCaps directory (default: experiments/full_training/data/audiocaps or data/audiocaps)"
     )
     parser.add_argument(
         "--splits",
@@ -96,10 +96,29 @@ def main():
     args = parser.parse_args()
 
     print("Starting AudioCaps CSV to JSONL conversion", flush=True)
-    print(f"Data root: {args.data_root}", flush=True)
 
-    data_root = args.data_root.expanduser().resolve()
-    audiocaps_dir = data_root / "audiocaps"
+    # Auto-detect audiocaps directory if not specified
+    if args.audiocaps_dir:
+        audiocaps_dir = args.audiocaps_dir.expanduser().resolve()
+    else:
+        # Try common locations
+        candidates = [
+            Path("experiments/full_training/data/audiocaps"),
+            Path("data/audiocaps"),
+        ]
+        audiocaps_dir = None
+        for candidate in candidates:
+            if candidate.exists():
+                audiocaps_dir = candidate.resolve()
+                print(f"Auto-detected audiocaps directory: {audiocaps_dir}", flush=True)
+                break
+
+        if audiocaps_dir is None:
+            raise FileNotFoundError(
+                f"AudioCaps directory not found. Tried: {[str(c) for c in candidates]}\n"
+                f"Use --audiocaps-dir to specify the location."
+            )
+
     audio_dir = audiocaps_dir / "audio"
 
     print(f"AudioCaps directory: {audiocaps_dir}", flush=True)

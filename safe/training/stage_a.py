@@ -2208,6 +2208,11 @@ class StageATrainer:
             # Get ground truth answers
             if "answers" in batch:
                 gt_answers = batch["answers"]
+                # Debug: Check what we're getting from the batch
+                if self.debug_logging and len(gt_answers) > 0:
+                    print(f"[AnswerDebug] Batch has {len(gt_answers)} answers", flush=True)
+                    print(f"[AnswerDebug] First answer type: {type(gt_answers[0])}", flush=True)
+                    print(f"[AnswerDebug] First answer value: '{gt_answers[0]}'", flush=True)
             elif "labels" in inputs:
                 # Decode labels to text (skip padding tokens)
                 labels = inputs["labels"]
