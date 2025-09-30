@@ -698,92 +698,26 @@ class SAFEModel(nn.Module):
                     # Single image
                     pil_images = [self._convert_to_pil(images)]
         
-        # Build LLaVA chat conversations with concise, clear prompts
-        conversations = []
-        instruction = "Answer in one word or a number."  # Shortened to reduce token count
-        
-        for i, question in enumerate(texts):
-            # Create concise prompt combining question and instruction
-            prompt_text = f"{instruction} Question: {question}"
-            
-            if i < len(pil_images) and pil_images[i] is not None:
-                # Multimodal conversation - use proper format for LLaVA
-                conversations.append([
-                    {
-                        "role": "user", 
-                        "content": [
-                            {"type": "image"}, 
-                            {"type": "text", "text": prompt_text}
-                        ]
-                    }
-                ])
-            else:
-                # Text-only conversation
-                conversations.append([
-                    {"role": "user", "content": prompt_text}
-                ])
-        
-        # Apply chat template to get proper prompts with <image> tokens
+        # Build simple prompts directly (chat templates are broken/not configured)
+        # Use the same approach as the working overfitting experiment
         prompts = []
-        for i, conv in enumerate(conversations):
-            print(f"[ChatTemplateDebug] Processing conversation {i}: {conv}", flush=True)
+        image_token = getattr(processor, 'image_token', '<image>')
 
-            # Extract the actual question text from the conversation
-            question_text = conv[0]["content"]
-            if isinstance(question_text, list):
-                # Multimodal format: extract text from content list
-                question_text = question_text[1]["text"]
+        for i, question in enumerate(texts):
+            # Simple format: USER: <question> ASSISTANT:
+            # This matches the working overfitting experiment format
+            if i < len(pil_images) and pil_images[i] is not None:
+                # Multimodal: include image token
+                prompt = f"USER: {image_token}\n{question} ASSISTANT:"
+            else:
+                # Text-only
+                prompt = f"USER: {question} ASSISTANT:"
 
-            print(f"[ChatTemplateDebug] Extracted question text: '{question_text}'", flush=True)
+            prompts.append(prompt)
 
-            try:
-                # Try using processor's chat template first
-                prompt = processor.apply_chat_template(
-                    conv,
-                    add_generation_prompt=True,
-                    tokenize=False
-                )
-                print(f"[ChatTemplateDebug] Processor template result: '{prompt}'", flush=True)
-
-                # CRITICAL CHECK: Verify the question text is actually in the prompt
-                if question_text not in prompt and len(prompt) < 50:
-                    print(f"[ChatTemplateDebug] WARNING: Chat template stripped question! Using manual format", flush=True)
-                    raise ValueError("Chat template produced empty or invalid prompt")
-
-                prompts.append(prompt)
-            except Exception as e:
-                print(f"[ChatTemplateDebug] Processor template failed or invalid: {e}", flush=True)
-                # Fallback: use tokenizer's chat template
-                try:
-                    tokenizer = getattr(processor, 'tokenizer', self.base_vl.tokenizer)
-                    prompt = tokenizer.apply_chat_template(
-                        conv,
-                        add_generation_prompt=True,
-                        tokenize=False
-                    )
-                    print(f"[ChatTemplateDebug] Tokenizer template result: '{prompt}'", flush=True)
-
-                    # Same check for tokenizer template
-                    if question_text not in prompt and len(prompt) < 50:
-                        print(f"[ChatTemplateDebug] WARNING: Tokenizer template stripped question! Using manual format", flush=True)
-                        raise ValueError("Tokenizer template produced empty or invalid prompt")
-
-                    # Manually insert image token if needed
-                    if i < len(pil_images) and pil_images[i] is not None:
-                        image_token = getattr(processor, 'image_token', '<image>')
-                        if image_token not in prompt:
-                            prompt = prompt.replace(question_text, f"{image_token}\n{question_text}")
-                    prompts.append(prompt)
-                except Exception as e2:
-                    print(f"[ChatTemplateDebug] Tokenizer template also failed: {e2}, using manual format", flush=True)
-                    # Final fallback: simple manual construction like overfitting experiment
-                    if i < len(pil_images) and pil_images[i] is not None:
-                        image_token = getattr(processor, 'image_token', '<image>')
-                        manual_prompt = f"USER: {image_token}\n{question_text} ASSISTANT:"
-                    else:
-                        manual_prompt = f"USER: {question_text} ASSISTANT:"
-                    print(f"[ChatTemplateDebug] Manual format prompt: '{manual_prompt}'", flush=True)
-                    prompts.append(manual_prompt)
+            # Debug: show first prompt
+            if i == 0:
+                print(f"[PromptDebug] First prompt: '{prompt}'", flush=True)
         
         num_samples = len(prompts)
         if not pil_images:
