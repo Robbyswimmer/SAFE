@@ -538,6 +538,14 @@ class SAFEModel(nn.Module):
         if self.base_vl.ensure_left_padding():
             print("[SAFEModel] Re-applied left padding configuration before multimodal prep", flush=True)
 
+        # DEBUG: Check inputs to prepare_multimodal_inputs
+        if isinstance(text, list):
+            print(f"[PrepDebug] Received {len(text)} questions", flush=True)
+            if len(text) > 0:
+                print(f"[PrepDebug] First question: '{text[0]}'", flush=True)
+        else:
+            print(f"[PrepDebug] Received single question: '{text}'", flush=True)
+
         # For LLaVA/BLIP2, use proper multimodal input preparation
         if self.base_vl.model_type == "llava":
             # LLaVA-specific handling with chat templates and proper <image> token insertion
@@ -650,9 +658,9 @@ class SAFEModel(nn.Module):
         return result
     
     def _prepare_llava_inputs(
-        self, 
-        text: Union[str, List[str]], 
-        images: Optional[Union[torch.Tensor, List]] = None, 
+        self,
+        text: Union[str, List[str]],
+        images: Optional[Union[torch.Tensor, List]] = None,
         device: str = "cuda"
     ) -> Dict[str, torch.Tensor]:
         """
@@ -660,14 +668,19 @@ class SAFEModel(nn.Module):
         """
         from PIL import Image
         from pathlib import Path
-        
+
         processor = self.base_vl.processor
-        
+
         # Ensure we have lists for batch processing
         if isinstance(text, str):
             texts = [text]
         else:
             texts = text
+
+        # DEBUG: Check what questions we're receiving
+        print(f"[LLaVADebug] Received {len(texts)} text inputs", flush=True)
+        if len(texts) > 0:
+            print(f"[LLaVADebug] First text: '{texts[0]}'", flush=True)
         
         # Convert images to PIL format if needed
         pil_images = []
