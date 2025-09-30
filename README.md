@@ -11,8 +11,8 @@ Production VL models (BLIP-2, LLaVA) lack audio understanding, but traditional a
 
 ## Key Innovations
 
-- **Zero Regression Architecture**: Gated bypass mechanism with mathematical guarantees for preserving base VL performance
-- **Efficiency-Aware Design**: Learned policy for selective audio processing with substantial computational savings
+- **Zero Regression Architecture**: Gated bypass mechanism with architectural properties designed to preserve base VL performance
+- **Efficiency-Aware Design**: Learned policy for selective audio processing with substantial computational savings *[Stage B - Planned]*
 - **Safety-First Training**: Multi-stage curriculum with retention constraints and validation protocols
 - **Modular Implementation**: Clean separation enabling easy integration with existing VL architectures
 

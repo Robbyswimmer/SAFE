@@ -1973,10 +1973,16 @@ class StageATrainer:
         
         print(f"\nAccuracy Results:", flush=True)
         if audio_total > 0:
-            print(f"  🎵 Audio Task Accuracy: {audio_accuracy:.3f} ({audio_correct}/{audio_total})", flush=True)
+            audio_ci_lower, audio_ci_upper = self._compute_confidence_interval(audio_correct, audio_total)
+            print(f"  🎵 Audio Task Accuracy: {audio_accuracy:.3f} ({audio_correct}/{audio_total}) "
+                  f"[95% CI: {audio_ci_lower:.1f}%-{audio_ci_upper:.1f}%]", flush=True)
         if vl_total > 0:
-            print(f"  🔥 SAFE VL Accuracy: {vl_safe_accuracy:.3f} ({vl_safe_correct}/{vl_total})", flush=True)
-            print(f"  📊 Base VL Accuracy: {vl_base_accuracy:.3f} ({vl_base_correct}/{vl_total})", flush=True)
+            vl_safe_ci_lower, vl_safe_ci_upper = self._compute_confidence_interval(vl_safe_correct, vl_total)
+            vl_base_ci_lower, vl_base_ci_upper = self._compute_confidence_interval(vl_base_correct, vl_total)
+            print(f"  🔥 SAFE VL Accuracy: {vl_safe_accuracy:.3f} ({vl_safe_correct}/{vl_total}) "
+                  f"[95% CI: {vl_safe_ci_lower:.1f}%-{vl_safe_ci_upper:.1f}%]", flush=True)
+            print(f"  📊 Base VL Accuracy: {vl_base_accuracy:.3f} ({vl_base_correct}/{vl_total}) "
+                  f"[95% CI: {vl_base_ci_lower:.1f}%-{vl_base_ci_upper:.1f}%]", flush=True)
             print(f"  📈 Retention Score: {retention_score:.3f} (SAFE/Base ratio)", flush=True)
             
             # Calculate VL drift if we have both audio and VL evaluation
@@ -1985,9 +1991,201 @@ class StageATrainer:
                 print(f"  ⚠️  VL Drift: {vl_drift:+.1f}% (performance change with audio enabled)", flush=True)
         
         print(f"==============================\n", flush=True)
-        
+
         return eval_metrics
-    
+
+    def evaluate_gate_zero_retention(
+        self,
+        max_batches: Optional[int] = None,
+        dataloader: Optional[torch.utils.data.DataLoader] = None
+    ) -> Dict[str, float]:
+        """
+        Evaluate SAFE model with gate=0 and compare to original VL baseline.
+        This validates the core retention property: SAFE(gate=0) ≈ Original_VL
+
+        Args:
+            max_batches: Optional limit on number of batches to evaluate
+            dataloader: Optional dataloader (defaults to validation VL-only data)
+
+        Returns:
+            Dictionary with retention validation metrics
+        """
+        previous_mode = self.safe_model.training
+        self.safe_model.eval()
+
+        data_source = dataloader if dataloader is not None else self.val_dataloader
+        if data_source is None:
+            print("Warning: No dataloader available for gate=0 retention validation", flush=True)
+            return {"gate_zero_accuracy": 0.0, "original_accuracy": 0.0, "retention_degradation": 0.0}
+
+        # Save current gate state
+        saved_gate = None
+        if hasattr(self.safe_model, 'get_gate'):
+            try:
+                saved_gate = self.safe_model.get_gate()
+            except:
+                saved_gate = 1.0
+        elif hasattr(self.safe_model, '_default_gate'):
+            saved_gate = self.safe_model._default_gate
+        else:
+            saved_gate = 1.0
+
+        print("\n" + "="*60, flush=True)
+        print("GATE=0 RETENTION VALIDATION", flush=True)
+        print("="*60, flush=True)
+
+        gate_zero_correct = 0
+        gate_zero_total = 0
+
+        try:
+            # Set gate to 0 for SAFE model
+            if hasattr(self.safe_model, 'set_gate'):
+                self.safe_model.set_gate(0.0)
+                print("✓ Set SAFE model gate=0", flush=True)
+
+            with torch.no_grad():
+                batch_count = 0
+                for batch_idx, batch in enumerate(data_source):
+                    if max_batches is not None and batch_idx >= max_batches:
+                        break
+
+                    batch_count += 1
+
+                    # Move to device
+                    device = next(self.safe_model.parameters()).device
+                    inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                             for k, v in batch.items()}
+
+                    # Filter out audio data for VL-only evaluation
+                    inputs_vl_only = {k: v for k, v in inputs.items()
+                                     if k not in ['audio', 'audio_features', 'has_audio']}
+
+                    # Check if this is actually VL-only data
+                    has_audio = inputs.get('has_audio')
+                    if has_audio is not None and torch.any(has_audio):
+                        continue  # Skip batches with audio for pure VL retention test
+
+                    # Generate predictions with SAFE(gate=0)
+                    generation_config = {
+                        "max_new_tokens": self.config.get("generation_max_new_tokens", 32),
+                        "do_sample": False,
+                        "temperature": None,
+                        "top_p": None,
+                    }
+
+                    try:
+                        generated_ids = self.safe_model.generate(
+                            **inputs_vl_only,
+                            **generation_config
+                        )
+
+                        # Decode and extract answers
+                        for i in range(generated_ids.size(0)):
+                            gen_text = self.safe_model.get_tokenizer().decode(
+                                generated_ids[i],
+                                skip_special_tokens=True
+                            )
+                            pred_answer = self._extract_answer(gen_text)
+
+                            # Get ground truth
+                            gt_answer = batch.get("answer")
+                            if gt_answer is not None:
+                                if isinstance(gt_answer, torch.Tensor):
+                                    gt_answer = gt_answer[i]
+                                elif isinstance(gt_answer, list):
+                                    gt_answer = gt_answer[i]
+
+                                # Compute accuracy
+                                acc = self._compute_answer_accuracy(pred_answer, gt_answer)
+                                gate_zero_correct += acc
+                                gate_zero_total += 1
+
+                    except Exception as e:
+                        if batch_idx == 0:
+                            print(f"Warning: Generation failed in gate=0 eval: {e}", flush=True)
+                        continue
+
+                print(f"Evaluated {batch_count} batches, {gate_zero_total} samples", flush=True)
+
+        finally:
+            # Restore gate
+            if hasattr(self.safe_model, 'set_gate') and saved_gate is not None:
+                self.safe_model.set_gate(saved_gate)
+                print(f"✓ Restored gate to {saved_gate}", flush=True)
+
+            self.safe_model.train(previous_mode)
+
+        # Compute metrics
+        gate_zero_accuracy = (gate_zero_correct / gate_zero_total * 100) if gate_zero_total > 0 else 0.0
+
+        # For comparison, we would need to run original VL baseline
+        # For now, track gate=0 accuracy over time
+        # Degradation = (baseline_acc - gate_zero_acc)
+        # We'll track this metric and expect it to stay near 0
+
+        print(f"\n{'='*60}", flush=True)
+        print(f"Gate=0 Accuracy: {gate_zero_accuracy:.2f}%", flush=True)
+        print(f"Samples Evaluated: {gate_zero_total}", flush=True)
+        print(f"{'='*60}\n", flush=True)
+
+        metrics = {
+            "gate_zero_accuracy": gate_zero_accuracy,
+            "gate_zero_samples": gate_zero_total,
+        }
+
+        # TODO: Add comparison to original VL baseline for true retention metric
+        # For now, track gate=0 accuracy and manually compare to baseline
+
+        return metrics
+
+    def _compute_confidence_interval(
+        self,
+        correct: float,
+        total: int,
+        confidence: float = 0.95,
+        num_bootstrap: int = 1000
+    ) -> Tuple[float, float]:
+        """
+        Compute confidence interval for accuracy using bootstrap.
+
+        Args:
+            correct: Number of correct predictions
+            total: Total number of samples
+            confidence: Confidence level (default 0.95)
+            num_bootstrap: Number of bootstrap samples
+
+        Returns:
+            Tuple of (lower_bound, upper_bound) as percentages
+        """
+        if total == 0:
+            return (0.0, 0.0)
+
+        import numpy as np
+
+        accuracy = correct / total
+
+        # Generate bootstrap samples
+        bootstrap_accs = []
+        rng = np.random.RandomState(42)  # Fixed seed for reproducibility
+
+        for _ in range(num_bootstrap):
+            # Sample with replacement
+            sample = rng.binomial(total, accuracy)
+            bootstrap_acc = sample / total
+            bootstrap_accs.append(bootstrap_acc)
+
+        bootstrap_accs = np.array(bootstrap_accs)
+
+        # Compute percentiles
+        alpha = 1 - confidence
+        lower_percentile = (alpha / 2) * 100
+        upper_percentile = (1 - alpha / 2) * 100
+
+        lower_bound = np.percentile(bootstrap_accs, lower_percentile) * 100
+        upper_bound = np.percentile(bootstrap_accs, upper_percentile) * 100
+
+        return (lower_bound, upper_bound)
+
     def _compute_robust_accuracy(self, safe_outputs, base_outputs, inputs, has_audio, batch):
         """
         Compute robust accuracy using proper answer generation and matching.
@@ -2288,11 +2486,29 @@ class StageATrainer:
             # Override max_length to respect max_new_tokens limit
             self.safe_model.base_vl.llm.generation_config.max_length = None
 
-        configured_max_new_tokens = int(self.config.get("generation_max_new_tokens", 3) or 1)
+        configured_max_new_tokens = int(self.config.get("generation_max_new_tokens", 32) or 32)
         configured_max_new_tokens = max(1, configured_max_new_tokens)
 
+        # Determine if this is audio task (needs longer captions) or VL task (needs short answers)
+        has_audio = audio_tokens is not None
+        pixel_present = pixel_values is not None and (
+            isinstance(pixel_values, torch.Tensor) or isinstance(pixel_values, (list, tuple))
+        )
+
+        # AudioCaps captions are longer (e.g., "A dog barks while birds chirp in the background")
+        # VQA answers are short (e.g., "blue", "2", "yes")
+        if has_audio and not pixel_present:
+            # Pure audio task (AudioCaps) - allow longer generation
+            max_new_tokens = configured_max_new_tokens
+        elif pixel_present and not has_audio:
+            # Pure VL task (VQA) - restrict to short answers
+            max_new_tokens = min(configured_max_new_tokens, 10)
+        else:
+            # Audio-visual or ambiguous - use configured value
+            max_new_tokens = configured_max_new_tokens
+
         gen_kwargs = dict(
-            max_new_tokens=configured_max_new_tokens,   # Configurable for short answers
+            max_new_tokens=max_new_tokens,
             do_sample=False,    # Greedy decoding for deterministic results
             temperature=None,
             top_p=None,
@@ -2303,23 +2519,15 @@ class StageATrainer:
             output_scores=False,
             return_dict_in_generate=False
         )
-
-        pixel_present = pixel_values is not None and (
-            isinstance(pixel_values, torch.Tensor) or isinstance(pixel_values, (list, tuple))
-        )
-
-        if pixel_present:
-            # VQA answers should be concise. Force deterministic decoding and a tight
-            # generation window so that "ASSISTANT:" style prefixes do not drown out
-            # the short answer tokens we care about.
-            gen_kwargs["max_new_tokens"] = min(gen_kwargs["max_new_tokens"], 4)
-            gen_kwargs["do_sample"] = False
-            gen_kwargs.pop("temperature", None)
-            gen_kwargs.pop("top_p", None)
         if self.debug_logging:
             print(f"[GenDebug] Generation kwargs: {gen_kwargs}", flush=True)
 
         if model_choice == "safe":
+            # Debug: Log input before generation
+            if self.debug_logging:
+                print(f"[GenDebug] input_ids before generation: {input_ids[0, :20].tolist()}", flush=True)
+                print(f"[GenDebug] max_new_tokens: {gen_kwargs.get('max_new_tokens')}", flush=True)
+
             generated = self.safe_model.generate(
                 input_ids=input_ids.to(device),
                 attention_mask=attention_mask.to(device) if isinstance(attention_mask, torch.Tensor) else None,
@@ -2328,6 +2536,11 @@ class StageATrainer:
                 audio_attention_mask=inputs.get("audio_attention_mask"),
                 **gen_kwargs,
             )
+
+            # Debug: Log generated output
+            if self.debug_logging:
+                print(f"[GenDebug] Generated IDs shape: {generated.shape}", flush=True)
+                print(f"[GenDebug] First generated seq: {generated[0, :30].tolist()}", flush=True)
         else:
             sanitized_ids = self._sanitize_input_ids_batch(input_ids)
             base_kwargs = {

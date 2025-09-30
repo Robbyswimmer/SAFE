@@ -46,15 +46,17 @@ Traditional approaches require end-to-end fine-tuning:
 ### Two-Part Solution
 
 #### Part 1: Architectural Safety (Gated Bypass)
-- **Gate = 0**: Literally the original model (bit-exact reproduction)
+- **Gate = 0**: Functionally equivalent to the original model
 - **Gate = 1**: Incorporates audio features via lightweight fusion
-- **Mathematical guarantee**: Can always fall back to original performance
+- **Architectural property**: Can always fall back to original performance
 
-#### Part 2: Learned Efficiency (RL Policy)
+#### Part 2: Learned Efficiency (RL Policy) **[Planned, not yet implemented]**
 - **Observation**: Many questions don't benefit from audio and thus waste compute
 - **Policy learns**: "Does this specific question need audio?"
 - **Reward function**: Accuracy - Computational Cost
 - **Result**: Selective audio usage with efficiency gains
+
+**Note**: The RL policy component (Stage B) is designed but not yet trained in current experiments. Current work focuses on Stage A (foundation training with retention).
 
 ### Architectural Overview
 
@@ -85,10 +87,13 @@ RL Policy: Should we use audio for this query?
 - **Total trainable**: 52M parameters (1.08% of model)
 
 ### Training Safety Net
-1. **Fisher Information regularization**: Prevents drift in frozen components
-2. **Knowledge distillation**: Maintains base VL behavior when gate=0
-3. **Curriculum learning**: Gradual audio exposure (25% → 100%)
-4. **Lagrangian constraints**: Hard performance floors on VL tasks
+1. **Knowledge distillation** (KL divergence): Maintains base VL behavior when gate=0 *[Active in soft_retention variant]*
+2. **Fisher Information regularization**: Prevents drift in frozen components *[Implemented but currently disabled]*
+3. **Null-space gradient projection**: Protects VL directions *[Implemented but currently disabled]*
+4. **Curriculum learning**: Gradual audio exposure (25% → 100%) *[Planned]*
+5. **Lagrangian constraints**: Hard performance floors on VL tasks *[For Stage B RL training]*
+
+**Current Experiments**: Focus on comparing `no_retention` (no distillation) vs `soft_retention` (KL divergence weight=0.2) variants.
 
 ### Parameter Efficiency
 - **Traditional fine-tuning**: 7B+ parameters at risk
@@ -98,22 +103,23 @@ RL Policy: Should we use audio for this query?
 
 ---
 
-## 4. Theoretical Foundations
+## 4. Architectural Properties
 
-### Non-Regression Guarantee
-**Formal Property**: `Performance(SAFE, gate=0) ≡ Performance(Original VL)`
+### Non-Regression Property
+**Architectural Design**: `Performance(SAFE, gate=0) ≈ Performance(Original VL)`
 
-This isn't empirical hope, instead it's architecturally enforced in our framework:
-- Gate=0 creates identical forward path
+This property is enforced by design in our framework:
+- Gate=0 creates functionally equivalent forward path
 - No parameters of original model modified
-- Bit-exact reproduction guaranteed
+- Audio pathway completely bypassed when gate=0
+- Empirical validation: We track gate=0 performance during training to ensure retention
 
-### Efficiency Guarantee
+### Efficiency Property (Future Work - Stage B)
 **Expected Computation**: `E[Compute] = P(use_audio) × Cost(audio) + Base_Cost`
 
-Note: numbers are currently GOALS
+**Note**: This efficiency component is planned but not yet implemented. Current experiments focus on Stage A (foundation training).
 
-With learned policy achieving `P(use_audio) ≈ 0.3-0.6`:
+With a learned policy achieving `P(use_audio) ≈ 0.3-0.6` (target):
 - **computational savings via selective listening** on audio processing
 - **Adaptive inference**: Expensive operations only when beneficial
 - **Graceful degradation**: Falls back to VL-only seamlessly
@@ -254,7 +260,7 @@ L_total = L_audio + λ_retention * L_retention + λ_fisher * L_fisher
 **Hyperparameters**:
 - Optimizer: AdamW (β=(0.9,0.999), weight_decay=0.01)
 - LR: 1e-4 (projector), 5e-5 (LoRA), cosine decay
-- Batch size: 128, 1-2 epochs
+- Batch size: 8 training, 16 validation (adjusted for GPU memory constraints)
 - Audio tokens: k=8 initial
 - Mixed precision, gradient clipping 1.0
 

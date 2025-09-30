@@ -112,7 +112,11 @@ def main():
 
     total_entries = 0
     for split in splits:
-        csv_path = audiocaps_dir / f"{split}.csv"
+        # Try metadata subdirectory first, then root
+        csv_path = audiocaps_dir / "metadata" / f"{split}.csv"
+        if not csv_path.exists():
+            csv_path = audiocaps_dir / f"{split}.csv"
+
         output_path = audiocaps_dir / f"{split}.jsonl"
 
         if not csv_path.exists():
