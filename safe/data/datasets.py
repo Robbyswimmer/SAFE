@@ -223,6 +223,17 @@ class AudioCapsDataset(_BaseQADataset):
         entry = self.examples[idx]
         question = entry.get("question") or "What is happening in the audio?"
         answers = entry.get("answers") or entry.get("caption") or entry.get("captions")
+
+        # Debug: Log first few samples to diagnose missing answers
+        if idx < 3:
+            print(f"[AudioCapsDebug] Sample {idx}:", flush=True)
+            print(f"  Entry keys: {list(entry.keys())}", flush=True)
+            print(f"  'answers' field: {entry.get('answers')}", flush=True)
+            print(f"  'caption' field: {entry.get('caption')}", flush=True)
+            print(f"  'captions' field: {entry.get('captions')}", flush=True)
+            print(f"  Final answers value: {answers}", flush=True)
+            print(f"  Answer type: {type(answers)}", flush=True)
+
         sample = {
             "sample_id": entry.get("id") or entry.get("ytid"),
             "question": question,
