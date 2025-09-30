@@ -198,12 +198,11 @@ class _BaseQADataset(Dataset):
 
         # Debug: Log first sample to verify data loading
         if idx == 0:
-            import sys
-            print(f"[DatasetDebug] First sample loaded:", file=sys.stderr, flush=True)
-            print(f"  Entry keys: {list(entry.keys())}", file=sys.stderr, flush=True)
-            print(f"  Question: '{entry.get('question', '')[:50]}'", file=sys.stderr, flush=True)
-            print(f"  Answer: '{answer_value}'", file=sys.stderr, flush=True)
-            print(f"  Audio path: '{entry.get('audio_path', entry.get('audio', 'N/A'))}'", file=sys.stderr, flush=True)
+            print(f"[DatasetDebug] First sample loaded:", flush=True)
+            print(f"  Entry keys: {list(entry.keys())}", flush=True)
+            print(f"  Question: '{entry.get('question', '')[:50]}'", flush=True)
+            print(f"  Answer: '{answer_value}'", flush=True)
+            print(f"  Audio path: '{entry.get('audio_path', entry.get('audio', 'N/A'))}'", flush=True)
 
         sample = {
             "sample_id": entry.get("id") or entry.get("sample_id"),

@@ -1697,6 +1697,16 @@ class StageATrainer:
                     # These are needed for accuracy computation after generation
                     original_answers = batch.get("answers", [])
 
+                    # DEBUG: Check what's in the batch
+                    print(f"[BatchDebug] Batch keys: {list(batch.keys())}", flush=True)
+                    print(f"[BatchDebug] Batch has 'answers': {'answers' in batch}", flush=True)
+                    if "answers" in batch:
+                        print(f"[BatchDebug] Number of answers: {len(batch['answers'])}", flush=True)
+                        if len(batch["answers"]) > 0:
+                            print(f"[BatchDebug] First answer: '{batch['answers'][0]}'", flush=True)
+                    else:
+                        print(f"[BatchDebug] WARNING: No 'answers' key in batch!", flush=True)
+
                     # Ensure include_audio_tokens=True for audio samples to guarantee audio placeholders in prompts
                     has_audio_data = batch.get("audio", None) is not None
                     inputs = self.safe_model.prepare_multimodal_inputs(
@@ -2595,6 +2605,11 @@ class StageATrainer:
             if self.debug_logging:
                 print(f"[GenDebug] input_ids before generation: {input_ids[0, :20].tolist()}", flush=True)
                 print(f"[GenDebug] max_new_tokens: {gen_kwargs.get('max_new_tokens')}", flush=True)
+
+            # CRITICAL DEBUG: Decode the actual prompt being sent to the model
+            decoded_prompt = tok.decode(input_ids[0], skip_special_tokens=False)
+            print(f"[PromptDebug] First sample prompt (raw): '{decoded_prompt}'", flush=True)
+            print(f"[PromptDebug] Input length: {input_ids.shape[1]} tokens", flush=True)
 
             generated = self.safe_model.generate(
                 input_ids=input_ids.to(device),
