@@ -699,19 +699,22 @@ class SAFEModel(nn.Module):
                     pil_images = [self._convert_to_pil(images)]
         
         # Build simple prompts directly (chat templates are broken/not configured)
-        # Use the same approach as the working overfitting experiment
+        # Add instruction for short-form answers (critical for VQA accuracy)
         prompts = []
         image_token = getattr(processor, 'image_token', '<image>')
+        instruction = "Answer in one word or a number."
 
         for i, question in enumerate(texts):
-            # Simple format: USER: <question> ASSISTANT:
-            # This matches the working overfitting experiment format
+            # Add instruction + question for better VQA performance
+            # Format: USER: <instruction> Question: <question> ASSISTANT:
+            full_question = f"{instruction} Question: {question}"
+
             if i < len(pil_images) and pil_images[i] is not None:
                 # Multimodal: include image token
-                prompt = f"USER: {image_token}\n{question} ASSISTANT:"
+                prompt = f"USER: {image_token}\n{full_question} ASSISTANT:"
             else:
                 # Text-only
-                prompt = f"USER: {question} ASSISTANT:"
+                prompt = f"USER: {full_question} ASSISTANT:"
 
             prompts.append(prompt)
 
