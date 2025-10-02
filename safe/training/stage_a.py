@@ -2426,8 +2426,10 @@ class StageATrainer:
                         safe_display = safe_pred_extracted
                         base_display = base_pred_extracted
 
-                        safe_accuracies[i] = self._compute_audio_caption_accuracy(safe_pred_extracted, gt_raw)
-                        base_accuracies[i] = self._compute_audio_caption_accuracy(base_pred_extracted, gt_raw)
+                        # Enable metric debugging for first 2 samples
+                        debug_metrics = (i < 2)
+                        safe_accuracies[i] = self._compute_audio_caption_accuracy(safe_pred_extracted, gt_raw, debug=debug_metrics)
+                        base_accuracies[i] = self._compute_audio_caption_accuracy(base_pred_extracted, gt_raw, debug=debug_metrics)
                     else:
                         safe_pred = self._clean_answer(self._extract_answer(safe_pred_full))
                         base_pred = self._clean_answer(self._extract_answer(base_pred_full))
@@ -2643,12 +2645,12 @@ class StageATrainer:
                 self._bertscore_failed = True
             return 0.0
 
-    def _compute_audio_caption_accuracy(self, pred_caption: Any, gt_caption: Any) -> float:
+    def _compute_audio_caption_accuracy(self, pred_caption: Any, gt_caption: Any, debug: bool = False) -> float:
         """
         Compute audio caption accuracy using multiple metrics:
         1. Exact match (original)
         2. Token F1 (always available)
-        3. BERTScore (if available)
+        3. BERTScore (if available, with sanity checks)
 
         Returns the maximum score across all metrics.
         """
@@ -2664,18 +2666,36 @@ class StageATrainer:
         # Metric 1: Exact match (strictest)
         exact_match = 1.0 if pred_norm in gt_norms else 0.0
         if exact_match == 1.0:
+            if debug:
+                print(f"  [Metrics] Exact=1.0, TokenF1=1.0, BERT=1.0 → Final=1.0", flush=True)
             return 1.0  # Early exit if exact match
 
         # Metric 2: Token F1 (always available, more lenient)
         max_token_f1 = max((self._compute_token_f1(pred_norm, gt) for gt in gt_norms), default=0.0)
 
         # Metric 3: BERTScore (semantic similarity, most lenient)
-        bertscore = self._compute_bertscore(pred_norm, gt_norms)
+        # Only use BERTScore if Token F1 > 0 (at least some word overlap)
+        # This prevents gibberish from getting high BERTScore
+        bertscore = 0.0
+        bertscore_raw = 0.0
+        if max_token_f1 > 0.0:
+            bertscore_raw = self._compute_bertscore(pred_norm, gt_norms)
+            # Apply threshold: BERTScore only counts if > 0.7
+            if bertscore_raw >= 0.7:
+                bertscore = bertscore_raw
+            else:
+                bertscore = 0.0
 
-        # Return max of all metrics (most lenient scoring)
-        # Weight BERTScore slightly to make it count as correct if > 0.8
-        # Weight Token F1 to count as correct if > 0.5
-        return max(exact_match, max_token_f1, bertscore)
+        # Token F1 threshold: count as correct if > 0.5
+        token_f1_score = 1.0 if max_token_f1 > 0.5 else max_token_f1
+
+        # Return max of all metrics
+        final_score = max(exact_match, token_f1_score, bertscore)
+
+        if debug:
+            print(f"  [Metrics] Exact={exact_match:.3f}, TokenF1={max_token_f1:.3f}, BERT={bertscore_raw:.3f} (thresh={bertscore:.3f}) → Final={final_score:.3f}", flush=True)
+
+        return final_score
 
     def _batch_contains_pixels(self, batch: Dict[str, Any], idx: int) -> bool:
         images = batch.get("images")
