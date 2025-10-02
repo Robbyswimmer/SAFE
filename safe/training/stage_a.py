@@ -2666,6 +2666,12 @@ class StageATrainer:
             generated = torch.as_tensor(generated)
         generated = generated.to(device)
 
+        # CRITICAL DEBUG: Log raw generation output to diagnose truncation
+        print(f"[GenDebug] RAW generated shape: {generated.shape}", flush=True)
+        print(f"[GenDebug] RAW first sample all IDs: {generated[0].tolist()}", flush=True)
+        print(f"[GenDebug] RAW decoded first sample: '{tok.decode(generated[0])}'", flush=True)
+        print(f"[GenDebug] Expected: prompt_len={input_ids.shape[1]} + new_tokens, Got: {generated.shape[1]}", flush=True)
+
         # Calculate per-sample prompt lengths using attention mask to handle left padding
         attention_mask = inputs.get("attention_mask", None)
         if attention_mask is not None:
@@ -2684,28 +2690,37 @@ class StageATrainer:
             print(f"[GenDebug] Audio prefix: {audio_prefix}", flush=True)
             print(f"[GenDebug] Per-sample prompt lengths: {prompt_lengths.tolist()}", flush=True)
 
-        # Extract only the newly generated tokens (after prompt) using per-sample lengths
-        extracted_tokens = []
-        for i in range(generated.size(0)):
-            # Use per-sample prompt length to handle left padding correctly
-            sample_prompt_len = prompt_lengths[i].item()
+        # CRITICAL FIX: Check if generation returned truncated output (only new tokens)
+        # This happens when using inputs_embeds with some HuggingFace configs
+        if generated.shape[1] < input_ids.shape[1]:
+            print(f"[GenDebug] ⚠️  UNEXPECTED: Generated sequence is SHORTER than input!", flush=True)
+            print(f"[GenDebug] ⚠️  Input: {input_ids.shape}, Generated: {generated.shape}", flush=True)
+            print(f"[GenDebug] ⚠️  Treating generated output as NEW TOKENS ONLY (not full sequence)", flush=True)
+            # Generation returned ONLY new tokens (unusual but handle it)
+            extracted_tokens = [generated[i] for i in range(generated.size(0))]
+        else:
+            # Normal case: Extract only the newly generated tokens (after prompt) using per-sample lengths
+            extracted_tokens = []
+            for i in range(generated.size(0)):
+                # Use per-sample prompt length to handle left padding correctly
+                sample_prompt_len = prompt_lengths[i].item()
 
-            # The attention mask length already includes any audio placeholder tokens
-            # that were tokenized as part of the text input. We don't need to adjust
-            # for audio_tokens here since they are injected via inputs_embeds and
-            # don't affect the text token count.
-            start_idx = sample_prompt_len
+                # The attention mask length already includes any audio placeholder tokens
+                # that were tokenized as part of the text input. We don't need to adjust
+                # for audio_tokens here since they are injected via inputs_embeds and
+                # don't affect the text token count.
+                start_idx = sample_prompt_len
 
-            if start_idx < generated.shape[1]:
-                new_tokens = generated[i, start_idx:]
-                decoded_new = self.safe_model.base_vl.tokenizer.decode(new_tokens, skip_special_tokens=True)
-                if len(new_tokens) == 0 or not decoded_new.strip():
-                    print(f"[GenDebug] ⚠️  Sample {i}: Extracted {len(new_tokens)} tokens but decoded to empty: '{decoded_new}'", flush=True)
-                extracted_tokens.append(new_tokens)
-            else:
-                print(f"[GenDebug] ❌ Sample {i}: start_idx={start_idx} >= gen_len={generated.shape[1]}, returning empty!", flush=True)
-                print(f"[GenDebug] ❌ This means no new tokens were generated (model hit EOS or generation failed)", flush=True)
-                extracted_tokens.append(torch.tensor([], dtype=torch.long, device=generated.device))
+                if start_idx < generated.shape[1]:
+                    new_tokens = generated[i, start_idx:]
+                    decoded_new = self.safe_model.base_vl.tokenizer.decode(new_tokens, skip_special_tokens=True)
+                    if len(new_tokens) == 0 or not decoded_new.strip():
+                        print(f"[GenDebug] ⚠️  Sample {i}: Extracted {len(new_tokens)} tokens but decoded to empty: '{decoded_new}'", flush=True)
+                    extracted_tokens.append(new_tokens)
+                else:
+                    print(f"[GenDebug] ❌ Sample {i}: start_idx={start_idx} >= gen_len={generated.shape[1]}, returning empty!", flush=True)
+                    print(f"[GenDebug] ❌ This means no new tokens were generated (model hit EOS or generation failed)", flush=True)
+                    extracted_tokens.append(torch.tensor([], dtype=torch.long, device=generated.device))
         
         return extracted_tokens
     
