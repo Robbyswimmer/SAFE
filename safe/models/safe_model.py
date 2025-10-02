@@ -1421,6 +1421,10 @@ class SAFEModel(nn.Module):
                     print("Warning: gate=0 disables audio influence during generation", flush=True)
 
                 base_inputs["inputs_embeds"] = fused_embeds
+                # Provide sanitized ids alongside inputs_embeds so generate() can
+                # reconstruct the full prompt when returning sequences.
+                if sanitized_ids is not None:
+                    base_inputs["input_ids"] = sanitized_ids
             else:
                 base_inputs["input_ids"] = sanitized_ids if sanitized_ids is not None else input_ids
 
