@@ -463,18 +463,26 @@ class StageATrainer:
             label_smoothing=float(self.config.get("audio_label_smoothing", 0.1))
         )
 
+        # Compute actual weights being used
+        audio_weight_used = loss_weights.get("audio_task_loss", self.config["audio_loss_weight"])
+        retention_weight_used = loss_weights.get("retention_loss", self.config["retention_loss_weight"])
+
         self.combined_loss = CombinedStageLoss(
             retention_loss=self.retention_loss,
             audio_task_loss=self.audio_task_loss,
-            audio_weight=loss_weights.get("audio_task_loss", self.config["audio_loss_weight"]),
-            retention_weight=loss_weights.get("retention_loss", self.config["retention_loss_weight"])
+            audio_weight=audio_weight_used,
+            retention_weight=retention_weight_used
         )
 
-        if self.debug_logging:
-            print(
-                f"[LossSetup] retention_weight={self.config['retention_loss_weight']}, distillation_weight={dist_weight}, audio_weight={self.config['audio_loss_weight']}",
-                flush=True,
-            )
+        # ALWAYS log loss weights for visibility (critical for debugging)
+        print(
+            f"[LossSetup] ✓ audio_weight={audio_weight_used}, retention_weight={retention_weight_used}, distillation_weight={dist_weight}",
+            flush=True,
+        )
+        print(
+            f"[LossSetup] ✓ retention_enabled={self.combined_loss.retention_enabled}",
+            flush=True,
+        )
     
     def update_curriculum_config(self):
         """Update training configuration based on current curriculum stage."""
@@ -913,21 +921,25 @@ class StageATrainer:
         """Check for silent/zero audio clips and return has_audio mask."""
         has_audio = batch.get("has_audio", None)
         audio_data = batch.get("audio", None)
-        
+
         if has_audio is None or audio_data is None:
             return has_audio if has_audio is not None else torch.tensor([])
-        
-        # Check for silent audio (all zeros or near-zero values)
-        silent_threshold = 1e-8  # Lowered threshold for better detection
+
+        # DISABLED: Let the audio masking in safe_model.py handle this
+        # The pre-filtering here was too aggressive and causing audio loss to be 0
+        # Just log statistics without filtering
+        silent_threshold = 1e-8
+        silent_count = 0
         for i, audio_tensor in enumerate(audio_data):
             if isinstance(audio_tensor, torch.Tensor):
                 max_amplitude = torch.abs(audio_tensor).max().item()
                 if max_amplitude < silent_threshold:
-                    if has_audio[i]:
-                        print(f"[SilentAudioFilter] Sample {i}: marking silent audio as has_audio=False (max_amp={max_amplitude:.2e})", flush=True)
-                    has_audio[i] = False
-        
-        return has_audio
+                    silent_count += 1
+
+        if silent_count > 0:
+            print(f"[SilentAudioCheck] Found {silent_count}/{len(audio_data)} truly silent samples (NOT filtering, letting model handle)", flush=True)
+
+        return has_audio  # Return unchanged
 
     def _log_update_norms(self, pre_update_params: Dict[str, torch.Tensor]) -> None:
         """Log parameter update norms to track learning progress."""
@@ -1002,29 +1014,41 @@ class StageATrainer:
         lora_with_grads = 0
         total_audio = 0
         total_lora = 0
-        
+        audio_grad_norms = []
+        lora_grad_norms = []
+
         for name, param in self.safe_model.named_parameters():
             if not param.requires_grad:
                 continue
-                
+
             lower_name = name.lower()
             has_grad = param.grad is not None and torch.any(param.grad != 0)
-            
+
             if any(x in lower_name for x in ["audio_projector", "fusion_adapter"]):
                 total_audio += 1
                 if has_grad:
                     audio_with_grads += 1
-                    
+                    grad_norm = param.grad.norm().item()
+                    audio_grad_norms.append(grad_norm)
+
             if "lora" in lower_name:
                 total_lora += 1
                 if has_grad:
                     lora_with_grads += 1
-        
-        # Only warn if gradients are completely missing (critical issues)
+                    grad_norm = param.grad.norm().item()
+                    lora_grad_norms.append(grad_norm)
+
+        # ENHANCED: Always log gradient flow status at critical steps
+        if self.global_step < 10 or audio_with_grads == 0 or lora_with_grads == 0:
+            avg_audio_norm = sum(audio_grad_norms) / len(audio_grad_norms) if audio_grad_norms else 0.0
+            avg_lora_norm = sum(lora_grad_norms) / len(lora_grad_norms) if lora_grad_norms else 0.0
+            print(f"[GradFlow] step {self.global_step}: audio={audio_with_grads}/{total_audio} (norm={avg_audio_norm:.2e}), lora={lora_with_grads}/{total_lora} (norm={avg_lora_norm:.2e})", flush=True)
+
+        # CRITICAL: Warn if gradients are completely missing
         if audio_with_grads == 0 and total_audio > 0:
-            print(f"WARNING: No audio gradients flowing ({audio_with_grads}/{total_audio})", flush=True)
+            print(f"❌ CRITICAL: No audio gradients flowing ({audio_with_grads}/{total_audio}) - audio won't learn!", flush=True)
         elif lora_with_grads == 0 and total_lora > 0:
-            print(f"WARNING: No LoRA gradients flowing ({lora_with_grads}/{total_lora})", flush=True)
+            print(f"❌ WARNING: No LoRA gradients flowing ({lora_with_grads}/{total_lora})", flush=True)
     
     def train_step(self, batch: Dict) -> Dict[str, float]:
         """
@@ -1691,21 +1715,21 @@ class StageATrainer:
                     if batch_label.startswith("AUDIO"):
                         assert batch.get("audio_tokens", None) is not None or (batch.get("has_audio", torch.zeros(1))).any(), \
                             f"Eval set has no usable audio (tokens/mask missing) for batch {batch_label}"
-                        print(f"[AUDIO_EVAL] Audio batch confirmed: {batch_label}", flush=True)
+                        # Removed: print(f"[AUDIO_EVAL] Audio batch confirmed: {batch_label}", flush=True)
                     
                     # IMPORTANT: Preserve original answers from batch BEFORE preprocessing
                     # These are needed for accuracy computation after generation
                     original_answers = batch.get("answers", [])
 
                     # DEBUG: Check what's in the batch
-                    print(f"[BatchDebug] Batch keys: {list(batch.keys())}", flush=True)
-                    print(f"[BatchDebug] Batch has 'answers': {'answers' in batch}", flush=True)
+                    # Removed: print(f"[BatchDebug] Batch keys: {list(batch.keys())}", flush=True)
+                    # Removed: print(f"[BatchDebug] Batch has 'answers': {'answers' in batch}", flush=True)
                     if "answers" in batch:
-                        print(f"[BatchDebug] Number of answers: {len(batch['answers'])}", flush=True)
+                        # Removed: print(f"[BatchDebug] Number of answers: {len(batch['answers'])}", flush=True)
                         if len(batch["answers"]) > 0:
-                            print(f"[BatchDebug] First answer: '{batch['answers'][0]}'", flush=True)
+                            # Removed: print(f"[BatchDebug] First answer: '{batch['answers'][0]}'", flush=True)
                     else:
-                        print(f"[BatchDebug] WARNING: No 'answers' key in batch!", flush=True)
+                        # Removed: print(f"[BatchDebug] WARNING: No 'answers' key in batch!", flush=True)
 
                     # Ensure include_audio_tokens=True for audio samples to guarantee audio placeholders in prompts
                     has_audio_data = batch.get("audio", None) is not None
@@ -1726,13 +1750,13 @@ class StageATrainer:
                     if "attention_mask" in inputs:
                         attn_shape = inputs["attention_mask"].shape
                         attn_sum_per_sample = inputs["attention_mask"].sum(dim=1) if len(attn_shape) > 1 else [inputs["attention_mask"].sum()]
-                        print(f"[AttentionDebug] attention_mask shape: {attn_shape}, sum per sample: {attn_sum_per_sample.tolist()}", flush=True)
+                        # Removed: print(f"[AttentionDebug] attention_mask shape: {attn_shape}, sum per sample: {attn_sum_per_sample.tolist()}", flush=True)
                     if "input_ids" in inputs:
                         input_shape = inputs["input_ids"].shape  
-                        print(f"[AttentionDebug] input_ids shape: {input_shape}", flush=True)
+                        # Removed: print(f"[AttentionDebug] input_ids shape: {input_shape}", flush=True)
                     if "audio_tokens" in inputs:
                         audio_shape = inputs["audio_tokens"].shape
-                        print(f"[AttentionDebug] audio_tokens shape: {audio_shape}", flush=True)
+                        # Removed: print(f"[AttentionDebug] audio_tokens shape: {audio_shape}", flush=True)
                     
                     # Apply audio gate control if configured
                     if eval_audio_gate_comparison and hasattr(self.safe_model, 'set_gate'):
@@ -1897,7 +1921,7 @@ class StageATrainer:
                     
                     # Compute accuracy metrics using robust methods
                     # Generate predictions and compute answer-level accuracy
-                    print(f"[PROGRESS] Starting robust accuracy for batch {batch_idx}", flush=True)
+                    # Removed verbose progress logging
                     if self.debug_logging:
                         print(
                             f"[EvalDebug] batch {batch_idx}: computing robust accuracy",
@@ -1907,7 +1931,7 @@ class StageATrainer:
                     safe_accuracy_batch, base_accuracy_batch = self._compute_robust_accuracy(
                         safe_outputs, base_outputs, inputs, has_audio, batch
                     )
-                    print(f"[PROGRESS] Finished robust accuracy for batch {batch_idx}", flush=True)
+                    # Removed verbose progress logging
                     if self.debug_logging:
                         if torch.cuda.is_available():
                             torch.cuda.synchronize()
@@ -2303,7 +2327,7 @@ class StageATrainer:
                 return safe_accuracies, base_accuracies
             
             # Generate predictions using proper generation (without labels)
-            print(f"[PROGRESS] Starting generation for robust accuracy", flush=True)
+            # Removed verbose progress logging
             # During training we receive inputs where ground-truth answers have been
             # appended directly to the prompt (teacher forcing). Generating from those
             # tensors leaks the correct answer which leads to empty generations and
@@ -2351,18 +2375,16 @@ class StageATrainer:
                     # padding and produce new tokens instead of echoing labels.
                     attention_mask[row, first_answer_idx:] = 0
                     input_ids[row, first_answer_idx:] = pad_token_id
-            print(f"[PROGRESS] Generating SAFE predictions...", flush=True)
+            # Removed verbose progress logging
             safe_pred_tokens = self._generate_predictions(gen_inputs, "safe")
             if self.combined_loss.retention_enabled:
-                print(f"[PROGRESS] Generating base predictions...", flush=True)
                 base_pred_tokens = self._generate_predictions(gen_inputs, "base")
             else:
-                print(f"[PROGRESS] Skipping base generation (retention disabled)", flush=True)
                 base_pred_tokens = [
                     pred.clone() if isinstance(pred, torch.Tensor) else torch.as_tensor(pred)
                     for pred in safe_pred_tokens
                 ]
-            print(f"[PROGRESS] Generation complete", flush=True)
+            # Removed verbose progress logging
             
             for i in range(batch_size):
                 try:
@@ -2389,7 +2411,7 @@ class StageATrainer:
                     
                     # Debug output for first few samples
                     if i < 2:  # Only log first 2 samples to avoid spam
-                        print(f"[AccuracyDebug] Sample {i}:", flush=True)
+                        # Removed: print(f"[AccuracyDebug] Sample {i}:", flush=True)
                         print(f"  GT: '{gt_answer}'", flush=True)
                         print(f"  SAFE_full: '{safe_pred_full}'", flush=True)
                         print(f"  SAFE_pred: '{safe_pred}'", flush=True)
@@ -2545,9 +2567,9 @@ class StageATrainer:
             atok_shape = tuple(audio_tokens.shape)
             amask = inputs.get("audio_attention_mask", None)
             amask_zeros = (amask==0).sum().item() if amask is not None else 'n/a'
-            print(f"[AUDIO_EVAL] tokens={atok_shape} masked_zeros={amask_zeros}", flush=True)
+            # Removed: print(f"[AUDIO_EVAL] tokens={atok_shape} masked_zeros={amask_zeros}", flush=True)
         else:
-            print("[AUDIO_EVAL] No audio_tokens in generation inputs!", flush=True)
+            # Removed: print("[AUDIO_EVAL] No audio_tokens in generation inputs!", flush=True)
 
         # Ensure model config has proper pad/eos tokens and respects max_new_tokens
         if hasattr(self.safe_model.base_vl.llm, 'config'):

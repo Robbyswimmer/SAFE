@@ -538,13 +538,7 @@ class SAFEModel(nn.Module):
         if self.base_vl.ensure_left_padding():
             print("[SAFEModel] Re-applied left padding configuration before multimodal prep", flush=True)
 
-        # DEBUG: Check inputs to prepare_multimodal_inputs
-        if isinstance(text, list):
-            print(f"[PrepDebug] Received {len(text)} questions", flush=True)
-            if len(text) > 0:
-                print(f"[PrepDebug] First question: '{text[0]}'", flush=True)
-        else:
-            print(f"[PrepDebug] Received single question: '{text}'", flush=True)
+        # Removed excessive PrepDebug logging
 
         # For LLaVA/BLIP2, use proper multimodal input preparation
         if self.base_vl.model_type == "llava":
@@ -626,15 +620,16 @@ class SAFEModel(nn.Module):
                                                   device=audio_tokens.device)
                 
                 # Mark truly silent samples as masked-out (all tokens for that sample)
-                # Further relaxed threshold - many samples were being over-masked
+                # CRITICAL FIX: Relax threshold from 1e-4 to 1e-6 to avoid masking valid audio
                 sample_absmax = audio_tokens.abs().amax(dim=(1, 2))  # (B,)
-                silent = sample_absmax < 1e-4  # Further relaxed from 1e-6 to 1e-4
+                silent = sample_absmax < 1e-6  # Relaxed threshold - was 1e-4 which was too aggressive
                 if silent.any():
                     audio_attention_mask[silent] = 0
-                    # Only log if significant number of samples are masked
+                    # Always log masked samples for debugging
                     silent_count = silent.sum().item()
-                    if silent_count > B // 4:  # More than 25% masked
-                        print(f"INFO: Masked {silent_count}/{B} silent audio samples", flush=True)
+                    print(f"[AudioMask] Masked {silent_count}/{B} silent audio samples (threshold=1e-6, max_values={sample_absmax[:3].tolist()})", flush=True)
+                else:
+                    print(f"[AudioMask] All {B} audio samples passed threshold (max_values={sample_absmax[:min(3,B)].tolist()})", flush=True)
                 
                 result["audio_attention_mask"] = audio_attention_mask
 
@@ -677,10 +672,7 @@ class SAFEModel(nn.Module):
         else:
             texts = text
 
-        # DEBUG: Check what questions we're receiving
-        print(f"[LLaVADebug] Received {len(texts)} text inputs", flush=True)
-        if len(texts) > 0:
-            print(f"[LLaVADebug] First text: '{texts[0]}'", flush=True)
+        # Removed excessive debug logging - enable only when debugging LLaVA issues
         
         # Convert images to PIL format if needed
         pil_images = []
@@ -717,10 +709,6 @@ class SAFEModel(nn.Module):
                 prompt = f"USER: {full_question} ASSISTANT:"
 
             prompts.append(prompt)
-
-            # Debug: show first prompt
-            if i == 0:
-                print(f"[PromptDebug] First prompt: '{prompt}'", flush=True)
         
         num_samples = len(prompts)
         if not pil_images:

@@ -348,6 +348,13 @@ class AudioTaskLoss(nn.Module):
             # Debug: Log supervised token count and label distribution
             valid_count = valid.sum().item()
             unique_labels = flat_labels[valid].unique() if torch.any(valid) else torch.tensor([])
+
+            # CRITICAL DEBUG: Always print to stdout for visibility (first path with attention mask)
+            print(f"[AudioTaskLoss] valid_tokens={valid_count}, unique_labels={len(unique_labels)}, total_positions={len(flat_labels)}", flush=True)
+            if valid_count == 0:
+                print(f"[AudioTaskLoss] WARNING: No valid tokens! All labels are -100 or out of vocab", flush=True)
+                print(f"[AudioTaskLoss] Labels range: [{flat_labels.min().item()}, {flat_labels.max().item()}], vocab_size={vocab_size}", flush=True)
+
             LOGGER.info(f"AudioTaskLoss: valid_tokens={valid_count}, unique_labels={len(unique_labels)}")
 
             loss = self.loss_fn(flat_logits[valid].float(), flat_labels[valid])
@@ -378,10 +385,17 @@ class AudioTaskLoss(nn.Module):
             # Debug: Log supervised token count and label distribution
             valid_count = valid.sum().item()
             unique_labels = flat_labels[valid].unique() if torch.any(valid) else torch.tensor([])
+
+            # CRITICAL DEBUG: Always print to stdout for visibility (second path)
+            print(f"[AudioTaskLoss] valid_tokens={valid_count}, unique_labels={len(unique_labels)}, total_positions={len(flat_labels)}", flush=True)
+            if valid_count == 0:
+                print(f"[AudioTaskLoss] WARNING: No valid tokens! All labels are -100 or out of vocab", flush=True)
+                print(f"[AudioTaskLoss] Labels range: [{flat_labels.min().item()}, {flat_labels.max().item()}], vocab_size={vocab_size}", flush=True)
+
             LOGGER.info(f"AudioTaskLoss: valid_tokens={valid_count}, unique_labels={len(unique_labels)}")
 
             loss = self.loss_fn(flat_logits[valid].float(), flat_labels[valid])
-        
+
         return loss
 
 
@@ -450,6 +464,7 @@ class CombinedStageLoss(nn.Module):
         # print(f"Device: {device}")
         
         # Audio task loss (for samples with audio)
+        print(f"[CombinedLoss] has_audio={has_audio.sum().item()}/{len(has_audio)} samples", flush=True)
         if torch.any(has_audio):
             audio_indices = torch.where(has_audio)[0]
             # Ensure indices are within bounds of both logits and labels tensors
@@ -458,6 +473,7 @@ class CombinedStageLoss(nn.Module):
             max_labels = labels.size(0) if labels is not None else 0
             max_bound = min(max_safe, max_labels)
             audio_indices = audio_indices[audio_indices < max_bound]
+            print(f"[CombinedLoss] audio_indices after filtering: {len(audio_indices)}/{len(has_audio)}", flush=True)
             if len(audio_indices) > 0:
                 audio_logits = safe_logits[audio_indices]
                 audio_labels = batch["labels"][audio_indices]
