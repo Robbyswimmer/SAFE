@@ -2592,6 +2592,7 @@ class StageATrainer:
 
         gen_kwargs = dict(
             max_new_tokens=max_new_tokens,
+            min_new_tokens=1,  # CRITICAL FIX: Force at least 1 token to prevent empty generation
             do_sample=False,    # Greedy decoding for deterministic results
             temperature=None,
             top_p=None,
@@ -2603,11 +2604,20 @@ class StageATrainer:
             return_dict_in_generate=False
         )
 
+        # EARLY TRAINING FIX: Suppress EOS in first 500 steps to force output
+        # The untrained audio features may confuse the model into immediate EOS
+        if self.global_step < 500 and getattr(tok, "eos_token_id", None) is not None:
+            suppress_list = [tok.eos_token_id]
+            # Also suppress pad token if different from EOS
+            if getattr(tok, "pad_token_id", None) is not None and tok.pad_token_id != tok.eos_token_id:
+                suppress_list.append(tok.pad_token_id)
+            gen_kwargs["suppress_tokens"] = suppress_list
+            print(f"[GenDebug] Early training (step {self.global_step}): Suppressing EOS tokens {suppress_list}", flush=True)
+
         # Debug: Verify tokenizer EOS setup
         if self.debug_logging:
             print(f"[GenDebug] Tokenizer EOS: token='{tok.eos_token}', id={tok.eos_token_id}", flush=True)
             print(f"[GenDebug] Tokenizer PAD: token='{tok.pad_token}', id={tok.pad_token_id}", flush=True)
-        if self.debug_logging:
             print(f"[GenDebug] Generation kwargs: {gen_kwargs}", flush=True)
 
         if model_choice == "safe":
@@ -2630,10 +2640,13 @@ class StageATrainer:
                 **gen_kwargs,
             )
 
-            # Debug: Log generated output
-            if self.debug_logging:
-                print(f"[GenDebug] Generated IDs shape: {generated.shape}", flush=True)
-                print(f"[GenDebug] First generated seq: {generated[0, :30].tolist()}", flush=True)
+            # CRITICAL DEBUG: Log generation results to diagnose empty strings
+            print(f"[GenDebug] Input shape: {input_ids.shape} → Generated shape: {generated.shape}", flush=True)
+            if generated.shape[1] <= input_ids.shape[1]:
+                print(f"[GenDebug] ⚠️  WARNING: No new tokens generated! (gen_len={generated.shape[1]} vs input_len={input_ids.shape[1]})", flush=True)
+            print(f"[GenDebug] First 10 generated token IDs: {generated[0, :10].tolist()}", flush=True)
+            decoded_sample = tok.decode(generated[0], skip_special_tokens=True)
+            print(f"[GenDebug] First decoded output: '{decoded_sample}'", flush=True)
         else:
             sanitized_ids = self._sanitize_input_ids_batch(input_ids)
             base_kwargs = {
@@ -2685,13 +2698,13 @@ class StageATrainer:
 
             if start_idx < generated.shape[1]:
                 new_tokens = generated[i, start_idx:]
-                if self.debug_logging:
-                    decoded_new = self.safe_model.base_vl.tokenizer.decode(new_tokens, skip_special_tokens=True)
-                    print(f"[GenDebug] Sample {i}: start_idx={start_idx}, extracted {len(new_tokens)} new tokens: '{decoded_new}'", flush=True)
+                decoded_new = self.safe_model.base_vl.tokenizer.decode(new_tokens, skip_special_tokens=True)
+                if len(new_tokens) == 0 or not decoded_new.strip():
+                    print(f"[GenDebug] ⚠️  Sample {i}: Extracted {len(new_tokens)} tokens but decoded to empty: '{decoded_new}'", flush=True)
                 extracted_tokens.append(new_tokens)
             else:
-                if self.debug_logging:
-                    print(f"[GenDebug] Sample {i}: start_idx={start_idx} >= gen_len={generated.shape[1]}, returning empty", flush=True)
+                print(f"[GenDebug] ❌ Sample {i}: start_idx={start_idx} >= gen_len={generated.shape[1]}, returning empty!", flush=True)
+                print(f"[GenDebug] ❌ This means no new tokens were generated (model hit EOS or generation failed)", flush=True)
                 extracted_tokens.append(torch.tensor([], dtype=torch.long, device=generated.device))
         
         return extracted_tokens
