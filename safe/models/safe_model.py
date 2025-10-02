@@ -691,22 +691,23 @@ class SAFEModel(nn.Module):
                     pil_images = [self._convert_to_pil(images)]
         
         # Build simple prompts directly (chat templates are broken/not configured)
-        # Add instruction for short-form answers (critical for VQA accuracy)
         prompts = []
         image_token = getattr(processor, 'image_token', '<image>')
-        instruction = "Answer in one word or a number."
 
         for i, question in enumerate(texts):
-            # Add instruction + question for better VQA performance
-            # Format: USER: <instruction> Question: <question> ASSISTANT:
-            full_question = f"{instruction} Question: {question}"
+            # Determine if this is audio-only (no image) - for audio captioning vs VQA
+            # Audio captioning needs full descriptions, VQA needs short answers
+            has_image = i < len(pil_images) and pil_images[i] is not None
 
-            if i < len(pil_images) and pil_images[i] is not None:
-                # Multimodal: include image token
+            if has_image:
+                # VQA task: Add instruction for short-form answers (critical for VQA accuracy)
+                instruction = "Answer in one word or a number."
+                full_question = f"{instruction} Question: {question}"
                 prompt = f"USER: {image_token}\n{full_question} ASSISTANT:"
             else:
-                # Text-only
-                prompt = f"USER: {full_question} ASSISTANT:"
+                # Audio-only task: No short-answer instruction (audio captioning needs descriptions)
+                # Format: USER: Question: <question> ASSISTANT:
+                prompt = f"USER: Question: {question} ASSISTANT:"
 
             prompts.append(prompt)
         

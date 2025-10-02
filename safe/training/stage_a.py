@@ -2416,13 +2416,6 @@ class StageATrainer:
 
                         gt_raw = gt_answers[i] if i < len(gt_answers) else ""
 
-                        if i < 2:  # Debug first 2 audio samples
-                            print(f"[GTDebug] Sample {i} (audio):", flush=True)
-                            print(f"  gt_answers[{i}] type: {type(gt_raw)}", flush=True)
-                            print(f"  gt_answers[{i}] value: {gt_raw}", flush=True)
-                            print(f"  safe_pred_full: {safe_pred_full}", flush=True)
-                            print(f"  safe_pred_extracted: {safe_pred_extracted}", flush=True)
-
                         # Preserve display strings prior to normalization for logging
                         gt_display = str(gt_raw).strip() if gt_raw is not None else ""
                         safe_display = safe_pred_extracted
@@ -2579,18 +2572,14 @@ class StageATrainer:
     def _compute_audio_caption_accuracy(self, pred_caption: Any, gt_caption: Any) -> float:
         pred_norm = self._normalize_audio_caption(pred_caption)
         if not pred_norm:
-            print(f"[AccDebug] pred_norm is empty. pred_caption={pred_caption}", flush=True)
             return 0.0
 
         gt_norms = [self._normalize_audio_caption(ans) for ans in self._prepare_gt_answers(gt_caption)]
         gt_norms = [ans for ans in gt_norms if ans]
         if not gt_norms:
-            print(f"[AccDebug] gt_norms is empty. gt_caption={gt_caption}", flush=True)
             return 0.0
 
-        result = 1.0 if pred_norm in gt_norms else 0.0
-        print(f"[AccDebug] pred_norm='{pred_norm}' | gt_norms={gt_norms} | match={result}", flush=True)
-        return result
+        return 1.0 if pred_norm in gt_norms else 0.0
 
     def _batch_contains_pixels(self, batch: Dict[str, Any], idx: int) -> bool:
         images = batch.get("images")
