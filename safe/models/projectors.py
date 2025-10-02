@@ -17,14 +17,20 @@ class AudioProjector(nn.Module):
         llm_hidden_size: int,
         num_audio_tokens: int = 8,
         dropout: float = 0.1,
-        activation: str = "gelu"
+        activation: str = "gelu",
+        bottleneck_dim: Optional[int] = None  # New parameter for bottleneck
     ):
         super().__init__()
-        
+
         self.audio_embed_dim = audio_embed_dim
         self.llm_hidden_size = llm_hidden_size
         self.num_audio_tokens = num_audio_tokens
-        
+
+        # Default bottleneck to 1024 if not specified (80% param reduction)
+        if bottleneck_dim is None:
+            bottleneck_dim = min(1024, llm_hidden_size // 4)
+        self.bottleneck_dim = bottleneck_dim
+
         # Activation function
         if activation.lower() == "gelu":
             self.activation = nn.GELU()
@@ -34,16 +40,17 @@ class AudioProjector(nn.Module):
             self.activation = nn.SiLU()
         else:
             raise ValueError(f"Unsupported activation: {activation}")
-        
+
         # Input normalization for stability
         self.input_norm = nn.LayerNorm(audio_embed_dim, eps=1e-6)
-        
-        # 2-layer MLP with improved stability
+
+        # 2-layer MLP with bottleneck for parameter efficiency
+        # Architecture: audio_embed_dim → bottleneck_dim → llm_hidden_size * num_audio_tokens
         self.projector = nn.Sequential(
-            nn.Linear(audio_embed_dim, llm_hidden_size),
+            nn.Linear(audio_embed_dim, bottleneck_dim),
             self.activation,
             nn.Dropout(dropout),
-            nn.Linear(llm_hidden_size, llm_hidden_size * num_audio_tokens),
+            nn.Linear(bottleneck_dim, llm_hidden_size * num_audio_tokens),
             nn.Tanh()  # Soft bounding to prevent saturation
         )
         

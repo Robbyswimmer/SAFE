@@ -77,9 +77,10 @@ FULL_CONFIG = {
     "projector_type": "standard",
     "num_audio_tokens": 8,
     "projector_config": {
-        "dropout": 0.1
+        "dropout": 0.1,
+        "bottleneck_dim": 1024  # Bottleneck for 80% parameter reduction (212M → 42M)
     },
-    
+
     # Fusion configuration
     "fusion_type": "lora",
     "fusion_layer_indices": [20, 30],   # Mid-layers for LLaVA 13B (40 layers total)
