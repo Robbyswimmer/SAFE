@@ -1722,14 +1722,8 @@ class StageATrainer:
                     original_answers = batch.get("answers", [])
 
                     # DEBUG: Check what's in the batch
-                    # Removed: print(f"[BatchDebug] Batch keys: {list(batch.keys())}", flush=True)
-                    # Removed: print(f"[BatchDebug] Batch has 'answers': {'answers' in batch}", flush=True)
-                    if "answers" in batch:
-                        # Removed: print(f"[BatchDebug] Number of answers: {len(batch['answers'])}", flush=True)
-                        if len(batch["answers"]) > 0:
-                            # Removed: print(f"[BatchDebug] First answer: '{batch['answers'][0]}'", flush=True)
-                    else:
-                        # Removed: print(f"[BatchDebug] WARNING: No 'answers' key in batch!", flush=True)
+                    # Removed verbose BatchDebug logging
+                    pass
 
                     # Ensure include_audio_tokens=True for audio samples to guarantee audio placeholders in prompts
                     has_audio_data = batch.get("audio", None) is not None
@@ -2562,14 +2556,8 @@ class StageATrainer:
             sample_input_text = tok.decode(input_ids[0], skip_special_tokens=True)
             print(f"[GenDebug] Sample input text: '{sample_input_text[:200]}...'", flush=True)
             
-        # Audio debug logging before generation  
-        if audio_tokens is not None:
-            atok_shape = tuple(audio_tokens.shape)
-            amask = inputs.get("audio_attention_mask", None)
-            amask_zeros = (amask==0).sum().item() if amask is not None else 'n/a'
-            # Removed: print(f"[AUDIO_EVAL] tokens={atok_shape} masked_zeros={amask_zeros}", flush=True)
-        else:
-            # Removed: print("[AUDIO_EVAL] No audio_tokens in generation inputs!", flush=True)
+        # Removed verbose AUDIO_EVAL logging
+        pass
 
         # Ensure model config has proper pad/eos tokens and respects max_new_tokens
         if hasattr(self.safe_model.base_vl.llm, 'config'):
