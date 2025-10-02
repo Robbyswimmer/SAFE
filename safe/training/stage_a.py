@@ -2392,33 +2392,65 @@ class StageATrainer:
                     safe_pred_full = self.safe_model.base_vl.tokenizer.decode(
                         safe_pred_tokens[i], skip_special_tokens=True
                     ).strip()
-                    safe_pred = self._clean_answer(self._extract_answer(safe_pred_full))
-                    
                     # Decode base model predictions and extract answer
                     base_pred_full = self.safe_model.base_vl.tokenizer.decode(
                         base_pred_tokens[i], skip_special_tokens=True
                     ).strip()
-                    base_pred = self._clean_answer(self._extract_answer(base_pred_full))
-                    
-                    # Get ground truth with proper cleaning
-                    gt_answer = self._clean_answer(gt_answers[i]) if i < len(gt_answers) else ""
-                    
+
+                    is_audio_sample = False
+                    if has_audio is not None:
+                        if isinstance(has_audio, torch.Tensor):
+                            if i < has_audio.numel():
+                                is_audio_sample = bool(has_audio[i].item())
+                        else:
+                            try:
+                                is_audio_sample = bool(has_audio[i])
+                            except Exception:
+                                is_audio_sample = False
+
+                    audio_only_sample = is_audio_sample and not self._batch_contains_pixels(batch, i)
+
+                    if audio_only_sample:
+                        safe_pred_extracted = self._extract_answer(safe_pred_full, mode="audio")
+                        base_pred_extracted = self._extract_answer(base_pred_full, mode="audio")
+
+                        gt_raw = gt_answers[i] if i < len(gt_answers) else ""
+
+                        # Preserve display strings prior to normalization for logging
+                        gt_display = str(gt_raw).strip() if gt_raw is not None else ""
+                        safe_display = safe_pred_extracted
+                        base_display = base_pred_extracted
+
+                        safe_accuracies[i] = self._compute_audio_caption_accuracy(safe_pred_extracted, gt_raw)
+                        base_accuracies[i] = self._compute_audio_caption_accuracy(base_pred_extracted, gt_raw)
+                    else:
+                        safe_pred = self._clean_answer(self._extract_answer(safe_pred_full))
+                        base_pred = self._clean_answer(self._extract_answer(base_pred_full))
+
+                        gt_raw = gt_answers[i] if i < len(gt_answers) else ""
+                        gt_answer = self._clean_answer(gt_raw)
+
+                        gt_display = gt_answer
+                        safe_display = safe_pred
+                        base_display = base_pred
+
+                        # Compute answer-level accuracy (exact match or fuzzy match)
+                        safe_accuracies[i] = self._compute_answer_accuracy(safe_pred, gt_answer)
+                        base_accuracies[i] = self._compute_answer_accuracy(base_pred, gt_answer)
+
                     # Debug output for first few samples
+                    safe_acc_value = safe_accuracies[i]
+                    base_acc_value = base_accuracies[i]
+
                     if i < 2:  # Only log first 2 samples to avoid spam
                         # Removed: print(f"[AccuracyDebug] Sample {i}:", flush=True)
-                        print(f"  GT: '{gt_answer}'", flush=True)
+                        print(f"  GT: '{gt_display}'", flush=True)
                         print(f"  SAFE_full: '{safe_pred_full}'", flush=True)
-                        print(f"  SAFE_pred: '{safe_pred}'", flush=True)
+                        print(f"  SAFE_pred: '{safe_display}'", flush=True)
                         print(f"  BASE_full: '{base_pred_full}'", flush=True)
-                        print(f"  BASE_pred: '{base_pred}'", flush=True)
-                    
-                    # Compute answer-level accuracy (exact match or fuzzy match)
-                    safe_accuracies[i] = self._compute_answer_accuracy(safe_pred, gt_answer)
-                    base_accuracies[i] = self._compute_answer_accuracy(base_pred, gt_answer)
-                    
-                    if i < 2:  # Continue debug for accuracy computation
-                        print(f"  SAFE_acc: {safe_accuracies[i]}, BASE_acc: {base_accuracies[i]}", flush=True)
-                    
+                        print(f"  BASE_pred: '{base_display}'", flush=True)
+                        print(f"  SAFE_acc: {safe_acc_value}, BASE_acc: {base_acc_value}", flush=True)
+
                 except Exception as e:
                     # Handle decoding errors gracefully
                     safe_accuracies[i] = 0.0
@@ -2518,7 +2550,53 @@ class StageATrainer:
             return 1.0 if matches > 0 else 0.0
         else:
             return min(1.0, matches / 3.0)
-    
+
+    def _normalize_audio_caption(self, text: Any) -> str:
+        if text is None:
+            return ""
+        if isinstance(text, (list, tuple)):
+            text = " ".join(str(t) for t in text if t)
+        elif isinstance(text, dict):
+            value = text.get("answer") or text.get("text")
+            text = value if value is not None else ""
+
+        normalized = str(text)
+        import re
+        import unicodedata
+
+        normalized = unicodedata.normalize("NFKC", normalized)
+        normalized = normalized.strip()
+        normalized = re.sub(r"\s+", " ", normalized)
+        return normalized.lower()
+
+    def _compute_audio_caption_accuracy(self, pred_caption: Any, gt_caption: Any) -> float:
+        pred_norm = self._normalize_audio_caption(pred_caption)
+        if not pred_norm:
+            return 0.0
+
+        gt_norms = [self._normalize_audio_caption(ans) for ans in self._prepare_gt_answers(gt_caption)]
+        gt_norms = [ans for ans in gt_norms if ans]
+        if not gt_norms:
+            return 0.0
+
+        return 1.0 if pred_norm in gt_norms else 0.0
+
+    def _batch_contains_pixels(self, batch: Dict[str, Any], idx: int) -> bool:
+        images = batch.get("images")
+        if isinstance(images, (list, tuple)) and idx < len(images):
+            if images[idx] is not None:
+                return True
+
+        pixel_values = batch.get("pixel_values")
+        if isinstance(pixel_values, torch.Tensor) and pixel_values.numel() > 0:
+            if pixel_values.ndim == 4:
+                if idx < pixel_values.size(0):
+                    return True
+            else:
+                return True
+
+        return False
+
     def _generate_predictions(self, inputs, model_choice="safe"):
         """Generate predictions using consistent SAFE/base pathways."""
         tok = self.safe_model.base_vl.tokenizer
@@ -2764,8 +2842,8 @@ class StageATrainer:
         """Clean and normalize answer text (legacy method)."""
         return self._normalize_answer(s)
     
-    def _extract_answer(self, generated_text):
-        """Extract a concise VQA-style answer from generated text."""
+    def _extract_answer(self, generated_text, *, mode: str = "vl"):
+        """Extract answer text, supporting both VQA-style and audio caption modes."""
         if not generated_text:
             return ""
 
@@ -2820,6 +2898,9 @@ class StageATrainer:
 
         # Remove leading markdown bullets or numbering artefacts.
         answer = re.sub(r"^(?:[\-\*\u2022]+|\d+\.)\s*", "", answer)
+
+        if mode == "audio":
+            return answer.strip()
 
         # Trim trailing sentence once we hit strong punctuation to keep VQA answers short.
         sentence_chunks = re.split(r"[\.?!]", answer)
