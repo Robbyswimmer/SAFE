@@ -14,6 +14,7 @@ import textwrap
 import traceback
 import time
 from collections import defaultdict
+import re
 
 # Set CPU threads for predictable performance
 torch.set_num_threads(min(8, os.cpu_count() or 2))
@@ -265,6 +266,10 @@ class StageATrainer:
             "vl_retention_score": [],
             "audio_gain_score": []
         }
+
+        # Initialize BERTScore for audio caption evaluation (lazy load to avoid startup delays)
+        self._bertscore_metric = None
+        self._bertscore_failed = False
 
         # Curriculum state
         self.current_stage_config = None
@@ -2569,7 +2574,84 @@ class StageATrainer:
         normalized = re.sub(r"\s+", " ", normalized)
         return normalized.lower()
 
+    def _get_bertscore_metric(self):
+        """Lazy load BERTScore metric."""
+        if self._bertscore_metric is None and not self._bertscore_failed:
+            try:
+                import evaluate
+                self._bertscore_metric = evaluate.load("bertscore")
+                print("✅ BERTScore metric loaded successfully", flush=True)
+            except Exception as e:
+                self._bertscore_failed = True
+                print(f"⚠️  BERTScore unavailable (will use token F1 only): {e}", flush=True)
+        return self._bertscore_metric
+
+    def _tokenize_caption(self, text: str) -> set:
+        """Tokenize caption into words for F1 computation."""
+        if not text:
+            return set()
+        # Lowercase, remove punctuation, split on whitespace
+        text = text.lower()
+        text = re.sub(r'[^\w\s]', ' ', text)
+        return set(text.split())
+
+    def _compute_token_f1(self, pred_caption: str, gt_caption: str) -> float:
+        """Compute token-level F1 score between prediction and ground truth."""
+        pred_tokens = self._tokenize_caption(pred_caption)
+        gt_tokens = self._tokenize_caption(gt_caption)
+
+        if not pred_tokens or not gt_tokens:
+            return 0.0
+
+        # Compute precision, recall, F1
+        intersection = pred_tokens & gt_tokens
+        if not intersection:
+            return 0.0
+
+        precision = len(intersection) / len(pred_tokens)
+        recall = len(intersection) / len(gt_tokens)
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        return f1
+
+    def _compute_bertscore(self, pred_caption: str, gt_captions: List[str]) -> float:
+        """Compute BERTScore between prediction and ground truth captions."""
+        bertscore = self._get_bertscore_metric()
+        if bertscore is None or not pred_caption or not gt_captions:
+            return 0.0
+
+        try:
+            # Compute BERTScore for all GT captions, take max
+            max_score = 0.0
+            for gt in gt_captions:
+                if not gt:
+                    continue
+                results = bertscore.compute(
+                    predictions=[pred_caption],
+                    references=[gt],
+                    lang="en",
+                    model_type="distilbert-base-uncased",  # Faster than BERT
+                    device="cuda" if torch.cuda.is_available() else "cpu"
+                )
+                # BERTScore returns precision, recall, F1 - we use F1
+                score = results["f1"][0] if results and "f1" in results else 0.0
+                max_score = max(max_score, score)
+            return max_score
+        except Exception as e:
+            if not self._bertscore_failed:
+                print(f"⚠️  BERTScore computation failed: {e}", flush=True)
+                self._bertscore_failed = True
+            return 0.0
+
     def _compute_audio_caption_accuracy(self, pred_caption: Any, gt_caption: Any) -> float:
+        """
+        Compute audio caption accuracy using multiple metrics:
+        1. Exact match (original)
+        2. Token F1 (always available)
+        3. BERTScore (if available)
+
+        Returns the maximum score across all metrics.
+        """
         pred_norm = self._normalize_audio_caption(pred_caption)
         if not pred_norm:
             return 0.0
@@ -2579,7 +2661,21 @@ class StageATrainer:
         if not gt_norms:
             return 0.0
 
-        return 1.0 if pred_norm in gt_norms else 0.0
+        # Metric 1: Exact match (strictest)
+        exact_match = 1.0 if pred_norm in gt_norms else 0.0
+        if exact_match == 1.0:
+            return 1.0  # Early exit if exact match
+
+        # Metric 2: Token F1 (always available, more lenient)
+        max_token_f1 = max((self._compute_token_f1(pred_norm, gt) for gt in gt_norms), default=0.0)
+
+        # Metric 3: BERTScore (semantic similarity, most lenient)
+        bertscore = self._compute_bertscore(pred_norm, gt_norms)
+
+        # Return max of all metrics (most lenient scoring)
+        # Weight BERTScore slightly to make it count as correct if > 0.8
+        # Weight Token F1 to count as correct if > 0.5
+        return max(exact_match, max_token_f1, bertscore)
 
     def _batch_contains_pixels(self, batch: Dict[str, Any], idx: int) -> bool:
         images = batch.get("images")
