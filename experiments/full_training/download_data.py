@@ -417,6 +417,7 @@ def download_audiocaps_audio_from_youtube(
     splits: List[str],
     max_downloads: Optional[int],
     num_workers: int = 8,
+    cookies_file: Optional[str] = None,
 ) -> None:
     """Fetch AudioCaps waveforms from YouTube using the project helper script."""
     try:
@@ -466,7 +467,7 @@ def download_audiocaps_audio_from_youtube(
         print(f"\n>>> Fetching AudioCaps audio for split '{split}'")
         print(f"    Metadata: {csv_path}")
         try:
-            downloader.process_audiocaps_csv(csv_path, destination, limit, num_workers)
+            downloader.process_audiocaps_csv(csv_path, destination, limit, num_workers, cookies_file)
         except Exception as exc:  # noqa: BLE001 - keep script resilient
             print(f"  Failed to download audio for split '{split}': {exc}")
 
@@ -570,6 +571,11 @@ Examples:
         default=8,
         help="Number of parallel workers for AudioCaps YouTube downloads (default: 8)",
     )
+    parser.add_argument(
+        "--cookies",
+        type=str,
+        help="Path to cookies.txt file for YouTube authentication",
+    )
 
     args = parser.parse_args(argv)
 
@@ -646,6 +652,7 @@ Examples:
                 splits=audio_splits,
                 max_downloads=args.audiocaps_max_downloads,
                 num_workers=args.audiocaps_workers,
+                cookies_file=args.cookies,
             )
 
         # Process VQA URLs
