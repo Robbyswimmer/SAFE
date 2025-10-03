@@ -1319,12 +1319,24 @@ class StageATrainer:
                 flush=True,
             )
 
+        # Extract current parameters for Fisher regularization (if enabled)
+        safe_params = None
+        base_params = None
+        if self.config.get("fisher_weight", 0.0) > 0 and hasattr(self, 'initial_params_snapshot'):
+            safe_params = {
+                name: param.data
+                for name, param in self.trainable_params.items()
+            }
+            base_params = self.initial_params_snapshot
+
         # Compute combined loss
         loss_dict = self.combined_loss(
             safe_outputs=safe_outputs,
             base_outputs=base_outputs,
             batch=inputs,
-            has_audio=has_audio
+            has_audio=has_audio,
+            safe_model_params=safe_params,
+            base_model_params=base_params
         )
 
         log_metrics: Dict[str, float] = {}
@@ -1982,12 +1994,24 @@ class StageATrainer:
                                 f"Teacher/student batch mismatch: {teacher_logits.size(0)} vs {student_logits.size(0)}"
                             )
     
+                    # Extract current parameters for Fisher regularization (if enabled)
+                    safe_params = None
+                    base_params = None
+                    if self.config.get("fisher_weight", 0.0) > 0 and hasattr(self, 'initial_params_snapshot'):
+                        safe_params = {
+                            name: param.data
+                            for name, param in self.trainable_params.items()
+                        }
+                        base_params = self.initial_params_snapshot
+
                     # Compute losses
                     batch_losses = self.combined_loss(
                         safe_outputs=safe_outputs,
                         base_outputs=base_outputs,
                         batch=inputs,
-                        has_audio=has_audio
+                        has_audio=has_audio,
+                        safe_model_params=safe_params,
+                        base_model_params=base_params
                     )
                     
                     # Accumulate losses
@@ -2928,19 +2952,19 @@ class StageATrainer:
             decoded_sample = tok.decode(generated[0], skip_special_tokens=True)
             print(f"[GenDebug] First decoded output: '{decoded_sample}'", flush=True)
         else:
-            sanitized_ids = self._sanitize_input_ids_batch(input_ids)
-            base_kwargs = {
-                "attention_mask": attention_mask.to(device) if isinstance(attention_mask, torch.Tensor) else None,
-                **gen_kwargs,
-            }
-            if sanitized_ids is not None:
-                base_kwargs["input_ids"] = sanitized_ids.to(device)
-            elif inputs.get("inputs_embeds") is not None:
-                base_kwargs["inputs_embeds"] = inputs["inputs_embeds"].to(device)
-            if isinstance(pixel_values, torch.Tensor):
-                base_kwargs["pixel_values"] = pixel_values.to(device)
+            # BASE model: Use SAFE with gate=0.0 to guarantee no audio contribution
+            # This ensures BASE predictions use clean VL-only embeddings without audio fusion
+            print(f"[GenDebug] BASE generation using SAFE model with gate=0.0 (no audio)", flush=True)
 
-            generated = self.safe_model.base_vl.llm.generate(**base_kwargs)
+            generated = self.safe_model.generate(
+                input_ids=input_ids.to(device),
+                attention_mask=attention_mask.to(device) if isinstance(attention_mask, torch.Tensor) else None,
+                pixel_values=pixel_values.to(device) if isinstance(pixel_values, torch.Tensor) else None,
+                audio_tokens=None,  # Explicitly set to None for BASE
+                audio_attention_mask=None,  # No audio mask
+                gate=0.0,  # CRITICAL: Force gate=0 to disable audio fusion
+                **gen_kwargs,
+            )
 
         if not isinstance(generated, torch.Tensor):
             generated = torch.as_tensor(generated)
@@ -3284,22 +3308,44 @@ class StageATrainer:
         else:
             return self._train_traditional()
     
+    def _save_initial_parameters(self):
+        """
+        Save initial snapshot of trainable parameters for Fisher regularization.
+
+        Fisher regularization penalizes changes to parameters, so we need a reference
+        point. In SAFE, we track the fusion adapter and audio projector parameters
+        to prevent them from degrading VL performance.
+        """
+        if self.config.get("fisher_weight", 0.0) <= 0:
+            return
+
+        self.initial_params_snapshot = {}
+        for name, param in self.trainable_params.items():
+            self.initial_params_snapshot[name] = param.data.clone().detach()
+
+        print(f"✓ Saved initial parameter snapshot: {len(self.initial_params_snapshot)} parameters for Fisher regularization", flush=True)
+
     def _compute_fisher_information(self):
-        """Compute Fisher information matrix before training starts."""
+        """
+        Compute Fisher information matrix for trainable parameters.
+
+        Fisher information measures parameter importance based on gradient variance
+        on VL-only tasks. This helps constrain fusion adapter changes that might
+        hurt VL performance.
+        """
         if not self.config.get("compute_fisher_at_start", False):
             return
         if self.config.get("fisher_weight", 0.0) <= 0:
             print("Skipping Fisher computation (fisher_weight=0)", flush=True)
             return
 
-        base_trainable = [p for p in self.safe_model.base_vl.parameters() if p.requires_grad]
-        if not base_trainable:
-            print("Skipping Fisher computation (base model frozen)", flush=True)
+        if not self.trainable_params:
+            print("Skipping Fisher computation (no trainable parameters)", flush=True)
             return
 
-        print("🔍 Computing Fisher information matrix for retention...", flush=True)
+        print("🔍 Computing Fisher information matrix for trainable parameters (fusion adapter, projector, etc.)...", flush=True)
         target_samples = int(self.config.get("fisher_num_samples", 1000))
-        device = next(self.safe_model.base_vl.parameters()).device
+        device = next(self.safe_model.parameters()).device
         prepared_batches: List[Dict[str, torch.Tensor]] = []
         collected = 0
 
@@ -3319,11 +3365,12 @@ class StageATrainer:
 
         try:
             fisher_info = self.retention_loss.compute_fisher_information(
-                self.safe_model.base_vl,
+                self.safe_model,
                 prepared_batches,
                 num_samples=collected,
+                param_names=list(self.trainable_params.keys())
             )
-            print(f"✓ Fisher information computed from {collected} samples", flush=True)
+            print(f"✓ Fisher information computed from {collected} samples for {len(self.trainable_params)} parameters", flush=True)
         except Exception as e:
             print(f"⚠️ Fisher computation failed: {e}", flush=True)
             print("   Continuing without Fisher information", flush=True)
@@ -3332,6 +3379,9 @@ class StageATrainer:
         """Training loop with curriculum learning."""
         print("🎓 Starting Stage A training with curriculum learning...", flush=True)
         print(f"Curriculum has {self.curriculum_manager.config.get_num_stages()} stages", flush=True)
+
+        # Save initial parameter snapshot for Fisher regularization
+        self._save_initial_parameters()
 
         # Compute Fisher information if enabled
         self._compute_fisher_information()
@@ -3517,6 +3567,9 @@ class StageATrainer:
         """Traditional fixed-epoch training loop."""
         print(f"Starting Stage A training for {self.config['num_epochs']} epochs...", flush=True)
         print(f"Total training steps: {len(self.train_dataloader) * self.config['num_epochs']}", flush=True)
+
+        # Save initial parameter snapshot for Fisher regularization
+        self._save_initial_parameters()
 
         # Compute Fisher information if enabled
         self._compute_fisher_information()

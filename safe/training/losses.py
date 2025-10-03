@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 import numpy as np
 import logging
 
@@ -45,59 +45,72 @@ class RetentionLoss(nn.Module):
         
     def compute_fisher_information(
         self,
-        base_model,
+        model,
         dataloader,
-        num_samples: int = 1000
+        num_samples: int = 1000,
+        param_names: Optional[List[str]] = None
     ) -> torch.Tensor:
         """
-        Compute Fisher information matrix for important parameters.
-        
+        Compute Fisher information matrix for trainable parameters.
+
+        In SAFE, this computes Fisher for the fusion adapter and audio projector
+        parameters to measure their importance for VL task performance.
+
         Args:
-            base_model: Base VL model
-            dataloader: Data loader for Fisher computation
+            model: SAFE model (or any model)
+            dataloader: Pre-prepared batches for Fisher computation
             num_samples: Number of samples to use
-            
+            param_names: List of parameter names to track (if None, uses all trainable)
+
         Returns:
-            Fisher information matrix
+            Fisher information matrix (dict mapping param names to importance tensors)
         """
-        base_model.eval()
+        model.eval()
         fisher_info = {}
-        
-        # Initialize Fisher information
-        for name, param in base_model.named_parameters():
+
+        # Initialize Fisher information for specified parameters
+        for name, param in model.named_parameters():
             if param.requires_grad:
-                fisher_info[name] = torch.zeros_like(param)
-        
+                # Only track specified params if param_names provided
+                if param_names is None or name in param_names:
+                    fisher_info[name] = torch.zeros_like(param)
+
+        if not fisher_info:
+            print("⚠️ No trainable parameters found for Fisher computation", flush=True)
+            return {}
+
         samples_processed = 0
-        
+
         for batch in dataloader:
             if samples_processed >= num_samples:
                 break
-                
+
             # Forward pass
-            outputs = base_model(**batch)
-            loss = outputs["loss"]
-            
+            outputs = model(**batch)
+            loss = outputs.get("loss") if isinstance(outputs, dict) else getattr(outputs, "loss", None)
+
+            if loss is None:
+                continue
+
             # Backward pass
-            base_model.zero_grad()
+            model.zero_grad()
             loss.backward()
-            
-            # Accumulate squared gradients (Fisher information)
-            for name, param in base_model.named_parameters():
-                if param.requires_grad and param.grad is not None:
+
+            # Accumulate squared gradients (Fisher information approximation)
+            for name, param in model.named_parameters():
+                if name in fisher_info and param.grad is not None:
                     fisher_info[name] += param.grad.data ** 2
-                    
-            samples_processed += batch["input_ids"].size(0)
-        
+
+            samples_processed += batch.get("input_ids", torch.tensor([0])).size(0)
+
         # Normalize by number of samples
         for name in fisher_info:
-            fisher_info[name] /= samples_processed
-            
-        # Convert to single tensor (simplified)
-        fisher_tensor = torch.cat([fisher_info[name].view(-1) for name in fisher_info])
-        
-        self.fisher_information = fisher_tensor
-        return fisher_tensor
+            fisher_info[name] /= max(samples_processed, 1)
+
+        # Store as dict for flexible use
+        self.fisher_information = fisher_info
+        print(f"✓ Fisher information computed for {len(fisher_info)} parameters", flush=True)
+        return fisher_info
     
     def kl_divergence_loss(
         self,
@@ -174,20 +187,24 @@ class RetentionLoss(nn.Module):
     ) -> torch.Tensor:
         """
         Compute Fisher-weighted L2 regularization loss.
-        
+
+        Penalizes parameter changes weighted by their importance (Fisher information).
+        In SAFE, this constrains fusion adapter and projector changes that might
+        hurt VL task performance.
+
         Args:
             current_params: Current model parameters
-            base_params: Base model parameters (reference)
-            
+            base_params: Initial/baseline model parameters (reference)
+
         Returns:
             Fisher-weighted regularization loss
         """
         if not current_params:
             return torch.tensor(0.0)
-            
+
         device = next(iter(current_params.values())).device
-        
-        if self.fisher_information is None:
+
+        if self.fisher_information is None or not isinstance(self.fisher_information, dict):
             # Fallback to uniform L2 regularization if Fisher information not available
             reg_loss = torch.tensor(0.0, device=device)
             for name in current_params:
@@ -195,30 +212,24 @@ class RetentionLoss(nn.Module):
                     param_diff = current_params[name] - base_params[name]
                     reg_loss = reg_loss + torch.sum(param_diff ** 2)
             return reg_loss
-        
+
         reg_loss = torch.tensor(0.0, device=device)
-        param_idx = 0
-        
-        for name in sorted(current_params.keys()):  # Ensure consistent ordering
-            if name in base_params:
-                param_diff = current_params[name] - base_params[name]
-                param_size = param_diff.numel()
-                
-                # Check if we have enough Fisher information
-                if param_idx + param_size <= len(self.fisher_information):
-                    # Get corresponding Fisher information
-                    fisher_slice = self.fisher_information[param_idx:param_idx + param_size]
-                    fisher_slice = fisher_slice.view_as(param_diff)
-                    
-                    # Weighted L2 loss
-                    weighted_loss = torch.sum(fisher_slice * (param_diff ** 2))
-                    reg_loss = reg_loss + weighted_loss
-                else:
-                    # Fallback to unweighted L2 for remaining parameters
-                    reg_loss = reg_loss + torch.sum(param_diff ** 2)
-                
-                param_idx += param_size
-        
+
+        for name in current_params.keys():
+            if name not in base_params:
+                continue
+
+            param_diff = current_params[name] - base_params[name]
+
+            if name in self.fisher_information:
+                # Fisher-weighted L2 loss
+                fisher_weights = self.fisher_information[name].to(device)
+                weighted_loss = torch.sum(fisher_weights * (param_diff ** 2))
+                reg_loss = reg_loss + weighted_loss
+            else:
+                # Fallback to unweighted L2 for parameters without Fisher info
+                reg_loss = reg_loss + torch.sum(param_diff ** 2)
+
         return reg_loss
     
     def forward(
@@ -427,17 +438,21 @@ class CombinedStageLoss(nn.Module):
         safe_outputs: Dict[str, torch.Tensor],
         base_outputs: Dict[str, torch.Tensor],
         batch: Dict[str, torch.Tensor],
-        has_audio: torch.Tensor
+        has_audio: torch.Tensor,
+        safe_model_params: Optional[Dict[str, torch.Tensor]] = None,
+        base_model_params: Optional[Dict[str, torch.Tensor]] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Compute combined Stage A loss.
-        
+
         Args:
             safe_outputs: SAFE model outputs
-            base_outputs: Base VL model outputs  
+            base_outputs: Base VL model outputs
             batch: Training batch
             has_audio: Boolean mask indicating which samples have audio
-            
+            safe_model_params: Current trainable parameters (for Fisher regularization)
+            base_model_params: Initial trainable parameters (for Fisher regularization)
+
         Returns:
             Dictionary with loss components
         """
@@ -501,7 +516,9 @@ class CombinedStageLoss(nn.Module):
         if retention_active:
             retention_losses = self.retention_loss(
                 safe_logits=safe_logits,
-                base_logits=base_logits
+                base_logits=base_logits,
+                safe_model_params=safe_model_params,
+                base_model_params=base_model_params
             )
             retention_loss = retention_losses["retention_loss"]
         else:
