@@ -2877,7 +2877,7 @@ class StageATrainer:
             num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
-            repetition_penalty=1.1,  # Reduced from 1.8 - was too aggressive
+            repetition_penalty=1.4,  # Reduced from 1.8 - was too aggressive
             # Removed no_repeat_ngram_size - was blocking fluent generation
             # Removed encoder_repetition_penalty - was making it worse
             output_scores=False,
