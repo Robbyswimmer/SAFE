@@ -302,7 +302,7 @@ def run_experiment(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run full-scale SAFE Stage A training")
-    parser.add_argument("--variant", choices=["no_retention", "soft_retention"], help="Retention configuration")
+    parser.add_argument("--variant", choices=["no_retention", "soft_retention", "fisher_retention", "nullspace_retention", "full_retention"], help="Retention configuration")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--data-root", type=str, default="experiments/full_training/data", help="Dataset root")
     parser.add_argument("--train-split", type=str, default="train", help="AudioCaps split for training")
