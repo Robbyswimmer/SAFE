@@ -714,9 +714,13 @@ class StageATrainer:
 
         # Only log if audio fusion is significantly hurting performance
         if gate_off_loss is not None and baseline_loss is not None and gate_off_loss < baseline_loss - 0.1:
-            print(f"WARNING: Audio fusion may be hurting (gate=1.0: {baseline_loss:.4f}, gate=0.0: {gate_off_loss:.4f})", flush=True)
-        print(f"  shuffled audio: {fmt(shuffled_loss)}", flush=True)
-        print(f"  zeroed audio: {fmt(zero_loss)}", flush=True)
+            print(
+                f"WARNING: Audio fusion may be hurting (gate=1.0: {baseline_loss:.4f}, gate=0.0: {gate_off_loss:.4f})",
+                flush=True,
+            )
+        if self.debug_logging:
+            print(f"  shuffled audio: {fmt(shuffled_loss)}", flush=True)
+            print(f"  zeroed audio: {fmt(zero_loss)}", flush=True)
 
         self._sanity_checks_completed = True
 
@@ -970,9 +974,10 @@ class StageATrainer:
                 silent_count += 1
 
         if silent_count > 0:
-            print(
-                f"[SilentAudioCheck] Found {silent_count}/{len(audio_data)} silent samples (not filtered)",
-                flush=True,
+            self.logger.warning(
+                "SilentAudioCheck: detected %d/%d samples with near-zero amplitude",
+                silent_count,
+                len(audio_data),
             )
 
         return has_audio  # Return unchanged
@@ -1074,11 +1079,15 @@ class StageATrainer:
                     grad_norm = param.grad.norm().item()
                     lora_grad_norms.append(grad_norm)
 
-        # ENHANCED: Always log gradient flow status at critical steps
-        if self.global_step < 10 or audio_with_grads == 0 or lora_with_grads == 0:
+        # Optional debug logging of gradient flow
+        if self.debug_logging and (self.global_step < 10 or audio_with_grads == 0 or lora_with_grads == 0):
             avg_audio_norm = sum(audio_grad_norms) / len(audio_grad_norms) if audio_grad_norms else 0.0
             avg_lora_norm = sum(lora_grad_norms) / len(lora_grad_norms) if lora_grad_norms else 0.0
-            print(f"[GradFlow] step {self.global_step}: audio={audio_with_grads}/{total_audio} (norm={avg_audio_norm:.2e}), lora={lora_with_grads}/{total_lora} (norm={avg_lora_norm:.2e})", flush=True)
+            print(
+                f"[GradFlow] step {self.global_step}: audio={audio_with_grads}/{total_audio} (norm={avg_audio_norm:.2e}), "
+                f"lora={lora_with_grads}/{total_lora} (norm={avg_lora_norm:.2e})",
+                flush=True,
+            )
 
         # CRITICAL: Warn if gradients are completely missing
         if audio_with_grads == 0 and total_audio > 0:
@@ -1242,7 +1251,7 @@ class StageATrainer:
 
                 if self.safe_model.base_vl.model_type == "llava":
                     # Debug: Log input shapes before calling teacher
-                    if not getattr(self, "_train_debug_logged", False):
+                    if self.debug_logging and not getattr(self, "_train_debug_logged", False):
                         print(f"[TrainDebug] Base inputs keys: {list(base_inputs.keys())}", flush=True)
                         if "input_ids" in base_inputs:
                             print(f"[TrainDebug] Base input_ids shape: {base_inputs['input_ids'].shape}", flush=True)
@@ -1253,7 +1262,7 @@ class StageATrainer:
                     base_outputs = self._forward_llava_teacher(base_inputs)
 
                     # Debug: Log output shapes
-                    if not getattr(self, "_train_output_logged", False):
+                    if self.debug_logging and not getattr(self, "_train_output_logged", False):
                         print(f"[TrainDebug] Teacher output logits shape: {base_outputs['logits'].shape}", flush=True)
                         self._train_output_logged = True
 
@@ -2057,13 +2066,13 @@ class StageATrainer:
                     
                     total_samples += batch_size
     
-                    if eval_logging_steps and (
+                    if self.debug_logging and eval_logging_steps and (
                         batch_idx % eval_logging_steps == 0
                         or (isinstance(total_eval_batches, int) and batch_idx == total_eval_batches)
                     ):
                         print(
                             f"[Eval] Processed {batch_idx}/{total_eval_batches if isinstance(total_eval_batches, int) else '?'} batches",
-                            flush=True
+                            flush=True,
                         )
                     if self.debug_logging:
                         if torch.cuda.is_available():
@@ -2086,8 +2095,6 @@ class StageATrainer:
                         self.safe_model._default_gate = saved_gate
                     if self.debug_logging:
                         print(f"[EvalGate] Restored gate state to {saved_gate}", flush=True)
-                    else:
-                        print(f"🔧 Restored audio gate to: {saved_gate}", flush=True)
                 except Exception as exc:
                     print(f"[EvalGate] WARNING: Failed to restore gate state ({exc})", flush=True)
             if previous_mode:
@@ -2543,7 +2550,7 @@ class StageATrainer:
                     safe_acc_value = safe_results[i].score
                     base_acc_value = base_results[i].score
 
-                    if i < 2:  # Only log first 2 samples to avoid spam
+                    if self.debug_logging and i < 2:  # Only log first 2 samples to avoid spam
                         # Removed: print(f"[AccuracyDebug] Sample {i}:", flush=True)
                         print(f"  GT: '{gt_display}'", flush=True)
                         print(f"  SAFE_full: '{safe_pred_full}'", flush=True)
