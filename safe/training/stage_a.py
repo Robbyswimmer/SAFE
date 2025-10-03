@@ -79,11 +79,11 @@ class StageATrainer:
             "warmup_steps": 1000,
             "warmup_ratio": 0.1,
             "max_grad_norm": 1.0,
-            "audio_loss_weight": 1.0,
-            "retention_loss_weight": 1.0,
-            "distillation_weight": 1.0,
+            "audio_loss_weight": 1.5,
+            "retention_loss_weight": 0.25,
+            "distillation_weight": 0.5,
             "distillation_temperature": 3.0,
-            "fisher_weight": 0.1,
+            "fisher_weight": 0.05,
             "compute_fisher_at_start": True,  # Compute Fisher information before training starts
             "fisher_num_samples": 1000,  # Number of samples for Fisher computation
             "save_steps": 5000,
@@ -103,7 +103,7 @@ class StageATrainer:
             "null_space_audio_threshold": 0.25,
             "null_space_refresh_interval": 2000,
             "null_space_verbose": False,
-            "audio_label_smoothing": 0.1,
+            "audio_label_smoothing": 0.05,
             "enable_audio_sanity_checks": True,
             "log_waveform_stats": True,
             "waveform_log_limit": 8,
@@ -118,6 +118,10 @@ class StageATrainer:
             "train_accuracy_interval": 0,
             "train_accuracy_warmup": 5,
             "generation_max_new_tokens": 12,
+            "generation_repetition_penalty_audio": 1.1,
+            "generation_repetition_penalty_default": 1.2,
+            "generation_no_repeat_ngram_audio": 3,
+            "generation_no_repeat_ngram_default": 0,
             "gradient_accumulation_steps": 1,
             "audio_bertscore_threshold": 0.7,
             "gate_warmup_steps": 2000,
@@ -166,7 +170,7 @@ class StageATrainer:
             total_steps = self.total_train_steps
             cold_steps = max(1, total_steps - self.warmup_steps)
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=cold_steps)
-        
+
         # Training state
         self.global_step = 0
         self.epoch = 0
@@ -190,6 +194,16 @@ class StageATrainer:
         self.ema_decay = 0.98  # 30-50 step EMA (alpha = 1 - decay = 0.02)
         self.ablation_check_interval = 100
         self.last_ablation_step = -1
+
+        gate_warmup_cfg = int(self.config.get("gate_warmup_steps", self.warmup_steps))
+        gate_warmup_steps = max(1, min(gate_warmup_cfg, self.total_train_steps))
+        if gate_warmup_steps != gate_warmup_cfg:
+            print(
+                f"[StageATrainer] Adjusted gate warmup from {gate_warmup_cfg} to {gate_warmup_steps} based on dataset size.",
+                flush=True,
+            )
+        self.gate_warmup_steps = gate_warmup_steps
+        self.config["gate_warmup_steps"] = gate_warmup_steps
 
         waveform_logs = int(self.config.get("waveform_log_limit", 8))
         waveform_debug = bool(self.config.get("log_waveform_stats", False))
@@ -1186,8 +1200,10 @@ class StageATrainer:
 
         # Drive fusion gate warmup using micro-step aware schedule
         if hasattr(self.safe_model, "set_gate_warmup"):
-            warmup_steps = int(self.config.get("gate_warmup_steps", self.warmup_steps))
-            warmup_steps = max(1, warmup_steps)
+            warmup_steps = getattr(self, "gate_warmup_steps", None)
+            if warmup_steps is None:
+                warmup_steps = int(self.config.get("gate_warmup_steps", self.warmup_steps))
+                warmup_steps = max(1, warmup_steps)
             effective_step = self.global_step * self.grad_accum_steps + self._micro_step
             self.safe_model.set_gate_warmup(effective_step, warmup_steps)
 
@@ -2868,6 +2884,17 @@ class StageATrainer:
             # Audio-visual or ambiguous - use configured value
             max_new_tokens = configured_max_new_tokens
 
+        audio_repetition_penalty = float(self.config.get("generation_repetition_penalty_audio", 1.1) or 1.0)
+        default_repetition_penalty = float(self.config.get("generation_repetition_penalty_default", 1.2) or 1.0)
+        audio_ngram = int(self.config.get("generation_no_repeat_ngram_audio", 0) or 0)
+        default_ngram = int(self.config.get("generation_no_repeat_ngram_default", 0) or 0)
+
+        is_audio_heavy = bool(has_audio)
+        repetition_penalty = audio_repetition_penalty if is_audio_heavy else default_repetition_penalty
+        repetition_penalty = max(1.0, repetition_penalty)
+        no_repeat_ngram = audio_ngram if is_audio_heavy else default_ngram
+        no_repeat_ngram = max(0, no_repeat_ngram)
+
         gen_kwargs = dict(
             max_new_tokens=max_new_tokens,
             min_new_tokens=1,  # CRITICAL FIX: Force at least 1 token to prevent empty generation
@@ -2877,12 +2904,14 @@ class StageATrainer:
             num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
-            repetition_penalty=1.4,  # Reduced from 1.8 - was too aggressive
-            # Removed no_repeat_ngram_size - was blocking fluent generation
+            repetition_penalty=repetition_penalty,
             # Removed encoder_repetition_penalty - was making it worse
             output_scores=False,
             return_dict_in_generate=False
         )
+
+        if no_repeat_ngram > 0:
+            gen_kwargs["no_repeat_ngram_size"] = no_repeat_ngram
 
         # EARLY TRAINING FIX: Suppress EOS in first 500 steps to force output
         # The untrained audio features may confuse the model into immediate EOS
