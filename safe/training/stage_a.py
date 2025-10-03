@@ -2793,7 +2793,9 @@ class StageATrainer:
             num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
-            repetition_penalty=1.2,  # Increased from 1.0 to prevent getting stuck repeating tokens
+            repetition_penalty=1.8,  # Increased from 1.2 to strongly penalize repetition
+            no_repeat_ngram_size=3,  # Prevent repeating 3-grams (stops "се се се" loops)
+            encoder_repetition_penalty=1.5,  # Additional penalty on encoder side
             output_scores=False,
             return_dict_in_generate=False
         )
