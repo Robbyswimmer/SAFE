@@ -79,11 +79,11 @@ class StageATrainer:
             "warmup_steps": 1000,
             "warmup_ratio": 0.1,
             "max_grad_norm": 1.0,
-            "audio_loss_weight": 1.0,
-            "retention_loss_weight": 1.0,
-            "distillation_weight": 1.0,
+            "audio_loss_weight": 1.3,  # bias early curriculum toward learning audio mappings
+            "retention_loss_weight": 0.2,  # keep minimal retention pressure while audio stabilises
+            "distillation_weight": 0.5,
             "distillation_temperature": 3.0,
-            "fisher_weight": 0.1,
+            "fisher_weight": 0.0,
             "compute_fisher_at_start": True,  # Compute Fisher information before training starts
             "fisher_num_samples": 1000,  # Number of samples for Fisher computation
             "save_steps": 5000,
@@ -117,10 +117,12 @@ class StageATrainer:
             "param_sanitize_clip": 1e3,
             "train_accuracy_interval": 0,
             "train_accuracy_warmup": 5,
-            "generation_max_new_tokens": 12,
+            "generation_max_new_tokens": 32,
+            "generation_repetition_penalty": 1.1,
+            "generation_no_repeat_ngram_size": 3,
             "gradient_accumulation_steps": 1,
             "audio_bertscore_threshold": 0.7,
-            "gate_warmup_steps": 2000,
+            "gate_warmup_steps": 400,
         }
 
         if config:
@@ -2875,6 +2877,13 @@ class StageATrainer:
             # Audio-visual or ambiguous - use configured value
             max_new_tokens = configured_max_new_tokens
 
+        repetition_penalty = float(self.config.get("generation_repetition_penalty", 1.1) or 1.0)
+        no_repeat = int(self.config.get("generation_no_repeat_ngram_size", 0) or 0)
+        if repetition_penalty < 1.0:
+            repetition_penalty = 1.0
+        if no_repeat < 0:
+            no_repeat = 0
+
         gen_kwargs = dict(
             max_new_tokens=max_new_tokens,
             min_new_tokens=1,  # CRITICAL FIX: Force at least 1 token to prevent empty generation
@@ -2884,12 +2893,13 @@ class StageATrainer:
             num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
-            repetition_penalty=1.4,  # Reduced from 1.8 - was too aggressive
-            # Removed no_repeat_ngram_size - was blocking fluent generation
-            # Removed encoder_repetition_penalty - was making it worse
             output_scores=False,
             return_dict_in_generate=False
         )
+        if repetition_penalty != 1.0:
+            gen_kwargs["repetition_penalty"] = repetition_penalty
+        if no_repeat > 0:
+            gen_kwargs["no_repeat_ngram_size"] = no_repeat
 
         # EARLY TRAINING FIX: Suppress EOS in first 500 steps to force output
         # The untrained audio features may confuse the model into immediate EOS
