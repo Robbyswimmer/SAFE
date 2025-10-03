@@ -238,9 +238,9 @@ def performance_thresholds():
 
 class MockDataset:
     """Mock dataset class for testing."""
-    
-    def __init__(self, size: int = 100, modalities: List[str] = None):
-        self.size = size
+
+    def __init__(self, size=100, modalities=None):
+        self.size = int(size)
         self.modalities = modalities or ["audio", "visual"]
         
     def __len__(self):
@@ -248,8 +248,8 @@ class MockDataset:
         
     def __getitem__(self, idx):
         item = {
-            "question": f"Test question {idx}",
-            "answer": f"Test answer {idx}",
+            "question": "Test question {}".format(idx),
+            "answer": "Test answer {}".format(idx),
             "question_type": "test"
         }
         
@@ -284,18 +284,18 @@ pytest.mark.gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU 
 # Helper functions
 def assert_tensor_shape(tensor: torch.Tensor, expected_shape: tuple, name: str = "tensor"):
     """Assert tensor has expected shape."""
-    assert tensor.shape == expected_shape, f"{name} shape {tensor.shape} != expected {expected_shape}"
+    assert tensor.shape == expected_shape, "{} shape {} != expected {}".format(name, tensor.shape, expected_shape)
 
 
 def assert_tensor_range(tensor: torch.Tensor, min_val: float = None, max_val: float = None, name: str = "tensor"):
     """Assert tensor values are in expected range."""
     if min_val is not None:
-        assert tensor.min() >= min_val, f"{name} min value {tensor.min()} < {min_val}"
+        assert tensor.min() >= min_val, "{} min value {} < {}".format(name, tensor.min(), min_val)
     if max_val is not None:
-        assert tensor.max() <= max_val, f"{name} max value {tensor.max()} > {max_val}"
+        assert tensor.max() <= max_val, "{} max value {} > {}".format(name, tensor.max(), max_val)
 
 
 def assert_no_nan_inf(tensor: torch.Tensor, name: str = "tensor"):
     """Assert tensor contains no NaN or infinite values."""
-    assert not torch.isnan(tensor).any(), f"{name} contains NaN values"
-    assert not torch.isinf(tensor).any(), f"{name} contains infinite values"
+    assert not torch.isnan(tensor).any(), "{} contains NaN values".format(name)
+    assert not torch.isinf(tensor).any(), "{} contains infinite values".format(name)

@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import torch.nn as nn
 import librosa
-from typing import Optional, Union, List, Tuple
+from typing import Any, Optional, Union, List, Tuple
 import laion_clap
 import whisper
 from transformers import WhisperFeatureExtractor, WhisperModel
@@ -88,7 +88,7 @@ class CLAPAudioEncoder(nn.Module):
         )
         self._waveform_logs_emitted += 1
 
-    def preprocess_audio(self, audio: Union[torch.Tensor, np.ndarray, str]) -> torch.Tensor:
+    def preprocess_audio(self, audio: Union[torch.Tensor, np.ndarray, str, Tuple[Any, Any]]) -> torch.Tensor:
         """
         Preprocess audio to the format expected by CLAP.
         
@@ -98,9 +98,23 @@ class CLAPAudioEncoder(nn.Module):
         Returns:
             Preprocessed audio tensor (1, max_samples)
         """
+        input_sr = self.sample_rate
+
         if isinstance(audio, str):
-            # Load from file
-            audio_data, sr = librosa.load(audio, sr=self.sample_rate)
+            audio_data, input_sr = librosa.load(audio, sr=self.sample_rate)
+        elif isinstance(audio, tuple) and len(audio) >= 1:
+            candidate = audio[0]
+            if isinstance(candidate, torch.Tensor):
+                audio_data = candidate.detach().cpu().numpy()
+            elif isinstance(candidate, np.ndarray):
+                audio_data = candidate
+            else:
+                raise ValueError(f"Unsupported audio tuple payload: {type(candidate)}")
+            if len(audio) > 1:
+                try:
+                    input_sr = int(audio[1])
+                except Exception:
+                    input_sr = self.sample_rate
         elif isinstance(audio, np.ndarray):
             audio_data = audio
         elif isinstance(audio, torch.Tensor):
@@ -112,6 +126,21 @@ class CLAPAudioEncoder(nn.Module):
         if len(audio_data.shape) > 1:
             audio_data = audio_data.mean(axis=0)  # Convert to mono
 
+        if input_sr != self.sample_rate:
+            try:
+                audio_data = librosa.resample(audio_data, orig_sr=input_sr, target_sr=self.sample_rate)
+            except Exception:
+                # Fall back to naive slicing when resampling fails
+                scale = self.sample_rate / float(max(input_sr, 1))
+                target_len = int(round(len(audio_data) * scale))
+                if target_len <= 0:
+                    target_len = len(audio_data)
+                audio_data = np.interp(
+                    np.linspace(0, len(audio_data) - 1, num=target_len, dtype=np.float32),
+                    np.arange(len(audio_data), dtype=np.float32),
+                    audio_data.astype(np.float32),
+                )
+
         # Truncate or pad to max_length
         if len(audio_data) > self.max_samples:
             audio_data = audio_data[:self.max_samples]
@@ -122,7 +151,7 @@ class CLAPAudioEncoder(nn.Module):
 
         return torch.from_numpy(audio_data).float().unsqueeze(0)  # (1, max_samples)
     
-    def forward(self, audio: Union[torch.Tensor, List[str], List[np.ndarray]]) -> torch.Tensor:
+    def forward(self, audio: Union[torch.Tensor, List[Any]]) -> torch.Tensor:
         """
         Extract audio embeddings using CLAP.
         

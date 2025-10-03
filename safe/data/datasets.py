@@ -169,8 +169,30 @@ class _BaseQADataset(Dataset):
             try:
                 import torchaudio
 
-                waveform, _ = torchaudio.load(audio_file)
-                return waveform.mean(dim=0)
+                waveform, sample_rate = torchaudio.load(audio_file)
+                if waveform.dim() == 2:
+                    waveform = waveform.mean(dim=0)
+
+                target_sample_rate = 48_000
+                if sample_rate != target_sample_rate:
+                    try:
+                        waveform = torchaudio.functional.resample(
+                            waveform.unsqueeze(0), sample_rate, target_sample_rate
+                        ).squeeze(0)
+                    except Exception:
+                        # Fallback to a naive nearest-neighbour style resample if the
+                        # functional helper is unavailable for the current backend.
+                        import torch
+                        ratio = target_sample_rate / float(sample_rate)
+                        num_samples = int(waveform.size(-1) * ratio)
+                        waveform = torch.nn.functional.interpolate(
+                            waveform.unsqueeze(0).unsqueeze(0),
+                            size=num_samples,
+                            mode="linear",
+                            align_corners=False,
+                        ).squeeze(0).squeeze(0)
+
+                return (waveform, target_sample_rate)
             except Exception:
                 return None
         return None

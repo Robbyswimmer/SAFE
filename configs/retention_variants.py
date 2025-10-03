@@ -57,8 +57,8 @@ NO_RETENTION = RetentionVariantConfig(
 KL_ONLY = RetentionVariantConfig(
     name="soft_retention",  # Keep existing name for compatibility
     description="KL divergence distillation only",
-    retention_loss_weight=0.2,
-    distillation_weight=0.2,
+    retention_loss_weight=0.05,  # Reduced from 0.2 - was overwhelming audio learning
+    distillation_weight=0.05,    # Reduced from 0.2 - distillation loss was too high
     fisher_weight=0.0,
     enable_null_space=False,
 )

@@ -164,6 +164,7 @@ class SAFEModel(nn.Module):
         
         # Gate default and setter for warmup
         self._default_gate = 1.0
+        self._audio_silence_threshold = 1e-4
 
     def set_gate(self, value: float) -> None:
         """Set default gate value for fusion (useful for warmup)."""
@@ -600,37 +601,72 @@ class SAFEModel(nn.Module):
         if audio_to_encode is not None:
             audio_tokens, transcripts = self.encode_audio(audio_to_encode, num_audio_tokens)
 
+            raw_levels_by_batch: Optional[List[Optional[float]]] = None
+            if isinstance(audio, torch.Tensor) and audio.dim() >= 2:
+                flattened = audio.reshape(audio.shape[0], -1)
+                raw_levels_by_batch = [float(flat.abs().max().item()) for flat in flattened]
+            elif isinstance(audio, list):
+                raw_levels_by_batch = []
+                for item in audio:
+                    waveform = self._extract_waveform_from_input(item)
+                    if waveform is None or waveform.numel() == 0:
+                        raw_levels_by_batch.append(None)
+                    else:
+                        raw_levels_by_batch.append(float(torch.abs(waveform).max().item()))
+
             if isinstance(audio, list) and audio_indices is not None:
                 audio_tokens = self._scatter_audio_tokens(audio_tokens, audio_indices, batch_size)
                 if transcripts is not None:
                     transcripts = self._scatter_transcripts(transcripts, audio_indices, batch_size)
 
+                if raw_levels_by_batch is not None:
+                    scattered_levels = [None] * batch_size
+                    for storage_index, level in zip(audio_indices, raw_levels_by_batch):
+                        scattered_levels[int(storage_index)] = level
+                    raw_levels_by_batch = scattered_levels
+
             # Gentle finite guards and build audio attention mask
             if torch.is_tensor(audio_tokens):
-                # Add finite guards where it matters
                 assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens after encode_audio"
-                
-                # Remove hard clamps, use gentle cleaning only
+
                 audio_tokens = torch.nan_to_num(audio_tokens, nan=0.0, posinf=0.0, neginf=0.0)
-                
-                # Build audio attention mask: 1=keep, 0=mask
+
                 B, T, _ = audio_tokens.shape
-                audio_attention_mask = torch.ones(B, T,
-                                                  dtype=torch.long,  # Match typical attention mask dtype
-                                                  device=audio_tokens.device)
-                
-                # Mark truly silent samples as masked-out (all tokens for that sample)
-                # CRITICAL FIX: Relax threshold from 1e-4 to 1e-6 to avoid masking valid audio
-                sample_absmax = audio_tokens.abs().amax(dim=(1, 2))  # (B,)
-                silent = sample_absmax < 1e-6  # Relaxed threshold - was 1e-4 which was too aggressive
+                audio_attention_mask = torch.ones(
+                    B,
+                    T,
+                    dtype=torch.long,
+                    device=audio_tokens.device,
+                )
+
+                token_absmax = audio_tokens.abs().amax(dim=(1, 2))
+                per_sample_levels: List[float] = []
+                for idx in range(B):
+                    raw_level = None
+                    if raw_levels_by_batch is not None and idx < len(raw_levels_by_batch):
+                        raw_level = raw_levels_by_batch[idx]
+                    if raw_level is None:
+                        raw_level = float(token_absmax[idx].item())
+                    per_sample_levels.append(raw_level)
+
+                level_tensor = torch.tensor(
+                    per_sample_levels,
+                    dtype=audio_tokens.dtype,
+                    device=audio_tokens.device,
+                )
+                silent = level_tensor < self._audio_silence_threshold
                 if silent.any():
                     audio_attention_mask[silent] = 0
-                    # Always log masked samples for debugging
-                    silent_count = silent.sum().item()
-                    print(f"[AudioMask] Masked {silent_count}/{B} silent audio samples (threshold=1e-6, max_values={sample_absmax[:3].tolist()})", flush=True)
-                else:
-                    print(f"[AudioMask] All {B} audio samples passed threshold (max_values={sample_absmax[:min(3,B)].tolist()})", flush=True)
-                
+                    if getattr(self, "debug_logging", False):
+                        silent_count = int(silent.sum().item())
+                        print(
+                            f"[AudioMask] Masked {silent_count}/{B} samples (threshold={self._audio_silence_threshold:.1e})",
+                            flush=True,
+                        )
+                elif getattr(self, "debug_logging", False):
+                    preview = per_sample_levels[: min(B, 3)]
+                    print(f"[AudioMask] Audio levels OK (sample max={preview})", flush=True)
+
                 result["audio_attention_mask"] = audio_attention_mask
 
             audio_tokens = audio_tokens.to(device)
@@ -1027,6 +1063,24 @@ class SAFEModel(nn.Module):
         for pos, tr in zip(indices, transcripts):
             full[pos] = tr
         return full
+
+    def _extract_waveform_from_input(self, audio_input: Any) -> Optional[torch.Tensor]:
+        """Attempt to recover a waveform tensor from arbitrary audio inputs."""
+
+        if isinstance(audio_input, torch.Tensor):
+            return audio_input
+
+        if isinstance(audio_input, tuple) and audio_input:
+            candidate = audio_input[0]
+            if isinstance(candidate, torch.Tensor):
+                return candidate
+
+        if isinstance(audio_input, dict):
+            candidate = audio_input.get("waveform")
+            if isinstance(candidate, torch.Tensor):
+                return candidate
+
+        return None
 
     def _sanitize_input_ids_for_base(self, input_ids: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
         if input_ids is None:

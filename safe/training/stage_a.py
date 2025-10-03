@@ -14,6 +14,7 @@ import textwrap
 import traceback
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 import re
 
 # Set CPU threads for predictable performance
@@ -25,6 +26,14 @@ from ..data.datasets import create_safe_dataloader
 from ..data.curriculum import CurriculumManager, CurriculumConfig, ProgressionStatus
 from .losses import RetentionLoss, AudioTaskLoss, CombinedStageLoss
 from .null_space import NullSpaceProjector, NullSpaceConfig
+
+
+@dataclass
+class AccuracyResult:
+    """Container for per-sample accuracy with auxiliary metrics."""
+
+    score: float
+    metrics: Dict[str, float]
 
 
 class StageATrainer:
@@ -109,12 +118,17 @@ class StageATrainer:
             "train_accuracy_interval": 0,
             "train_accuracy_warmup": 5,
             "generation_max_new_tokens": 12,
+            "gradient_accumulation_steps": 1,
+            "audio_bertscore_threshold": 0.7,
+            "gate_warmup_steps": 2000,
         }
 
         if config:
             self.config.update(config)
 
         self.debug_logging = bool(self.config.get("debug_logging", False))
+        self.grad_accum_steps = max(1, int(self.config.get("gradient_accumulation_steps", 1)))
+        self._micro_step = 0
 
         self.logger = logging.getLogger(__name__)
         if not self.logger.handlers:
@@ -935,14 +949,31 @@ class StageATrainer:
         # Just log statistics without filtering
         silent_threshold = 1e-8
         silent_count = 0
-        for i, audio_tensor in enumerate(audio_data):
+        for audio_tensor in audio_data:
+            waveform = None
             if isinstance(audio_tensor, torch.Tensor):
-                max_amplitude = torch.abs(audio_tensor).max().item()
-                if max_amplitude < silent_threshold:
-                    silent_count += 1
+                waveform = audio_tensor
+            elif isinstance(audio_tensor, tuple) and audio_tensor:
+                candidate = audio_tensor[0]
+                if isinstance(candidate, torch.Tensor):
+                    waveform = candidate
+            elif isinstance(audio_tensor, dict):
+                candidate = audio_tensor.get("waveform")
+                if isinstance(candidate, torch.Tensor):
+                    waveform = candidate
+
+            if waveform is None:
+                continue
+
+            max_amplitude = torch.abs(waveform).max().item() if waveform.numel() > 0 else 0.0
+            if max_amplitude < silent_threshold:
+                silent_count += 1
 
         if silent_count > 0:
-            print(f"[SilentAudioCheck] Found {silent_count}/{len(audio_data)} truly silent samples (NOT filtering, letting model handle)", flush=True)
+            print(
+                f"[SilentAudioCheck] Found {silent_count}/{len(audio_data)} silent samples (not filtered)",
+                flush=True,
+            )
 
         return has_audio  # Return unchanged
 
@@ -1054,8 +1085,36 @@ class StageATrainer:
             print(f"❌ CRITICAL: No audio gradients flowing ({audio_with_grads}/{total_audio}) - audio won't learn!", flush=True)
         elif lora_with_grads == 0 and total_lora > 0:
             print(f"❌ WARNING: No LoRA gradients flowing ({lora_with_grads}/{total_lora})", flush=True)
-    
-    def train_step(self, batch: Dict) -> Dict[str, float]:
+
+    def _prepare_fisher_batch(self, batch: Dict[str, Any], device: torch.device) -> Optional[Dict[str, torch.Tensor]]:
+        """Tokenize a raw curriculum batch for Fisher information computation."""
+
+        questions = batch.get("questions")
+        if not questions:
+            return None
+
+        inputs = self.safe_model.prepare_multimodal_inputs(
+            text=questions,
+            images=batch.get("images"),
+            audio=None,
+            answers=batch.get("answers"),
+            device=device,
+            include_audio_tokens=False,
+            training_mode=True,
+        )
+
+        fisher_inputs: Dict[str, torch.Tensor] = {}
+        for key in ("input_ids", "attention_mask", "labels", "pixel_values"):
+            value = inputs.get(key)
+            if isinstance(value, torch.Tensor):
+                fisher_inputs[key] = value.detach()
+
+        if "input_ids" not in fisher_inputs:
+            return None
+
+        return fisher_inputs
+
+    def train_step(self, batch: Dict) -> Tuple[Dict[str, float], bool]:
         """
         Single training step.
         
@@ -1063,7 +1122,7 @@ class StageATrainer:
             batch: Training batch
             
         Returns:
-            Dictionary with loss values
+            Tuple of (loss metrics, optimizer_step_performed)
         """
         self.safe_model.train()
         self.safe_model.enable_audio_training()  # Only train audio components
@@ -1071,6 +1130,9 @@ class StageATrainer:
         # Verify trainable parameters (debug gradient flow issues)
         if self.global_step % 10 == 0 or self.global_step < 5:  # Check every 10 steps or first 5 steps
             self._verify_trainable_parameters()
+
+        if self._micro_step == 0:
+            self.optimizer.zero_grad(set_to_none=True)
 
         step_timer_start = None
         if self.debug_logging:
@@ -1107,7 +1169,7 @@ class StageATrainer:
             has_audio = self._check_silent_audio(batch)
             if isinstance(has_audio, torch.Tensor):
                 has_audio = has_audio.to(device=device, dtype=torch.bool)
-        
+
         # Create input tensors for training - apply answers for supervised learning
         inputs = self.safe_model.prepare_multimodal_inputs(
             text=batch["questions"],
@@ -1121,6 +1183,13 @@ class StageATrainer:
         # Get processed inputs
         audio_tokens = inputs.get("audio_tokens", None)
         labels = inputs.get("labels", None)
+
+        # Drive fusion gate warmup using micro-step aware schedule
+        if hasattr(self.safe_model, "set_gate_warmup"):
+            warmup_steps = int(self.config.get("gate_warmup_steps", self.warmup_steps))
+            warmup_steps = max(1, warmup_steps)
+            effective_step = self.global_step * self.grad_accum_steps + self._micro_step
+            self.safe_model.set_gate_warmup(effective_step, warmup_steps)
 
         if self.debug_logging:
             input_shape = None
@@ -1279,7 +1348,7 @@ class StageATrainer:
                 prev_mode = self.safe_model.training
                 with torch.no_grad():
                     self.safe_model.eval()
-                    safe_acc_list, _ = self._compute_robust_accuracy(
+                    safe_results, _ = self._compute_robust_accuracy(
                         safe_outputs=safe_outputs,
                         base_outputs=base_outputs,
                         inputs=inputs,
@@ -1295,14 +1364,22 @@ class StageATrainer:
                 vl_indices = (~has_audio_cpu).nonzero(as_tuple=False).view(-1).tolist()
 
                 if audio_indices:
-                    audio_acc = float(np.mean([safe_acc_list[i] for i in audio_indices]))
-                    train_metrics["train_audio_accuracy"] = audio_acc
+                    audio_scores = [safe_results[i].score for i in audio_indices]
+                    train_metrics["train_audio_accuracy"] = float(np.mean(audio_scores)) if audio_scores else 0.0
+                    token_f1_scores = [safe_results[i].metrics.get("token_f1", 0.0) for i in audio_indices]
+                    if token_f1_scores:
+                        train_metrics["train_audio_token_f1"] = float(np.mean(token_f1_scores))
+                    bert_scores = [safe_results[i].metrics.get("bertscore", 0.0) for i in audio_indices]
+                    if bert_scores:
+                        train_metrics["train_audio_bertscore"] = float(np.mean(bert_scores))
                 if vl_indices:
-                    vl_acc = float(np.mean([safe_acc_list[i] for i in vl_indices]))
-                    train_metrics["train_vl_accuracy"] = vl_acc
+                    vl_scores = [safe_results[i].score for i in vl_indices]
+                    train_metrics["train_vl_accuracy"] = float(np.mean(vl_scores)) if vl_scores else 0.0
 
-                if safe_acc_list:
-                    train_metrics["train_overall_accuracy"] = float(np.mean(safe_acc_list))
+                if safe_results:
+                    train_metrics["train_overall_accuracy"] = float(
+                        np.mean([res.score for res in safe_results])
+                    )
 
                 if train_metrics:
                     metrics_str = ", ".join(f"{k}={v:.3f}" for k, v in train_metrics.items())
@@ -1383,75 +1460,73 @@ class StageATrainer:
             print(f"Batch size: {len(inputs.get('input_ids', []))}", flush=True)
             print("="*30, flush=True)
         
-        # Backward pass
-        total_loss.backward()
+        # Backward pass with gradient accumulation support
+        loss_scale = 1.0 / float(self.grad_accum_steps)
+        (total_loss * loss_scale).backward()
 
         # Clean up NaN/Inf gradients from audio pathway before diagnostics
         self._sanitize_audio_gradients()
-        self._sanitize_audio_parameters()
 
-        # Verify gradients are flowing (debug)
-        if self.global_step % 5 == 0 or self.global_step < 3:
-            self._check_gradient_flow()
+        self._micro_step += 1
+        ready_to_step = self._micro_step >= self.grad_accum_steps
 
-        self._log_grad_norms()
+        if ready_to_step:
+            # Optional additional parameter sanitization before inspection
+            self._sanitize_audio_parameters()
 
-        if self.null_space_projector is not None:
-            self.null_space_projector.observe(step=self.global_step, has_audio=has_audio)
-            self.null_space_projector.project()
+            # Verify gradients are flowing (debug)
+            if self.global_step % 5 == 0 or self.global_step < 3:
+                self._check_gradient_flow()
 
-        # Gradient clipping with NaN detection and prevention
-        if self.trainable_param_list:
-            # Check for and handle NaN/Inf gradients
-            nan_grad_count = 0
-            sanitized_grad_count = 0
-            for param in self.trainable_param_list:
-                if param.grad is not None:
+            self._log_grad_norms()
+
+            if self.null_space_projector is not None:
+                self.null_space_projector.observe(step=self.global_step, has_audio=has_audio)
+                self.null_space_projector.project()
+
+            # Gradient clipping with NaN detection and prevention
+            if self.trainable_param_list:
+                grad_clip = float(self.config.get("grad_sanitize_clip", 1e3))
+                for param in self.trainable_param_list:
+                    if param.grad is None:
+                        continue
                     grad = param.grad
                     if torch.isnan(grad).any() or torch.isinf(grad).any():
-                        torch.nan_to_num_(grad, nan=0.0, posinf=self.config["grad_sanitize_clip"], neginf=-self.config["grad_sanitize_clip"])
-                        grad.clamp_(-self.config["grad_sanitize_clip"], self.config["grad_sanitize_clip"])
+                        torch.nan_to_num_(grad, nan=0.0, posinf=grad_clip, neginf=-grad_clip)
+                        grad.clamp_(-grad_clip, grad_clip)
                         if torch.isnan(grad).any() or torch.isinf(grad).any():
                             grad.zero_()
-                            nan_grad_count += 1
-                        else:
-                            sanitized_grad_count += 1
 
-            # Keep track of sanitized gradients (logging removed)
-            
-            # Apply gradient clipping
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.trainable_param_list,
-                self.config["max_grad_norm"]
-            )
-            
-            # Track gradient clipping (logging removed)
+                torch.nn.utils.clip_grad_norm_(
+                    self.trainable_param_list,
+                    self.config["max_grad_norm"],
+                )
 
-        # Store pre-update parameters for update norm calculation
-        pre_update_params = {}
-        if self.config.get("log_update_norms", True):
-            for name, param in self.safe_model.named_parameters():
-                if param.requires_grad:
-                    pre_update_params[name] = param.data.clone()
+            # Store pre-update parameters for update norm calculation
+            pre_update_params = {}
+            if self.config.get("log_update_norms", True):
+                for name, param in self.safe_model.named_parameters():
+                    if param.requires_grad:
+                        pre_update_params[name] = param.data.clone()
 
-        # Optimizer step
-        self.optimizer.step()
-        self._sanitize_audio_parameters()
-        
-        # Log parameter update norms
-        if self.config.get("log_update_norms", True) and self.global_step % self.config.get("grad_log_interval", 1) == 0:
-            self._log_update_norms(pre_update_params)
-        
-        self.optimizer.zero_grad()
-        
-        # Learning rate scheduling (fixed: use local_step, assign don't multiply)
-        local_step = self.global_step + 1  # because caller increments after train_step returns
-        
-        if local_step <= self.warmup_steps:
-            self._apply_warmup(local_step)
-        elif self.scheduler is not None:
-            self.scheduler.step()
-        
+            # Optimizer step
+            self.optimizer.step()
+            self._sanitize_audio_parameters()
+
+            # Log parameter update norms
+            if self.config.get("log_update_norms", True) and self.global_step % self.config.get("grad_log_interval", 1) == 0:
+                self._log_update_norms(pre_update_params)
+
+            self._micro_step = 0
+
+            # Learning rate scheduling (fixed: use local_step, assign don't multiply)
+            local_step = self.global_step + 1  # caller increments after returning
+
+            if local_step <= self.warmup_steps:
+                self._apply_warmup(local_step)
+            elif self.scheduler is not None:
+                self.scheduler.step()
+
         if self.debug_logging:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -1461,7 +1536,7 @@ class StageATrainer:
                 flush=True,
             )
 
-        return log_metrics
+        return log_metrics, ready_to_step
     
     def evaluate(
         self,
@@ -1517,6 +1592,9 @@ class StageATrainer:
         # Metrics for audio-dependent samples
         audio_correct = 0
         audio_total = 0
+        audio_exact = 0.0
+        audio_token_f1 = 0.0
+        audio_bertscore = 0.0
         
         # Metrics for VL retention
         vl_safe_correct = 0
@@ -1927,7 +2005,7 @@ class StageATrainer:
                             flush=True,
                         )
                     robust_t0 = time.time()
-                    safe_accuracy_batch, base_accuracy_batch = self._compute_robust_accuracy(
+                    safe_results_batch, base_results_batch = self._compute_robust_accuracy(
                         safe_outputs, base_outputs, inputs, has_audio, batch
                     )
                     # Removed verbose progress logging
@@ -1938,12 +2016,12 @@ class StageATrainer:
                             f"[EvalDebug] batch {batch_idx}: robust accuracy done in {time.time() - robust_t0:.2f}s",
                             flush=True,
                         )
-                        if safe_accuracy_batch:
+                        if safe_results_batch:
                             print(
-                                f"[EvalDebug] batch {batch_idx}: sample SAFE acc={safe_accuracy_batch[0]:.3f}, base acc={base_accuracy_batch[0]:.3f}",
+                                f"[EvalDebug] batch {batch_idx}: sample SAFE acc={safe_results_batch[0].score:.3f}, base acc={base_results_batch[0].score:.3f}",
                                 flush=True,
                             )
-                    
+
                     if self._should_log_sample():
                         try:
                             self._log_sample_predictions(
@@ -1951,28 +2029,29 @@ class StageATrainer:
                                 base_outputs=base_outputs,
                                 inputs=inputs,
                                 batch=batch,
-                                safe_accuracies=safe_accuracy_batch,
-                                base_accuracies=base_accuracy_batch,
+                                safe_accuracies=[res.score for res in safe_results_batch],
+                                base_accuracies=[res.score for res in base_results_batch],
                                 context="eval"
                             )
                         except Exception as exc:
                             self.logger.debug(f"Sample logging skipped during eval due to error: {exc}")
-                    
+
                     # Audio-dependent accuracy
                     if torch.any(has_audio):
                         audio_indices = torch.where(has_audio)[0]
                         if len(audio_indices) > 0:
-                            # Use answer-level accuracy for audio samples (fix tensor indexing)
-                            audio_correct += sum(safe_accuracy_batch[int(i)] for i in audio_indices)
+                            audio_correct += sum(safe_results_batch[int(i)].score for i in audio_indices)
+                            audio_exact += sum(safe_results_batch[int(i)].metrics.get("exact", 0.0) for i in audio_indices)
+                            audio_token_f1 += sum(safe_results_batch[int(i)].metrics.get("token_f1", 0.0) for i in audio_indices)
+                            audio_bertscore += sum(safe_results_batch[int(i)].metrics.get("bertscore", 0.0) for i in audio_indices)
                             audio_total += len(audio_indices)
                             audio_samples += len(audio_indices)
-                    
+
                     # VL retention accuracy  
                     vl_indices = torch.where(~has_audio)[0] if torch.any(~has_audio) else torch.arange(len(has_audio))
                     if len(vl_indices) > 0:
-                        # Use answer-level accuracy for VL samples (fix tensor indexing)
-                        vl_safe_correct += sum(safe_accuracy_batch[int(i)] for i in vl_indices)
-                        vl_base_correct += sum(base_accuracy_batch[int(i)] for i in vl_indices)
+                        vl_safe_correct += sum(safe_results_batch[int(i)].score for i in vl_indices)
+                        vl_base_correct += sum(base_results_batch[int(i)].score for i in vl_indices)
                         vl_total += len(vl_indices)
                         vl_samples += len(vl_indices)
                     
@@ -2029,6 +2108,9 @@ class StageATrainer:
         
         # Compute accuracy metrics
         audio_accuracy = audio_correct / max(audio_total, 1)
+        audio_exact_avg = audio_exact / max(audio_total, 1)
+        audio_token_f1_avg = audio_token_f1 / max(audio_total, 1)
+        audio_bertscore_avg = audio_bertscore / max(audio_total, 1)
         vl_safe_accuracy = vl_safe_correct / max(vl_total, 1)
         vl_base_accuracy = vl_base_correct / max(vl_total, 1)
         
@@ -2038,6 +2120,9 @@ class StageATrainer:
         eval_metrics = {
             **eval_losses,
             "audio_accuracy": audio_accuracy,
+            "audio_exact_match": audio_exact_avg,
+            "audio_token_f1": audio_token_f1_avg,
+            "audio_bertscore": audio_bertscore_avg,
             "vl_safe_accuracy": vl_safe_accuracy,
             "vl_base_accuracy": vl_base_accuracy,
             "retention_score": retention_score,
@@ -2287,8 +2372,8 @@ class StageATrainer:
             Tuple of (safe_accuracies, base_accuracies) for each sample in batch
         """
         batch_size = len(batch.get("questions", inputs.get("input_ids", [])))
-        safe_accuracies = [0.0] * batch_size
-        base_accuracies = [0.0] * batch_size
+        safe_results = [AccuracyResult(0.0, {"exact": 0.0}) for _ in range(batch_size)]
+        base_results = [AccuracyResult(0.0, {"exact": 0.0}) for _ in range(batch_size)]
         
         try:
             # Get ground truth answers (preserved from original batch before preprocessing)
@@ -2323,7 +2408,7 @@ class StageATrainer:
                         gt_answers.append("")
             else:
                 # No ground truth available
-                return safe_accuracies, base_accuracies
+                return safe_results, base_results
             
             # Generate predictions using proper generation (without labels)
             # Removed verbose progress logging
@@ -2389,8 +2474,8 @@ class StageATrainer:
                 try:
                     # Check bounds before accessing prediction tokens
                     if i >= len(safe_pred_tokens) or i >= len(base_pred_tokens):
-                        safe_accuracies[i] = 0.0
-                        base_accuracies[i] = 0.0
+                        safe_results[i] = AccuracyResult(0.0, {"exact": 0.0})
+                        base_results[i] = AccuracyResult(0.0, {"exact": 0.0})
                         continue
                     
                     # Decode SAFE model predictions and extract answer
@@ -2428,8 +2513,15 @@ class StageATrainer:
 
                         # Enable metric debugging for first 2 samples
                         debug_metrics = (i < 2)
-                        safe_accuracies[i] = self._compute_audio_caption_accuracy(safe_pred_extracted, gt_raw, debug=debug_metrics)
-                        base_accuracies[i] = self._compute_audio_caption_accuracy(base_pred_extracted, gt_raw, debug=debug_metrics)
+                        safe_metrics = self._compute_audio_caption_metrics(
+                            safe_pred_extracted, gt_raw, debug=debug_metrics
+                        )
+                        base_metrics = self._compute_audio_caption_metrics(
+                            base_pred_extracted, gt_raw, debug=debug_metrics
+                        )
+
+                        safe_results[i] = AccuracyResult(safe_metrics["composite"], safe_metrics)
+                        base_results[i] = AccuracyResult(base_metrics["composite"], base_metrics)
                     else:
                         safe_pred = self._clean_answer(self._extract_answer(safe_pred_full))
                         base_pred = self._clean_answer(self._extract_answer(base_pred_full))
@@ -2442,12 +2534,14 @@ class StageATrainer:
                         base_display = base_pred
 
                         # Compute answer-level accuracy (exact match or fuzzy match)
-                        safe_accuracies[i] = self._compute_answer_accuracy(safe_pred, gt_answer)
-                        base_accuracies[i] = self._compute_answer_accuracy(base_pred, gt_answer)
+                        safe_score = self._compute_answer_accuracy(safe_pred, gt_answer)
+                        base_score = self._compute_answer_accuracy(base_pred, gt_answer)
+                        safe_results[i] = AccuracyResult(safe_score, {"exact": safe_score})
+                        base_results[i] = AccuracyResult(base_score, {"exact": base_score})
 
                     # Debug output for first few samples
-                    safe_acc_value = safe_accuracies[i]
-                    base_acc_value = base_accuracies[i]
+                    safe_acc_value = safe_results[i].score
+                    base_acc_value = base_results[i].score
 
                     if i < 2:  # Only log first 2 samples to avoid spam
                         # Removed: print(f"[AccuracyDebug] Sample {i}:", flush=True)
@@ -2460,8 +2554,8 @@ class StageATrainer:
 
                 except Exception as e:
                     # Handle decoding errors gracefully
-                    safe_accuracies[i] = 0.0
-                    base_accuracies[i] = 0.0
+                    safe_results[i] = AccuracyResult(0.0, {"exact": 0.0})
+                    base_results[i] = AccuracyResult(0.0, {"exact": 0.0})
                     
         except Exception as e:
             # Handle any errors gracefully
@@ -2473,7 +2567,7 @@ class StageATrainer:
             print(f"Warning: Error in robust accuracy computation: {e}", flush=True)
             pass
 
-        return safe_accuracies, base_accuracies
+        return safe_results, base_results
     
     def _normalize_vqa_answer(self, answer: str) -> str:
         import re
@@ -2588,33 +2682,34 @@ class StageATrainer:
                 print(f"⚠️  BERTScore unavailable (will use token F1 only): {e}", flush=True)
         return self._bertscore_metric
 
-    def _tokenize_caption(self, text: str) -> set:
-        """Tokenize caption into words for F1 computation."""
+    def _tokenize_caption(self, text: str) -> List[str]:
+        """Tokenize caption into words (keeps duplicates for F1)."""
         if not text:
-            return set()
-        # Lowercase, remove punctuation, split on whitespace
+            return []
         text = text.lower()
         text = re.sub(r'[^\w\s]', ' ', text)
-        return set(text.split())
+        return [token for token in text.split() if token]
 
     def _compute_token_f1(self, pred_caption: str, gt_caption: str) -> float:
-        """Compute token-level F1 score between prediction and ground truth."""
+        """Compute token-level F1 score using multisets (preserves duplicates)."""
+        from collections import Counter
+
         pred_tokens = self._tokenize_caption(pred_caption)
         gt_tokens = self._tokenize_caption(gt_caption)
 
         if not pred_tokens or not gt_tokens:
             return 0.0
 
-        # Compute precision, recall, F1
-        intersection = pred_tokens & gt_tokens
-        if not intersection:
+        pred_counts = Counter(pred_tokens)
+        gt_counts = Counter(gt_tokens)
+        overlap = sum(min(pred_counts[token], gt_counts[token]) for token in pred_counts.keys() | gt_counts.keys())
+
+        if overlap == 0:
             return 0.0
 
-        precision = len(intersection) / len(pred_tokens)
-        recall = len(intersection) / len(gt_tokens)
-        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-
-        return f1
+        precision = overlap / sum(pred_counts.values())
+        recall = overlap / sum(gt_counts.values())
+        return 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
 
     def _compute_bertscore(self, pred_caption: str, gt_captions: List[str]) -> float:
         """Compute BERTScore between prediction and ground truth captions."""
@@ -2623,79 +2718,68 @@ class StageATrainer:
             return 0.0
 
         try:
-            # Compute BERTScore for all GT captions, take max
-            max_score = 0.0
-            for gt in gt_captions:
-                if not gt:
-                    continue
-                results = bertscore.compute(
-                    predictions=[pred_caption],
-                    references=[gt],
-                    lang="en",
-                    model_type="distilbert-base-uncased",  # Faster than BERT
-                    device="cuda" if torch.cuda.is_available() else "cpu"
-                )
-                # BERTScore returns precision, recall, F1 - we use F1
-                score = results["f1"][0] if results and "f1" in results else 0.0
-                max_score = max(max_score, score)
-            return max_score
+            valid_refs = [gt for gt in gt_captions if gt]
+            if not valid_refs:
+                return 0.0
+
+            predictions = [pred_caption] * len(valid_refs)
+            results = bertscore.compute(
+                predictions=predictions,
+                references=valid_refs,
+                lang="en",
+                model_type="distilbert-base-uncased",  # Faster than BERT
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            )
+            if not results or "f1" not in results:
+                return 0.0
+            scores = results["f1"]
+            return max(scores) if scores else 0.0
         except Exception as e:
             if not self._bertscore_failed:
                 print(f"⚠️  BERTScore computation failed: {e}", flush=True)
                 self._bertscore_failed = True
             return 0.0
 
-    def _compute_audio_caption_accuracy(self, pred_caption: Any, gt_caption: Any, debug: bool = False) -> float:
-        """
-        Compute audio caption accuracy using multiple metrics:
-        1. Exact match (original)
-        2. Token F1 (always available)
-        3. BERTScore (if available, with sanity checks)
+    def _compute_audio_caption_metrics(self, pred_caption: Any, gt_caption: Any, debug: bool = False) -> Dict[str, float]:
+        """Compute granular audio caption metrics and a composite score."""
 
-        Returns the maximum score across all metrics.
-        """
         pred_norm = self._normalize_audio_caption(pred_caption)
         if not pred_norm:
-            return 0.0
+            return {"composite": 0.0, "exact": 0.0, "token_f1": 0.0, "bertscore": 0.0}
 
         gt_norms = [self._normalize_audio_caption(ans) for ans in self._prepare_gt_answers(gt_caption)]
         gt_norms = [ans for ans in gt_norms if ans]
         if not gt_norms:
-            return 0.0
+            return {"composite": 0.0, "exact": 0.0, "token_f1": 0.0, "bertscore": 0.0}
 
-        # Metric 1: Exact match (strictest)
         exact_match = 1.0 if pred_norm in gt_norms else 0.0
+        token_f1 = max((self._compute_token_f1(pred_norm, gt) for gt in gt_norms), default=0.0)
+        bertscore_raw = self._compute_bertscore(pred_norm, gt_norms)
+        bert_threshold = float(self.config.get("audio_bertscore_threshold", 0.7))
+        bertscore = bertscore_raw if bertscore_raw >= bert_threshold else 0.0
+
         if exact_match == 1.0:
-            if debug:
-                print(f"  [Metrics] Exact=1.0, TokenF1=1.0, BERT=1.0 → Final=1.0", flush=True)
-            return 1.0  # Early exit if exact match
-
-        # Metric 2: Token F1 (always available, more lenient)
-        max_token_f1 = max((self._compute_token_f1(pred_norm, gt) for gt in gt_norms), default=0.0)
-
-        # Metric 3: BERTScore (semantic similarity, most lenient)
-        # Only use BERTScore if Token F1 > 0 (at least some word overlap)
-        # This prevents gibberish from getting high BERTScore
-        bertscore = 0.0
-        bertscore_raw = 0.0
-        if max_token_f1 > 0.0:
-            bertscore_raw = self._compute_bertscore(pred_norm, gt_norms)
-            # Apply threshold: BERTScore only counts if > 0.7
-            if bertscore_raw >= 0.7:
-                bertscore = bertscore_raw
-            else:
-                bertscore = 0.0
-
-        # Token F1 threshold: count as correct if > 0.5
-        token_f1_score = 1.0 if max_token_f1 > 0.5 else max_token_f1
-
-        # Return max of all metrics
-        final_score = max(exact_match, token_f1_score, bertscore)
+            composite = 1.0
+        else:
+            composite = 0.0
+            composite += 0.6 * token_f1
+            composite += 0.4 * bertscore
+            composite = min(composite, 1.0)
 
         if debug:
-            print(f"  [Metrics] Exact={exact_match:.3f}, TokenF1={max_token_f1:.3f}, BERT={bertscore_raw:.3f} (thresh={bertscore:.3f}) → Final={final_score:.3f}", flush=True)
+            print(
+                "  [Metrics] Exact={:.3f}, TokenF1={:.3f}, BERT={:.3f} (thr={:.2f}) → Composite={:.3f}".format(
+                    exact_match, token_f1, bertscore_raw, bert_threshold, composite
+                ),
+                flush=True,
+            )
 
-        return final_score
+        return {
+            "composite": composite,
+            "exact": exact_match,
+            "token_f1": token_f1,
+            "bertscore": bertscore_raw,
+        }
 
     def _batch_contains_pixels(self, batch: Dict[str, Any], idx: int) -> bool:
         images = batch.get("images")
@@ -2793,9 +2877,9 @@ class StageATrainer:
             num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
-            repetition_penalty=1.8,  # Increased from 1.2 to strongly penalize repetition
-            no_repeat_ngram_size=3,  # Prevent repeating 3-grams (stops "се се се" loops)
-            encoder_repetition_penalty=1.5,  # Additional penalty on encoder side
+            repetition_penalty=1.1,  # Reduced from 1.8 - was too aggressive
+            # Removed no_repeat_ngram_size - was blocking fluent generation
+            # Removed encoder_repetition_penalty - was making it worse
             output_scores=False,
             return_dict_in_generate=False
         )
@@ -3208,17 +3292,38 @@ class StageATrainer:
             print("Skipping Fisher computation (fisher_weight=0)", flush=True)
             return
 
+        base_trainable = [p for p in self.safe_model.base_vl.parameters() if p.requires_grad]
+        if not base_trainable:
+            print("Skipping Fisher computation (base model frozen)", flush=True)
+            return
+
         print("🔍 Computing Fisher information matrix for retention...", flush=True)
-        num_samples = self.config.get("fisher_num_samples", 1000)
+        target_samples = int(self.config.get("fisher_num_samples", 1000))
+        device = next(self.safe_model.base_vl.parameters()).device
+        prepared_batches: List[Dict[str, torch.Tensor]] = []
+        collected = 0
+
+        with torch.no_grad():
+            for batch in self.val_dataloader:
+                fisher_batch = self._prepare_fisher_batch(batch, device)
+                if fisher_batch is None:
+                    continue
+                prepared_batches.append(fisher_batch)
+                collected += fisher_batch["input_ids"].size(0)
+                if collected >= target_samples:
+                    break
+
+        if not prepared_batches:
+            print("⚠️ Fisher computation skipped: unable to prepare validation batches", flush=True)
+            return
 
         try:
-            # Compute Fisher using VL validation data
             fisher_info = self.retention_loss.compute_fisher_information(
                 self.safe_model.base_vl,
-                self.val_dataloader,
-                num_samples=num_samples
+                prepared_batches,
+                num_samples=collected,
             )
-            print(f"✓ Fisher information computed from {num_samples} samples", flush=True)
+            print(f"✓ Fisher information computed from {collected} samples", flush=True)
         except Exception as e:
             print(f"⚠️ Fisher computation failed: {e}", flush=True)
             print("   Continuing without Fisher information", flush=True)
@@ -3274,50 +3379,51 @@ class StageATrainer:
             progress_bar = self.train_dataloader
             for step, batch in enumerate(progress_bar):
                 # Training step
-                step_losses = self.train_step(batch)
-                self.global_step += 1
+                step_losses, optimizer_stepped = self.train_step(batch)
                 batch_size = len(batch["questions"])
                 samples_in_stage += batch_size
-                
+
                 # Accumulate losses
                 for key, value in step_losses.items():
                     epoch_losses[key].append(float(value))
-                
-                # Update progress bar
-                if epoch_losses["total_loss"] and (step + 1) % self.config.get("logging_steps", 50) == 0:
-                    avg_loss = np.mean(epoch_losses["total_loss"][-10:])
-                    print(
-                        f"Stage {stage_name} | Epoch {epoch_in_stage} Step {step+1}: loss={avg_loss:.4f}",
-                        flush=True
-                    )
-                
-                # Logging
-                if self.global_step % self.config["logging_steps"] == 0:
-                    avg_losses = {k: np.mean(v[-self.config["logging_steps"]:]) 
-                                 for k, v in epoch_losses.items() if v}
-                    if avg_losses:
-                        summary_parts = [f"{k}={val:.4f}" for k, val in avg_losses.items()]
+
+                if optimizer_stepped:
+                    self.global_step += 1
+
+                    # Update progress logs using most recent window of metrics
+                    if epoch_losses["total_loss"] and (step + 1) % self.config.get("logging_steps", 50) == 0:
+                        avg_loss = np.mean(epoch_losses["total_loss"][-10:])
                         print(
-                            f"[Train|Stage {stage_name}] Global step {self.global_step}: " + ", ".join(summary_parts),
+                            f"Stage {stage_name} | Epoch {epoch_in_stage} Step {step+1}: loss={avg_loss:.4f}",
                             flush=True
                         )
-                    else:
-                        print(
-                            f"[Train|Stage {stage_name}] Global step {self.global_step}: metrics pending",
-                            flush=True
-                        )
-                    
-                    # Log to wandb if available
-                    try:
-                        log_dict = {"train/" + k: v for k, v in avg_losses.items()}
-                        log_dict.update({
-                            "curriculum/stage": stage_idx,
-                            "curriculum/stage_name": stage_name,
-                            "curriculum/samples_in_stage": samples_in_stage
-                        })
-                        wandb.log(log_dict, step=self.global_step)
-                    except:
-                        pass
+
+                    if self.global_step % self.config["logging_steps"] == 0:
+                        avg_losses = {k: np.mean(v[-self.config["logging_steps"]:])
+                                      for k, v in epoch_losses.items() if v}
+                        if avg_losses:
+                            summary_parts = [f"{k}={val:.4f}" for k, val in avg_losses.items()]
+                            print(
+                                f"[Train|Stage {stage_name}] Global step {self.global_step}: " + ", ".join(summary_parts),
+                                flush=True
+                            )
+                        else:
+                            print(
+                                f"[Train|Stage {stage_name}] Global step {self.global_step}: metrics pending",
+                                flush=True
+                            )
+
+                        # Log to wandb if available
+                        try:
+                            log_dict = {"train/" + k: v for k, v in avg_losses.items()}
+                            log_dict.update({
+                                "curriculum/stage": stage_idx,
+                                "curriculum/stage_name": stage_name,
+                                "curriculum/samples_in_stage": samples_in_stage
+                            })
+                            wandb.log(log_dict, step=self.global_step)
+                        except:
+                            pass
             
             # End of epoch evaluation
             print(f"\n📊 End of Epoch {self.epoch} (Stage {stage_name}, Epoch {epoch_in_stage})", flush=True)
@@ -3437,44 +3543,49 @@ class StageATrainer:
                     print(f"Processing first batch of epoch {epoch+1}...", flush=True)
                 
                 # Training step
-                step_losses = self.train_step(batch)
-                self.global_step += 1
+                step_losses, optimizer_stepped = self.train_step(batch)
                 
                 if step == 0:
-                    print(f"First batch completed successfully! Loss: {step_losses.get('total_loss', 'N/A'):.4f}", flush=True)
-                
+                    print(
+                        f"First batch completed successfully! Loss: {step_losses.get('total_loss', 'N/A'):.4f}",
+                        flush=True,
+                    )
+
                 # Accumulate losses
                 for key, value in step_losses.items():
                     epoch_losses[key].append(float(value))
-                
-                # Update progress bar
-                if epoch_losses["total_loss"] and (step + 1) % self.config.get("logging_steps", 50) == 0:
-                    avg_loss = np.mean(epoch_losses["total_loss"][-100:])
-                    print(f"Epoch {epoch+1} Step {step+1}: loss={avg_loss:.4f}", flush=True)
-                
-                # Logging
-                if self.global_step % self.config["logging_steps"] == 0:
-                    avg_losses = {k: np.mean(v[-self.config["logging_steps"]:]) 
-                                 for k, v in epoch_losses.items() if v}
-                    if avg_losses:
-                        summary_parts = [f"{k}={val:.4f}" for k, val in avg_losses.items()]
-                        print(
-                            f"[Train] Global step {self.global_step}: " + ", ".join(summary_parts),
-                            flush=True
-                        )
-                    else:
-                        print(f"[Train] Global step {self.global_step}: metrics pending", flush=True)
-                    
-                    # Log to wandb if available
-                    try:
-                        wandb.log({
-                            "train/" + k: v for k, v in avg_losses.items()
-                        }, step=self.global_step)
-                    except:
-                        pass
-                
-                # Evaluation
-                if self.global_step % self.config["eval_steps"] == 0:
+
+                if optimizer_stepped:
+                    self.global_step += 1
+
+                    # Update progress bar
+                    if epoch_losses["total_loss"] and (step + 1) % self.config.get("logging_steps", 50) == 0:
+                        avg_loss = np.mean(epoch_losses["total_loss"][-100:])
+                        print(f"Epoch {epoch+1} Step {step+1}: loss={avg_loss:.4f}", flush=True)
+
+                    # Logging
+                    if self.global_step % self.config["logging_steps"] == 0:
+                        avg_losses = {k: np.mean(v[-self.config["logging_steps"]:])
+                                      for k, v in epoch_losses.items() if v}
+                        if avg_losses:
+                            summary_parts = [f"{k}={val:.4f}" for k, val in avg_losses.items()]
+                            print(
+                                f"[Train] Global step {self.global_step}: " + ", ".join(summary_parts),
+                                flush=True,
+                            )
+                        else:
+                            print(f"[Train] Global step {self.global_step}: metrics pending", flush=True)
+
+                        # Log to wandb if available
+                        try:
+                            wandb.log({
+                                "train/" + k: v for k, v in avg_losses.items()
+                            }, step=self.global_step)
+                        except:
+                            pass
+
+                # Evaluation (only trigger on actual optimizer steps)
+                if optimizer_stepped and self.global_step % self.config["eval_steps"] == 0:
                     max_eval_batches = self.config.get("max_eval_batches", None)
                     eval_metrics = self.evaluate(max_batches=max_eval_batches)
                     
