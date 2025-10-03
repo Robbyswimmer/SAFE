@@ -549,18 +549,50 @@ class SAFEModel(nn.Module):
             # BLIP2-specific handling
             result = self._prepare_blip2_inputs(text, images, device)
         else:
-            # For custom models, use the original approach
-            text_with_modalities = text
-            
-            if images is not None:
-                text_with_modalities = f"{self.base_vl.vision_start_token}{self.base_vl.vision_end_token} {text_with_modalities}"
-                
-            if audio is not None and include_audio_tokens:
-                text_with_modalities = f"{self.audio_start_token}{self.audio_end_token} {text_with_modalities}"
-            
-            # Tokenize text
+            # For custom models, add modality tokens on a per-sample basis
+            if isinstance(text, str):
+                texts = [text]
+            else:
+                texts = list(text)
+
+            num_samples = len(texts)
+
+            def _resolve_presence(modality, count: int) -> List[bool]:
+                if modality is None:
+                    return [False] * count
+                if isinstance(modality, (list, tuple)):
+                    presence = [item is not None for item in modality]
+                elif torch.is_tensor(modality):
+                    if modality.dim() == 0:
+                        presence = [bool(modality.item())] * count
+                    elif modality.dim() == 1:
+                        presence = [True]
+                    else:
+                        presence = [True] * int(modality.size(0))
+                else:
+                    presence = [True] * count
+
+                if len(presence) < count:
+                    presence = presence + [False] * (count - len(presence))
+                elif len(presence) > count:
+                    presence = presence[:count]
+                return presence
+
+            image_presence = _resolve_presence(images, num_samples)
+            audio_presence = _resolve_presence(audio, num_samples) if include_audio_tokens else [False] * num_samples
+
+            prompts: List[str] = []
+            for idx, base_text in enumerate(texts):
+                prompt = base_text
+                if idx < len(image_presence) and image_presence[idx]:
+                    prompt = f"{self.base_vl.vision_start_token}{self.base_vl.vision_end_token} {prompt}"
+                if include_audio_tokens and idx < len(audio_presence) and audio_presence[idx]:
+                    prompt = f"{self.audio_start_token}{self.audio_end_token} {prompt}"
+                prompts.append(prompt)
+
+            # Tokenize text (always operate on list to keep batch alignment intact)
             inputs = self.base_vl.tokenizer(
-                text_with_modalities,
+                prompts,
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
