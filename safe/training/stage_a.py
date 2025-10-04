@@ -2485,13 +2485,12 @@ class StageATrainer:
                     input_ids[row, first_answer_idx:] = pad_token_id
             # Removed verbose progress logging
             safe_pred_tokens = self._generate_predictions(gen_inputs, "safe")
-            if self.combined_loss.retention_enabled:
-                base_pred_tokens = self._generate_predictions(gen_inputs, "base")
-            else:
-                base_pred_tokens = [
-                    pred.clone() if isinstance(pred, torch.Tensor) else torch.as_tensor(pred)
-                    for pred in safe_pred_tokens
-                ]
+
+            # ALWAYS generate BASE predictions independently
+            # BASE is the frozen baseline - must never copy SAFE, regardless of retention variant
+            # This ensures valid comparison even in no_retention experiments
+            base_pred_tokens = self._generate_predictions(gen_inputs, "base")
+
             # Removed verbose progress logging
             
             for i in range(batch_size):
