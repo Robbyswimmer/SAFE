@@ -2952,17 +2952,20 @@ class StageATrainer:
             decoded_sample = tok.decode(generated[0], skip_special_tokens=True)
             print(f"[GenDebug] First decoded output: '{decoded_sample}'", flush=True)
         else:
-            # BASE model: Use SAFE with gate=0.0 to guarantee no audio contribution
-            # This ensures BASE predictions use clean VL-only embeddings without audio fusion
-            print(f"[GenDebug] BASE generation using SAFE model with gate=0.0 (no audio)", flush=True)
+            # BASE model: Use raw base_vl directly to avoid audio_token_embeddings contamination
+            # Even with gate=0, SAFE's get_input_embeddings() uses trained audio_token_embeddings
+            # which causes BASE to improve over time. True baseline must use frozen base_vl.
+            print(f"[GenDebug] BASE generation using raw base_vl (completely frozen)", flush=True)
 
-            generated = self.safe_model.generate(
-                input_ids=input_ids.to(device),
+            # Sanitize input_ids to remove audio tokens
+            sanitized_ids = self._sanitize_input_ids_batch(input_ids)
+            if sanitized_ids is None:
+                sanitized_ids = input_ids
+
+            generated = self.safe_model.base_vl.llm.generate(
+                input_ids=sanitized_ids.to(device),
                 attention_mask=attention_mask.to(device) if isinstance(attention_mask, torch.Tensor) else None,
                 pixel_values=pixel_values.to(device) if isinstance(pixel_values, torch.Tensor) else None,
-                audio_tokens=None,  # Explicitly set to None for BASE
-                audio_attention_mask=None,  # No audio mask
-                gate=0.0,  # CRITICAL: Force gate=0 to disable audio fusion
                 **gen_kwargs,
             )
 

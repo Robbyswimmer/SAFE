@@ -81,27 +81,30 @@ class RetentionLoss(nn.Module):
 
         samples_processed = 0
 
-        for batch in dataloader:
-            if samples_processed >= num_samples:
-                break
+        # Enable gradient computation even though model is in eval mode
+        # This is necessary to compute Fisher information (gradient variance)
+        with torch.enable_grad():
+            for batch in dataloader:
+                if samples_processed >= num_samples:
+                    break
 
-            # Forward pass
-            outputs = model(**batch)
-            loss = outputs.get("loss") if isinstance(outputs, dict) else getattr(outputs, "loss", None)
+                # Forward pass
+                outputs = model(**batch)
+                loss = outputs.get("loss") if isinstance(outputs, dict) else getattr(outputs, "loss", None)
 
-            if loss is None:
-                continue
+                if loss is None:
+                    continue
 
-            # Backward pass
-            model.zero_grad()
-            loss.backward()
+                # Backward pass
+                model.zero_grad()
+                loss.backward()
 
-            # Accumulate squared gradients (Fisher information approximation)
-            for name, param in model.named_parameters():
-                if name in fisher_info and param.grad is not None:
-                    fisher_info[name] += param.grad.data ** 2
+                # Accumulate squared gradients (Fisher information approximation)
+                for name, param in model.named_parameters():
+                    if name in fisher_info and param.grad is not None:
+                        fisher_info[name] += param.grad.data ** 2
 
-            samples_processed += batch.get("input_ids", torch.tensor([0])).size(0)
+                samples_processed += batch.get("input_ids", torch.tensor([0])).size(0)
 
         # Normalize by number of samples
         for name in fisher_info:
