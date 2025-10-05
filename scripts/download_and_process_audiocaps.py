@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """
-Download, process, and auto-cleanup AudioCaps audio segments.
+Download, process, and auto-cleanup AudioCaps audio segments with parallel processing.
 
 This script implements ethical data practices by:
-1. Downloading audio segments to temporary storage only
+1. Downloading audio segments to temporary storage only (parallel downloads)
 2. Extracting CLAP embeddings immediately
 3. Deleting raw audio before next download
 4. Storing only derived features (embeddings)
 5. Logging all source metadata
 
 Usage:
+    # Default: 4 parallel workers
     python scripts/download_and_process_audiocaps.py --split train --max-downloads 100
+
+    # Custom parallelism
+    python scripts/download_and_process_audiocaps.py --split train --num-workers 8
+
+    # Append to existing file
     python scripts/download_and_process_audiocaps.py --split val --append
+
+    # Resume from specific index
     python scripts/download_and_process_audiocaps.py --split train --resume-from 500
 
 Ethical Note:
@@ -28,6 +36,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -152,39 +162,40 @@ def append_to_hdf5(
     h5_path: Path,
     youtube_id: str,
     embedding: np.ndarray,
-    metadata: Dict
+    metadata: Dict,
+    lock: threading.Lock
 ) -> bool:
     """
-    Append new embedding to existing HDF5 file.
+    Append new embedding to existing HDF5 file (thread-safe).
 
     Returns:
         True if successful, False otherwise
     """
     try:
-        with h5py.File(h5_path, 'a') as hf:
-            # Get existing data
-            embeddings = hf['embeddings'][:]
-            youtube_ids = hf['youtube_ids'][:].astype(str)
+        with lock:  # Ensure thread-safe HDF5 access
+            with h5py.File(h5_path, 'a') as hf:
+                # Get existing data
+                embeddings = hf['embeddings'][:]
+                youtube_ids = hf['youtube_ids'][:].astype(str)
 
-            # Check if already exists
-            if youtube_id in youtube_ids:
-                print(f"  ℹ️  Already exists in HDF5: {youtube_id}")
-                return True
+                # Check if already exists
+                if youtube_id in youtube_ids:
+                    return True
 
-            # Append new data
-            new_embeddings = np.vstack([embeddings, embedding[np.newaxis, :]])
-            new_ids = np.append(youtube_ids, youtube_id)
+                # Append new data
+                new_embeddings = np.vstack([embeddings, embedding[np.newaxis, :]])
+                new_ids = np.append(youtube_ids, youtube_id)
 
-            # Delete old datasets
-            del hf['embeddings']
-            del hf['youtube_ids']
+                # Delete old datasets
+                del hf['embeddings']
+                del hf['youtube_ids']
 
-            # Create new datasets with appended data
-            hf.create_dataset('embeddings', data=new_embeddings, compression='gzip')
-            hf.create_dataset('youtube_ids', data=np.array(new_ids, dtype='S11'))
+                # Create new datasets with appended data
+                hf.create_dataset('embeddings', data=new_embeddings, compression='gzip')
+                hf.create_dataset('youtube_ids', data=np.array(new_ids, dtype='S11'))
 
-            # Update count
-            hf.attrs['num_samples'] = len(new_ids)
+                # Update count
+                hf.attrs['num_samples'] = len(new_ids)
 
         return True
 
@@ -213,6 +224,76 @@ def create_hdf5(
         hf.attrs['encoder_model'] = 'laion/clap-htsat-unfused'
 
 
+def process_single_video(
+    meta: Dict,
+    temp_dir: Path,
+    encoder: CLAPAudioEncoder,
+    h5_path: Path,
+    sources_dict: Dict,
+    h5_lock: threading.Lock,
+    sources_lock: threading.Lock,
+    device: str
+) -> Tuple[str, str]:
+    """
+    Process a single video: download, extract, save, delete.
+
+    Returns:
+        (youtube_id, status): status is one of 'success', 'skip', 'download_fail', 'extract_fail', 'save_fail'
+    """
+    youtube_id = meta['youtube_id']
+
+    # Check if already processed (thread-safe read)
+    with sources_lock:
+        if youtube_id in sources_dict:
+            return (youtube_id, 'skip')
+
+    # Download to temporary directory
+    audio_path = download_audio_segment(
+        youtube_id,
+        meta['start_time'],
+        temp_dir
+    )
+
+    if audio_path is None:
+        return (youtube_id, 'download_fail')
+
+    try:
+        # Extract embedding
+        embedding, extract_success = extract_clap_embedding(
+            audio_path, encoder, device
+        )
+
+        if not extract_success:
+            audio_path.unlink()
+            return (youtube_id, 'extract_fail')
+
+        # Append to HDF5 (thread-safe)
+        if not append_to_hdf5(h5_path, youtube_id, embedding, meta, h5_lock):
+            audio_path.unlink()
+            return (youtube_id, 'save_fail')
+
+        # Store source info (thread-safe)
+        with sources_lock:
+            sources_dict[youtube_id] = {
+                'youtube_id': youtube_id,
+                'audiocap_id': meta['audiocap_id'],
+                'start_time': meta['start_time'],
+                'caption': meta['caption'],
+                'checksum': compute_checksum(embedding)
+            }
+
+        # Delete temporary WAV file
+        audio_path.unlink()
+
+        return (youtube_id, 'success')
+
+    except Exception as e:
+        # Cleanup on any error
+        if audio_path.exists():
+            audio_path.unlink()
+        return (youtube_id, f'error: {e}')
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Download and process AudioCaps with auto-cleanup'
@@ -232,6 +313,8 @@ def main():
                         help='Device for CLAP encoder')
     parser.add_argument('--batch-log-interval', type=int, default=50,
                         help='Save sources log every N files')
+    parser.add_argument('--num-workers', type=int, default=4,
+                        help='Number of parallel download workers')
 
     args = parser.parse_args()
 
@@ -303,68 +386,66 @@ def main():
     temp_dir = Path(tempfile.mkdtemp(prefix='audiocaps_'))
     print(f"📁 Using temporary directory: {temp_dir}")
 
+    # Thread locks for thread-safe operations
+    h5_lock = threading.Lock()
+    sources_lock = threading.Lock()
+
     # Process files
     success_count = 0
     download_fail_count = 0
     extraction_fail_count = 0
+    save_fail_count = 0
     skip_count = 0
 
-    print(f"\n🔄 Processing {len(metadata_subset)} files with auto-cleanup...\n")
+    print(f"\n🔄 Processing {len(metadata_subset)} files with {args.num_workers} parallel workers...\n")
 
     try:
-        for idx, meta in enumerate(tqdm(metadata_subset, desc="Downloading & extracting")):
-            youtube_id = meta['youtube_id']
-
-            # Skip if already processed
-            if youtube_id in sources_dict:
-                skip_count += 1
-                continue
-
-            # Download to temporary directory
-            audio_path = download_audio_segment(
-                youtube_id,
-                meta['start_time'],
-                temp_dir
-            )
-
-            if audio_path is None:
-                download_fail_count += 1
-                continue
-
-            # Extract embedding
-            embedding, extract_success = extract_clap_embedding(
-                audio_path, encoder, args.device
-            )
-
-            if not extract_success:
-                extraction_fail_count += 1
-                audio_path.unlink()  # Delete failed file
-                continue
-
-            # Append to HDF5
-            if not append_to_hdf5(h5_path, youtube_id, embedding, meta):
-                extraction_fail_count += 1
-                audio_path.unlink()
-                continue
-
-            # Store source info
-            sources_dict[youtube_id] = {
-                'youtube_id': youtube_id,
-                'audiocap_id': meta['audiocap_id'],
-                'start_time': meta['start_time'],
-                'caption': meta['caption'],
-                'checksum': compute_checksum(embedding)
+        # Use ThreadPoolExecutor for parallel downloads
+        with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
+            # Submit all tasks
+            future_to_meta = {
+                executor.submit(
+                    process_single_video,
+                    meta,
+                    temp_dir,
+                    encoder,
+                    h5_path,
+                    sources_dict,
+                    h5_lock,
+                    sources_lock,
+                    args.device
+                ): meta
+                for meta in metadata_subset
             }
 
-            # Delete temporary WAV file immediately
-            audio_path.unlink()
+            # Process results with progress bar
+            with tqdm(total=len(metadata_subset), desc="Downloading & extracting") as pbar:
+                processed_count = 0
+                for future in as_completed(future_to_meta):
+                    youtube_id, status = future.result()
 
-            success_count += 1
+                    if status == 'success':
+                        success_count += 1
+                    elif status == 'skip':
+                        skip_count += 1
+                    elif status == 'download_fail':
+                        download_fail_count += 1
+                    elif status == 'extract_fail':
+                        extraction_fail_count += 1
+                    elif status == 'save_fail':
+                        save_fail_count += 1
+                    else:
+                        # Handle unexpected errors
+                        extraction_fail_count += 1
 
-            # Periodic save of sources
-            if (idx + 1) % args.batch_log_interval == 0:
-                with open(sources_path, 'w') as f:
-                    json.dump(sources_dict, f, indent=2)
+                    pbar.update(1)
+                    processed_count += 1
+
+                    # Periodic save of sources (thread-safe)
+                    if processed_count % args.batch_log_interval == 0:
+                        with sources_lock:
+                            with open(sources_path, 'w') as f:
+                                json.dump(sources_dict, f, indent=2)
 
     finally:
         # Cleanup temp directory
@@ -373,8 +454,9 @@ def main():
 
     # Final save of sources
     print(f"\n💾 Saving final source log to {sources_path}")
-    with open(sources_path, 'w') as f:
-        json.dump(sources_dict, f, indent=2)
+    with sources_lock:
+        with open(sources_path, 'w') as f:
+            json.dump(sources_dict, f, indent=2)
     print(f"   Logged {len(sources_dict)} total sources")
 
     # Summary
@@ -386,6 +468,8 @@ def main():
     print(f"Successfully added:     {success_count}")
     print(f"Download failures:      {download_fail_count}")
     print(f"Extraction failures:    {extraction_fail_count}")
+    print(f"Save failures:          {save_fail_count}")
+    print(f"Parallel workers:       {args.num_workers}")
     print(f"HDF5 file:              {h5_path}")
     print(f"Sources log:            {sources_path}")
     print(f"="*60)
