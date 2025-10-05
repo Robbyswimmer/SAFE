@@ -173,7 +173,7 @@ def main():
                         help='Dataset split to clean up')
     parser.add_argument('--all-splits', action='store_true',
                         help='Clean up all splits (train, val, test)')
-    parser.add_argument('--data-root', type=str, default='data/audiocaps',
+    parser.add_argument('--data-root', type=str, default='experiments/full_training/data/audiocaps',
                         help='Root directory for AudioCaps data')
     parser.add_argument('--dry-run', action='store_true',
                         help='Preview what would be deleted without deleting')

@@ -98,7 +98,7 @@ def main():
     parser = argparse.ArgumentParser(description='Extract CLAP features from AudioCaps WAV files')
     parser.add_argument('--split', choices=['train', 'val', 'test'], default='train',
                         help='Dataset split to process')
-    parser.add_argument('--data-root', type=str, default='data/audiocaps',
+    parser.add_argument('--data-root', type=str, default='experiments/full_training/data/audiocaps',
                         help='Root directory for AudioCaps data')
     parser.add_argument('--delete-wavs', action='store_true',
                         help='Delete WAV files after successful extraction')
