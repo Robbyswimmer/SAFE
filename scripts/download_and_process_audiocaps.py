@@ -320,7 +320,7 @@ def main():
 
     # Setup paths
     data_root = Path(args.data_root).expanduser().resolve()
-    metadata_path = data_root / 'metadata' / f'{args.split}.csv'
+    metadata_path = data_root / f'{args.split}.csv'  # CSV is directly in data_root
     features_dir = data_root / 'features'
     features_dir.mkdir(parents=True, exist_ok=True)
 
