@@ -279,8 +279,8 @@ def process_single_video(
     if audio_path is None:
         return (youtube_id, 'download_fail')
 
-    # Download succeeded - print success message
-    print(f"  ✓ Downloaded: {youtube_id}")
+    # Download succeeded (return success indicator)
+    # Note: Print happens in main loop to avoid tqdm conflicts
 
     try:
         # Extract embedding
@@ -310,7 +310,6 @@ def process_single_video(
         # Delete temporary WAV file
         audio_path.unlink()
 
-        print(f"  ✅ Saved embedding: {youtube_id}")
         return (youtube_id, 'success')
 
     except Exception as e:
@@ -427,6 +426,7 @@ def process_split(split: str, args) -> int:
 
                     if status == 'success':
                         success_count += 1
+                        pbar.write(f"  ✅ {youtube_id}")
                     elif status in ('skip_hdf5', 'skip_session'):
                         skip_count += 1
                     elif status == 'download_fail':
