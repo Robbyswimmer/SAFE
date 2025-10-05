@@ -7,6 +7,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+import h5py
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -92,9 +94,28 @@ class _BaseQADataset(Dataset):
     dataset_name: str = "generic"
     file_stem: str = "data"
 
-    def __init__(self, data_path: str | Path, split: str = "train"):
+    def __init__(self, data_path: str | Path, split: str = "train", use_hdf5_features: bool = True):
         self.data_path = Path(data_path)
         self.split = split
+        self.use_hdf5_features = use_hdf5_features
+
+        # Load HDF5 features if available
+        self.hdf5_features = None
+        self.hdf5_index = None
+        if use_hdf5_features:
+            hdf5_path = self.data_path / "features" / f"{split}_clap_embeddings.h5"
+            if hdf5_path.exists():
+                try:
+                    with h5py.File(hdf5_path, 'r') as hf:
+                        self.hdf5_features = hf['embeddings'][:]
+                        youtube_ids = hf['youtube_ids'][:].astype(str)
+                        # Create index: youtube_id -> embedding index
+                        self.hdf5_index = {vid: idx for idx, vid in enumerate(youtube_ids)}
+                    print(f"✓ Loaded HDF5 features: {len(self.hdf5_index)} embeddings from {hdf5_path}")
+                except Exception as e:
+                    print(f"⚠️  Failed to load HDF5 features: {e}")
+                    self.hdf5_features = None
+                    self.hdf5_index = None
 
         dataset_dir = self.data_path / self.dataset_name
         if not dataset_dir.exists():
@@ -161,9 +182,23 @@ class _BaseQADataset(Dataset):
 
     # ------------------------------------------------------------------
     def _load_audio(self, entry: Dict[str, Any]) -> Any:
+        """Load audio - from HDF5 features if available, otherwise from WAV file."""
         audio_path = entry.get("audio") or entry.get("audio_path")
         if not audio_path:
             return None
+
+        # Try HDF5 features first (ethical data practice - pre-extracted embeddings)
+        if self.hdf5_features is not None and self.hdf5_index is not None:
+            # Extract youtube_id from audio path (e.g., "audio/train/abc123.wav" -> "abc123")
+            youtube_id = Path(audio_path).stem
+            if youtube_id in self.hdf5_index:
+                idx = self.hdf5_index[youtube_id]
+                embedding = self.hdf5_features[idx]
+                # Return pre-computed CLAP embedding
+                # Format: (embedding_tensor, is_precomputed_flag)
+                return (torch.from_numpy(embedding).float(), True)
+
+        # Fallback to WAV file loading (legacy mode)
         audio_file = self.data_path / audio_path
         if audio_file.exists():
             try:
@@ -192,6 +227,8 @@ class _BaseQADataset(Dataset):
                             align_corners=False,
                         ).squeeze(0).squeeze(0)
 
+                # Return waveform for CLAP encoding
+                # Format: (waveform_tensor, sample_rate)
                 return (waveform, target_sample_rate)
             except Exception:
                 return None
