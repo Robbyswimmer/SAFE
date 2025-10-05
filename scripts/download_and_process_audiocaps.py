@@ -105,8 +105,13 @@ def download_audio_segment(
     ]
 
     # Add cookies if provided (must come before URL)
-    if cookies_file and Path(cookies_file).exists():
-        cmd.extend(['--cookies', cookies_file])
+    if cookies_file:
+        if cookies_file.startswith('browser:'):
+            # Extract browser name (e.g., "browser:chrome" -> "chrome")
+            browser = cookies_file.split(':', 1)[1]
+            cmd.extend(['--cookies-from-browser', browser])
+        elif Path(cookies_file).exists():
+            cmd.extend(['--cookies', cookies_file])
 
     # Add URL last
     cmd.append(f'https://www.youtube.com/watch?v={youtube_id}')
@@ -243,7 +248,8 @@ def process_single_video(
     h5_lock: threading.Lock,
     sources_lock: threading.Lock,
     device: str,
-    cookies_file: Optional[str] = None
+    cookies_file: Optional[str] = None,
+    existing_ids: set = None
 ) -> Tuple[str, str]:
     """
     Process a single video: download, extract, save, delete.
@@ -253,10 +259,14 @@ def process_single_video(
     """
     youtube_id = meta['youtube_id']
 
-    # Check if already processed (thread-safe read)
+    # Check if already in HDF5 file (skip expensive operations)
+    if existing_ids and youtube_id in existing_ids:
+        return (youtube_id, 'skip_hdf5')
+
+    # Check if already processed in this session (thread-safe read)
     with sources_lock:
         if youtube_id in sources_dict:
-            return (youtube_id, 'skip')
+            return (youtube_id, 'skip_session')
 
     # Download to temporary directory
     audio_path = download_audio_segment(
@@ -268,6 +278,9 @@ def process_single_video(
 
     if audio_path is None:
         return (youtube_id, 'download_fail')
+
+    # Download succeeded - print success message
+    print(f"  ✓ Downloaded: {youtube_id}")
 
     try:
         # Extract embedding
@@ -297,6 +310,7 @@ def process_single_video(
         # Delete temporary WAV file
         audio_path.unlink()
 
+        print(f"  ✅ Saved embedding: {youtube_id}")
         return (youtube_id, 'success')
 
     except Exception as e:
@@ -347,11 +361,17 @@ def process_split(split: str, args) -> int:
     print(f"   CLAP embedding dimension: {encoder.audio_embed_dim}")
 
     # Create or load HDF5
+    existing_ids = set()
     if not h5_path.exists():
         print(f"📦 Creating new HDF5 file: {h5_path}")
         create_hdf5(h5_path, split, encoder.audio_embed_dim)
     else:
         print(f"📦 Appending to existing HDF5 file: {h5_path}")
+        # Load existing IDs to skip re-processing
+        with h5py.File(h5_path, 'r') as hf:
+            if 'youtube_ids' in hf:
+                existing_ids = set(hf['youtube_ids'][:].astype(str))
+                print(f"   Found {len(existing_ids)} existing embeddings - will skip these")
 
     # Load existing sources or create new
     if sources_path.exists():
@@ -393,7 +413,8 @@ def process_split(split: str, args) -> int:
                     h5_lock,
                     sources_lock,
                     args.device,
-                    args.cookies
+                    args.cookies,
+                    existing_ids
                 ): meta
                 for meta in metadata_subset
             }
@@ -406,7 +427,7 @@ def process_split(split: str, args) -> int:
 
                     if status == 'success':
                         success_count += 1
-                    elif status == 'skip':
+                    elif status in ('skip_hdf5', 'skip_session'):
                         skip_count += 1
                     elif status == 'download_fail':
                         download_fail_count += 1
@@ -494,7 +515,7 @@ def main():
     parser.add_argument('--num-workers', type=int, default=4,
                         help='Number of parallel download workers')
     parser.add_argument('--cookies', type=str, default=None,
-                        help='Path to cookies.txt file for YouTube authentication')
+                        help='Path to cookies.txt file OR "browser:chrome" to extract from browser')
 
     args = parser.parse_args()
 
@@ -631,7 +652,8 @@ def main():
                     h5_lock,
                     sources_lock,
                     args.device,
-                    args.cookies
+                    args.cookies,
+                    existing_ids
                 ): meta
                 for meta in metadata_subset
             }
@@ -644,7 +666,7 @@ def main():
 
                     if status == 'success':
                         success_count += 1
-                    elif status == 'skip':
+                    elif status in ('skip_hdf5', 'skip_session'):
                         skip_count += 1
                     elif status == 'download_fail':
                         download_fail_count += 1
