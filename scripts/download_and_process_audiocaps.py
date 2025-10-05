@@ -28,6 +28,12 @@ Usage:
 Ethical Note:
     This implements fair use by never storing raw audio permanently.
     Only derived features (embeddings) are retained for research.
+
+Notes:
+    - The `--cookies` file must be in Netscape format. Use `scripts/extract_cookies.sh`
+      to generate one directly from your browser session.
+    - The downloader retries transient YouTube errors and aborts early on
+      configuration issues so you can fix them without wasting time.
 """
 
 import argparse
@@ -40,6 +46,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -49,6 +56,26 @@ import numpy as np
 import torch
 import torchaudio
 from tqdm import tqdm
+
+DEFAULT_USER_AGENT = (
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+    'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+)
+
+NON_RETRY_ERROR_PATTERNS = (
+    'video unavailable',
+    'private video',
+    'removed for violating youtube\'s terms of service',
+    'account associated with this video has been terminated',
+    'this video is no longer available',
+)
+
+COOKIE_FORMAT_ERROR = 'does not look like a netscape format cookies file'
+
+
+class DownloadFatalError(RuntimeError):
+    """Raised for configuration problems that require aborting the run."""
+    pass
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -81,7 +108,8 @@ def download_audio_segment(
     start_time: int,
     temp_dir: Path,
     duration: int = 10,
-    cookies_file: Optional[str] = None
+    cookies_file: Optional[str] = None,
+    max_retries: int = 3,
 ) -> Optional[Path]:
     """
     Download 10s audio segment using yt-dlp to temporary directory.
@@ -89,52 +117,114 @@ def download_audio_segment(
     Returns:
         Path to downloaded WAV file, or None if download failed
     """
-    output_path = temp_dir / f"{youtube_id}.wav"
+    # Include timestamp in filename to avoid collisions when the same video is requested multiple times
+    output_stem = f"{youtube_id}_{int(start_time):06d}"
+    output_path = temp_dir / f"{output_stem}.wav"
 
-    # yt-dlp command to extract audio segment
-    cmd = [
+    base_cmd = [
         'yt-dlp',
-        '-x',  # Extract audio
-        '--audio-format', 'wav',
-        '--audio-quality', '0',  # Best quality
-        '-o', str(output_path.with_suffix('')),  # Output template (without extension)
-        '--postprocessor-args', f'ffmpeg:-ss {start_time} -t {duration}',  # Extract segment
-        '--no-playlist',
         '--quiet',
+        '--no-progress',
         '--no-warnings',
+        '--ignore-config',
+        '--no-playlist',
+        '--force-overwrites',
+        '--extract-audio',
+        '--audio-format', 'wav',
+        '--audio-quality', '0',
+        '--user-agent', DEFAULT_USER_AGENT,
+        '--geo-bypass',
+        '--sleep-requests', '1',
+        '--sleep-interval', '0.5',
+        '--max-sleep-interval', '2',
+        '--retries', '3',
+        '--fragment-retries', '3',
+        '--output', str((temp_dir / output_stem)),
+        '--postprocessor-args', f'ffmpeg:-ss {start_time} -t {duration}',
     ]
 
-    # Add cookies if provided (must come before URL)
+    cookie_args: List[str] = []
     if cookies_file:
         if cookies_file.startswith('browser:'):
-            # Extract browser name (e.g., "browser:chrome" -> "chrome")
             browser = cookies_file.split(':', 1)[1]
-            cmd.extend(['--cookies-from-browser', browser])
-        elif Path(cookies_file).exists():
-            cmd.extend(['--cookies', cookies_file])
-
-    # Add URL last
-    cmd.append(f'https://www.youtube.com/watch?v={youtube_id}')
-
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=60)
-
-        # yt-dlp adds .wav extension
-        if output_path.exists():
-            return output_path
+            cookie_args.extend(['--cookies-from-browser', browser])
         else:
-            print(f"  ⚠️  Download succeeded but file not found: {youtube_id}")
-            return None
+            cookie_path = Path(cookies_file)
+            if cookie_path.exists():
+                cookie_args.extend(['--cookies', str(cookie_path)])
 
-    except subprocess.TimeoutExpired:
-        print(f"  ⚠️  Download timeout: {youtube_id}")
-        return None
-    except subprocess.CalledProcessError as e:
-        print(f"  ⚠️  Download failed: {youtube_id} - {e.stderr.decode()[:100]}")
-        return None
-    except Exception as e:
-        print(f"  ⚠️  Unexpected error: {youtube_id} - {e}")
-        return None
+    url = f'https://www.youtube.com/watch?v={youtube_id}'
+
+    # Strategies for retry attempts
+    retry_configs = [
+        {},
+        {'force_ipv4': True},
+        {'force_android_client': True},
+        {'force_ipv4': True, 'force_android_client': True},
+    ]
+
+    def build_cmd(force_ipv4: bool = False, force_android_client: bool = False) -> List[str]:
+        cmd = list(base_cmd)
+        if force_ipv4:
+            cmd.append('--force-ipv4')
+        if force_android_client:
+            cmd.extend(['--extractor-args', 'youtube:player_client=android'])
+        cmd.extend(cookie_args)
+        cmd.append(url)
+        return cmd
+
+    attempts = min(max_retries, len(retry_configs))
+    last_error = ''
+
+    for attempt_idx in range(attempts):
+        retry_cfg = retry_configs[attempt_idx]
+        cmd = build_cmd(**retry_cfg)
+
+        if output_path.exists():
+            output_path.unlink()
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+
+            if result.returncode == 0 and output_path.exists():
+                return output_path
+
+            stderr = (result.stderr or '')
+            stdout = (result.stdout or '')
+            combined_msg = (stderr + '\n' + stdout).strip()
+            last_error = combined_msg or 'Unknown error'
+            error_lower = last_error.lower()
+
+            if COOKIE_FORMAT_ERROR in error_lower:
+                raise DownloadFatalError(
+                    "Cookies file is not in Netscape format. Regenerate it using yt-dlp "
+                    "(see scripts/extract_cookies.sh)."
+                )
+
+            if any(pattern in error_lower for pattern in NON_RETRY_ERROR_PATTERNS):
+                break
+
+        except subprocess.TimeoutExpired:
+            last_error = 'Download timed out'
+        except Exception as exc:  # pragma: no cover - defensive
+            last_error = f'Unexpected error: {exc}'
+            break
+
+        # Backoff before retrying (skip after final attempt)
+        if attempt_idx < attempts - 1:
+            time.sleep(2 ** attempt_idx)
+
+    if last_error:
+        print(f"  ⚠️  Download failed: {youtube_id} - {last_error}")
+    else:
+        print(f"  ⚠️  Download failed: {youtube_id} - Unknown error")
+
+    return None
 
 
 def extract_clap_embedding(
@@ -419,10 +509,17 @@ def process_split(split: str, args) -> int:
             }
 
             # Process results with progress bar
+            fatal_error: Optional[Exception] = None
             with tqdm(total=len(metadata_subset), desc=f"[{split}] Downloading & extracting") as pbar:
                 processed_count = 0
                 for future in as_completed(future_to_meta):
-                    youtube_id, status = future.result()
+                    try:
+                        youtube_id, status = future.result()
+                    except DownloadFatalError as err:
+                        fatal_error = err
+                        pbar.write(f"  ❌ {err}")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
 
                     if status == 'success':
                         success_count += 1
@@ -447,6 +544,9 @@ def process_split(split: str, args) -> int:
                         with sources_lock:
                             with open(sources_path, 'w') as f:
                                 json.dump(sources_dict, f, indent=2)
+
+            if fatal_error:
+                return 1
 
     finally:
         # Cleanup temp directory
