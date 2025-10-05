@@ -10,17 +10,20 @@ This script implements ethical data practices by:
 5. Logging all source metadata
 
 Usage:
+    # With cookies (recommended to avoid bot detection)
+    python scripts/download_and_process_audiocaps.py --split train --cookies cookies.txt
+
     # Default: 4 parallel workers
-    python scripts/download_and_process_audiocaps.py --split train --max-downloads 100
+    python scripts/download_and_process_audiocaps.py --split train --max-downloads 100 --cookies cookies.txt
 
     # Custom parallelism
-    python scripts/download_and_process_audiocaps.py --split train --num-workers 8
+    python scripts/download_and_process_audiocaps.py --split train --num-workers 8 --cookies cookies.txt
 
     # Append to existing file
-    python scripts/download_and_process_audiocaps.py --split val --append
+    python scripts/download_and_process_audiocaps.py --split val --append --cookies cookies.txt
 
     # Resume from specific index
-    python scripts/download_and_process_audiocaps.py --split train --resume-from 500
+    python scripts/download_and_process_audiocaps.py --split train --resume-from 500 --cookies cookies.txt
 
 Ethical Note:
     This implements fair use by never storing raw audio permanently.
@@ -77,7 +80,8 @@ def download_audio_segment(
     youtube_id: str,
     start_time: int,
     temp_dir: Path,
-    duration: int = 10
+    duration: int = 10,
+    cookies_file: Optional[str] = None
 ) -> Optional[Path]:
     """
     Download 10s audio segment using yt-dlp to temporary directory.
@@ -100,6 +104,11 @@ def download_audio_segment(
         '--no-warnings',
         f'https://www.youtube.com/watch?v={youtube_id}'
     ]
+
+    # Add cookies if provided
+    if cookies_file and Path(cookies_file).exists():
+        cmd.insert(-1, '--cookies')
+        cmd.insert(-1, cookies_file)
 
     try:
         subprocess.run(cmd, check=True, capture_output=True, timeout=60)
@@ -232,7 +241,8 @@ def process_single_video(
     sources_dict: Dict,
     h5_lock: threading.Lock,
     sources_lock: threading.Lock,
-    device: str
+    device: str,
+    cookies_file: Optional[str] = None
 ) -> Tuple[str, str]:
     """
     Process a single video: download, extract, save, delete.
@@ -251,7 +261,8 @@ def process_single_video(
     audio_path = download_audio_segment(
         youtube_id,
         meta['start_time'],
-        temp_dir
+        temp_dir,
+        cookies_file=cookies_file
     )
 
     if audio_path is None:
@@ -315,6 +326,8 @@ def main():
                         help='Save sources log every N files')
     parser.add_argument('--num-workers', type=int, default=4,
                         help='Number of parallel download workers')
+    parser.add_argument('--cookies', type=str, default=None,
+                        help='Path to cookies.txt file for YouTube authentication')
 
     args = parser.parse_args()
 
@@ -331,6 +344,15 @@ def main():
     if not metadata_path.exists():
         print(f"❌ Metadata not found: {metadata_path}")
         return 1
+
+    # Check cookies file
+    if args.cookies:
+        cookies_path = Path(args.cookies)
+        if not cookies_path.exists():
+            print(f"❌ Cookies file not found: {cookies_path}")
+            print(f"   Export cookies from browser using 'Get cookies.txt' extension")
+            return 1
+        print(f"✓ Using cookies from: {cookies_path}")
 
     # Check HDF5 existence
     if h5_path.exists() and not args.append:
@@ -413,7 +435,8 @@ def main():
                     sources_dict,
                     h5_lock,
                     sources_lock,
-                    args.device
+                    args.device,
+                    args.cookies
                 ): meta
                 for meta in metadata_subset
             }
