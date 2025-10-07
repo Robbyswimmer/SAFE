@@ -185,43 +185,49 @@ def download_wavcaps(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Available subsets
-    all_subsets = ["FreeSound", "BBC_Sound_Effects", "SoundBible", "AudioSet_SL"]
-    subsets = subsets or all_subsets
-
     print(f"Downloading WavCaps dataset to: {output_dir}")
-    print(f"Subsets: {', '.join(subsets)}")
     print(f"Workers: {num_workers}")
     print(f"Max duration: {max_duration}s")
     print()
 
+    # WavCaps has a single 'train' split with all data
+    # The 'subset' field in each sample indicates the source
+    print(f"Loading WavCaps dataset...")
+    try:
+        # Load the default configuration
+        dataset = load_dataset("cvssp/WavCaps", split="train")
+
+        # Limit samples if specified (for testing)
+        if max_samples_per_subset:
+            dataset = dataset.select(range(min(max_samples_per_subset, len(dataset))))
+
+        print(f"  {len(dataset)} samples loaded")
+
+    except Exception as e:
+        print(f"Error loading WavCaps: {e}")
+        return
+
+    # Filter by subsets if specified
+    if subsets is not None:
+        print(f"Filtering subsets: {', '.join(subsets)}")
+        filtered_samples = []
+        for sample in dataset:
+            # Check if sample has subset field matching requested subsets
+            sample_subset = sample.get("dataset", sample.get("subset", "unknown"))
+            if sample_subset in subsets:
+                filtered_samples.append(sample)
+        dataset = filtered_samples
+        print(f"  {len(dataset)} samples after filtering")
+
+    # Process samples with progress bar
     all_metadata: List[Dict[str, Any]] = []
 
-    for subset_name in subsets:
-        if subset_name not in all_subsets:
-            print(f"Warning: Unknown subset '{subset_name}', skipping...")
-            continue
-
-        print(f"Loading {subset_name}...")
-        try:
-            # Load dataset from HuggingFace
-            dataset = load_dataset("cvssp/WavCaps", name=subset_name, split="train")
-
-            # Limit samples if specified (for testing)
-            if max_samples_per_subset:
-                dataset = dataset.select(range(min(max_samples_per_subset, len(dataset))))
-
-            print(f"  {len(dataset)} samples loaded")
-
-        except Exception as e:
-            print(f"Error loading {subset_name}: {e}")
-            continue
-
-        # Process samples with progress bar
-        subset_metadata: List[Dict[str, Any]] = []
-
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = [
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = []
+        for idx, sample in enumerate(dataset):
+            # Get subset name from sample
+            subset_name = sample.get("dataset", sample.get("subset", "unknown"))
+            futures.append(
                 executor.submit(
                     process_sample,
                     idx,
@@ -230,20 +236,18 @@ def download_wavcaps(
                     subset_name,
                     max_duration,
                 )
-                for idx, sample in enumerate(dataset)
-            ]
+            )
 
-            for future in tqdm(
-                as_completed(futures),
-                total=len(futures),
-                desc=f"  Processing {subset_name}",
-            ):
-                result = future.result()
-                if result is not None:
-                    subset_metadata.append(result)
+        for future in tqdm(
+            as_completed(futures),
+            total=len(futures),
+            desc="  Processing samples",
+        ):
+            result = future.result()
+            if result is not None:
+                all_metadata.append(result)
 
-        print(f"  {len(subset_metadata)}/{len(dataset)} samples processed successfully")
-        all_metadata.extend(subset_metadata)
+    print(f"  {len(all_metadata)}/{len(dataset)} samples processed successfully")
 
     # Save metadata as JSONL
     metadata_path = output_dir / "wavcaps_train.jsonl"
@@ -273,7 +277,7 @@ def main():
         "--subsets",
         nargs="+",
         default=None,
-        help="Subsets to download (default: all). Options: FreeSound, BBC_Sound_Effects, SoundBible, AudioSet_SL",
+        help="Filter by subsets (default: all). The dataset will be checked for 'dataset' or 'subset' field",
     )
     parser.add_argument(
         "--num-workers",
