@@ -190,12 +190,12 @@ def download_wavcaps(
     print(f"Max duration: {max_duration}s")
     print()
 
-    # WavCaps has a single 'train' split with all data
+    # WavCaps has a 'test' split (despite the name, it contains all the data)
     # The 'subset' field in each sample indicates the source
     print(f"Loading WavCaps dataset...")
     try:
-        # Load the default configuration
-        dataset = load_dataset("cvssp/WavCaps", split="train")
+        # Load the default configuration with 'test' split
+        dataset = load_dataset("cvssp/WavCaps", split="test")
 
         # Limit samples if specified (for testing)
         if max_samples_per_subset:
