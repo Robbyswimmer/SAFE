@@ -34,6 +34,9 @@ Notes:
       to generate one directly from your browser session.
     - The downloader retries transient YouTube errors and aborts early on
       configuration issues so you can fix them without wasting time.
+    - If YouTube rate-limits your session, the script exits quickly so you can
+      wait before resuming. Lower `--num-workers` and raise `--sleep-min` /
+      `--sleep-max` if this happens frequently.
 """
 
 import argparse
@@ -71,6 +74,7 @@ NON_RETRY_ERROR_PATTERNS = (
 )
 
 COOKIE_FORMAT_ERROR = 'does not look like a netscape format cookies file'
+RATE_LIMIT_PATTERN = 'current session has been rate-limited'
 
 
 class DownloadFatalError(RuntimeError):
@@ -110,6 +114,8 @@ def download_audio_segment(
     duration: int = 10,
     cookies_file: Optional[str] = None,
     max_retries: int = 3,
+    sleep_min: float = 0.5,
+    sleep_max: float = 2.0,
 ) -> Optional[Path]:
     """
     Download 10s audio segment using yt-dlp to temporary directory.
@@ -135,8 +141,8 @@ def download_audio_segment(
         '--user-agent', DEFAULT_USER_AGENT,
         '--geo-bypass',
         '--sleep-requests', '1',
-        '--sleep-interval', '0.5',
-        '--max-sleep-interval', '2',
+        '--sleep-interval', f'{sleep_min}',
+        '--max-sleep-interval', f'{sleep_max}',
         '--retries', '3',
         '--fragment-retries', '3',
         '--output', str((temp_dir / output_stem)),
@@ -204,6 +210,13 @@ def download_audio_segment(
                 raise DownloadFatalError(
                     "Cookies file is not in Netscape format. Regenerate it using yt-dlp "
                     "(see scripts/extract_cookies.sh)."
+                )
+
+            if RATE_LIMIT_PATTERN in error_lower:
+                raise DownloadFatalError(
+                    "YouTube rate-limited this session. Pause downloads for ~60 minutes, "
+                    "reduce parallelism (e.g., --num-workers 1), increase --sleep-min/--sleep-max "
+                    "and consider regenerating cookies."
                 )
 
             if any(pattern in error_lower for pattern in NON_RETRY_ERROR_PATTERNS):
@@ -339,7 +352,9 @@ def process_single_video(
     sources_lock: threading.Lock,
     device: str,
     cookies_file: Optional[str] = None,
-    existing_ids: set = None
+    existing_ids: set = None,
+    sleep_min: float = 0.5,
+    sleep_max: float = 2.0,
 ) -> Tuple[str, str]:
     """
     Process a single video: download, extract, save, delete.
@@ -363,7 +378,9 @@ def process_single_video(
         youtube_id,
         meta['start_time'],
         temp_dir,
-        cookies_file=cookies_file
+        cookies_file=cookies_file,
+        sleep_min=sleep_min,
+        sleep_max=sleep_max,
     )
 
     if audio_path is None:
@@ -503,7 +520,9 @@ def process_split(split: str, args) -> int:
                     sources_lock,
                     args.device,
                     args.cookies,
-                    existing_ids
+                    existing_ids,
+                    args.sleep_min,
+                    args.sleep_max,
                 ): meta
                 for meta in metadata_subset
             }
@@ -616,8 +635,17 @@ def main():
                         help='Number of parallel download workers')
     parser.add_argument('--cookies', type=str, default=None,
                         help='Path to cookies.txt file OR "browser:chrome" to extract from browser')
+    parser.add_argument('--sleep-min', type=float, default=0.5,
+                        help='Minimum seconds to sleep between successive requests (default: 0.5)')
+    parser.add_argument('--sleep-max', type=float, default=2.0,
+                        help='Maximum seconds to sleep between successive requests (default: 2.0)')
 
     args = parser.parse_args()
+
+    if args.sleep_min < 0 or args.sleep_max < 0:
+        parser.error('Sleep intervals must be non-negative values')
+    if args.sleep_max < args.sleep_min:
+        parser.error('--sleep-max must be greater than or equal to --sleep-min')
 
     # Validate split arguments
     if not args.split and not args.all_splits:

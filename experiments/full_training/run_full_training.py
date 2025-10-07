@@ -16,7 +16,7 @@ from torch.utils.data import Dataset
 
 from configs.model_configs import DEMO_CONFIG, FULL_CONFIG, MULTIMODAL_CONFIG
 from configs.retention_variants import get_variant_config, RETENTION_VARIANTS
-from safe.data.datasets import AudioCapsDataset, VQADataset, create_safe_dataloader
+from safe.data.datasets import AudioCapsDataset, VQADataset, WavCapsDataset, create_safe_dataloader
 from safe.models.safe_model import SAFEModel
 from safe.training.stage_a import StageATrainer
 
@@ -49,6 +49,65 @@ class TrainingConfig:
     train_accuracy_warmup: int
     train_eval_batches: int
     generation_max_new_tokens: int
+
+
+class CombinedAudioDataset(Dataset):
+    """Combine AudioCaps and WavCaps with configurable ratio."""
+
+    def __init__(
+        self,
+        audiocaps_dataset: Optional[Dataset] = None,
+        wavcaps_dataset: Optional[Dataset] = None,
+        *,
+        wavcaps_ratio: float = 0.5,
+        shuffle: bool = True,
+        seed: int = 42,
+    ) -> None:
+        self.datasets = []
+
+        if audiocaps_dataset is not None:
+            self.datasets.append(("audiocaps", audiocaps_dataset))
+
+        if wavcaps_dataset is not None:
+            self.datasets.append(("wavcaps", wavcaps_dataset))
+
+        if not self.datasets:
+            raise ValueError("At least one dataset (AudioCaps or WavCaps) must be provided")
+
+        # Build index map based on ratio
+        self.index_map: List[Tuple[str, int]] = []
+
+        if len(self.datasets) == 1:
+            # Only one dataset, use all samples
+            name, dataset = self.datasets[0]
+            self.index_map = [(name, idx) for idx in range(len(dataset))]
+        else:
+            # Both datasets: mix based on ratio
+            audiocaps_count = len(audiocaps_dataset) if audiocaps_dataset else 0
+            wavcaps_count = len(wavcaps_dataset) if wavcaps_dataset else 0
+
+            # Calculate samples to use from each dataset
+            total_samples = audiocaps_count + int(wavcaps_count * wavcaps_ratio)
+
+            self.index_map = [
+                ("audiocaps", idx) for idx in range(audiocaps_count)
+            ] + [
+                ("wavcaps", idx) for idx in range(int(wavcaps_count * wavcaps_ratio))
+            ]
+
+        if shuffle:
+            rng = random.Random(seed)
+            rng.shuffle(self.index_map)
+
+    def __len__(self) -> int:
+        return len(self.index_map)
+
+    def __getitem__(self, idx: int):
+        dataset_name, local_idx = self.index_map[idx]
+        for name, dataset in self.datasets:
+            if name == dataset_name:
+                return dataset[local_idx]
+        raise IndexError(f"Invalid index: {idx}")
 
 
 class CombinedValidationDataset(Dataset):
@@ -177,7 +236,40 @@ def run_experiment(args: argparse.Namespace) -> None:
     if not data_root.exists():
         raise FileNotFoundError(f"Data root '{data_root}' does not exist")
 
-    train_dataset = AudioCapsDataset(data_path=data_root, split=args.train_split)
+    # Load AudioCaps dataset
+    audiocaps_train = AudioCapsDataset(data_path=data_root, split=args.train_split)
+    print(f"Loaded AudioCaps train: {len(audiocaps_train)} samples")
+
+    # Optionally load WavCaps
+    wavcaps_train = None
+    if args.use_wavcaps:
+        wavcaps_path = data_root / "wavcaps"
+        if wavcaps_path.exists():
+            try:
+                wavcaps_train = WavCapsDataset(data_path=data_root, split="train")
+                print(f"Loaded WavCaps train: {len(wavcaps_train)} samples")
+                print(f"Using WavCaps ratio: {args.wavcaps_ratio}")
+            except Exception as e:
+                print(f"Warning: Failed to load WavCaps: {e}")
+                print("Continuing with AudioCaps only")
+        else:
+            print(f"Warning: WavCaps directory not found at {wavcaps_path}")
+            print("Continuing with AudioCaps only")
+
+    # Combine datasets if WavCaps is available
+    if wavcaps_train is not None:
+        train_dataset = CombinedAudioDataset(
+            audiocaps_dataset=audiocaps_train,
+            wavcaps_dataset=wavcaps_train,
+            wavcaps_ratio=args.wavcaps_ratio,
+            shuffle=not args.disable_train_shuffle,
+            seed=args.seed,
+        )
+        print(f"Combined training dataset: {len(train_dataset)} samples")
+    else:
+        train_dataset = audiocaps_train
+
+    # Validation datasets (only AudioCaps for audio validation)
     val_audio_dataset = AudioCapsDataset(data_path=data_root, split=args.val_audio_split)
     val_vl_dataset = VQADataset(data_path=data_root, split=args.val_vqa_split)
 
@@ -307,6 +399,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=str, default="experiments/full_training/data", help="Dataset root")
     parser.add_argument("--train-split", type=str, default="train", help="AudioCaps split for training")
     parser.add_argument("--val-audio-split", type=str, default="val", help="AudioCaps split for validation")
+    parser.add_argument("--use-wavcaps", action="store_true", help="Include WavCaps dataset for training")
+    parser.add_argument("--wavcaps-ratio", type=float, default=0.5, help="Ratio of WavCaps samples to use (0.0-1.0)")
     parser.add_argument("--val-vqa-split", type=str, default="val", help="VQA split for validation")
     parser.add_argument("--train-batch-size", type=int, default=32, help="Training batch size")
     parser.add_argument("--val-batch-size", type=int, default=64, help="Validation batch size")

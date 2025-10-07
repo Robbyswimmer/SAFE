@@ -312,22 +312,14 @@ class SAFEModel(nn.Module):
         Encode audio into token representations.
 
         Args:
-            audio: Audio input (various formats supported) - can be:
-                   - Waveform tensor for encoding
-                   - Pre-computed CLAP embedding (from HDF5)
+            audio: Audio input - waveform tensor for encoding
             num_tokens: Optional override for number of tokens
 
         Returns:
             Tuple of (audio_tokens, transcripts)
         """
-        # Check if audio is pre-computed embedding (tuple with flag)
-        # Format: (embedding_tensor, True) from HDF5 loader
-        if isinstance(audio, tuple) and len(audio) == 2 and isinstance(audio[1], bool) and audio[1]:
-            # Pre-computed CLAP embedding from HDF5
-            audio_features = audio[0]
-            transcripts = None
         # Extract audio features from waveform
-        elif self.audio_encoder_type in ["clap", "multimodal"]:
+        if self.audio_encoder_type in ["clap", "multimodal"]:
             audio_features, transcripts = self.audio_encoder(audio), None
         else:  # whisper
             audio_features, transcripts = self.audio_encoder(audio)
