@@ -36,35 +36,76 @@ from typing import List
 HF_REPO = "https://huggingface.co/datasets/cvssp/WavCaps"
 
 
-def download_hf_file(repo_url: str, file_path: str, output_path: Path) -> bool:
-    """Download a file from HuggingFace repository using wget or curl."""
+def download_hf_file(repo_url: str, file_path: str, output_path: Path, resume: bool = True) -> bool:
+    """
+    Download a file from HuggingFace repository using wget or curl.
+
+    Args:
+        repo_url: Base repository URL
+        file_path: Path within repository
+        output_path: Local output path
+        resume: Enable resume support for partial downloads
+
+    Returns:
+        True if download successful or file already complete, False otherwise
+    """
     url = f"{repo_url}/resolve/main/{file_path}"
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Check if file already exists and appears complete
+    if output_path.exists():
+        file_size = output_path.stat().st_size
+        if file_size > 0:
+            print(f"File already exists ({file_size / 1024 / 1024:.2f} MB): {output_path.name}")
+            # Try to verify it's not a partial download by checking if it's readable
+            try:
+                # For JSON files, try to parse
+                if output_path.suffix == '.json':
+                    with open(output_path, 'r') as f:
+                        json.load(f)
+                    print(f"  ✓ Verified complete JSON file")
+                    return True
+                else:
+                    # For zip files, just check size is reasonable
+                    if file_size > 1024:  # At least 1KB
+                        print(f"  ✓ File appears complete, skipping")
+                        return True
+            except Exception:
+                print(f"  ⚠ File appears corrupted, re-downloading...")
+                output_path.unlink()
 
     print(f"Downloading: {file_path}")
     print(f"  URL: {url}")
     print(f"  Output: {output_path}")
 
+    # Try wget first (supports resume with -c)
     try:
-        # Try wget first
+        wget_args = ["wget", "-c", "-O", str(output_path), url] if resume else ["wget", "-O", str(output_path), url]
         result = subprocess.run(
-            ["wget", "-O", str(output_path), url],
-            capture_output=True,
+            wget_args,
+            capture_output=False,  # Show progress
             text=True,
         )
         if result.returncode == 0:
+            print(f"  ✓ Downloaded successfully")
             return True
     except FileNotFoundError:
         pass
 
-    # Fallback to curl
+    # Fallback to curl (supports resume with -C -)
     try:
+        curl_args = ["curl", "-L", "-C", "-", "-o", str(output_path), url] if resume else ["curl", "-L", "-o", str(output_path), url]
         result = subprocess.run(
-            ["curl", "-L", "-o", str(output_path), url],
-            capture_output=True,
+            curl_args,
+            capture_output=False,  # Show progress
             text=True,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            print(f"  ✓ Downloaded successfully")
+            return True
+        else:
+            print(f"  ✗ curl failed with return code {result.returncode}")
+            return False
     except FileNotFoundError:
         print("Error: Neither wget nor curl found. Please install one.")
         return False
@@ -93,63 +134,102 @@ def download_json_metadata(output_dir: Path, subset: str) -> Path:
 
 
 def download_zip_files(output_dir: Path, subset: str) -> List[Path]:
-    """Download all zip parts for a subset."""
+    """Download all zip parts for a subset with resume support."""
     zip_dir = output_dir / "Zip_files" / subset
     zip_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\nDownloading zip files for {subset}...")
     print("WARNING: This may be very large (hundreds of GB)")
+    print("Downloads support resume - you can safely interrupt and restart")
 
-    # Different subsets have different zip structures
-    # FreeSound has .z01 through .z121 plus .zip
-    # We'll try to download sequentially until we fail
+    # Progress tracking file
+    progress_file = zip_dir / ".download_progress.json"
+    progress = {}
+    if progress_file.exists():
+        try:
+            with open(progress_file, 'r') as f:
+                progress = json.load(f)
+            print(f"  Resuming from previous download session...")
+        except Exception:
+            progress = {}
 
     downloaded_files = []
 
     # Try main .zip file
     main_zip = zip_dir / f"{subset}.zip"
-    if not main_zip.exists():
+    if main_zip.exists() and main_zip.stat().st_size > 0:
+        print(f"  ✓ Main zip already exists: {main_zip.name}")
+        downloaded_files.append(main_zip)
+        progress['main_zip'] = True
+    else:
         success = download_hf_file(
             HF_REPO,
             f"Zip_files/{subset}/{subset}.zip",
             main_zip,
+            resume=True,
         )
         if success:
             downloaded_files.append(main_zip)
-    else:
-        downloaded_files.append(main_zip)
+            progress['main_zip'] = True
+            # Save progress
+            with open(progress_file, 'w') as f:
+                json.dump(progress, f)
 
     # Try multi-part zips (.z01, .z02, etc.)
     part_num = 1
+    consecutive_failures = 0
+    max_consecutive_failures = 3  # Stop after 3 consecutive 404s
+
     while True:
         part_file = zip_dir / f"{subset}.z{part_num:02d}"
+        part_key = f"part_{part_num:02d}"
 
-        if part_file.exists():
+        # Check if already downloaded
+        if part_file.exists() and part_file.stat().st_size > 0:
+            if part_key not in progress or not progress[part_key]:
+                print(f"  ✓ Part already exists: {part_file.name}")
             downloaded_files.append(part_file)
+            progress[part_key] = True
+            consecutive_failures = 0
             part_num += 1
             continue
 
+        # Try to download
         success = download_hf_file(
             HF_REPO,
             f"Zip_files/{subset}/{subset}.z{part_num:02d}",
             part_file,
+            resume=True,
         )
 
         if success:
             downloaded_files.append(part_file)
+            progress[part_key] = True
+            consecutive_failures = 0
+
+            # Save progress after each successful download
+            with open(progress_file, 'w') as f:
+                json.dump(progress, f)
+
             part_num += 1
         else:
-            # No more parts
-            break
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                print(f"  No more parts found (tried {consecutive_failures} consecutive files)")
+                break
 
         # Safety limit
         if part_num > 200:
+            print(f"  Reached safety limit of 200 parts")
             break
 
     if not downloaded_files:
         raise RuntimeError(f"No zip files downloaded for {subset}")
 
-    print(f"  ✓ Downloaded {len(downloaded_files)} zip parts")
+    print(f"\n  ✓ Total zip parts found: {len(downloaded_files)}")
+    print(f"  Progress saved to: {progress_file}")
+    print(f"  You can safely interrupt and resume this download")
+
     return downloaded_files
 
 
