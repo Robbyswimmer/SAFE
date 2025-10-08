@@ -124,6 +124,7 @@ def extract_subset_audio(output_dir: Path, subset: str, *, force: bool = False) 
     base_zip = zip_dir / f"{subset}.zip"
     if not base_zip.exists():
         raise FileNotFoundError(f"Main zip file missing for subset '{subset}': {base_zip}")
+    base_zip = base_zip.resolve()
 
     parts = _collect_split_parts(zip_dir, subset)
     _validate_split_parts(parts)
