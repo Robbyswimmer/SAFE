@@ -502,7 +502,7 @@ def main():
 
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.extract_only and args.metadata_only:
