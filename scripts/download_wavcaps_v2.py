@@ -12,6 +12,9 @@ Usage:
     # Download specific subset with audio
     python scripts/download_wavcaps_v2.py --output-dir experiments/full_training/data/wavcaps --subset FreeSound
 
+    # Extract audio from existing archives without re-downloading
+    python scripts/download_wavcaps_v2.py --output-dir experiments/full_training/data/wavcaps --subset FreeSound --extract-only
+
     # Download all (WARNING: 819GB!)
     python scripts/download_wavcaps_v2.py --output-dir experiments/full_training/data/wavcaps --all-subsets
 
@@ -28,12 +31,145 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import shutil
 import subprocess
-import zipfile
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 HF_REPO = "https://huggingface.co/datasets/cvssp/WavCaps"
+
+
+def _has_audio_files(directory: Path) -> bool:
+    """Check if a directory already contains audio files."""
+    if not directory.exists():
+        return False
+
+    patterns = ("*.wav", "*.flac", "*.mp3", "*.ogg", "*.m4a")
+    for pattern in patterns:
+        if next(directory.rglob(pattern), None) is not None:
+            return True
+    return False
+
+
+def _collect_split_parts(zip_dir: Path, subset: str) -> List[Path]:
+    """Return ordered list of split zip parts for a subset (excluding the .zip tail)."""
+    part_pattern = re.compile(rf"{re.escape(subset)}\.z(\d+)$", re.IGNORECASE)
+    parts: List[tuple[int, Path]] = []
+
+    if not zip_dir.exists():
+        return []
+
+    for candidate in zip_dir.iterdir():
+        if not candidate.is_file():
+            continue
+        match = part_pattern.match(candidate.name)
+        if match:
+            parts.append((int(match.group(1)), candidate))
+
+    parts.sort(key=lambda item: item[0])
+    return [path for _, path in parts]
+
+
+def _validate_split_parts(parts: List[Path]) -> None:
+    """Ensure split archive parts form a contiguous sequence."""
+    if not parts:
+        return
+
+    missing: List[str] = []
+    current = 1
+    for part in parts:
+        suffix = part.name.split(".z")[-1]
+        try:
+            part_num = int(suffix)
+        except ValueError:
+            continue
+        while current < part_num:
+            missing.append(f"z{current:02d}")
+            current += 1
+        current = part_num + 1
+
+    if missing:
+        raise FileNotFoundError(
+            "Missing split archive part(s): " + ", ".join(missing)
+        )
+
+
+def _find_subset_audio_dir(audio_root: Path, subset: str) -> Path:
+    """Locate the directory holding extracted audio for a subset (case-insensitive)."""
+    canonical = subset.lower()
+    direct = audio_root / subset
+    if direct.exists():
+        return direct
+
+    for candidate in audio_root.iterdir():
+        if candidate.is_dir() and candidate.name.lower() == canonical:
+            return candidate
+
+    raise FileNotFoundError(
+        f"Extracted audio directory not found for subset '{subset}' under {audio_root}"
+    )
+
+
+def extract_subset_audio(output_dir: Path, subset: str, *, force: bool = False) -> Path:
+    """Extract (or verify) WavCaps audio for a given subset from split zip archives."""
+
+    audio_root = output_dir / "audio"
+    audio_root.mkdir(parents=True, exist_ok=True)
+
+    zip_dir = output_dir / "Zip_files" / subset
+    if not zip_dir.exists():
+        raise FileNotFoundError(f"Zip directory not found for subset '{subset}': {zip_dir}")
+
+    base_zip = zip_dir / f"{subset}.zip"
+    if not base_zip.exists():
+        raise FileNotFoundError(f"Main zip file missing for subset '{subset}': {base_zip}")
+
+    parts = _collect_split_parts(zip_dir, subset)
+    _validate_split_parts(parts)
+
+    try:
+        subset_dir = _find_subset_audio_dir(audio_root, subset)
+    except FileNotFoundError:
+        subset_dir = audio_root / subset
+
+    if _has_audio_files(subset_dir) and not force:
+        print(f"  ✓ Audio already extracted for {subset}: {subset_dir}")
+        return subset_dir
+
+    extractor = None
+    if shutil.which("7z"):
+        extractor = ["7z", "x", str(base_zip), f"-o{audio_root}", "-aos"]
+    elif shutil.which("unzip"):
+        extractor = ["unzip", "-n", str(base_zip), "-d", str(audio_root)]
+    else:
+        raise RuntimeError(
+            "Neither '7z' nor 'unzip' is available on PATH. Install one to extract split archives."
+        )
+
+    print(f"\nExtracting {subset} audio using {' '.join(extractor[:1])}...")
+    result = subprocess.run(
+        extractor,
+        cwd=zip_dir,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        raise RuntimeError(
+            f"Failed to extract {subset} archive (exit code {result.returncode}).\n"
+            f"stderr: {stderr}"
+        )
+
+    subset_dir = _find_subset_audio_dir(audio_root, subset)
+
+    if not _has_audio_files(subset_dir):
+        raise RuntimeError(
+            f"Extraction for {subset} completed but no audio files were found in {subset_dir}"
+        )
+
+    print(f"  ✓ Extracted audio to {subset_dir}")
+    return subset_dir
 
 
 def download_hf_file(repo_url: str, file_path: str, output_path: Path, resume: bool = True) -> bool:
@@ -94,15 +230,31 @@ def download_hf_file(repo_url: str, file_path: str, output_path: Path, resume: b
 
     # Fallback to curl (supports resume with -C -)
     try:
-        curl_args = ["curl", "-L", "-C", "-", "-o", str(output_path), url] if resume else ["curl", "-L", "-o", str(output_path), url]
+        curl_args = ["curl", "-L", "-C", "-", "-o", str(output_path), "-w", "%{http_code}", url] if resume else ["curl", "-L", "-o", str(output_path), "-w", "%{http_code}", url]
         result = subprocess.run(
             curl_args,
-            capture_output=False,  # Show progress
+            capture_output=True,  # Capture to check HTTP code
             text=True,
         )
+
+        # Check HTTP status code (curl prints it at the end)
         if result.returncode == 0:
-            print(f"  ✓ Downloaded successfully")
-            return True
+            # Try to extract HTTP code from output
+            http_code = result.stdout.strip().split('\n')[-1] if result.stdout else ""
+
+            # Check if it's a valid success code
+            if http_code.startswith('2'):  # 2xx success
+                print(f"  ✓ Downloaded successfully")
+                return True
+            elif http_code == '404':
+                print(f"  ✗ File not found (404)")
+                # Remove the error page file if it exists
+                if output_path.exists() and output_path.stat().st_size < 1024:
+                    output_path.unlink()
+                return False
+            else:
+                print(f"  ✗ HTTP error: {http_code}")
+                return False
         else:
             print(f"  ✗ curl failed with return code {result.returncode}")
             return False
@@ -237,8 +389,8 @@ def process_subset_to_jsonl(
     output_dir: Path,
     subset: str,
     audio_dir: Path,
-) -> int:
-    """Convert WavCaps JSON to SAFE-compatible JSONL format."""
+) -> List[Dict[str, Any]]:
+    """Convert WavCaps JSON metadata into SAFE-compatible JSONL entries."""
 
     # Load WavCaps JSON
     json_path = output_dir / "json_files" / subset / f"{subset}.json"
@@ -247,8 +399,17 @@ def process_subset_to_jsonl(
         raise FileNotFoundError(f"JSON file not found: {json_path}")
 
     print(f"\nProcessing {subset} metadata...")
-    with open(json_path, "r", encoding="utf-8") as f:
-        wavcaps_data = json.load(f)
+
+    # Verify file is valid JSON before parsing
+    file_size = json_path.stat().st_size
+    if file_size < 100:
+        raise ValueError(f"JSON file too small ({file_size} bytes), likely corrupted: {json_path}")
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            wavcaps_data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse JSON file {json_path}: {e}")
 
     # WavCaps JSON format: {"data": [{...}, {...}]}
     if isinstance(wavcaps_data, dict) and "data" in wavcaps_data:
@@ -259,6 +420,13 @@ def process_subset_to_jsonl(
         raise ValueError(f"Unexpected JSON format in {json_path}")
 
     print(f"  Found {len(samples)} samples")
+
+    audio_dir = Path(audio_dir)
+    if audio_dir.exists():
+        if not _has_audio_files(audio_dir):
+            print(f"  ⚠ Audio directory has no audio files yet: {audio_dir}")
+    else:
+        print(f"  ⚠ Audio directory not found (metadata-only run?): {audio_dir}")
 
     # Convert to SAFE format
     output_samples = []
@@ -271,12 +439,14 @@ def process_subset_to_jsonl(
         # Caption/answer
         caption = sample.get("caption", sample.get("description", ""))
 
+        rel_audio_path = Path("wavcaps") / "audio" / subset / audio_filename
         # Build SAFE-compatible entry
         safe_sample = {
             "id": f"{subset}_{idx:06d}",
             "question": "What is happening in the audio?",
             "answer": caption,
-            "audio_path": f"{subset}/{audio_filename}",
+            "audio": rel_audio_path.as_posix(),
+            "audio_path": rel_audio_path.as_posix(),
             "subset": subset,
             "wavcaps_id": sample.get("id", ""),
         }
@@ -294,7 +464,7 @@ def process_subset_to_jsonl(
             f.write(json.dumps(sample) + "\n")
 
     print(f"  ✓ Saved {len(output_samples)} samples to {jsonl_path}")
-    return len(output_samples)
+    return output_samples
 
 
 def main():
@@ -323,11 +493,22 @@ def main():
         action="store_true",
         help="Download all subsets (WARNING: 819GB!)",
     )
+    parser.add_argument(
+        "--extract-only",
+        action="store_true",
+        help="Skip downloading archives; only extract existing zip parts and rebuild metadata",
+    )
 
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.extract_only and args.metadata_only:
+        parser.error("--extract-only cannot be combined with --metadata-only")
+
+    if args.extract_only and not (args.all_subsets or args.subset):
+        parser.error("--extract-only requires --subset or --all-subsets to specify which archives to extract")
 
     # Determine which subsets to process
     if args.all_subsets:
@@ -342,6 +523,7 @@ def main():
         print("Use --subset <name> to download audio for a specific subset.\n")
 
     total_samples = 0
+    aggregated_entries: List[Dict[str, Any]] = []
 
     for subset in subsets:
         print(f"\n{'='*60}")
@@ -358,29 +540,24 @@ def main():
         # Download audio if requested
         if not args.metadata_only:
             try:
-                zip_files = download_zip_files(output_dir, subset)
-
-                # Extract audio
-                print(f"\nExtracting audio files...")
-                audio_dir = output_dir / "audio" / subset
-                audio_dir.mkdir(parents=True, exist_ok=True)
-
-                # For multi-part zips, we need to use 7z or unzip
-                # This is platform-specific
-                print("  (Extraction code needed - use 7z or unzip)")
-
+                if args.extract_only:
+                    extract_subset_audio(output_dir, subset)
+                else:
+                    download_zip_files(output_dir, subset)
+                    extract_subset_audio(output_dir, subset)
             except Exception as e:
                 print(f"  ✗ Failed to download/extract audio: {e}")
                 continue
 
         # Process to JSONL
         try:
-            count = process_subset_to_jsonl(
+            subset_entries = process_subset_to_jsonl(
                 output_dir,
                 subset,
-                output_dir / "audio",
+                output_dir / "audio" / subset,
             )
-            total_samples += count
+            aggregated_entries.extend(subset_entries)
+            total_samples += len(subset_entries)
         except Exception as e:
             print(f"  ✗ Failed to process metadata: {e}")
             continue
@@ -390,6 +567,15 @@ def main():
     print(f"{'='*60}")
     print(f"Total samples: {total_samples}")
     print(f"Output directory: {output_dir}")
+
+    if aggregated_entries:
+        train_jsonl_path = output_dir / "wavcaps_train.jsonl"
+        with open(train_jsonl_path, "w", encoding="utf-8") as f:
+            for entry in aggregated_entries:
+                f.write(json.dumps(entry) + "\n")
+        print(f"  ✓ Aggregated metadata written to {train_jsonl_path}")
+    else:
+        print("  ⚠ No samples were processed. Check previous warnings for details.")
 
     if args.metadata_only:
         print("\nMetadata downloaded. To get audio:")
