@@ -35,12 +35,26 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 HF_REPO = "https://huggingface.co/datasets/cvssp/WavCaps"
 
 
-_DATASET_CACHE = None
+_REPO_FILE_CACHE: Optional[List[str]] = None
+_SUBSET_METADATA_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+_DATASET_CACHE_BUILT = False
+
+_KNOWN_SUBSET_NAMES = {
+    "freesound",
+    "bbc_sound_effects",
+    "soundbible",
+    "audioset",
+    "audioset_sl",
+}
+
+_SUBSET_ALIAS = {
+    "audioset": "AudioSet_SL",
+}
 
 
 def _has_audio_files(directory: Path) -> bool:
@@ -267,89 +281,301 @@ def download_hf_file(repo_url: str, file_path: str, output_path: Path, resume: b
         return False
 
 
-def _rebuild_metadata_via_hf_dataset(json_path: Path, subset: str) -> Path:
-    """Generate subset metadata via the HuggingFace datasets API when files are missing."""
+def _normalize_subset_name(name: str) -> str:
+    return name.replace(" ", "_").replace("-", "_").lower()
 
-    global _DATASET_CACHE
+
+def _download_json_via_hfhub(json_path: Path, subset: str) -> Optional[Path]:
+    """Attempt to download subset metadata using the HuggingFace Hub Python API."""
+
+    global _REPO_FILE_CACHE
 
     try:
-        from datasets import Value, load_dataset
+        from huggingface_hub import HfApi, hf_hub_download
+    except ImportError:
+        return None
+
+    if _REPO_FILE_CACHE is None:
+        try:
+            api = HfApi()
+            _REPO_FILE_CACHE = api.list_repo_files(
+                repo_id="cvssp/WavCaps", repo_type="dataset"
+            )
+        except Exception as exc:
+            print(f"  ✗ Failed to enumerate repository files via HuggingFace Hub: {exc}")
+            return None
+
+    normalized_subset = _normalize_subset_name(subset)
+
+    candidates: List[str] = []
+    for path_str in _REPO_FILE_CACHE:
+        lower = path_str.lower()
+        if not lower.endswith(".json"):
+            continue
+
+        path_obj = Path(path_str)
+        stem_normalized = _normalize_subset_name(path_obj.stem)
+
+        if normalized_subset == stem_normalized:
+            candidates.append(path_str)
+            continue
+
+        if normalized_subset in lower:
+            candidates.append(path_str)
+
+    if not candidates:
+        return None
+
+    def _sort_key(item: str) -> tuple[int, int]:
+        score = 0
+        path_lower = item.lower()
+        if "/json_files/" in path_lower:
+            score -= 10
+        if path_lower.endswith(f"/{subset.lower()}.json"):
+            score -= 5
+        if path_lower.endswith(f"/{normalized_subset}.json"):
+            score -= 5
+        return (score, len(item))
+
+    candidates.sort(key=_sort_key)
+
+    for candidate in candidates:
+        try:
+            downloaded_path = hf_hub_download(
+                repo_id="cvssp/WavCaps",
+                filename=candidate,
+                repo_type="dataset",
+            )
+        except Exception as exc:
+            print(f"  ✗ Failed to download {candidate} via HuggingFace Hub: {exc}")
+            continue
+
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(Path(downloaded_path), json_path)
+        print(f"  ✓ Downloaded via HuggingFace Hub: {candidate}")
+        return json_path
+
+    return None
+
+
+def _extract_caption(value: Any) -> str:
+    """Return a clean caption string from diverse metadata formats."""
+
+    if not value:
+        return ""
+
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, list):
+        for item in value:
+            caption = _extract_caption(item)
+            if caption:
+                return caption
+        return ""
+
+    if isinstance(value, dict):
+        for key in ("caption", "text", "description", "value"):
+            if key in value:
+                caption = _extract_caption(value[key])
+                if caption:
+                    return caption
+        return ""
+
+    return str(value).strip()
+
+
+def _extract_audio_filename(audio_field: Any) -> str:
+    """Extract a filename from possible audio metadata representations."""
+
+    if audio_field is None:
+        return ""
+
+    if isinstance(audio_field, dict):
+        for key in ("path", "filename", "file", "audio"):
+            if key in audio_field and audio_field[key]:
+                return _extract_audio_filename(audio_field[key])
+        return ""
+
+    if isinstance(audio_field, (list, tuple)):
+        for item in audio_field:
+            filename = _extract_audio_filename(item)
+            if filename:
+                return filename
+        return ""
+
+    audio_str = str(audio_field).strip()
+    if not audio_str:
+        return ""
+
+    try:
+        return Path(audio_str).name
+    except Exception:
+        return audio_str
+
+
+def _prepare_subset_metadata_cache() -> None:
+    """Populate subset-level metadata via the datasets streaming API."""
+
+    global _DATASET_CACHE_BUILT
+
+    if _DATASET_CACHE_BUILT:
+        return
+
+    try:
+        from datasets import load_dataset
     except ImportError as exc:
         raise RuntimeError(
             "huggingface-datasets is required to rebuild metadata when JSON files are "
-            "missing. Install it or run with an environment that provides it."
+            "missing. Install it or ensure the environment provides it."
         ) from exc
 
-    if _DATASET_CACHE is None:
-        print("  ↺ Downloading WavCaps metadata via datasets.load_dataset() ...")
-        dataset = load_dataset("cvssp/WavCaps", split="test")
-        dataset = dataset.cast_column("audio", Value("string"))
-        _DATASET_CACHE = dataset
-    else:
-        dataset = _DATASET_CACHE
+    print("  ↺ Downloading WavCaps metadata via datasets.load_dataset() (streaming)...")
 
-    target = subset.replace(" ", "_").lower()
-    rebuilt = []
-
-    for sample in dataset:
-        sample_subset = (
-            sample.get("dataset")
-            or sample.get("subset")
-            or sample.get("source")
-            or ""
+    try:
+        dataset_stream = load_dataset(
+            "cvssp/WavCaps", split="test", streaming=True
         )
-        if not sample_subset:
-            continue
-        canonical = sample_subset.replace(" ", "_").lower()
-        if canonical != target:
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to load WavCaps dataset via datasets API."
+        ) from exc
+
+    total_samples = 0
+
+    for sample in dataset_stream:
+        if not isinstance(sample, dict):
             continue
 
-        audio_ref = sample.get("audio")
-        if not audio_ref:
+        subset_candidates = []
+        for key in ("dataset", "subset", "source", "collection"):
+            value = sample.get(key)
+            if isinstance(value, str) and value.strip():
+                subset_candidates.append(value.strip())
+
+        if not subset_candidates:
             continue
 
-        try:
-            audio_filename = Path(audio_ref).name
-        except Exception:
-            audio_filename = str(audio_ref)
+        subset_label = None
+        normalized = ""
+        for candidate in subset_candidates:
+            candidate_norm = _normalize_subset_name(candidate)
+            if candidate_norm in _KNOWN_SUBSET_NAMES:
+                subset_label = candidate
+                normalized = candidate_norm
+                break
 
-        caption = (
+        if subset_label is None:
+            subset_label = subset_candidates[0]
+            normalized = _normalize_subset_name(subset_label)
+
+        if normalized in _SUBSET_ALIAS:
+            subset_label = _SUBSET_ALIAS[normalized]
+            normalized = _normalize_subset_name(subset_label)
+
+        audio_filename = _extract_audio_filename(
+            sample.get("audio") or sample.get("audio_path")
+        )
+        if not audio_filename:
+            continue
+
+        caption = _extract_caption(
             sample.get("caption")
+            or sample.get("caption_en")
             or sample.get("description")
+            or sample.get("captions")
             or sample.get("text")
-            or ""
+            or sample.get("answers")
         )
         if not caption:
             continue
 
-        entry = {
-            "id": sample.get("id") or audio_filename.rsplit(".", 1)[0],
+        entry: Dict[str, Any] = {
+            "id": str(sample.get("id") or "").strip(),
             "caption": caption,
             "audio": audio_filename,
-            "subset": subset,
+            "subset": subset_label,
         }
 
         duration = sample.get("duration") or sample.get("length")
-        if duration:
-            entry["duration"] = duration
+        if duration is not None:
+            try:
+                entry["duration"] = float(duration)
+            except (TypeError, ValueError):
+                entry["duration"] = duration
 
         if sample.get("dataset"):
             entry["dataset"] = sample["dataset"]
 
-        rebuilt.append(entry)
+        if not entry["id"]:
+            entry["id"] = audio_filename.rsplit(".", 1)[0]
 
-    if not rebuilt:
+        _SUBSET_METADATA_CACHE.setdefault(normalized, []).append(entry)
+        total_samples += 1
+
+    # Ensure deterministic IDs if any remained empty or duplicated.
+    for normalized, entries in _SUBSET_METADATA_CACHE.items():
+        for idx, entry in enumerate(entries):
+            if not entry.get("id"):
+                entry["id"] = f"{normalized}_{idx:06d}"
+
+    _DATASET_CACHE_BUILT = True
+
+    available_subsets = ", ".join(sorted(_SUBSET_METADATA_CACHE.keys())) or "none"
+    print(
+        f"  ✓ Cached metadata for {len(_SUBSET_METADATA_CACHE)} subsets "
+        f"({total_samples} samples). Available: {available_subsets}"
+    )
+
+
+def _rebuild_metadata_via_hf_dataset(json_path: Path, subset: str) -> Path:
+    """Generate subset metadata via the HuggingFace datasets API when files are missing."""
+
+    try:
+        _prepare_subset_metadata_cache()
+    except Exception as exc:
         raise RuntimeError(
-            f"Unable to rebuild metadata for subset '{subset}' using datasets API"
+            "Failed to rebuild metadata via datasets API"
+        ) from exc
+
+    normalized = _normalize_subset_name(subset)
+    entries = _SUBSET_METADATA_CACHE.get(normalized)
+
+    if not entries and normalized == "audioset_sl":
+        entries = _SUBSET_METADATA_CACHE.get("audioset")
+
+    if not entries:
+        for key, value in _SUBSET_METADATA_CACHE.items():
+            if normalized in key:
+                entries = value
+                break
+
+    if not entries:
+        available = ", ".join(sorted(_SUBSET_METADATA_CACHE)) or "none"
+        raise RuntimeError(
+            f"Unable to rebuild metadata for subset '{subset}'. "
+            f"Available subsets from datasets API: {available}"
         )
 
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump({"data": rebuilt}, f)
+
+    to_serialize = []
+    for entry in entries:
+        serializable = dict(entry)
+        serializable["subset"] = subset
+        to_serialize.append(serializable)
+
+    if json_path.suffix == ".jsonl":
+        with open(json_path, "w", encoding="utf-8") as f:
+            for item in to_serialize:
+                f.write(json.dumps(item) + "\n")
+    else:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump({"data": to_serialize}, f)
 
     print(
-        f"  ✓ Rebuilt metadata for {subset} using datasets API ("\
-        f"{len(rebuilt)} samples)"
+        f"  ✓ Rebuilt metadata for {subset} using datasets API "
+        f"({len(to_serialize)} samples)"
     )
     return json_path
 
@@ -388,8 +614,13 @@ def download_json_metadata(output_dir: Path, subset: str) -> Path:
 
     print(
         f"  ⚠ Could not download {json_file} from repository. "
-        "Attempting to rebuild metadata locally."
+        "Trying HuggingFace Hub API fallback."
     )
+    hub_result = _download_json_via_hfhub(json_path, subset)
+    if hub_result is not None:
+        return hub_result
+
+    print("  ⚠ Hub API fallback failed. Rebuilding via datasets API...")
     return _rebuild_metadata_via_hf_dataset(json_path, subset)
 
 
