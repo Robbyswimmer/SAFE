@@ -270,8 +270,21 @@ def download_json_metadata(output_dir: Path, subset: str) -> Path:
     json_path = output_dir / "json_files" / subset / json_file
 
     if json_path.exists():
-        print(f"  JSON already exists: {json_path}")
-        return json_path
+        file_size = json_path.stat().st_size
+        if file_size < 100:
+            print(
+                f"  ⚠ Existing JSON looks truncated ({file_size} bytes). "
+                f"Re-downloading: {json_path}"
+            )
+            try:
+                json_path.unlink()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Failed to remove corrupted JSON file {json_path}: {exc}"
+                )
+        else:
+            print(f"  JSON already exists: {json_path}")
+            return json_path
 
     success = download_hf_file(
         HF_REPO,
