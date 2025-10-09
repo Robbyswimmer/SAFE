@@ -40,6 +40,9 @@ from typing import Any, Dict, List
 HF_REPO = "https://huggingface.co/datasets/cvssp/WavCaps"
 
 
+_DATASET_CACHE = None
+
+
 def _has_audio_files(directory: Path) -> bool:
     """Check if a directory already contains audio files."""
     if not directory.exists():
@@ -264,6 +267,93 @@ def download_hf_file(repo_url: str, file_path: str, output_path: Path, resume: b
         return False
 
 
+def _rebuild_metadata_via_hf_dataset(json_path: Path, subset: str) -> Path:
+    """Generate subset metadata via the HuggingFace datasets API when files are missing."""
+
+    global _DATASET_CACHE
+
+    try:
+        from datasets import Value, load_dataset
+    except ImportError as exc:
+        raise RuntimeError(
+            "huggingface-datasets is required to rebuild metadata when JSON files are "
+            "missing. Install it or run with an environment that provides it."
+        ) from exc
+
+    if _DATASET_CACHE is None:
+        print("  ↺ Downloading WavCaps metadata via datasets.load_dataset() ...")
+        dataset = load_dataset("cvssp/WavCaps", split="test")
+        dataset = dataset.cast_column("audio", Value("string"))
+        _DATASET_CACHE = dataset
+    else:
+        dataset = _DATASET_CACHE
+
+    target = subset.replace(" ", "_").lower()
+    rebuilt = []
+
+    for sample in dataset:
+        sample_subset = (
+            sample.get("dataset")
+            or sample.get("subset")
+            or sample.get("source")
+            or ""
+        )
+        if not sample_subset:
+            continue
+        canonical = sample_subset.replace(" ", "_").lower()
+        if canonical != target:
+            continue
+
+        audio_ref = sample.get("audio")
+        if not audio_ref:
+            continue
+
+        try:
+            audio_filename = Path(audio_ref).name
+        except Exception:
+            audio_filename = str(audio_ref)
+
+        caption = (
+            sample.get("caption")
+            or sample.get("description")
+            or sample.get("text")
+            or ""
+        )
+        if not caption:
+            continue
+
+        entry = {
+            "id": sample.get("id") or audio_filename.rsplit(".", 1)[0],
+            "caption": caption,
+            "audio": audio_filename,
+            "subset": subset,
+        }
+
+        duration = sample.get("duration") or sample.get("length")
+        if duration:
+            entry["duration"] = duration
+
+        if sample.get("dataset"):
+            entry["dataset"] = sample["dataset"]
+
+        rebuilt.append(entry)
+
+    if not rebuilt:
+        raise RuntimeError(
+            f"Unable to rebuild metadata for subset '{subset}' using datasets API"
+        )
+
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump({"data": rebuilt}, f)
+
+    print(
+        f"  ✓ Rebuilt metadata for {subset} using datasets API ("\
+        f"{len(rebuilt)} samples)"
+    )
+    return json_path
+
+
 def download_json_metadata(output_dir: Path, subset: str) -> Path:
     """Download JSON metadata for a subset."""
     json_file = f"{subset}.json"
@@ -295,8 +385,12 @@ def download_json_metadata(output_dir: Path, subset: str) -> Path:
     if success:
         print(f"  ✓ Downloaded: {json_path}")
         return json_path
-    else:
-        raise RuntimeError(f"Failed to download {json_file}")
+
+    print(
+        f"  ⚠ Could not download {json_file} from repository. "
+        "Attempting to rebuild metadata locally."
+    )
+    return _rebuild_metadata_via_hf_dataset(json_path, subset)
 
 
 def download_zip_files(output_dir: Path, subset: str) -> List[Path]:
