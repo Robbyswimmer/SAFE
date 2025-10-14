@@ -30,6 +30,9 @@ experiments/full_training/data/
 │   ├── audiocaps_train.jsonl
 │   ├── audiocaps_val.jsonl
 │   └── audio/...
+├── wavcaps/                      # Optional: additional audio data
+│   ├── wavcaps_train.jsonl
+│   └── audio/...
 └── vqa/
     ├── vqa_train.jsonl
     ├── vqa_val.jsonl
@@ -38,6 +41,38 @@ experiments/full_training/data/
 
 You can override the download destination with `--destination` and point the
 runner at any directory that matches this layout via `--data-root`.
+
+### WavCaps Setup (Optional)
+
+WavCaps provides 400K+ additional audio-caption pairs to augment AudioCaps training.
+If you have WavCaps data with FLAC files in non-standard directories, use the
+repair script to generate correct metadata:
+
+```bash
+# 1. Fix metadata paths to match actual audio files
+python scripts/fix_wavcaps_paths.py \
+    --wavcaps-dir experiments/full_training/data/wavcaps
+
+# 2. Validate the setup
+python scripts/validate_wavcaps.py \
+    --wavcaps-dir experiments/full_training/data/wavcaps \
+    --test-loading --num-samples 10
+```
+
+**Common Issues:**
+- **"No samples were processed"**: Audio file paths in JSONL don't match actual files.
+  Run `fix_wavcaps_paths.py` to scan and regenerate metadata.
+- **FLAC vs WAV**: The dataset loader supports both formats via torchaudio.
+- **Symlinked directories**: The repair script handles complex directory structures
+  including symlinks.
+
+**Training with WavCaps:**
+```bash
+python experiments/full_training/run_full_training.py \
+    --variant soft_retention \
+    --use-wavcaps \
+    --wavcaps-ratio 0.5  # Use 50% of WavCaps samples
+```
 
 ## Running the experiment
 

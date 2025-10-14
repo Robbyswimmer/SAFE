@@ -163,41 +163,84 @@ class _BaseQADataset(Dataset):
 
     # ------------------------------------------------------------------
     def _load_audio(self, entry: Dict[str, Any]) -> Any:
-        """Load audio from WAV file."""
+        """
+        Load audio from file (supports WAV, FLAC, MP3, OGG, etc.).
+
+        Args:
+            entry: Metadata entry containing 'audio_path' or 'audio' field
+
+        Returns:
+            Tuple of (waveform, sample_rate) or None if loading fails
+        """
         audio_path = entry.get("audio") or entry.get("audio_path")
         if not audio_path:
             return None
 
-        audio_file = self.data_path / audio_path
-        if audio_file.exists():
-            try:
-                import torchaudio
+        # Support both relative and absolute paths
+        audio_file = Path(audio_path)
+        if not audio_file.is_absolute():
+            audio_file = self.data_path / audio_path
 
-                waveform, sample_rate = torchaudio.load(audio_file)
-                if waveform.dim() == 2:
-                    waveform = waveform.mean(dim=0)
+        if not audio_file.exists():
+            # Only log first few missing files to avoid spam
+            if not hasattr(self, '_missing_audio_count'):
+                self._missing_audio_count = 0
 
-                target_sample_rate = 48_000
-                if sample_rate != target_sample_rate:
-                    try:
-                        waveform = torchaudio.functional.resample(
-                            waveform.unsqueeze(0), sample_rate, target_sample_rate
-                        ).squeeze(0)
-                    except Exception:
-                        import torch
-                        ratio = target_sample_rate / float(sample_rate)
-                        num_samples = int(waveform.size(-1) * ratio)
-                        waveform = torch.nn.functional.interpolate(
-                            waveform.unsqueeze(0).unsqueeze(0),
-                            size=num_samples,
-                            mode="linear",
-                            align_corners=False,
-                        ).squeeze(0).squeeze(0)
+            if self._missing_audio_count < 5:
+                print(f"[Dataset] Warning: Audio file not found: {audio_path}", flush=True)
+                self._missing_audio_count += 1
+            elif self._missing_audio_count == 5:
+                print(f"[Dataset] Warning: Additional missing audio files will not be logged", flush=True)
+                self._missing_audio_count += 1
 
-                return (waveform, target_sample_rate)
-            except Exception:
-                return None
-        return None
+            return None
+
+        try:
+            import torchaudio
+
+            # torchaudio.load() supports WAV, FLAC, MP3, OGG, etc.
+            waveform, sample_rate = torchaudio.load(str(audio_file))
+
+            # Convert stereo to mono
+            if waveform.dim() == 2 and waveform.size(0) > 1:
+                waveform = waveform.mean(dim=0)
+            elif waveform.dim() == 2:
+                waveform = waveform.squeeze(0)
+
+            # Resample to target sample rate
+            target_sample_rate = 48_000
+            if sample_rate != target_sample_rate:
+                try:
+                    waveform = torchaudio.functional.resample(
+                        waveform.unsqueeze(0), sample_rate, target_sample_rate
+                    ).squeeze(0)
+                except Exception:
+                    # Fallback to torch interpolation
+                    import torch
+                    ratio = target_sample_rate / float(sample_rate)
+                    num_samples = int(waveform.size(-1) * ratio)
+                    waveform = torch.nn.functional.interpolate(
+                        waveform.unsqueeze(0).unsqueeze(0),
+                        size=num_samples,
+                        mode="linear",
+                        align_corners=False,
+                    ).squeeze(0).squeeze(0)
+
+            return (waveform, target_sample_rate)
+
+        except Exception as e:
+            # Log first few load failures
+            if not hasattr(self, '_load_error_count'):
+                self._load_error_count = 0
+
+            if self._load_error_count < 3:
+                print(f"[Dataset] Error loading audio {audio_path}: {e}", flush=True)
+                self._load_error_count += 1
+            elif self._load_error_count == 3:
+                print(f"[Dataset] Additional audio load errors will not be logged", flush=True)
+                self._load_error_count += 1
+
+            return None
 
     # ------------------------------------------------------------------
     def _load_image(self, entry: Dict[str, Any]) -> Any:
