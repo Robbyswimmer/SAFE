@@ -57,6 +57,8 @@ DISABLE_EVAL_AUDIO_GATE=${DISABLE_EVAL_AUDIO_GATE:-0}
 EVAL_AUDIO_GATE_COMPARISON=${EVAL_AUDIO_GATE_COMPARISON:-0}
 DISABLE_TRAIN_SHUFFLE=${DISABLE_TRAIN_SHUFFLE:-0}
 DISABLE_VAL_SHUFFLE=${DISABLE_VAL_SHUFFLE:-0}
+USE_WAVCAPS=${USE_WAVCAPS:-0}
+WAVCAPS_RATIO=${WAVCAPS_RATIO:-0.5}
 VARIANT_ORDER=${VARIANT_ORDER:-"no_retention soft_retention fisher_retention nullspace_retention full_retention"}
 
 mkdir -p logs
@@ -97,6 +99,11 @@ if [[ "$EVAL_AUDIO_GATE_COMPARISON" != "0" ]]; then
   eval_comparison_flag=(--eval-audio-gate-comparison)
 fi
 
+wavcaps_flags=()
+if [[ "$USE_WAVCAPS" != "0" ]]; then
+  wavcaps_flags+=(--use-wavcaps --wavcaps-ratio "${WAVCAPS_RATIO}")
+fi
+
 for variant in "${variants[@]}"; do
   echo "\n=== Running variant: ${variant} ==="
   python -m experiments.full_training.run_full_training \
@@ -131,7 +138,8 @@ for variant in "${variants[@]}"; do
     "${eval_gate_flag[@]}" \
     "${eval_comparison_flag[@]}" \
     "${train_shuffle_flag[@]}" \
-    "${val_shuffle_flag[@]}"
+    "${val_shuffle_flag[@]}" \
+    "${wavcaps_flags[@]}"
   echo "=== Completed variant: ${variant} ===\n"
 done
 
