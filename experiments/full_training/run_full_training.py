@@ -49,6 +49,7 @@ class TrainingConfig:
     train_accuracy_warmup: int
     train_eval_batches: int
     generation_max_new_tokens: int
+    gradient_accumulation_steps: int
 
 
 class CombinedAudioDataset(Dataset):
@@ -218,6 +219,7 @@ def build_stage_a_config(cfg: TrainingConfig) -> Dict[str, object]:
         "train_accuracy_interval": cfg.train_accuracy_interval,
         "train_accuracy_warmup": cfg.train_accuracy_warmup,
         "generation_max_new_tokens": cfg.generation_max_new_tokens,
+        "gradient_accumulation_steps": cfg.gradient_accumulation_steps,
         "output_dir": cfg.output_dir,
     }
 
@@ -352,6 +354,7 @@ def run_experiment(args: argparse.Namespace) -> None:
         train_accuracy_warmup=args.train_accuracy_warmup,
         train_eval_batches=args.train_eval_batches,
         generation_max_new_tokens=args.generation_max_new_tokens,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
     )
 
     variant_config = configure_variant(args.variant, base_config)
@@ -428,6 +431,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-eval-audio-gate", action="store_true", help="Evaluate without audio gating")
     parser.add_argument("--eval-audio-gate-comparison", action="store_true", help="Run with and without audio gate during eval")
     parser.add_argument("--debug-logging", action="store_true", help="Enable verbose trainer logging")
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1, help="Gradient accumulation steps for effective larger batch size")
 
     return parser.parse_args()
 

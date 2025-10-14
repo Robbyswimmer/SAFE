@@ -59,6 +59,7 @@ DISABLE_TRAIN_SHUFFLE=${DISABLE_TRAIN_SHUFFLE:-0}
 DISABLE_VAL_SHUFFLE=${DISABLE_VAL_SHUFFLE:-0}
 USE_WAVCAPS=${USE_WAVCAPS:-0}
 WAVCAPS_RATIO=${WAVCAPS_RATIO:-0.5}
+GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-1}
 VARIANT_ORDER=${VARIANT_ORDER:-"no_retention soft_retention fisher_retention nullspace_retention full_retention"}
 
 mkdir -p logs
@@ -134,6 +135,7 @@ for variant in "${variants[@]}"; do
     --generation-max-new-tokens "${GEN_MAX_NEW_TOKENS}" \
     --output-root "${OUTPUT_ROOT}" \
     --model-config "${MODEL_CONFIG}" \
+    --gradient-accumulation-steps "${GRADIENT_ACCUMULATION_STEPS}" \
     "${debug_flag[@]}" \
     "${eval_gate_flag[@]}" \
     "${eval_comparison_flag[@]}" \
