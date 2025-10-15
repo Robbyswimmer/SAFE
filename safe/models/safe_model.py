@@ -52,8 +52,11 @@ class SAFEModel(nn.Module):
         self.fusion_type = fusion_type
         self.num_audio_tokens = num_audio_tokens
         self.llm_hidden_size = llm_hidden_size
-        
+
         # Initialize base VL model
+        print(f"[SAFE] Initializing BaseVLModel (LLM: {llm_model_name}, Vision: {vision_model_name})...", flush=True)
+        import sys
+        sys.stdout.flush()
         self.base_vl = BaseVLModel(
             llm_model_name=llm_model_name,
             vision_model_name=vision_model_name,
@@ -61,8 +64,12 @@ class SAFEModel(nn.Module):
             freeze_vision=freeze_base_vl,
             freeze_llm=freeze_base_vl
         )
+        print(f"[SAFE] ✓ BaseVLModel initialized", flush=True)
+        sys.stdout.flush()
         
         # Initialize audio encoder
+        print(f"[SAFE] Initializing audio encoder ({audio_encoder_type})...", flush=True)
+        sys.stdout.flush()
         audio_encoder_config = audio_encoder_config or {}
         if audio_encoder_type == "clap":
             self.audio_encoder = CLAPAudioEncoder(
@@ -81,8 +88,12 @@ class SAFEModel(nn.Module):
             audio_embed_dim = self.audio_encoder.total_embed_dim
         else:
             raise ValueError(f"Unsupported audio encoder type: {audio_encoder_type}")
+        print(f"[SAFE] ✓ Audio encoder initialized (embed_dim={audio_embed_dim})", flush=True)
+        sys.stdout.flush()
         
         # Initialize audio projector
+        print(f"[SAFE] Initializing audio projector ({projector_type})...", flush=True)
+        sys.stdout.flush()
         projector_config = projector_config or {}
         if projector_type == "standard":
             self.audio_projector = AudioProjector(
@@ -100,8 +111,12 @@ class SAFEModel(nn.Module):
             )
         else:
             raise ValueError(f"Unsupported projector type: {projector_type}")
+        print(f"[SAFE] ✓ Audio projector initialized", flush=True)
+        sys.stdout.flush()
         
         # Initialize fusion adapter
+        print(f"[SAFE] Initializing fusion adapter ({fusion_type})...", flush=True)
+        sys.stdout.flush()
         fusion_config = fusion_config or {}
         if fusion_type == "lora":
             self.fusion_adapter = LoRAFusionAdapter(
@@ -124,6 +139,8 @@ class SAFEModel(nn.Module):
             )
         else:
             raise ValueError(f"Unsupported fusion type: {fusion_type}")
+        print(f"[SAFE] ✓ Fusion adapter initialized", flush=True)
+        sys.stdout.flush()
         
         # Special tokens for audio
         self.audio_start_token = "<audio>"
@@ -159,6 +176,9 @@ class SAFEModel(nn.Module):
             
             # Update our stored hidden size to match the actual model
             self.llm_hidden_size = actual_hidden_size
+
+        print(f"[SAFE] ✓ SAFEModel.__init__() complete", flush=True)
+        sys.stdout.flush()
 
         self.debug_logging = False
         

@@ -89,6 +89,7 @@ class StageATrainer:
             "save_steps": 5000,
             "eval_steps": 1000,
             "logging_steps": 100,
+            "progress_log_timeout": 600,
             "output_dir": "./checkpoints/stage_a",
             "early_stopping_patience": 3,
             "retention_tolerance": 0.005,  # 0.5% tolerance for VL degradation
@@ -121,6 +122,7 @@ class StageATrainer:
             "gradient_accumulation_steps": 1,
             "audio_bertscore_threshold": 0.7,
             "gate_warmup_steps": 2000,
+            "disable_bertscore": False,  # Set to True to skip BERTScore (use token F1 only)
         }
 
         if config:
@@ -129,6 +131,16 @@ class StageATrainer:
         self.debug_logging = bool(self.config.get("debug_logging", False))
         self.grad_accum_steps = max(1, int(self.config.get("gradient_accumulation_steps", 1)))
         self._micro_step = 0
+
+        self.log_interval = max(1, int(self.config.get("logging_steps", 50)))
+        self.config["logging_steps"] = self.log_interval
+
+        timeout_value = float(self.config.get("progress_log_timeout", 0) or 0)
+        self.progress_log_timeout = timeout_value if timeout_value > 0 else float("inf")
+        self._last_progress_log_time = time.time()
+
+        self.eval_interval = max(1, int(self.config.get("eval_steps", 1000)))
+        self.config["eval_steps"] = self.eval_interval
 
         self.logger = logging.getLogger(__name__)
         if not self.logger.handlers:
@@ -2695,10 +2707,28 @@ class StageATrainer:
 
     def _get_bertscore_metric(self):
         """Lazy load BERTScore metric."""
+        # Check if BERTScore is disabled via config
+        if self.config.get("disable_bertscore", False):
+            if not self._bertscore_failed:
+                print("ℹ️  BERTScore disabled via config (using token F1 only)", flush=True)
+                self._bertscore_failed = True
+            return None
+
         if self._bertscore_metric is None and not self._bertscore_failed:
             try:
+                import logging
                 import evaluate
-                self._bertscore_metric = evaluate.load("bertscore")
+
+                # Suppress logging errors from evaluate library in SLURM environment
+                # The evaluate library tries to log warnings to a closed stderr handle
+                old_level = logging.root.level
+                logging.root.setLevel(logging.CRITICAL)  # Suppress all logs below CRITICAL
+
+                try:
+                    self._bertscore_metric = evaluate.load("bertscore")
+                finally:
+                    logging.root.setLevel(old_level)  # Restore original level
+
                 print("✅ BERTScore metric loaded successfully", flush=True)
             except Exception as e:
                 self._bertscore_failed = True
@@ -2745,14 +2775,43 @@ class StageATrainer:
             if not valid_refs:
                 return 0.0
 
+            # Log progress for first few computations (can be slow)
+            if not hasattr(self, '_bertscore_computed'):
+                self._bertscore_computed = 0
+
+            if self._bertscore_computed < 3:
+                print(f"[BERTScore] Computing score {self._bertscore_computed + 1} (may take 30-60s on first run)...", flush=True)
+                import sys
+                sys.stdout.flush()
+                sys.stderr.flush()
+                self._bertscore_computed += 1
+
             predictions = [pred_caption] * len(valid_refs)
+
+            # CRITICAL: Log just before the blocking call
+            print(f"[BERTScore] About to call bertscore.compute() with {len(predictions)} predictions...", flush=True)
+            import sys
+            sys.stdout.flush()
+            sys.stderr.flush()
+
             results = bertscore.compute(
                 predictions=predictions,
                 references=valid_refs,
                 lang="en",
                 model_type="distilbert-base-uncased",  # Faster than BERT
                 device="cuda" if torch.cuda.is_available() else "cpu",
+                batch_size=8,  # Add batch size to prevent OOM/hang
+                verbose=False,  # Disable internal logging
             )
+
+            # Log completion for first few computations
+            print(f"[BERTScore] ✓ bertscore.compute() returned successfully", flush=True)
+            import sys
+            sys.stdout.flush()
+
+            if self._bertscore_computed <= 3:
+                print(f"[BERTScore] ✓ Computation {self._bertscore_computed} complete", flush=True)
+
             if not results or "f1" not in results:
                 return 0.0
             scores = results["f1"]
@@ -3377,6 +3436,48 @@ class StageATrainer:
             print(f"⚠️ Fisher computation failed: {e}", flush=True)
             print("   Continuing without Fisher information", flush=True)
 
+    def _maybe_log_progress(
+        self,
+        *,
+        label: str,
+        step_index: int,
+        total_batches: int,
+        epoch_losses: Dict[str, List[float]],
+    ) -> None:
+        """Emit periodic training progress logs irrespective of accumulation settings."""
+
+        total_batches = max(1, total_batches)
+        now = time.time()
+
+        should_log_step = (step_index + 1) % self.log_interval == 0
+        should_log_time = (now - self._last_progress_log_time) >= self.progress_log_timeout
+
+        if not should_log_step and not should_log_time:
+            return
+
+        losses = epoch_losses.get("total_loss") if epoch_losses else None
+        if not losses:
+            if should_log_time:
+                print(
+                    f"[Train] {label} Batch {step_index + 1}/{total_batches}: waiting for loss statistics"
+                    f" (optimizer_step={self.global_step})",
+                    flush=True,
+                )
+                self._last_progress_log_time = now
+            return
+
+        window_size = min(len(losses), self.log_interval)
+        avg_loss = float(np.mean(losses[-window_size:])) if window_size else float("nan")
+
+        accum_position = self._micro_step if self._micro_step > 0 else self.grad_accum_steps
+        message = (
+            f"[Train] {label} Batch {step_index + 1}/{total_batches} | "
+            f"optimizer_step={self.global_step} | accum={accum_position}/{self.grad_accum_steps} | "
+            f"avg_total_loss={avg_loss:.4f}"
+        )
+        print(message, flush=True)
+        self._last_progress_log_time = now
+
     def _train_with_curriculum(self):
         """Training loop with curriculum learning."""
         print("🎓 Starting Stage A training with curriculum learning...", flush=True)
@@ -3442,40 +3543,37 @@ class StageATrainer:
                 if optimizer_stepped:
                     self.global_step += 1
 
-                    # Update progress logs using most recent window of metrics
-                    if epoch_losses["total_loss"] and (step + 1) % self.config.get("logging_steps", 50) == 0:
-                        avg_loss = np.mean(epoch_losses["total_loss"][-10:])
+                self._maybe_log_progress(
+                    label=f"Stage {stage_name} Epoch {epoch_in_stage}",
+                    step_index=step,
+                    total_batches=len(self.train_dataloader),
+                    epoch_losses=epoch_losses,
+                )
+
+                if optimizer_stepped and self.global_step % self.log_interval == 0:
+                    avg_losses = {k: np.mean(v[-self.log_interval:]) for k, v in epoch_losses.items() if v}
+                    if avg_losses:
+                        summary_parts = [f"{k}={val:.4f}" for k, val in avg_losses.items()]
                         print(
-                            f"Stage {stage_name} | Epoch {epoch_in_stage} Step {step+1}: loss={avg_loss:.4f}",
-                            flush=True
+                            f"[Train|Stage {stage_name}] Global step {self.global_step}: " + ", ".join(summary_parts),
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"[Train|Stage {stage_name}] Global step {self.global_step}: metrics pending",
+                            flush=True,
                         )
 
-                    if self.global_step % self.config["logging_steps"] == 0:
-                        avg_losses = {k: np.mean(v[-self.config["logging_steps"]:])
-                                      for k, v in epoch_losses.items() if v}
-                        if avg_losses:
-                            summary_parts = [f"{k}={val:.4f}" for k, val in avg_losses.items()]
-                            print(
-                                f"[Train|Stage {stage_name}] Global step {self.global_step}: " + ", ".join(summary_parts),
-                                flush=True
-                            )
-                        else:
-                            print(
-                                f"[Train|Stage {stage_name}] Global step {self.global_step}: metrics pending",
-                                flush=True
-                            )
-
-                        # Log to wandb if available
-                        try:
-                            log_dict = {"train/" + k: v for k, v in avg_losses.items()}
-                            log_dict.update({
-                                "curriculum/stage": stage_idx,
-                                "curriculum/stage_name": stage_name,
-                                "curriculum/samples_in_stage": samples_in_stage
-                            })
-                            wandb.log(log_dict, step=self.global_step)
-                        except:
-                            pass
+                    try:
+                        log_dict = {"train/" + k: v for k, v in avg_losses.items()}
+                        log_dict.update({
+                            "curriculum/stage": stage_idx,
+                            "curriculum/stage_name": stage_name,
+                            "curriculum/samples_in_stage": samples_in_stage,
+                        })
+                        wandb.log(log_dict, step=self.global_step)
+                    except Exception:
+                        pass
             
             # End of epoch evaluation
             print(f"\n📊 End of Epoch {self.epoch} (Stage {stage_name}, Epoch {epoch_in_stage})", flush=True)
@@ -3601,8 +3699,18 @@ class StageATrainer:
                 step_losses, optimizer_stepped = self.train_step(batch)
                 
                 if step == 0:
+                    first_loss = step_losses.get("total_loss")
+                    if isinstance(first_loss, (int, float)):
+                        loss_str = f"{float(first_loss):.4f}"
+                    elif first_loss is not None:
+                        try:
+                            loss_str = f"{float(first_loss):.4f}"
+                        except (TypeError, ValueError):
+                            loss_str = str(first_loss)
+                    else:
+                        loss_str = "N/A"
                     print(
-                        f"First batch completed successfully! Loss: {step_losses.get('total_loss', 'N/A'):.4f}",
+                        f"First batch completed successfully! Loss: {loss_str}",
                         flush=True,
                     )
 
@@ -3613,34 +3721,36 @@ class StageATrainer:
                 if optimizer_stepped:
                     self.global_step += 1
 
-                    # Update progress bar
-                    if epoch_losses["total_loss"] and (step + 1) % self.config.get("logging_steps", 50) == 0:
-                        avg_loss = np.mean(epoch_losses["total_loss"][-100:])
-                        print(f"Epoch {epoch+1} Step {step+1}: loss={avg_loss:.4f}", flush=True)
+                self._maybe_log_progress(
+                    label=f"Epoch {epoch + 1}/{self.config['num_epochs']}",
+                    step_index=step,
+                    total_batches=len(self.train_dataloader),
+                    epoch_losses=epoch_losses,
+                )
 
-                    # Logging
-                    if self.global_step % self.config["logging_steps"] == 0:
-                        avg_losses = {k: np.mean(v[-self.config["logging_steps"]:])
-                                      for k, v in epoch_losses.items() if v}
-                        if avg_losses:
-                            summary_parts = [f"{k}={val:.4f}" for k, val in avg_losses.items()]
-                            print(
-                                f"[Train] Global step {self.global_step}: " + ", ".join(summary_parts),
-                                flush=True,
-                            )
-                        else:
-                            print(f"[Train] Global step {self.global_step}: metrics pending", flush=True)
+                if optimizer_stepped and self.global_step % self.log_interval == 0:
+                    avg_losses = {k: np.mean(v[-self.log_interval:]) for k, v in epoch_losses.items() if v}
+                    if avg_losses:
+                        summary_parts = [f"{k}={val:.4f}" for k, val in avg_losses.items()]
+                        print(
+                            f"[Train] Global step {self.global_step}: " + ", ".join(summary_parts),
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"[Train] Global step {self.global_step}: metrics pending",
+                            flush=True,
+                        )
 
-                        # Log to wandb if available
-                        try:
-                            wandb.log({
-                                "train/" + k: v for k, v in avg_losses.items()
-                            }, step=self.global_step)
-                        except:
-                            pass
+                    try:
+                        wandb.log({
+                            "train/" + k: v for k, v in avg_losses.items()
+                        }, step=self.global_step)
+                    except Exception:
+                        pass
 
                 # Evaluation (only trigger on actual optimizer steps)
-                if optimizer_stepped and self.global_step % self.config["eval_steps"] == 0:
+                if optimizer_stepped and self.global_step % self.eval_interval == 0:
                     max_eval_batches = self.config.get("max_eval_batches", None)
                     eval_metrics = self.evaluate(max_batches=max_eval_batches)
                     

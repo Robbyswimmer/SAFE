@@ -34,16 +34,25 @@ class CLAPAudioEncoder(nn.Module):
         import sys
         import os
         from contextlib import redirect_stdout, redirect_stderr
-        
+
+        print(f"[CLAP] Initializing CLAP audio encoder: {model_name}...", flush=True)
+        sys.stdout.flush()
+
         # Suppress all output during model loading
         old_level = logging.getLogger().level
         logging.getLogger().setLevel(logging.ERROR)
-        
+
         try:
             with open(os.devnull, 'w') as devnull:
                 with redirect_stdout(devnull), redirect_stderr(devnull):
+                    print(f"[CLAP] Creating CLAP_Module...", flush=True)
+                    sys.stdout.flush()
                     self.model = laion_clap.CLAP_Module(enable_fusion=False)
+                    print(f"[CLAP] Loading CLAP checkpoint...", flush=True)
+                    sys.stdout.flush()
                     self.model.load_ckpt()  # Load default checkpoint
+                    print(f"[CLAP] ✓ CLAP checkpoint loaded", flush=True)
+                    sys.stdout.flush()
         finally:
             logging.getLogger().setLevel(old_level)
         
@@ -232,10 +241,19 @@ class WhisperAudioEncoder(nn.Module):
         self.debug_logging = False
         self._waveform_log_limit = 5
         self._waveform_logs_emitted = 0
-        
+
         # Load Whisper model
+        print(f"[Whisper] Loading Whisper model: {model_name}...", flush=True)
+        import sys
+        sys.stdout.flush()
         self.model = whisper.load_model(model_name)
+        print(f"[Whisper] ✓ Whisper model loaded", flush=True)
+        sys.stdout.flush()
+        print(f"[Whisper] Loading feature extractor: openai/{model_name}...", flush=True)
+        sys.stdout.flush()
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(f"openai/{model_name}")
+        print(f"[Whisper] ✓ Feature extractor loaded", flush=True)
+        sys.stdout.flush()
         
         if freeze:
             for param in self.model.parameters():

@@ -42,13 +42,22 @@ class BaseVLModel(nn.Module):
         self.vision_hidden_size = vision_hidden_size
         self.llm_hidden_size = llm_hidden_size
         self.num_vision_tokens = num_vision_tokens
-        
+
         # Load vision encoder (frozen) - use safetensors to avoid PyTorch security issue
+        print(f"[BaseVL] Loading vision encoder: {vision_model_name}...", flush=True)
+        import sys
+        sys.stdout.flush()
         self.vision_encoder = CLIPVisionModel.from_pretrained(
             vision_model_name,
             use_safetensors=True
         )
+        print(f"[BaseVL] ✓ Vision encoder loaded", flush=True)
+        sys.stdout.flush()
+        print(f"[BaseVL] Loading image processor: {vision_model_name}...", flush=True)
+        sys.stdout.flush()
         self.image_processor = CLIPImageProcessor.from_pretrained(vision_model_name)
+        print(f"[BaseVL] ✓ Image processor loaded", flush=True)
+        sys.stdout.flush()
         
         if freeze_vision:
             for param in self.vision_encoder.parameters():
@@ -57,35 +66,53 @@ class BaseVLModel(nn.Module):
         # Determine appropriate dtype based on device availability
         # Use float16 for GPU, float32 for CPU to avoid LayerNorm issues
         device_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-        
+
         # Load LLM (frozen) - handle different VL models
+        print(f"[BaseVL] Loading LLM: {llm_model_name}...", flush=True)
+        sys.stdout.flush()
         if "llava" in llm_model_name.lower():
+            print(f"[BaseVL] Detected LLaVA model type", flush=True)
+            sys.stdout.flush()
             self.llm = LlavaForConditionalGeneration.from_pretrained(
                 llm_model_name,
                 torch_dtype=device_dtype,
                 low_cpu_mem_usage=True,
                 use_safetensors=True
             )
+            print(f"[BaseVL] ✓ LLM model loaded", flush=True)
+            sys.stdout.flush()
             self.processor = LlavaProcessor.from_pretrained(llm_model_name)
             self.tokenizer = self.processor.tokenizer
             self.model_type = "llava"
         elif "blip2" in llm_model_name.lower():
+            print(f"[BaseVL] Detected BLIP2 model type", flush=True)
+            sys.stdout.flush()
             self.llm = Blip2ForConditionalGeneration.from_pretrained(
                 llm_model_name,
                 torch_dtype=device_dtype,
                 low_cpu_mem_usage=True,
                 use_safetensors=True
             )
+            print(f"[BaseVL] ✓ LLM model loaded", flush=True)
+            sys.stdout.flush()
             self.processor = Blip2Processor.from_pretrained(llm_model_name)
             self.tokenizer = self.processor.tokenizer
             self.model_type = "blip2"
         else:
+            print(f"[BaseVL] Using AutoModel for custom LLM", flush=True)
+            sys.stdout.flush()
             self.llm = AutoModelForCausalLM.from_pretrained(
                 llm_model_name,
                 use_safetensors=True
             )
+            print(f"[BaseVL] ✓ LLM model loaded", flush=True)
+            sys.stdout.flush()
             self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
+            print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
+            sys.stdout.flush()
             self.model_type = "custom"
+        print(f"[BaseVL] ✓ All LLM components loaded (type: {self.model_type})", flush=True)
+        sys.stdout.flush()
         
         # Configure all tokenizers comprehensively
         self._configure_tokenizers()

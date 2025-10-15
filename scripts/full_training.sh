@@ -13,6 +13,9 @@
 
 set -euo pipefail
 
+# Force unbuffered output for Python
+export PYTHONUNBUFFERED=1
+
 if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
   source "$HOME/miniconda3/etc/profile.d/conda.sh"
 elif command -v module &>/dev/null; then
@@ -60,6 +63,8 @@ DISABLE_VAL_SHUFFLE=${DISABLE_VAL_SHUFFLE:-0}
 USE_WAVCAPS=${USE_WAVCAPS:-0}
 WAVCAPS_RATIO=${WAVCAPS_RATIO:-0.5}
 GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-1}
+DISABLE_BERTSCORE=${DISABLE_BERTSCORE:-0}  # Default: enabled (use Token F1 as fallback)
+PROGRESS_LOG_TIMEOUT=${PROGRESS_LOG_TIMEOUT:-600}
 VARIANT_ORDER=${VARIANT_ORDER:-"no_retention soft_retention fisher_retention nullspace_retention full_retention"}
 
 mkdir -p logs
@@ -105,9 +110,18 @@ if [[ "$USE_WAVCAPS" != "0" ]]; then
   wavcaps_flags+=(--use-wavcaps --wavcaps-ratio "${WAVCAPS_RATIO}")
 fi
 
+bertscore_flag=()
+if [[ "$DISABLE_BERTSCORE" != "0" ]]; then
+  bertscore_flag=(--disable-bertscore)
+fi
+
 for variant in "${variants[@]}"; do
   echo "\n=== Running variant: ${variant} ==="
-  python -m experiments.full_training.run_full_training \
+  echo "[SHELL] About to invoke Python script..."
+  echo "[SHELL] Python version: $(python --version)"
+  echo "[SHELL] Python path: $(which python)"
+  echo "[SHELL] Starting training script NOW..."
+  python -u -m experiments.full_training.run_full_training \
     --variant "${variant}" \
     --seed "${SEED}" \
     --data-root "${DATA_ROOT}" \
@@ -133,6 +147,7 @@ for variant in "${variants[@]}"; do
     --train-accuracy-warmup "${TRAIN_ACCURACY_WARMUP}" \
     --train-eval-batches "${TRAIN_EVAL_BATCHES}" \
     --generation-max-new-tokens "${GEN_MAX_NEW_TOKENS}" \
+    --progress-log-timeout "${PROGRESS_LOG_TIMEOUT}" \
     --output-root "${OUTPUT_ROOT}" \
     --model-config "${MODEL_CONFIG}" \
     --gradient-accumulation-steps "${GRADIENT_ACCUMULATION_STEPS}" \
@@ -141,7 +156,17 @@ for variant in "${variants[@]}"; do
     "${eval_comparison_flag[@]}" \
     "${train_shuffle_flag[@]}" \
     "${val_shuffle_flag[@]}" \
-    "${wavcaps_flags[@]}"
+    "${wavcaps_flags[@]}" \
+    "${bertscore_flag[@]}"
+
+  exit_code=$?
+  echo "[SHELL] Python process exited with code: ${exit_code}"
+
+  if [[ ${exit_code} -ne 0 ]]; then
+    echo "[SHELL] ERROR: Training failed for variant ${variant}"
+    exit ${exit_code}
+  fi
+
   echo "=== Completed variant: ${variant} ===\n"
 done
 

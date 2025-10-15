@@ -1,7 +1,14 @@
 """Stage A training driver for the full-scale SAFE experiment."""
 
+print("[run_full_training.py] Script starting...", flush=True)
+import sys
+sys.stdout.flush()
+sys.stderr.flush()
+
 from __future__ import annotations
 
+print("[run_full_training.py] Importing standard library modules...", flush=True)
+sys.stdout.flush()
 import argparse
 import json
 import random
@@ -10,15 +17,34 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+print("[run_full_training.py] Importing numpy...", flush=True)
+sys.stdout.flush()
 import numpy as np
+
+print("[run_full_training.py] Importing torch...", flush=True)
+sys.stdout.flush()
 import torch
 from torch.utils.data import Dataset
 
+print("[run_full_training.py] Importing configs...", flush=True)
+sys.stdout.flush()
 from configs.model_configs import DEMO_CONFIG, FULL_CONFIG, MULTIMODAL_CONFIG
 from configs.retention_variants import get_variant_config, RETENTION_VARIANTS
+
+print("[run_full_training.py] Importing SAFE datasets...", flush=True)
+sys.stdout.flush()
 from safe.data.datasets import AudioCapsDataset, VQADataset, WavCapsDataset, create_safe_dataloader
+
+print("[run_full_training.py] Importing SAFE model...", flush=True)
+sys.stdout.flush()
 from safe.models.safe_model import SAFEModel
+
+print("[run_full_training.py] Importing StageATrainer...", flush=True)
+sys.stdout.flush()
 from safe.training.stage_a import StageATrainer
+
+print("[run_full_training.py] ✓ All imports complete", flush=True)
+sys.stdout.flush()
 
 
 @dataclass
@@ -50,6 +76,8 @@ class TrainingConfig:
     train_eval_batches: int
     generation_max_new_tokens: int
     gradient_accumulation_steps: int
+    disable_bertscore: bool
+    progress_log_timeout: int
 
 
 class CombinedAudioDataset(Dataset):
@@ -203,6 +231,7 @@ def build_stage_a_config(cfg: TrainingConfig) -> Dict[str, object]:
         "save_steps": 5_000,
         "logging_steps": 100,
         "eval_logging_steps": max(1, cfg.eval_logging_steps),
+        "progress_log_timeout": max(0, cfg.progress_log_timeout),
         "max_eval_batches": max_eval_batches,
         "max_audio_eval_batches": cfg.max_audio_eval_batches,
         "max_vl_eval_batches": cfg.max_vl_eval_batches,
@@ -220,27 +249,47 @@ def build_stage_a_config(cfg: TrainingConfig) -> Dict[str, object]:
         "train_accuracy_warmup": cfg.train_accuracy_warmup,
         "generation_max_new_tokens": cfg.generation_max_new_tokens,
         "gradient_accumulation_steps": cfg.gradient_accumulation_steps,
+        "disable_bertscore": cfg.disable_bertscore,
         "output_dir": cfg.output_dir,
     }
 
 
 def run_experiment(args: argparse.Namespace) -> None:
+    print(f"\n[run_experiment] Function called with variant={args.variant}", flush=True)
+    import sys
+    sys.stdout.flush()
+
+    print(f"[run_experiment] Creating output directories...", flush=True)
+    sys.stdout.flush()
     output_root = Path(args.output_root).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = output_root / f"{timestamp}_{args.variant}"
     run_dir.mkdir(parents=True, exist_ok=False)
+    print(f"[run_experiment] ✓ Output directory created: {run_dir}", flush=True)
+    sys.stdout.flush()
 
+    print(f"[run_experiment] Setting random seeds (seed={args.seed})...", flush=True)
+    sys.stdout.flush()
     set_random_seeds(args.seed)
+    print(f"[run_experiment] ✓ Random seeds set", flush=True)
+    sys.stdout.flush()
 
+    print(f"[run_experiment] Checking data root: {args.data_root}...", flush=True)
+    sys.stdout.flush()
     data_root = Path(args.data_root).expanduser().resolve()
     if not data_root.exists():
         raise FileNotFoundError(f"Data root '{data_root}' does not exist")
+    print(f"[run_experiment] ✓ Data root exists: {data_root}", flush=True)
+    sys.stdout.flush()
 
     # Load AudioCaps dataset
+    print(f"[run_experiment] Loading AudioCaps dataset (split={args.train_split})...", flush=True)
+    sys.stdout.flush()
     audiocaps_train = AudioCapsDataset(data_path=data_root, split=args.train_split)
-    print(f"Loaded AudioCaps train: {len(audiocaps_train)} samples")
+    print(f"Loaded AudioCaps train: {len(audiocaps_train)} samples", flush=True)
+    sys.stdout.flush()
 
     # Optionally load WavCaps
     wavcaps_train = None
@@ -325,7 +374,22 @@ def run_experiment(args: argparse.Namespace) -> None:
     }
 
     model_kwargs = {key: value for key, value in selected_model_config.items() if key in safe_model_keys}
+
+    print(f"\n{'='*70}", flush=True)
+    print(f"Initializing SAFEModel with config: {args.model_config}", flush=True)
+    print(f"  LLM: {model_kwargs.get('llm_model_name', 'N/A')}", flush=True)
+    print(f"  Vision: {model_kwargs.get('vision_model_name', 'N/A')}", flush=True)
+    print(f"  Audio: {model_kwargs.get('audio_encoder_type', 'N/A')}", flush=True)
+    print(f"{'='*70}", flush=True)
+    import sys
+    sys.stdout.flush()
+    sys.stderr.flush()
+
     model = SAFEModel(**model_kwargs)
+
+    print(f"✅ SAFEModel initialized successfully", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
 
     base_config = TrainingConfig(
         variant=args.variant,
@@ -355,6 +419,8 @@ def run_experiment(args: argparse.Namespace) -> None:
         train_eval_batches=args.train_eval_batches,
         generation_max_new_tokens=args.generation_max_new_tokens,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        disable_bertscore=args.disable_bertscore,
+        progress_log_timeout=args.progress_log_timeout,
     )
 
     variant_config = configure_variant(args.variant, base_config)
@@ -420,6 +486,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-audio-val-samples", type=int, default=4096, help="Audio validation sample cap (<=0 disables)")
     parser.add_argument("--max-vqa-val-samples", type=int, default=4096, help="VQA validation sample cap (<=0 disables)")
     parser.add_argument("--eval-logging-steps", type=int, default=10, help="Eval logging frequency")
+    parser.add_argument("--progress-log-timeout", type=int, default=600, help="Seconds between forced progress logs (0 disables time-based fallback)")
     parser.add_argument("--train-accuracy-interval", type=int, default=0, help="Interval for train accuracy logging")
     parser.add_argument("--train-accuracy-warmup", type=int, default=5, help="Warmup epochs before accuracy logging")
     parser.add_argument("--train-eval-batches", type=int, default=0, help="Evaluate training split after fit")
@@ -432,9 +499,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-audio-gate-comparison", action="store_true", help="Run with and without audio gate during eval")
     parser.add_argument("--debug-logging", action="store_true", help="Enable verbose trainer logging")
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1, help="Gradient accumulation steps for effective larger batch size")
+    parser.add_argument("--disable-bertscore", action="store_true", help="Disable BERTScore evaluation (use token F1 only)")
 
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    run_experiment(parse_args())
+    print("[run_full_training.py] Entering main block...", flush=True)
+    import sys
+    sys.stdout.flush()
+    print("[run_full_training.py] Parsing arguments...", flush=True)
+    sys.stdout.flush()
+    args = parse_args()
+    print("[run_full_training.py] ✓ Arguments parsed", flush=True)
+    sys.stdout.flush()
+    print("[run_full_training.py] Starting experiment...", flush=True)
+    sys.stdout.flush()
+    run_experiment(args)
