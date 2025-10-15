@@ -1,11 +1,11 @@
 """Stage A training driver for the full-scale SAFE experiment."""
 
+from __future__ import annotations
+
 print("[run_full_training.py] Script starting...", flush=True)
 import sys
 sys.stdout.flush()
 sys.stderr.flush()
-
-from __future__ import annotations
 
 print("[run_full_training.py] Importing standard library modules...", flush=True)
 sys.stdout.flush()
