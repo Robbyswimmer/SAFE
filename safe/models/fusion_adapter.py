@@ -1,6 +1,6 @@
 import torch
 import math
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -179,20 +179,17 @@ class CrossAttentionBlock(nn.Module):
         context_layer = context_layer.view(*new_context_layer_shape)
         
         # Output projection
-        output = self.output_dense(context_layer)
-        output = torch.nan_to_num(output, nan=0.0, posinf=1e4, neginf=-1e4)
-        output = self.output_dropout(output)
-        output = output.to(input_dtype)
+        delta = self.output_dense(context_layer)
+        delta = torch.nan_to_num(delta, nan=0.0, posinf=1e4, neginf=-1e4)
+        delta = self.output_dropout(delta)
+        delta = delta.to(input_dtype)
 
-        # Apply scaled residual connection BEFORE layer norm and gating (using cleaned fp32 hs)
-        output = hs + (self.residual_scale * output)
+        delta = self.residual_scale * delta
 
-        # Optional layer norm on the full fused output
         if self.layer_norm is not None:
-            output = self.layer_norm(output)
+            delta = self.layer_norm(delta)
 
-        # Cast back to the original dtype expected by the LM stack
-        output = output.to(orig_dtype)
+        delta = delta.to(orig_dtype)
 
         if getattr(self, "debug_logging", False):
             summary = {
@@ -228,7 +225,7 @@ class CrossAttentionBlock(nn.Module):
         else:
             self._last_attention_summary = None
 
-        return output
+        return delta
 
 
 class LoRAFusionAdapter(nn.Module):
@@ -325,7 +322,7 @@ class LoRAFusionAdapter(nn.Module):
             audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
 
         # Apply cross-attention with LoRA (returns hidden_states + attention_output)
-        fused_states = self.cross_attention(
+        delta_states = self.cross_attention(
             hidden_states=hidden_states,
             audio_tokens=audio_tokens,
             attention_mask=attention_mask,
@@ -353,16 +350,15 @@ class LoRAFusionAdapter(nn.Module):
                 print(msg, flush=True)
                 self._attention_logs_emitted += 1
 
-        # Apply gating: interpolate between original and fused states
-        # gate=0 -> return hidden_states (no audio), gate=1 -> return fused_states (full audio)
+        # Apply gating on residual update
         if isinstance(gate, torch.Tensor):
-            gate = gate.to(device=hidden_states.device, dtype=hidden_states.dtype)
-            while gate.dim() < fused_states.dim():
-                gate = gate.unsqueeze(-1)
-            output = gate * fused_states + (1.0 - gate) * hidden_states
+            gate_tensor = gate.to(device=hidden_states.device, dtype=hidden_states.dtype)
+            while gate_tensor.dim() < delta_states.dim():
+                gate_tensor = gate_tensor.unsqueeze(-1)
+            output = hidden_states + gate_tensor * delta_states
         else:
-            gate = float(gate)
-            output = gate * fused_states + (1.0 - gate) * hidden_states
+            gate_value = float(gate)
+            output = hidden_states + gate_value * delta_states
 
         # Cast back to the original dtype expected by the LM stack
         output = output.to(orig_dtype)
@@ -372,42 +368,41 @@ class LoRAFusionAdapter(nn.Module):
 
 class MultiLayerFusionAdapter(nn.Module):
     """
-    Multi-layer fusion adapter that can insert audio fusion at multiple LLM layers.
-    Supports selection of fusion layers during training/inference.
+    Multi-layer fusion adapter that can insert modality fusion at configurable decoder layers.
+    Supports multiple modalities sharing the same adapter instance.
     """
-    
+
     def __init__(
         self,
         hidden_size: int,
         num_layers: int = 2,
-        fusion_layer_indices: list = None,
+        fusion_layer_indices: Union[Dict[str, List[int]], List[int], None] = None,
         num_attention_heads: int = 8,
         lora_rank: int = 8,
         lora_alpha: float = 16.0,
-        lora_dropout: float = 0.1
+        lora_dropout: float = 0.1,
     ):
         super().__init__()
-        
+
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        
-        if fusion_layer_indices is None:
-            # Default to mid-layers
-            fusion_layer_indices = [num_layers // 3, 2 * num_layers // 3]
-            
-        self.fusion_layer_indices = fusion_layer_indices
-        
-        # Create fusion adapters for each target layer
+
+        self.fusion_layers = self._normalize_layer_mapping(fusion_layer_indices)
+        self.fusion_layer_indices = sorted({idx for indices in self.fusion_layers.values() for idx in indices})
+        self.layer_modalities = self._invert_layer_mapping(self.fusion_layers)
         self.fusion_adapters = nn.ModuleDict()
-        for layer_idx in fusion_layer_indices:
-            self.fusion_adapters[str(layer_idx)] = LoRAFusionAdapter(
-                hidden_size=hidden_size,
-                num_attention_heads=num_attention_heads,
-                lora_rank=lora_rank,
-                lora_alpha=lora_alpha,
-                lora_dropout=lora_dropout
-            )
-    
+
+        for modality, indices in self.fusion_layers.items():
+            for layer_idx in indices:
+                key = self._adapter_key(modality, layer_idx)
+                self.fusion_adapters[key] = LoRAFusionAdapter(
+                    hidden_size=hidden_size,
+                    num_attention_heads=num_attention_heads,
+                    lora_rank=lora_rank,
+                    lora_alpha=lora_alpha,
+                    lora_dropout=lora_dropout,
+                )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -418,40 +413,65 @@ class MultiLayerFusionAdapter(nn.Module):
         active_fusion_layer: Optional[int] = None,
         supervised_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Apply fusion at specified layer.
-        
-        Args:
-            hidden_states: LLM hidden states at current layer
-            audio_tokens: Audio tokens
-            layer_idx: Current LLM layer index
-            attention_mask: Optional attention mask
-            gate: Gating factor
-            active_fusion_layer: Specific layer to apply fusion (if None, use all configured layers)
-            
-        Returns:
-            Fused hidden states
-        """
-        # Check if this layer should apply fusion
-        if active_fusion_layer is not None:
-            should_fuse = (layer_idx == active_fusion_layer)
-        else:
-            should_fuse = (layer_idx in self.fusion_layer_indices)
-            
-        if not should_fuse or str(layer_idx) not in self.fusion_adapters:
+        if active_fusion_layer is not None and layer_idx != active_fusion_layer:
             return hidden_states
-            
-        # Apply fusion
-        fusion_adapter = self.fusion_adapters[str(layer_idx)]
-        fused_states = fusion_adapter(
+
+        if layer_idx not in self.layer_modalities:
+            return hidden_states
+
+        modality_tokens = {"audio": audio_tokens}
+        modality_masks = {"audio": attention_mask} if attention_mask is not None else None
+
+        return self.apply_fusion_at_layer(
+            layer_idx=layer_idx,
             hidden_states=hidden_states,
-            audio_tokens=audio_tokens,
-            attention_mask=attention_mask,
+            modality_tokens=modality_tokens,
+            modality_masks=modality_masks,
             gate=gate,
             supervised_mask=supervised_mask,
         )
 
-        return fused_states
+    def apply_fusion_at_layer(
+        self,
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        modality_tokens: Dict[str, torch.Tensor],
+        modality_masks: Optional[Dict[str, torch.Tensor]] = None,
+        gate: Union[float, Dict[str, float]] = 1.0,
+        supervised_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        modalities = self.layer_modalities.get(layer_idx, [])
+        if not modalities:
+            return hidden_states
+
+        output = hidden_states
+        for modality in modalities:
+            tokens = modality_tokens.get(modality)
+            if tokens is None:
+                continue
+            mask = None
+            if modality_masks is not None:
+                mask = modality_masks.get(modality)
+
+            adapter = self.fusion_adapters.get(self._adapter_key(modality, layer_idx))
+            if adapter is None:
+                continue
+
+            modality_gate: Union[float, torch.Tensor]
+            if isinstance(gate, dict):
+                modality_gate = gate.get(modality, 1.0)
+            else:
+                modality_gate = gate
+
+            output = adapter(
+                hidden_states=output,
+                audio_tokens=tokens,
+                attention_mask=mask,
+                gate=modality_gate,
+                supervised_mask=supervised_mask,
+            )
+
+        return output
 
     def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
         for adapter in self.fusion_adapters.values():
@@ -459,6 +479,39 @@ class MultiLayerFusionAdapter(nn.Module):
 
     def configure_attention_probe(self, enabled: bool, log_limit: int = 5) -> None:
         self.set_debug_logging(enabled, log_limit)
+
+    @staticmethod
+    def _adapter_key(modality: str, layer_idx: int) -> str:
+        return f"{modality}:{layer_idx}"
+
+    def _normalize_layer_mapping(
+        self,
+        mapping: Union[Dict[str, List[int]], List[int], None],
+    ) -> Dict[str, List[int]]:
+        if mapping is None:
+            default_indices = [self.num_layers // 3, 2 * self.num_layers // 3]
+            return {"audio": default_indices}
+
+        if isinstance(mapping, dict):
+            normalized: Dict[str, List[int]] = {}
+            for modality, indices in mapping.items():
+                if indices is None:
+                    continue
+                normalized[modality] = sorted({int(idx) for idx in indices})
+            return normalized
+
+        if isinstance(mapping, (list, tuple)):
+            return {"audio": [int(idx) for idx in mapping]}
+
+        raise ValueError("fusion_layer_indices must be None, a list, or a modality -> layers mapping")
+
+    @staticmethod
+    def _invert_layer_mapping(mapping: Dict[str, List[int]]) -> Dict[int, List[str]]:
+        layer_to_modalities: Dict[int, List[str]] = {}
+        for modality, indices in mapping.items():
+            for idx in indices:
+                layer_to_modalities.setdefault(idx, []).append(modality)
+        return layer_to_modalities
 
 
 class GatedFusionAdapter(nn.Module):

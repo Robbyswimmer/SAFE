@@ -6,6 +6,7 @@ from .base_vl import BaseVLModel
 from .audio_encoders import CLAPAudioEncoder, WhisperAudioEncoder, MultiModalAudioEncoder
 from .projectors import AudioProjector, AdaptiveAudioProjector
 from .fusion_adapter import LoRAFusionAdapter, MultiLayerFusionAdapter, GatedFusionAdapter
+from .layer_hooks import LayerHookManager
 
 
 class SAFEModel(nn.Module):
@@ -141,7 +142,9 @@ class SAFEModel(nn.Module):
             raise ValueError(f"Unsupported fusion type: {fusion_type}")
         print(f"[SAFE] ✓ Fusion adapter initialized", flush=True)
         sys.stdout.flush()
-        
+
+        self.enable_midlayer_fusion = (fusion_type == "multilayer")
+
         # Special tokens for audio
         self.audio_start_token = "<audio>"
         self.audio_end_token = "</audio>"
@@ -1230,43 +1233,13 @@ class SAFEModel(nn.Module):
 
             # Determine base dtype from the language model weights
             base_dtype = next(self.base_vl.llm.parameters()).dtype
-            
+
             # Ensure inputs_embeds matches base dtype
             inputs_embeds = inputs_embeds.to(base_dtype)
-            
-            if audio_tokens is not None and gate > 0.0:
-                
-                # Add finite guards before fusion
-                assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens before fusion"
-                
-                # Debug asserts to catch dtype mismatches early
-                assert audio_tokens.dtype == base_dtype, f"audio_tokens {audio_tokens.dtype} != LM dtype {base_dtype}"
-                assert inputs_embeds.dtype == base_dtype, f"inputs_embeds {inputs_embeds.dtype} != LM dtype {base_dtype}"
-                
-                audio_tokens = audio_tokens.to(
-                    device=inputs_embeds.device,
-                    dtype=inputs_embeds.dtype,
-                )
-                if gate != 1.0:
-                    audio_tokens = audio_tokens * gate
 
-                if audio_attention_mask is not None:
-                    audio_attention_mask = audio_attention_mask.to(attention_mask.device)
-
-                supervised_mask = None
-                if labels is not None:
-                    supervised_mask = (labels != -100).to(inputs_embeds.device)
-
-                inputs_embeds = self.fusion_adapter(
-                    hidden_states=inputs_embeds,
-                    audio_tokens=audio_tokens,
-                    attention_mask=audio_attention_mask,
-                    gate=gate,
-                    supervised_mask=supervised_mask,
-                )
-
-            # Final guard: ensure fusion output matches LM dtype
-            assert inputs_embeds.dtype == base_dtype, f"Fusion output {inputs_embeds.dtype} != LM dtype {base_dtype}"
+            supervised_mask = None
+            if labels is not None:
+                supervised_mask = (labels != -100).to(inputs_embeds.device)
 
             model_inputs = {
                 "inputs_embeds": inputs_embeds,
@@ -1278,10 +1251,92 @@ class SAFEModel(nn.Module):
             if pixel_values is not None:
                 model_inputs["pixel_values"] = pixel_values
 
+            use_midlayer_hooks = (
+                audio_tokens is not None
+                and gate > 0.0
+                and self.enable_midlayer_fusion
+                and hasattr(self.fusion_adapter, "apply_fusion_at_layer")
+            )
+
+            language_model = None
+            fusion_layers = None
+            modality_tokens = None
+            modality_masks = None
+
+            if use_midlayer_hooks:
+                assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens before fusion"
+
+                audio_tokens = audio_tokens.to(
+                    device=inputs_embeds.device,
+                    dtype=inputs_embeds.dtype,
+                )
+                if audio_attention_mask is not None:
+                    audio_attention_mask = audio_attention_mask.to(inputs_embeds.device)
+
+                language_model = self._resolve_language_model(self.base_vl.llm)
+                fusion_layers = self._resolve_fusion_layers()
+                if not any(fusion_layers.values()):
+                    use_midlayer_hooks = False
+                else:
+                    modality_tokens = {"audio": audio_tokens}
+                    modality_masks = (
+                        {"audio": audio_attention_mask}
+                        if audio_attention_mask is not None
+                        else None
+                    )
+
+            else:
+                if audio_tokens is not None:
+                    audio_tokens = audio_tokens.to(
+                        device=inputs_embeds.device,
+                        dtype=inputs_embeds.dtype,
+                    )
+                if audio_attention_mask is not None:
+                    audio_attention_mask = audio_attention_mask.to(inputs_embeds.device)
+
+            def run_with_hooks(run_inputs: Dict[str, torch.Tensor]) -> Any:
+                hook_manager = LayerHookManager(
+                    model=language_model,
+                    fusion_adapter=self.fusion_adapter,
+                    fusion_layers=fusion_layers,
+                )
+                hook_manager.register_hooks(
+                    modality_tokens=modality_tokens,
+                    modality_masks=modality_masks,
+                    gate={"audio": gate},
+                    supervised_mask=supervised_mask,
+                )
+                try:
+                    return self.base_vl.llm(**run_inputs)
+                finally:
+                    hook_manager.remove_hooks()
+
+            def run_without_hooks(run_inputs: Dict[str, torch.Tensor]) -> Any:
+                if (
+                    audio_tokens is not None
+                    and gate > 0.0
+                    and not self.enable_midlayer_fusion
+                ):
+                    fused_embeds = self.fusion_adapter(
+                        hidden_states=run_inputs["inputs_embeds"],
+                        audio_tokens=audio_tokens,
+                        attention_mask=audio_attention_mask,
+                        gate=gate,
+                        supervised_mask=supervised_mask,
+                    )
+                    updated_inputs = dict(run_inputs)
+                    updated_inputs["inputs_embeds"] = fused_embeds
+                    run_inputs = updated_inputs
+                return self.base_vl.llm(**run_inputs)
+
             import sys
             sys.stdout.flush()
+
             try:
-                outputs = self.base_vl.llm(**model_inputs)
+                if use_midlayer_hooks:
+                    outputs = run_with_hooks(model_inputs)
+                else:
+                    outputs = run_without_hooks(model_inputs)
             except ValueError as exc:
                 if (
                     self.base_vl.model_type == "llava"
@@ -1294,7 +1349,10 @@ class SAFEModel(nn.Module):
                     )
                     retry_inputs = dict(model_inputs)
                     retry_inputs.pop("pixel_values", None)
-                    outputs = self.base_vl.llm(**retry_inputs)
+                    if use_midlayer_hooks:
+                        outputs = run_with_hooks(retry_inputs)
+                    else:
+                        outputs = run_without_hooks(retry_inputs)
                 else:
                     raise
             logits = outputs.logits
@@ -1435,6 +1493,37 @@ class SAFEModel(nn.Module):
             "loss": loss,
             "hidden_states": hidden_states if 'hidden_states' in locals() else None
         }
+
+    def _resolve_language_model(self, llm: nn.Module) -> nn.Module:
+        candidates = [
+            getattr(llm, "language_model", None),
+            getattr(llm, "model", None),
+            getattr(llm, "decoder", None),
+        ]
+
+        for candidate in candidates:
+            if candidate is not None:
+                return candidate
+
+        return llm
+
+    def _resolve_fusion_layers(self) -> Dict[str, List[int]]:
+        if hasattr(self.fusion_adapter, "fusion_layers"):
+            return {
+                modality: list(indices)
+                for modality, indices in self.fusion_adapter.fusion_layers.items()
+            }
+
+        if hasattr(self.fusion_adapter, "fusion_layer_indices"):
+            indices = self.fusion_adapter.fusion_layer_indices
+            if isinstance(indices, dict):
+                return {
+                    modality: list(values)
+                    for modality, values in indices.items()
+                }
+            return {"audio": list(indices)}
+
+        return {"audio": []}
     
     def generate(
         self,
@@ -1459,54 +1548,87 @@ class SAFEModel(nn.Module):
             if sanitized_ids is not None:
                 sanitized_ids = sanitized_ids.to(input_ids.device)
 
-            if audio_tokens is not None and gate > 0.0 and hasattr(self, "fusion_adapter") and self.fusion_adapter is not None:
-                # When fusing audio we must retain the custom audio token embeddings.
-                # Using the sanitized ids would replace <audio> placeholders with padding tokens
-                # which prevents get_input_embeddings from routing through audio_token_embeddings.
-                if sanitized_ids is not None and input_ids is not None and not torch.equal(sanitized_ids, input_ids):
-                    embed_source = input_ids
-                else:
-                    embed_source = sanitized_ids if sanitized_ids is not None else input_ids
-                embeds = self.get_input_embeddings(embed_source)
-                base_dtype = next(self.base_vl.llm.parameters()).dtype
-                embeds = embeds.to(base_dtype)
+            token_source = input_ids
+            if sanitized_ids is not None and input_ids is not None and not torch.equal(sanitized_ids, input_ids):
+                token_source = input_ids
+            elif sanitized_ids is not None:
+                token_source = sanitized_ids
 
-                audio_tokens = audio_tokens.to(device=embeds.device, dtype=base_dtype)
-                if gate != 1.0:
-                    audio_tokens = audio_tokens * gate
+            base_dtype = next(self.base_vl.llm.parameters()).dtype
+            embeds = self.get_input_embeddings(token_source).to(base_dtype)
 
-                attention_arg = None
-                if audio_attention_mask is not None:
-                    target_device = (
-                        attention_mask.device
-                        if attention_mask is not None
-                        else audio_tokens.device
-                    )
-                    attention_arg = audio_attention_mask.to(device=target_device)
-
-                fused_embeds = self.fusion_adapter(
-                    hidden_states=embeds,
-                    audio_tokens=audio_tokens,
-                    attention_mask=attention_arg,
-                    gate=gate,
-                )
-
-                # Warn only if gate is zero (disabling audio)
-                if gate == 0.0:
-                    print("Warning: gate=0 disables audio influence during generation", flush=True)
-
-                base_inputs["inputs_embeds"] = fused_embeds
-                # Provide sanitized ids alongside inputs_embeds so generate() can
-                # reconstruct the full prompt when returning sequences.
-                if sanitized_ids is not None:
-                    base_inputs["input_ids"] = sanitized_ids
+            if sanitized_ids is not None:
+                base_inputs["input_ids"] = sanitized_ids
             else:
-                base_inputs["input_ids"] = sanitized_ids if sanitized_ids is not None else input_ids
+                base_inputs["input_ids"] = input_ids
 
+            base_inputs["inputs_embeds"] = embeds
             if attention_mask is not None:
                 base_inputs["attention_mask"] = attention_mask
             if pixel_values is not None:
                 base_inputs["pixel_values"] = pixel_values
+
+            use_midlayer_hooks = (
+                audio_tokens is not None
+                and gate > 0.0
+                and self.enable_midlayer_fusion
+                and hasattr(self.fusion_adapter, "apply_fusion_at_layer")
+            )
+
+            language_model = None
+            fusion_layers = None
+            modality_tokens = None
+            modality_masks = None
+
+            if use_midlayer_hooks:
+                assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens before generation fusion"
+
+                audio_tokens = audio_tokens.to(device=embeds.device, dtype=base_dtype)
+                audio_attention = None
+                if audio_attention_mask is not None:
+                    audio_attention = audio_attention_mask.to(embeds.device)
+
+                language_model = self._resolve_language_model(self.base_vl.llm)
+                fusion_layers = self._resolve_fusion_layers()
+                if not any(fusion_layers.values()):
+                    use_midlayer_hooks = False
+                else:
+                    modality_tokens = {"audio": audio_tokens}
+                    modality_masks = (
+                        {"audio": audio_attention}
+                        if audio_attention is not None
+                        else None
+                    )
+            else:
+                if audio_tokens is not None:
+                    audio_tokens = audio_tokens.to(device=embeds.device, dtype=base_dtype)
+                if audio_attention_mask is not None:
+                    audio_attention_mask = audio_attention_mask.to(embeds.device)
+
+            if use_midlayer_hooks:
+                hook_manager = LayerHookManager(
+                    model=language_model,
+                    fusion_adapter=self.fusion_adapter,
+                    fusion_layers=fusion_layers,
+                )
+                hook_manager.register_hooks(
+                    modality_tokens=modality_tokens,
+                    modality_masks=modality_masks,
+                    gate={"audio": gate},
+                )
+                try:
+                    return self.base_vl.llm.generate(**base_inputs)
+                finally:
+                    hook_manager.remove_hooks()
+
+            if audio_tokens is not None and gate > 0.0 and not self.enable_midlayer_fusion:
+                fused_embeds = self.fusion_adapter(
+                    hidden_states=embeds,
+                    audio_tokens=audio_tokens,
+                    attention_mask=audio_attention_mask,
+                    gate=gate,
+                )
+                base_inputs["inputs_embeds"] = fused_embeds
 
             try:
                 return self.base_vl.llm.generate(**base_inputs)
@@ -1522,6 +1644,21 @@ class SAFEModel(nn.Module):
                     )
                     retry_inputs = dict(base_inputs)
                     retry_inputs.pop("pixel_values", None)
+                    if use_midlayer_hooks:
+                        hook_manager = LayerHookManager(
+                            model=language_model,
+                            fusion_adapter=self.fusion_adapter,
+                            fusion_layers=fusion_layers,
+                        )
+                        hook_manager.register_hooks(
+                            modality_tokens=modality_tokens,
+                            modality_masks=modality_masks,
+                            gate={"audio": gate},
+                        )
+                        try:
+                            return self.base_vl.llm.generate(**retry_inputs)
+                        finally:
+                            hook_manager.remove_hooks()
                     return self.base_vl.llm.generate(**retry_inputs)
                 raise
 

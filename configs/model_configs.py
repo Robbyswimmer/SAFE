@@ -33,12 +33,18 @@ DEMO_CONFIG = {
     },
     
     # Fusion configuration - Updated for OPT 2.7B architecture
-    "fusion_type": "lora",
+    "fusion_type": "multilayer",
     "fusion_layer_indices": [16, 24],  # Mid-layers for OPT 2.7B (32 layers total)
     "lora_rank": 8,
     "fusion_config": {
         "num_attention_heads": 20,  # OPT 2.7B attention heads
-        "attention_dropout": 0.1
+        "attention_dropout": 0.1,
+        "modalities": {
+            "audio": {
+                "layer_indices": [16, 24],
+                "num_tokens": 8
+            }
+        }
     },
     
     # Training configuration
@@ -82,12 +88,18 @@ FULL_CONFIG = {
     },
 
     # Fusion configuration
-    "fusion_type": "lora",
+    "fusion_type": "multilayer",
     "fusion_layer_indices": [20, 30],   # Mid-layers for LLaVA 13B (40 layers total)
     "lora_rank": 8,
     "fusion_config": {
         "num_attention_heads": 40,  # LLaVA 13B attention heads
-        "attention_dropout": 0.1
+        "attention_dropout": 0.1,
+        "modalities": {
+            "audio": {
+                "layer_indices": [20, 30],
+                "num_tokens": 8
+            }
+        }
     },
     
     # Training configuration
@@ -147,7 +159,13 @@ MULTIMODAL_CONFIG = {
     "lora_rank": 16,  # Higher rank for more complex fusion
     "fusion_config": {
         "num_attention_heads": 40,  # LLaVA 13B attention heads
-        "attention_dropout": 0.1
+        "attention_dropout": 0.1,
+        "modalities": {
+            "audio": {
+                "layer_indices": [15, 25, 35],
+                "num_tokens": 12
+            }
+        }
     },
     
     # Training configuration
