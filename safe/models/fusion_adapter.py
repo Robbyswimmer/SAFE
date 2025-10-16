@@ -460,9 +460,10 @@ class MultiLayerFusionAdapter(nn.Module):
             if modality_masks is not None:
                 mask = modality_masks.get(modality)
 
-            adapter = self.fusion_adapters.get(self._adapter_key(modality, layer_idx))
-            if adapter is None:
+            adapter_key = self._adapter_key(modality, layer_idx)
+            if adapter_key not in self.fusion_adapters:
                 continue
+            adapter = self.fusion_adapters[adapter_key]
 
             modality_gate: Union[float, torch.Tensor]
             if isinstance(gate, dict):
