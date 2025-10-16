@@ -1,6 +1,6 @@
 import torch
 import math
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -381,13 +381,19 @@ class MultiLayerFusionAdapter(nn.Module):
         lora_rank: int = 8,
         lora_alpha: float = 16.0,
         lora_dropout: float = 0.1,
+        attention_dropout: float = 0.1,
+        modalities: Optional[Dict[str, Any]] = None,
+        **unused_kwargs,
     ):
         super().__init__()
 
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.extra_config = dict(unused_kwargs)
 
-        self.fusion_layers = self._normalize_layer_mapping(fusion_layer_indices)
+        layer_mapping_source = modalities if modalities is not None else fusion_layer_indices
+        self.modality_configs = modalities or {}
+        self.fusion_layers = self._normalize_layer_mapping(layer_mapping_source)
         self.fusion_layer_indices = sorted({idx for indices in self.fusion_layers.values() for idx in indices})
         self.layer_modalities = self._invert_layer_mapping(self.fusion_layers)
         self.fusion_adapters = nn.ModuleDict()
@@ -401,6 +407,7 @@ class MultiLayerFusionAdapter(nn.Module):
                     lora_rank=lora_rank,
                     lora_alpha=lora_alpha,
                     lora_dropout=lora_dropout,
+                    attention_dropout=attention_dropout,
                 )
 
     def forward(
@@ -494,10 +501,16 @@ class MultiLayerFusionAdapter(nn.Module):
 
         if isinstance(mapping, dict):
             normalized: Dict[str, List[int]] = {}
-            for modality, indices in mapping.items():
+            for modality, value in mapping.items():
+                if value is None:
+                    continue
+                if isinstance(value, dict):
+                    indices = value.get("layer_indices")
+                else:
+                    indices = value
                 if indices is None:
                     continue
-                normalized[modality] = sorted({int(idx) for idx in indices})
+                normalized[modality] = sorted({int(idx) for idx in list(indices)})
             return normalized
 
         if isinstance(mapping, (list, tuple)):
