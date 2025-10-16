@@ -11,6 +11,7 @@ print("[run_full_training.py] Importing standard library modules...", flush=True
 sys.stdout.flush()
 import argparse
 import json
+import os
 import random
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -67,6 +68,8 @@ class TrainingConfig:
     max_eval_batches: Optional[int]
     max_audio_eval_batches: int
     max_vl_eval_batches: int
+    max_audio_eval_samples: int
+    max_vl_eval_samples: int
     eval_with_audio_gate: bool
     eval_audio_gate_comparison: bool
     eval_logging_steps: int
@@ -179,11 +182,18 @@ class CombinedValidationDataset(Dataset):
 
 
 def set_random_seeds(seed: int) -> None:
+    os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if hasattr(torch, "backends") and hasattr(torch.backends, "cudnn"):
+        try:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+        except Exception:
+            pass
 
 
 def configure_variant(variant: str, base_config: TrainingConfig) -> TrainingConfig:
@@ -235,6 +245,8 @@ def build_stage_a_config(cfg: TrainingConfig) -> Dict[str, object]:
         "max_eval_batches": max_eval_batches,
         "max_audio_eval_batches": cfg.max_audio_eval_batches,
         "max_vl_eval_batches": cfg.max_vl_eval_batches,
+        "max_audio_eval_samples": cfg.max_audio_eval_samples,
+        "max_vl_eval_samples": cfg.max_vl_eval_samples,
         "eval_with_audio_gate": cfg.eval_with_audio_gate,
         "eval_audio_gate_comparison": cfg.eval_audio_gate_comparison,
         "debug_logging": cfg.debug_logging,
@@ -410,6 +422,8 @@ def run_experiment(args: argparse.Namespace) -> None:
         max_eval_batches=args.max_eval_batches if args.max_eval_batches > 0 else None,
         max_audio_eval_batches=args.max_audio_eval_batches,
         max_vl_eval_batches=args.max_vl_eval_batches,
+        max_audio_eval_samples=args.max_audio_eval_samples,
+        max_vl_eval_samples=args.max_vl_eval_samples,
         eval_with_audio_gate=not args.disable_eval_audio_gate,
         eval_audio_gate_comparison=args.eval_audio_gate_comparison,
         eval_logging_steps=args.eval_logging_steps,
@@ -481,8 +495,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--null-space-min-samples", type=int, default=128, help="Minimum samples for null-space")
     parser.add_argument("--null-space-refresh", type=int, default=4000, help="Null-space refresh interval")
     parser.add_argument("--max-eval-batches", type=int, default=-1, help="Limit validation batches (<=0 = full)")
-    parser.add_argument("--max-audio-eval-batches", type=int, default=32, help="Audio eval batch cap")
-    parser.add_argument("--max-vl-eval-batches", type=int, default=64, help="VL eval batch cap")
+    parser.add_argument("--max-audio-eval-batches", type=int, default=0, help="Audio eval batch cap (<=0 disables)")
+    parser.add_argument("--max-vl-eval-batches", type=int, default=0, help="VL eval batch cap (<=0 disables)")
+    parser.add_argument("--max-audio-eval-samples", type=int, default=600, help="Audio evaluation sample cap (<=0 disables)")
+    parser.add_argument("--max-vl-eval-samples", type=int, default=600, help="VL evaluation sample cap (<=0 disables)")
     parser.add_argument("--max-audio-val-samples", type=int, default=4096, help="Audio validation sample cap (<=0 disables)")
     parser.add_argument("--max-vqa-val-samples", type=int, default=4096, help="VQA validation sample cap (<=0 disables)")
     parser.add_argument("--eval-logging-steps", type=int, default=10, help="Eval logging frequency")
