@@ -1230,12 +1230,12 @@ class SAFEModel(nn.Module):
                     pixel_values = None
 
             # ==================== VL PASSTHROUGH CHECK ====================
-            # If no audio is present and gate is disabled, use true VL passthrough:
+            # If no audio is present, use true VL passthrough:
             # Call base model with input_ids directly to avoid embedding contamination
+            # Gate value is irrelevant when there's no audio to fuse
             no_audio = (audio_tokens is None or audio_tokens.numel() == 0)
-            gate_disabled = (gate <= 0.0)
 
-            if no_audio and gate_disabled:
+            if no_audio:
                 # TRUE VL PASSTHROUGH: Use input_ids directly (identical to frozen base)
                 sanitized_ids = self._sanitize_input_ids_for_base(input_ids)
                 base_inputs = {
