@@ -1236,22 +1236,13 @@ class SAFEModel(nn.Module):
             no_audio = (audio_tokens is None or audio_tokens.numel() == 0)
 
             if no_audio:
-                # TRUE VL PASSTHROUGH: Use base embeddings (not custom) + same vision path as fusion
-                # This matches the old fusion path exactly but without audio contamination
-                # NO SANITIZATION for VL-only: there are no audio tokens to remove, and sanitization
-                # would corrupt legitimate tokens like <image> that happen to be >= original_vocab_size
+                # TRUE VL PASSTHROUGH: Use input_ids directly (not embeddings) for proper vision merging
+                # LLaVA needs input_ids + pixel_values to merge vision features at <image> positions
+                # NO SANITIZATION for VL-only: there are no audio tokens to remove
 
-                # Get embeddings from BASE model's embedding layer (not custom get_input_embeddings)
-                base_embeddings_layer = self.base_vl.llm.get_input_embeddings()
-                inputs_embeds = base_embeddings_layer(input_ids)  # Use original input_ids, not sanitized
-
-                # Ensure correct dtype
-                base_dtype = next(self.base_vl.llm.parameters()).dtype
-                inputs_embeds = inputs_embeds.to(base_dtype)
-
-                # Use same path as fusion (base_vl.llm with inputs_embeds + pixel_values)
+                # Use same path as BASE teacher evaluation - input_ids + pixel_values
                 base_inputs = {
-                    "inputs_embeds": inputs_embeds,
+                    "input_ids": input_ids,  # Use input_ids for proper LLaVA vision merging
                     "attention_mask": attention_mask,
                     "labels": labels,
                     **filtered_kwargs,
@@ -1259,7 +1250,7 @@ class SAFEModel(nn.Module):
                 if pixel_values is not None:
                     base_inputs["pixel_values"] = pixel_values
 
-                # Call language model component (same as fusion path line 1336/1356)
+                # Call full LLaVA model (handles vision merging internally)
                 outputs = self.base_vl.llm(**base_inputs)
                 logits = outputs.logits
                 loss = outputs.loss if labels is not None else None
