@@ -1236,10 +1236,21 @@ class SAFEModel(nn.Module):
             no_audio = (audio_tokens is None or audio_tokens.numel() == 0)
 
             if no_audio:
-                # TRUE VL PASSTHROUGH: Use input_ids directly (identical to frozen base)
+                # TRUE VL PASSTHROUGH: Use base embeddings (not custom) + same vision path as fusion
+                # This matches the old fusion path exactly but without audio contamination
                 sanitized_ids = self._sanitize_input_ids_for_base(input_ids)
+
+                # Get embeddings from BASE model's embedding layer (not custom get_input_embeddings)
+                base_embeddings_layer = self.base_vl.llm.get_input_embeddings()
+                inputs_embeds = base_embeddings_layer(sanitized_ids)
+
+                # Ensure correct dtype
+                base_dtype = next(self.base_vl.llm.parameters()).dtype
+                inputs_embeds = inputs_embeds.to(base_dtype)
+
+                # Use same path as fusion (base_vl.llm with inputs_embeds + pixel_values)
                 base_inputs = {
-                    "input_ids": sanitized_ids,
+                    "inputs_embeds": inputs_embeds,
                     "attention_mask": attention_mask,
                     "labels": labels,
                     **filtered_kwargs,
@@ -1247,8 +1258,8 @@ class SAFEModel(nn.Module):
                 if pixel_values is not None:
                     base_inputs["pixel_values"] = pixel_values
 
-                # Call frozen base VL model (includes vision processing for LLaVA/BLIP2)
-                outputs = self.base_vl(**base_inputs)
+                # Call language model component (same as fusion path line 1336/1356)
+                outputs = self.base_vl.llm(**base_inputs)
                 logits = outputs.logits
                 loss = outputs.loss if labels is not None else None
                 return {"logits": logits, "loss": loss, "hidden_states": None}
