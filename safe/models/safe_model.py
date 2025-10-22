@@ -1247,8 +1247,8 @@ class SAFEModel(nn.Module):
                 if pixel_values is not None:
                     base_inputs["pixel_values"] = pixel_values
 
-                # Call frozen base model directly
-                outputs = self.base_vl.llm(**base_inputs)
+                # Call frozen base VL model (includes vision processing for LLaVA/BLIP2)
+                outputs = self.base_vl(**base_inputs)
                 logits = outputs.logits
                 loss = outputs.loss if labels is not None else None
                 return {"logits": logits, "loss": loss, "hidden_states": None}
