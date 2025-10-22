@@ -119,6 +119,7 @@ class StageATrainer:
             "train_accuracy_interval": 0,
             "train_accuracy_warmup": 5,
             "generation_max_new_tokens": 12,
+            "vl_max_new_tokens": 4,  # Encourage one-word/short answers for VQA
             "gradient_accumulation_steps": 1,
             "audio_bertscore_threshold": 0.7,
             "gate_warmup_steps": 2000,
@@ -127,6 +128,11 @@ class StageATrainer:
             "max_vl_eval_batches": 0,
             "max_audio_eval_samples": 0,
             "max_vl_eval_samples": 0,
+            # Modality-specific generation tuning
+            "vl_repetition_penalty": 1.0,
+            "audio_repetition_penalty": 1.1,
+            # Only suppress EOS early in training for audio batches (not VL)
+            "suppress_eos_for_audio_early_steps": True,
         }
 
         if config:
@@ -3228,10 +3234,21 @@ class StageATrainer:
             max_new_tokens = configured_max_new_tokens
         elif pixel_present and not has_audio:
             # Pure VL task (VQA) - restrict to short answers
-            max_new_tokens = min(configured_max_new_tokens, 10)
+            vl_max = int(self.config.get("vl_max_new_tokens", 4) or 4)
+            max_new_tokens = max(1, min(configured_max_new_tokens, vl_max))
         else:
             # Audio-visual or ambiguous - use configured value
             max_new_tokens = configured_max_new_tokens
+
+        # Modality-specific repetition penalty
+        vl_rep = float(self.config.get("vl_repetition_penalty", 1.0))
+        audio_rep = float(self.config.get("audio_repetition_penalty", 1.1))
+        if has_audio and not pixel_present:
+            repetition_penalty = audio_rep
+        elif pixel_present and not has_audio:
+            repetition_penalty = vl_rep
+        else:
+            repetition_penalty = audio_rep
 
         gen_kwargs = dict(
             max_new_tokens=max_new_tokens,
@@ -3242,7 +3259,7 @@ class StageATrainer:
             num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
-            repetition_penalty=1.1,  # Reduced from 1.8 - was too aggressive
+            repetition_penalty=repetition_penalty,
             # Removed no_repeat_ngram_size - was blocking fluent generation
             # Removed encoder_repetition_penalty - was making it worse
             output_scores=False,
@@ -3251,13 +3268,16 @@ class StageATrainer:
 
         # EARLY TRAINING FIX: Suppress EOS in first 500 steps to force output
         # The untrained audio features may confuse the model into immediate EOS
-        if self.global_step < 500 and getattr(tok, "eos_token_id", None) is not None:
+        early_audio_suppress = bool(self.config.get("suppress_eos_for_audio_early_steps", True))
+        if early_audio_suppress and has_audio and self.global_step < 500 and getattr(tok, "eos_token_id", None) is not None:
             suppress_list = [tok.eos_token_id]
             # Also suppress pad token if different from EOS
             if getattr(tok, "pad_token_id", None) is not None and tok.pad_token_id != tok.eos_token_id:
                 suppress_list.append(tok.pad_token_id)
             gen_kwargs["suppress_tokens"] = suppress_list
-            print(f"[GenDebug] Early training (step {self.global_step}): Suppressing EOS tokens {suppress_list}", flush=True)
+            print(f"[GenDebug] Early training (step {self.global_step}): Suppressing EOS tokens {suppress_list} (audio batch)", flush=True)
+        elif self.debug_logging and self.global_step < 500 and not has_audio:
+            print(f"[GenDebug] Early training: Not suppressing EOS for VL-only batch (step {self.global_step})", flush=True)
 
         # Debug: Verify tokenizer EOS setup
         if self.debug_logging:
