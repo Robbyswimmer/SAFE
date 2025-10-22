@@ -33,7 +33,7 @@ class AccuracyResult:
     """Container for per-sample accuracy with auxiliary metrics."""
 
     score: float
-    metrics: Dict[str, float]
+    metrics: Dict[str, Any]
 
 
 class StageATrainer:
@@ -1623,7 +1623,9 @@ class StageATrainer:
         audio_exact = 0.0
         audio_token_f1 = 0.0
         audio_bertscore = 0.0
-        
+        audio_caption_predictions: List[str] = []
+        audio_caption_references: List[List[str]] = []
+
         # Metrics for VL retention
         vl_safe_correct = 0
         vl_base_correct = 0
@@ -2185,6 +2187,19 @@ class StageATrainer:
                             audio_exact += sum(safe_results_batch[int(i)].metrics.get("exact", 0.0) for i in audio_indices)
                             audio_token_f1 += sum(safe_results_batch[int(i)].metrics.get("token_f1", 0.0) for i in audio_indices)
                             audio_bertscore += sum(safe_results_batch[int(i)].metrics.get("bertscore", 0.0) for i in audio_indices)
+                            for idx in audio_indices.tolist():
+                                metrics = safe_results_batch[int(idx)].metrics if idx < len(safe_results_batch) else {}
+                                pred_text = metrics.get("prediction_raw") or metrics.get("prediction")
+                                ref_list = metrics.get("references_raw") or metrics.get("references")
+                                if pred_text and ref_list:
+                                    if isinstance(ref_list, str):
+                                        ref_candidates = [ref_list]
+                                    else:
+                                        ref_candidates = [str(ref).strip() for ref in ref_list if str(ref).strip()]
+                                    clean_pred = str(pred_text).strip()
+                                    if clean_pred and ref_candidates:
+                                        audio_caption_predictions.append(clean_pred)
+                                        audio_caption_references.append(ref_candidates)
                             audio_total += len(audio_indices)
                             audio_samples += len(audio_indices)
 
@@ -2272,7 +2287,14 @@ class StageATrainer:
             "vl_samples": vl_samples,
             "total_samples": total_samples
         }
-        
+
+        caption_metrics = self._compute_standard_caption_metrics(
+            audio_caption_predictions,
+            audio_caption_references,
+        )
+        if caption_metrics:
+            eval_metrics.update(caption_metrics)
+
         # Report cumulative evaluation results
         print(f"\n=== {description.upper()} EVALUATION COMPLETE ===", flush=True)
         if split_batches:
@@ -2314,7 +2336,26 @@ class StageATrainer:
             if eval_audio_gate_comparison and audio_total > 0 and vl_total > 0:
                 vl_drift = (1.0 - retention_score) * 100
                 print(f"  ⚠️  VL Drift: {vl_drift:+.1f}% (performance change with audio enabled)", flush=True)
-        
+
+        if caption_metrics:
+            print(f"\nCaption Quality Metrics:", flush=True)
+            caption_order = [
+                "audio_bleu_1",
+                "audio_bleu_2",
+                "audio_bleu_3",
+                "audio_bleu_4",
+                "audio_meteor",
+                "audio_rouge_l",
+                "audio_cider",
+                "audio_spice",
+                "audio_spider",
+            ]
+            for key in caption_order:
+                if key in caption_metrics:
+                    print(f"  - {key.replace('audio_', '').upper()}: {caption_metrics[key]:.3f}", flush=True)
+            if "audio_caption_samples" in caption_metrics:
+                print(f"  - CAPTION_SAMPLES: {int(caption_metrics['audio_caption_samples'])}", flush=True)
+
         print(f"==============================\n", flush=True)
 
         return eval_metrics
@@ -2940,17 +2981,37 @@ class StageATrainer:
                 self._bertscore_failed = True
             return 0.0
 
-    def _compute_audio_caption_metrics(self, pred_caption: Any, gt_caption: Any, debug: bool = False) -> Dict[str, float]:
+    def _compute_audio_caption_metrics(self, pred_caption: Any, gt_caption: Any, debug: bool = False) -> Dict[str, Any]:
         """Compute granular audio caption metrics and a composite score."""
 
+        pred_raw = str(pred_caption).strip() if pred_caption is not None else ""
         pred_norm = self._normalize_audio_caption(pred_caption)
         if not pred_norm:
-            return {"composite": 0.0, "exact": 0.0, "token_f1": 0.0, "bertscore": 0.0}
+            return {
+                "composite": 0.0,
+                "exact": 0.0,
+                "token_f1": 0.0,
+                "bertscore": 0.0,
+                "prediction": "",
+                "prediction_raw": pred_raw,
+                "references": [],
+                "references_raw": [],
+            }
 
-        gt_norms = [self._normalize_audio_caption(ans) for ans in self._prepare_gt_answers(gt_caption)]
+        gt_candidates = [str(ans).strip() for ans in self._prepare_gt_answers(gt_caption) if str(ans).strip()]
+        gt_norms = [self._normalize_audio_caption(ans) for ans in gt_candidates]
         gt_norms = [ans for ans in gt_norms if ans]
         if not gt_norms:
-            return {"composite": 0.0, "exact": 0.0, "token_f1": 0.0, "bertscore": 0.0}
+            return {
+                "composite": 0.0,
+                "exact": 0.0,
+                "token_f1": 0.0,
+                "bertscore": 0.0,
+                "prediction": pred_norm,
+                "prediction_raw": pred_raw,
+                "references": [],
+                "references_raw": gt_candidates,
+            }
 
         exact_match = 1.0 if pred_norm in gt_norms else 0.0
         token_f1 = max((self._compute_token_f1(pred_norm, gt) for gt in gt_norms), default=0.0)
@@ -2979,7 +3040,103 @@ class StageATrainer:
             "exact": exact_match,
             "token_f1": token_f1,
             "bertscore": bertscore_raw,
+            "prediction": pred_norm,
+            "prediction_raw": pred_raw,
+            "references": gt_norms,
+            "references_raw": gt_candidates,
         }
+
+    def _log_caption_metric_warning(self, metric_name: str, error: Exception) -> None:
+        """Emit a single warning per caption metric failure."""
+
+        if not hasattr(self, "_caption_metric_warnings"):
+            self._caption_metric_warnings = set()
+        if metric_name not in self._caption_metric_warnings:
+            print(f"⚠️  {metric_name} metric unavailable: {error}", flush=True)
+            self._caption_metric_warnings.add(metric_name)
+
+    def _compute_standard_caption_metrics(
+        self,
+        predictions: List[str],
+        references: List[List[str]],
+    ) -> Dict[str, float]:
+        """Compute standard captioning metrics for SAFE audio predictions."""
+
+        if not predictions or not references:
+            return {}
+
+        paired_data: List[Tuple[str, List[str]]] = []
+        for pred, refs in zip(predictions, references):
+            pred_clean = str(pred).strip()
+            refs_clean = [str(ref).strip() for ref in refs if str(ref).strip()]
+            if pred_clean and refs_clean:
+                paired_data.append((pred_clean, refs_clean))
+
+        if not paired_data:
+            return {}
+
+        preds, refs = zip(*paired_data)
+        preds_list = list(preds)
+        refs_list = [list(r) for r in refs]
+
+        try:
+            import evaluate
+        except Exception as exc:
+            self._log_caption_metric_warning("evaluate", exc)
+            return {}
+
+        metrics: Dict[str, float] = {}
+
+        try:
+            bleu_metric = evaluate.load("bleu")
+            bleu_result = bleu_metric.compute(predictions=preds_list, references=refs_list)
+            if bleu_result:
+                precisions = bleu_result.get("precisions", [])
+                for n in range(min(4, len(precisions))):
+                    metrics[f"audio_bleu_{n + 1}"] = float(precisions[n])
+                if "bleu" in bleu_result:
+                    metrics["audio_bleu"] = float(bleu_result["bleu"])
+        except Exception as exc:
+            self._log_caption_metric_warning("BLEU", exc)
+
+        try:
+            meteor_metric = evaluate.load("meteor")
+            meteor_result = meteor_metric.compute(predictions=preds_list, references=refs_list)
+            if meteor_result and "meteor" in meteor_result:
+                metrics["audio_meteor"] = float(meteor_result["meteor"])
+        except Exception as exc:
+            self._log_caption_metric_warning("METEOR", exc)
+
+        try:
+            rouge_metric = evaluate.load("rouge")
+            rouge_result = rouge_metric.compute(predictions=preds_list, references=refs_list)
+            if rouge_result and "rougeL" in rouge_result:
+                metrics["audio_rouge_l"] = float(rouge_result["rougeL"])
+        except Exception as exc:
+            self._log_caption_metric_warning("ROUGE-L", exc)
+
+        try:
+            cider_metric = evaluate.load("cider")
+            cider_result = cider_metric.compute(predictions=preds_list, references=refs_list)
+            if cider_result and "score" in cider_result:
+                metrics["audio_cider"] = float(cider_result["score"])
+        except Exception as exc:
+            self._log_caption_metric_warning("CIDEr", exc)
+
+        try:
+            spice_metric = evaluate.load("spice")
+            spice_result = spice_metric.compute(predictions=preds_list, references=refs_list)
+            if spice_result and "score" in spice_result:
+                metrics["audio_spice"] = float(spice_result["score"])
+        except Exception as exc:
+            self._log_caption_metric_warning("SPICE", exc)
+
+        if "audio_cider" in metrics and "audio_spice" in metrics:
+            metrics["audio_spider"] = (metrics["audio_cider"] + metrics["audio_spice"]) / 2.0
+
+        metrics["audio_caption_samples"] = float(len(preds_list))
+
+        return metrics
 
     def _batch_contains_pixels(self, batch: Dict[str, Any], idx: int) -> bool:
         images = batch.get("images")

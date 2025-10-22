@@ -1229,6 +1229,32 @@ class SAFEModel(nn.Module):
                         )
                     pixel_values = None
 
+            # ==================== VL PASSTHROUGH CHECK ====================
+            # If no audio is present and gate is disabled, use true VL passthrough:
+            # Call base model with input_ids directly to avoid embedding contamination
+            no_audio = (audio_tokens is None or audio_tokens.numel() == 0)
+            gate_disabled = (gate <= 0.0)
+
+            if no_audio and gate_disabled:
+                # TRUE VL PASSTHROUGH: Use input_ids directly (identical to frozen base)
+                sanitized_ids = self._sanitize_input_ids_for_base(input_ids)
+                base_inputs = {
+                    "input_ids": sanitized_ids,
+                    "attention_mask": attention_mask,
+                    "labels": labels,
+                    **filtered_kwargs,
+                }
+                if pixel_values is not None:
+                    base_inputs["pixel_values"] = pixel_values
+
+                # Call frozen base model directly
+                outputs = self.base_vl.llm(**base_inputs)
+                logits = outputs.logits
+                loss = outputs.loss if labels is not None else None
+                return {"logits": logits, "loss": loss, "hidden_states": None}
+            # ==================== END VL PASSTHROUGH ====================
+
+            # FUSION PATH: Convert to inputs_embeds only when audio fusion is needed
             inputs_embeds = self.get_input_embeddings(input_ids)
 
             # Determine base dtype from the language model weights
