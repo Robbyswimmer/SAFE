@@ -1236,13 +1236,19 @@ class SAFEModel(nn.Module):
             no_audio = (audio_tokens is None or audio_tokens.numel() == 0)
 
             if no_audio:
-                # TRUE VL PASSTHROUGH: Use input_ids directly (not embeddings) for proper vision merging
-                # LLaVA needs input_ids + pixel_values to merge vision features at <image> positions
-                # NO SANITIZATION for VL-only: there are no audio tokens to remove
+                # TRUE VL PASSTHROUGH: Use base embeddings + pixel_values (matches working fusion path)
+                # Get embeddings from BASE model's embedding layer (not custom get_input_embeddings)
+                # This avoids contamination while using the proven working path
+                base_embeddings_layer = self.base_vl.llm.get_input_embeddings()
+                inputs_embeds = base_embeddings_layer(input_ids)  # Clean base embeddings, no sanitization
 
-                # Use same path as BASE teacher evaluation - input_ids + pixel_values
+                # Ensure correct dtype
+                base_dtype = next(self.base_vl.llm.parameters()).dtype
+                inputs_embeds = inputs_embeds.to(base_dtype)
+
+                # Use same format as fusion path: inputs_embeds + pixel_values
                 base_inputs = {
-                    "input_ids": input_ids,  # Use input_ids for proper LLaVA vision merging
+                    "inputs_embeds": inputs_embeds,  # Use embeddings (not input_ids) for proper vision merge
                     "attention_mask": attention_mask,
                     "labels": labels,
                     **filtered_kwargs,
@@ -1250,7 +1256,7 @@ class SAFEModel(nn.Module):
                 if pixel_values is not None:
                     base_inputs["pixel_values"] = pixel_values
 
-                # Call full LLaVA model (handles vision merging internally)
+                # Call LlavaForConditionalGeneration with embeddings + vision (same as fusion path)
                 outputs = self.base_vl.llm(**base_inputs)
                 logits = outputs.logits
                 loss = outputs.loss if labels is not None else None
