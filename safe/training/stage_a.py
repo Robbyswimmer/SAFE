@@ -2028,8 +2028,16 @@ class StageATrainer:
                     # Base VL model forward pass (skip when retention disabled)
                     if self.combined_loss.retention_enabled:
                         teacher_t0 = time.time()
-                        sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
-                        sanitized_labels = self.safe_model.sanitize_labels_for_base(inputs.get("labels"))
+                        # Only sanitize if batch has audio tokens - VL-only batches don't need sanitization
+                        # and sanitization corrupts legitimate tokens like <image>
+                        has_audio = inputs.get("audio_tokens") is not None
+                        if has_audio:
+                            sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
+                            sanitized_labels = self.safe_model.sanitize_labels_for_base(inputs.get("labels"))
+                        else:
+                            sanitized_ids = inputs.get("input_ids")  # No sanitization for VL-only
+                            sanitized_labels = inputs.get("labels")
+
                         base_inputs = {
                             "attention_mask": inputs["attention_mask"],
                         }

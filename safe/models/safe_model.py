@@ -1238,11 +1238,12 @@ class SAFEModel(nn.Module):
             if no_audio:
                 # TRUE VL PASSTHROUGH: Use base embeddings (not custom) + same vision path as fusion
                 # This matches the old fusion path exactly but without audio contamination
-                sanitized_ids = self._sanitize_input_ids_for_base(input_ids)
+                # NO SANITIZATION for VL-only: there are no audio tokens to remove, and sanitization
+                # would corrupt legitimate tokens like <image> that happen to be >= original_vocab_size
 
                 # Get embeddings from BASE model's embedding layer (not custom get_input_embeddings)
                 base_embeddings_layer = self.base_vl.llm.get_input_embeddings()
-                inputs_embeds = base_embeddings_layer(sanitized_ids)
+                inputs_embeds = base_embeddings_layer(input_ids)  # Use original input_ids, not sanitized
 
                 # Ensure correct dtype
                 base_dtype = next(self.base_vl.llm.parameters()).dtype
