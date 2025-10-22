@@ -1578,6 +1578,30 @@ class SAFEModel(nn.Module):
         """Generate text response given multimodal inputs."""
         # Low-level API: direct tensor inputs
         if input_ids is not None:
+            # VL PASSTHROUGH CHECK for generation (same as forward)
+            no_audio = (audio_tokens is None) or (audio_tokens is not None and audio_tokens.numel() == 0)
+
+            if no_audio:
+                # TRUE VL PASSTHROUGH: Use base embeddings for generation (no contamination)
+                base_embeddings_layer = self.base_vl.llm.get_input_embeddings()
+                embeds = base_embeddings_layer(input_ids)  # Clean base embeddings, no sanitization
+
+                base_dtype = next(self.base_vl.llm.parameters()).dtype
+                embeds = embeds.to(base_dtype)
+
+                base_inputs = {
+                    "inputs_embeds": embeds,
+                    **generation_kwargs
+                }
+                if attention_mask is not None:
+                    base_inputs["attention_mask"] = attention_mask
+                if pixel_values is not None:
+                    base_inputs["pixel_values"] = pixel_values
+
+                # Generate with clean base embeddings
+                return self.base_vl.llm.generate(**base_inputs)
+
+            # AUDIO PATH: Use custom embeddings and fusion (existing logic)
             base_inputs = {**generation_kwargs}
             sanitized_ids = self.sanitize_input_ids_for_base(input_ids)
             if sanitized_ids is not None:
