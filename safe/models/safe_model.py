@@ -1582,15 +1582,11 @@ class SAFEModel(nn.Module):
             no_audio = (audio_tokens is None) or (audio_tokens is not None and audio_tokens.numel() == 0)
 
             if no_audio:
-                # TRUE VL PASSTHROUGH: Use base embeddings for generation (no contamination)
-                base_embeddings_layer = self.base_vl.llm.get_input_embeddings()
-                embeds = base_embeddings_layer(input_ids)  # Clean base embeddings, no sanitization
-
-                base_dtype = next(self.base_vl.llm.parameters()).dtype
-                embeds = embeds.to(base_dtype)
-
+                # TRUE VL PASSTHROUGH: Use base_vl.llm.generate directly with input_ids
+                # This bypasses SAFE's contaminated embedding layer entirely
+                # Using inputs_embeds causes HF generate to return ONLY new tokens (breaks decoding)
                 base_inputs = {
-                    "inputs_embeds": embeds,
+                    "input_ids": input_ids,
                     **generation_kwargs
                 }
                 if attention_mask is not None:
@@ -1598,7 +1594,7 @@ class SAFEModel(nn.Module):
                 if pixel_values is not None:
                     base_inputs["pixel_values"] = pixel_values
 
-                # Generate with clean base embeddings
+                # Generate with base model directly (no sanitization needed for VL)
                 return self.base_vl.llm.generate(**base_inputs)
 
             # AUDIO PATH: Use custom embeddings and fusion (existing logic)
