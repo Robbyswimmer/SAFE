@@ -81,7 +81,7 @@ FULL_CONFIG = {
     
     # Projector configuration
     "projector_type": "standard",
-    "num_audio_tokens": 8,
+    "num_audio_tokens": 16,  # Increased from 8 for more detailed audio representations
     "projector_config": {
         "dropout": 0.1,
         "bottleneck_dim": 1024  # Bottleneck for 80% parameter reduction (212M → 42M)
@@ -89,15 +89,15 @@ FULL_CONFIG = {
 
     # Fusion configuration
     "fusion_type": "multilayer",
-    "fusion_layer_indices": [20, 30],   # Mid-layers for LLaVA 13B (40 layers total)
+    "fusion_layer_indices": [12, 24],   # Earlier fusion (30%, 60%) for better acoustic-linguistic alignment
     "lora_rank": 8,
     "fusion_config": {
         "num_attention_heads": 40,  # LLaVA 13B attention heads
         "attention_dropout": 0.1,
         "modalities": {
             "audio": {
-                "layer_indices": [20, 30],
-                "num_tokens": 8
+                "layer_indices": [12, 24],  # Match fusion_layer_indices
+                "num_tokens": 16  # Match num_audio_tokens
             }
         }
     },
