@@ -1235,6 +1235,9 @@ class SAFEModel(nn.Module):
             # Gate value is irrelevant when there's no audio to fuse
             no_audio = (audio_tokens is None or audio_tokens.numel() == 0)
 
+            # DEBUG: Log passthrough decision
+            print(f"[PassthroughDebug-forward] audio_tokens type: {type(audio_tokens)}, is None: {audio_tokens is None}, numel: {audio_tokens.numel() if audio_tokens is not None else 'N/A'}, no_audio: {no_audio}, gate: {gate}", flush=True)
+
             if no_audio:
                 # TRUE VL PASSTHROUGH: Use base embeddings + pixel_values (matches working fusion path)
                 # Get embeddings from BASE model's embedding layer (not custom get_input_embeddings)
@@ -1580,6 +1583,9 @@ class SAFEModel(nn.Module):
         if input_ids is not None:
             # VL PASSTHROUGH CHECK for generation (same as forward)
             no_audio = (audio_tokens is None) or (audio_tokens is not None and audio_tokens.numel() == 0)
+
+            # DEBUG: Log passthrough decision
+            print(f"[PassthroughDebug-generate] audio_tokens type: {type(audio_tokens)}, is None: {audio_tokens is None}, numel: {audio_tokens.numel() if audio_tokens is not None else 'N/A'}, no_audio: {no_audio}", flush=True)
 
             if no_audio:
                 # TRUE VL PASSTHROUGH: Use base_vl.llm.generate directly with input_ids

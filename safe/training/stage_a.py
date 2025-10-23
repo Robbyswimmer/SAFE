@@ -1970,7 +1970,11 @@ class StageATrainer:
 
                     # Add preserved answers back to inputs for accuracy computation
                     inputs["original_answers"] = original_answers
-                    
+
+                    # DEBUG: Log what audio_tokens we got
+                    audio_tokens_in_inputs = inputs.get("audio_tokens")
+                    print(f"[InputsDebug] {batch_label}: audio in batch: {batch.get('audio', None) is not None}, audio_tokens in inputs: type={type(audio_tokens_in_inputs)}, is None={audio_tokens_in_inputs is None}, shape={audio_tokens_in_inputs.shape if isinstance(audio_tokens_in_inputs, torch.Tensor) else 'N/A'}", flush=True)
+
                     # Debug multimodal input preparation
                     if "attention_mask" in inputs:
                         attn_shape = inputs["attention_mask"].shape
