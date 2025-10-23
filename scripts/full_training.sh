@@ -68,6 +68,9 @@ GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-1}
 DISABLE_BERTSCORE=${DISABLE_BERTSCORE:-0}  # Default: enabled (use Token F1 as fallback)
 PROGRESS_LOG_TIMEOUT=${PROGRESS_LOG_TIMEOUT:-600}
 VARIANT_ORDER=${VARIANT_ORDER:-"no_retention soft_retention fisher_retention nullspace_retention full_retention"}
+SAVE_AUDIO_CSV=${SAVE_AUDIO_CSV:-0}  # Enable CSV export for audio samples
+CSV_MIN_ACCURACY=${CSV_MIN_ACCURACY:-0.45}  # Minimum accuracy threshold to save CSV
+CSV_MAX_SAMPLES=${CSV_MAX_SAMPLES:-500}  # Maximum samples to save to CSV
 
 mkdir -p logs
 mkdir -p "$OUTPUT_ROOT"
@@ -117,6 +120,11 @@ if [[ "$DISABLE_BERTSCORE" != "0" ]]; then
   bertscore_flag=(--disable-bertscore)
 fi
 
+csv_flags=()
+if [[ "$SAVE_AUDIO_CSV" != "0" ]]; then
+  csv_flags+=(--save-audio-csv --csv-min-accuracy "${CSV_MIN_ACCURACY}" --csv-max-samples "${CSV_MAX_SAMPLES}")
+fi
+
 for variant in "${variants[@]}"; do
   echo "\n=== Running variant: ${variant} ==="
   echo "[SHELL] About to invoke Python script..."
@@ -161,7 +169,8 @@ for variant in "${variants[@]}"; do
     "${train_shuffle_flag[@]}" \
     "${val_shuffle_flag[@]}" \
     "${wavcaps_flags[@]}" \
-    "${bertscore_flag[@]}"
+    "${bertscore_flag[@]}" \
+    "${csv_flags[@]}"
 
   exit_code=$?
   echo "[SHELL] Python process exited with code: ${exit_code}"

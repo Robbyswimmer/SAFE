@@ -16,6 +16,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 import re
+import csv
 
 # Set CPU threads for predictable performance
 torch.set_num_threads(min(8, os.cpu_count() or 2))
@@ -330,7 +331,10 @@ class StageATrainer:
                 params=self.trainable_params,
                 config=ns_config
             )
-    
+
+        # Initialize CSV export tracking
+        self._last_audio_accuracy = 0.0
+
     def _get_image_token_id(self):
         """Get the image token ID for LLaVA models."""
         # Be defensive across processors/tokenizers
@@ -1578,6 +1582,8 @@ class StageATrainer:
         dataloader: Optional[DataLoader] = None,
         description: str = "Validation",
         split_batches: Optional[bool] = None,
+        save_audio_samples_csv: Optional[str] = None,
+        max_csv_samples: int = 500,
     ) -> Dict[str, float]:
         """
         Evaluate model on a specified dataset.
@@ -1587,6 +1593,8 @@ class StageATrainer:
             dataloader: Optional dataloader to evaluate. Defaults to validation loader
             description: Human readable description used in logs
             split_batches: Override whether to perform audio/VL split evaluation
+            save_audio_samples_csv: Optional path to save audio sample predictions to CSV
+            max_csv_samples: Maximum number of audio samples to save to CSV (default: 500)
 
         Returns:
             Dictionary with evaluation metrics
@@ -1631,6 +1639,9 @@ class StageATrainer:
         audio_bertscore = 0.0
         audio_caption_predictions: List[str] = []
         audio_caption_references: List[List[str]] = []
+
+        # CSV export collection for audio samples
+        csv_samples = [] if save_audio_samples_csv else None
 
         # Metrics for VL retention
         vl_safe_correct = 0
@@ -2214,6 +2225,26 @@ class StageATrainer:
                                     if clean_pred and ref_candidates:
                                         audio_caption_predictions.append(clean_pred)
                                         audio_caption_references.append(ref_candidates)
+
+                                # Collect CSV samples if enabled (up to max_csv_samples)
+                                if csv_samples is not None and len(csv_samples) < max_csv_samples:
+                                    # Get prompt/question for this sample
+                                    prompt = batch.get("questions", [""])[int(idx)] if int(idx) < len(batch.get("questions", [])) else ""
+                                    prediction = str(pred_text).strip() if pred_text else ""
+                                    # Get ground truth as string
+                                    if isinstance(ref_list, str):
+                                        ground_truth = ref_list
+                                    elif isinstance(ref_list, list) and len(ref_list) > 0:
+                                        ground_truth = ref_list[0]  # Use first reference
+                                    else:
+                                        ground_truth = str(ref_list) if ref_list else ""
+
+                                    csv_samples.append({
+                                        "prompt": prompt,
+                                        "model_output": prediction,
+                                        "ground_truth": ground_truth,
+                                        "accuracy": safe_results_batch[int(idx)].score
+                                    })
                             audio_total += len(audio_indices)
                             audio_samples += len(audio_indices)
 
@@ -2371,6 +2402,23 @@ class StageATrainer:
                 print(f"  - CAPTION_SAMPLES: {int(caption_metrics['audio_caption_samples'])}", flush=True)
 
         print(f"==============================\n", flush=True)
+
+        # Save audio samples to CSV if requested
+        if csv_samples is not None and len(csv_samples) > 0:
+            try:
+                # Create directory if it doesn't exist
+                csv_path = Path(save_audio_samples_csv)
+                csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+                with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                    fieldnames = ['prompt', 'model_output', 'ground_truth', 'accuracy']
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(csv_samples)
+
+                print(f"✓ Saved {len(csv_samples)} audio samples to {save_audio_samples_csv}", flush=True)
+            except Exception as e:
+                print(f"⚠️  Failed to save CSV: {e}", flush=True)
 
         return eval_metrics
 
@@ -3884,7 +3932,21 @@ class StageATrainer:
 
             # eval every n epochs
             if self.epoch % 10 == 0:
-                eval_metrics = self.evaluate(max_batches=max_eval_batches)
+                # Check if we should save CSV based on previous eval accuracy
+                csv_path = None
+                if (self.config.get("save_audio_csv", False) and
+                    hasattr(self, '_last_audio_accuracy') and
+                    self._last_audio_accuracy >= self.config.get("csv_min_accuracy", 0.45)):
+                    csv_path = f"{self.config['output_dir']}/audio_eval_epoch{self.epoch}.csv"
+
+                eval_metrics = self.evaluate(
+                    max_batches=max_eval_batches,
+                    save_audio_samples_csv=csv_path,
+                    max_csv_samples=self.config.get("csv_max_samples", 500)
+                )
+
+                # Store accuracy for next epoch check
+                self._last_audio_accuracy = eval_metrics.get('audio_accuracy', 0.0)
             
             # Calculate curriculum-specific metrics
             curriculum_metrics = {
@@ -4105,7 +4167,23 @@ class StageATrainer:
             # End of epoch evaluation
             print(f"\nEnd of Epoch {epoch+1}", flush=True)
             max_eval_batches = self.config.get("max_eval_batches", None)
-            epoch_metrics = self.evaluate(max_batches=max_eval_batches)
+
+            # Check if we should save CSV based on previous eval accuracy
+            csv_path = None
+            if (self.config.get("save_audio_csv", False) and
+                hasattr(self, '_last_audio_accuracy') and
+                self._last_audio_accuracy >= self.config.get("csv_min_accuracy", 0.45)):
+                csv_path = f"{self.config['output_dir']}/audio_eval_epoch{epoch+1}.csv"
+
+            epoch_metrics = self.evaluate(
+                max_batches=max_eval_batches,
+                save_audio_samples_csv=csv_path,
+                max_csv_samples=self.config.get("csv_max_samples", 500)
+            )
+
+            # Store accuracy for next epoch check
+            self._last_audio_accuracy = epoch_metrics.get('audio_accuracy', 0.0)
+
             print(f"Epoch {epoch+1} Results:", flush=True)
             print(f"  Retention Score: {epoch_metrics['retention_score']:.4f}", flush=True)
             print(f"  Audio Accuracy: {epoch_metrics['audio_accuracy']:.4f}", flush=True)

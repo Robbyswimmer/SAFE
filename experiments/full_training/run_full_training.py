@@ -81,6 +81,9 @@ class TrainingConfig:
     gradient_accumulation_steps: int
     disable_bertscore: bool
     progress_log_timeout: int
+    save_audio_csv: bool
+    csv_min_accuracy: float
+    csv_max_samples: int
 
 
 class CombinedAudioDataset(Dataset):
@@ -435,6 +438,9 @@ def run_experiment(args: argparse.Namespace) -> None:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         disable_bertscore=args.disable_bertscore,
         progress_log_timeout=args.progress_log_timeout,
+        save_audio_csv=args.save_audio_csv,
+        csv_min_accuracy=args.csv_min_accuracy,
+        csv_max_samples=args.csv_max_samples,
     )
 
     variant_config = configure_variant(args.variant, base_config)
@@ -516,6 +522,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug-logging", action="store_true", help="Enable verbose trainer logging")
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1, help="Gradient accumulation steps for effective larger batch size")
     parser.add_argument("--disable-bertscore", action="store_true", help="Disable BERTScore evaluation (use token F1 only)")
+    parser.add_argument("--save-audio-csv", action="store_true", help="Save audio evaluation samples to CSV")
+    parser.add_argument("--csv-min-accuracy", type=float, default=0.45, help="Minimum audio accuracy to trigger CSV export")
+    parser.add_argument("--csv-max-samples", type=int, default=500, help="Maximum audio samples to save to CSV")
 
     return parser.parse_args()
 
