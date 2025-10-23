@@ -1250,10 +1250,15 @@ class StageATrainer:
         # Forward pass through base VL model (for retention loss)
         if self.combined_loss.retention_enabled:
             with torch.no_grad():
-                sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
-                sanitized_labels = self.safe_model.sanitize_labels_for_base(
-                    inputs.get("labels")
-                )
+                # Only sanitize if batch has audio tokens - VL-only batches don't need sanitization
+                # and sanitization corrupts legitimate tokens like <image> (ID=32000 >= original_vocab_size)
+                has_audio = inputs.get("audio_tokens") is not None
+                if has_audio:
+                    sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
+                    sanitized_labels = self.safe_model.sanitize_labels_for_base(inputs.get("labels"))
+                else:
+                    sanitized_ids = inputs.get("input_ids")  # No sanitization for VL-only
+                    sanitized_labels = inputs.get("labels")
                 base_inputs = {
                     "attention_mask": inputs["attention_mask"],
                 }
@@ -3370,10 +3375,21 @@ class StageATrainer:
             # which causes BASE to improve over time. True baseline must use frozen base_vl.
             print(f"[GenDebug] BASE generation using raw base_vl (completely frozen)", flush=True)
 
-            # Sanitize input_ids to remove audio tokens
-            sanitized_ids = self._sanitize_input_ids_batch(input_ids)
-            if sanitized_ids is None:
+            # CRITICAL FIX: Only sanitize if audio_tokens present (to remove audio token IDs)
+            # VL-only batches have no audio tokens to remove, and sanitization would
+            # incorrectly replace image tokens (ID=32000) since they're >= original_vocab_size (32000)
+            has_audio_tokens = audio_tokens is not None and (isinstance(audio_tokens, torch.Tensor) and audio_tokens.numel() > 0)
+
+            if has_audio_tokens:
+                # Audio batch: sanitize to remove audio token placeholders
+                sanitized_ids = self._sanitize_input_ids_batch(input_ids)
+                if sanitized_ids is None:
+                    sanitized_ids = input_ids
+                print(f"[SanitizeDebug] Audio batch: Sanitized input_ids", flush=True)
+            else:
+                # VL-only batch: NO sanitization (preserve image tokens)
                 sanitized_ids = input_ids
+                print(f"[SanitizeDebug] VL batch: Skipped sanitization (preserving image tokens)", flush=True)
 
             generated = self.safe_model.base_vl.llm.generate(
                 input_ids=sanitized_ids.to(device),
