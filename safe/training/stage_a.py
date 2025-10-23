@@ -2257,13 +2257,27 @@ class StageATrainer:
                             audio_total += len(audio_indices)
                             audio_samples += len(audio_indices)
 
-                    # VL retention accuracy  
-                    vl_indices = torch.where(~has_audio)[0] if torch.any(~has_audio) else torch.arange(len(has_audio))
-                    if len(vl_indices) > 0:
-                        vl_safe_correct += sum(safe_results_batch[int(i)].score for i in vl_indices)
-                        vl_base_correct += sum(base_results_batch[int(i)].score for i in vl_indices)
-                        vl_total += len(vl_indices)
-                        vl_samples += len(vl_indices)
+                    # VL retention accuracy
+                    vl_indices_list: List[int] = []
+                    if has_audio is None:
+                        vl_indices_list = list(range(batch_size))
+                    elif isinstance(has_audio, torch.Tensor):
+                        if has_audio.numel() > 0:
+                            vl_mask = (~has_audio).detach()
+                            if vl_mask.is_cuda:
+                                vl_mask = vl_mask.to("cpu")
+                            vl_indices_list = vl_mask.nonzero(as_tuple=False).view(-1).tolist()
+                    else:
+                        try:
+                            vl_indices_list = [idx for idx, flag in enumerate(has_audio) if not bool(flag)]
+                        except Exception:
+                            vl_indices_list = list(range(batch_size))
+
+                    if vl_indices_list:
+                        vl_safe_correct += sum(safe_results_batch[idx].score for idx in vl_indices_list)
+                        vl_base_correct += sum(base_results_batch[idx].score for idx in vl_indices_list)
+                        vl_total += len(vl_indices_list)
+                        vl_samples += len(vl_indices_list)
                     
                     total_samples += batch_size
     
