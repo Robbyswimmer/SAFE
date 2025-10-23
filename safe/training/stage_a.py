@@ -3932,20 +3932,21 @@ class StageATrainer:
 
             # eval every n epochs
             if self.epoch % 10 == 0:
-                # Check if we should save CSV based on previous eval accuracy
-                csv_path = None
+                eval_metrics = self.evaluate(max_batches=max_eval_batches)
+
+                # Save CSV if accuracy exceeds threshold (check current epoch, not previous)
                 if (self.config.get("save_audio_csv", False) and
-                    hasattr(self, '_last_audio_accuracy') and
-                    self._last_audio_accuracy >= self.config.get("csv_min_accuracy", 0.45)):
+                    eval_metrics.get('audio_accuracy', 0.0) >= self.config.get("csv_min_accuracy", 0.45)):
                     csv_path = f"{self.config['output_dir']}/audio_eval_epoch{self.epoch}.csv"
+                    print(f"🔍 Audio accuracy {eval_metrics['audio_accuracy']:.3f} >= {self.config.get('csv_min_accuracy', 0.45):.3f}, saving CSV to {csv_path}", flush=True)
+                    # Re-run evaluation to collect CSV samples
+                    self.evaluate(
+                        max_batches=max_eval_batches,
+                        save_audio_samples_csv=csv_path,
+                        max_csv_samples=self.config.get("csv_max_samples", 500)
+                    )
 
-                eval_metrics = self.evaluate(
-                    max_batches=max_eval_batches,
-                    save_audio_samples_csv=csv_path,
-                    max_csv_samples=self.config.get("csv_max_samples", 500)
-                )
-
-                # Store accuracy for next epoch check
+                # Store accuracy for tracking
                 self._last_audio_accuracy = eval_metrics.get('audio_accuracy', 0.0)
             
             # Calculate curriculum-specific metrics
@@ -4168,18 +4169,19 @@ class StageATrainer:
             print(f"\nEnd of Epoch {epoch+1}", flush=True)
             max_eval_batches = self.config.get("max_eval_batches", None)
 
-            # Check if we should save CSV based on previous eval accuracy
-            csv_path = None
-            if (self.config.get("save_audio_csv", False) and
-                hasattr(self, '_last_audio_accuracy') and
-                self._last_audio_accuracy >= self.config.get("csv_min_accuracy", 0.45)):
-                csv_path = f"{self.config['output_dir']}/audio_eval_epoch{epoch+1}.csv"
+            epoch_metrics = self.evaluate(max_batches=max_eval_batches)
 
-            epoch_metrics = self.evaluate(
-                max_batches=max_eval_batches,
-                save_audio_samples_csv=csv_path,
-                max_csv_samples=self.config.get("csv_max_samples", 500)
-            )
+            # Save CSV if accuracy exceeds threshold (check current epoch, not previous)
+            if (self.config.get("save_audio_csv", False) and
+                epoch_metrics.get('audio_accuracy', 0.0) >= self.config.get("csv_min_accuracy", 0.45)):
+                csv_path = f"{self.config['output_dir']}/audio_eval_epoch{epoch+1}.csv"
+                print(f"🔍 Audio accuracy {epoch_metrics['audio_accuracy']:.3f} >= {self.config.get('csv_min_accuracy', 0.45):.3f}, saving CSV to {csv_path}", flush=True)
+                # Re-run evaluation to collect CSV samples
+                self.evaluate(
+                    max_batches=max_eval_batches,
+                    save_audio_samples_csv=csv_path,
+                    max_csv_samples=self.config.get("csv_max_samples", 500)
+                )
 
             # Store accuracy for next epoch check
             self._last_audio_accuracy = epoch_metrics.get('audio_accuracy', 0.0)

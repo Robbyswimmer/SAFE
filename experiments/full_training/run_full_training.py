@@ -266,6 +266,9 @@ def build_stage_a_config(cfg: TrainingConfig) -> Dict[str, object]:
         "gradient_accumulation_steps": cfg.gradient_accumulation_steps,
         "disable_bertscore": cfg.disable_bertscore,
         "output_dir": cfg.output_dir,
+        "save_audio_csv": cfg.save_audio_csv,
+        "csv_min_accuracy": cfg.csv_min_accuracy,
+        "csv_max_samples": cfg.csv_max_samples,
     }
 
 
