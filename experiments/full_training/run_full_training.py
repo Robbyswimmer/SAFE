@@ -364,6 +364,11 @@ def run_experiment(args: argparse.Namespace) -> None:
         num_workers=args.num_workers,
     )
 
+    # Log dataset sizes
+    train_size = len(train_dataset) if hasattr(train_dataset, '__len__') else 'unknown'
+    val_size = len(val_dataset) if hasattr(val_dataset, '__len__') else 'unknown'
+    print(f"📊 Dataset sizes - Train: {train_size} samples, Val: {val_size} samples", flush=True)
+
     model_configs = {
         "demo": DEMO_CONFIG,
         "full": FULL_CONFIG,
