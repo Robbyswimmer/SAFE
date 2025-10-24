@@ -40,7 +40,7 @@ def load_caption_map(json_path):
 
 def scan_audio_files(audio_dir, subset_name):
     """Scan audio directory and return list of (file_id, file_path) tuples."""
-    print(f"Scanning {audio_dir}...")
+    print(f"Scanning {audio_dir} for {subset_name}...")
 
     if not audio_dir.exists():
         print(f"  Warning: Directory not found: {audio_dir}")
@@ -50,13 +50,24 @@ def scan_audio_files(audio_dir, subset_name):
     for ext in ['.flac', '.wav', '.mp3', '.ogg']:
         audio_files.extend(audio_dir.rglob(f'*{ext}'))
 
-    # Extract ID from filename (e.g., "180913.flac" -> "180913")
+    # Filter by subset name in path
+    subset_keywords = {
+        'FreeSound': ['freesound'],
+        'BBC_Sound_Effects': ['bbc', 'sound_effects'],
+    }
+
+    keywords = subset_keywords.get(subset_name, [subset_name.lower()])
+
+    # Extract ID from filename and filter by path
     id_path_pairs = []
     for file_path in audio_files:
-        file_id = file_path.stem  # filename without extension
-        id_path_pairs.append((file_id, file_path))
+        path_lower = str(file_path).lower()
+        # Check if path contains subset keywords
+        if any(kw in path_lower for kw in keywords):
+            file_id = file_path.stem  # filename without extension
+            id_path_pairs.append((file_id, file_path))
 
-    print(f"  Found {len(id_path_pairs)} audio files")
+    print(f"  Found {len(id_path_pairs)} {subset_name} audio files")
     return id_path_pairs
 
 
