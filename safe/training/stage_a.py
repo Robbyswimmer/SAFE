@@ -56,7 +56,12 @@ class StageATrainer:
         self.safe_model = safe_model
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
-        
+
+        # Log dataset sizes
+        train_size = len(train_dataloader.dataset) if hasattr(train_dataloader.dataset, '__len__') else 'unknown'
+        val_size = len(val_dataloader.dataset) if hasattr(val_dataloader.dataset, '__len__') else 'unknown'
+        print(f"📊 Dataset sizes - Train: {train_size} samples, Val: {val_size} samples", flush=True)
+
         # Initialize curriculum learning
         if curriculum_config is not None:
             if isinstance(curriculum_config, CurriculumConfig):
