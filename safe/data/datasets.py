@@ -229,6 +229,22 @@ class _BaseQADataset(Dataset):
             return (waveform, target_sample_rate)
 
         except Exception as e:
+            if isinstance(e, TypeError) and "get_src_stream_info" in str(e):
+                # torchaudio <-> torio backend sometimes throws TypeError when probing malformed files
+                # Fall back to librosa (pure Python) so that a few bad headers don't drop the sample entirely
+                try:
+                    import librosa
+                    import torch
+
+                    target_sample_rate = 48_000
+                    audio_np, sample_rate = librosa.load(
+                        str(audio_file), sr=target_sample_rate, mono=True
+                    )
+                    waveform = torch.from_numpy(audio_np).float()
+                    return (waveform, target_sample_rate)
+                except Exception as inner_exc:
+                    e = inner_exc
+
             # Log first few load failures
             if not hasattr(self, '_load_error_count'):
                 self._load_error_count = 0

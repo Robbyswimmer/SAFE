@@ -540,6 +540,40 @@ class StageATrainer:
         if self.debug_logging:
             print(message, flush=True)
 
+    def _shorten_text_for_log(self, text: Any, limit: int = 80) -> str:
+        if text is None:
+            return ""
+
+        display = str(text).strip()
+        if not display:
+            return ""
+
+        display = display.replace("\n", " ")
+        display = re.sub(r"\s+", " ", display)
+
+        # Repair truncated assistant prefixes (common when prompts are trimmed)
+        display = display.replace("SSISTANT:", "ASSISTANT:")
+        display = display.replace("ISTANT:", "ASSISTANT:")
+        display = display.replace("ANT:", "ASSISTANT:")
+
+        # Collapse to the segment after the final ASSISTANT marker if present
+        lower_display = display.lower()
+        if "assistant:" in lower_display:
+            parts = re.split(r"assistant:\s*", display, flags=re.IGNORECASE)
+            # Keep a short context before the last ASSISTANT for reference when available
+            if len(parts) >= 2:
+                prefix = parts[-2].strip()
+                answer = parts[-1].strip()
+                if prefix:
+                    display = f"{prefix} → {answer}"
+                else:
+                    display = answer
+
+        if len(display) > limit:
+            display = display[: limit - 1].rstrip() + "…"
+
+        return display
+
     def update_curriculum_config(self):
         """Update training configuration based on current curriculum stage."""
         if not self.use_curriculum:
@@ -2852,12 +2886,23 @@ class StageATrainer:
 
                     if i < 2:  # Only log first 2 samples to avoid spam
                         # Removed: print(f"[AccuracyDebug] Sample {i}:", flush=True)
-                        print(f"  GT: '{gt_display}'", flush=True)
-                        print(f"  SAFE_full: '{safe_pred_full}'", flush=True)
-                        print(f"  SAFE_pred: '{safe_display}'", flush=True)
-                        print(f"  BASE_full: '{base_pred_full}'", flush=True)
-                        print(f"  BASE_pred: '{base_display}'", flush=True)
-                        print(f"  SAFE_acc: {safe_acc_value}, BASE_acc: {base_acc_value}", flush=True)
+                        gt_log = self._shorten_text_for_log(gt_display)
+                        safe_raw_log = self._shorten_text_for_log(safe_pred_full)
+                        base_raw_log = self._shorten_text_for_log(base_pred_full)
+
+                        print(f"  GT: {gt_log or '∅'}", flush=True)
+                        print(
+                            f"  SAFE: pred='{safe_display}' | raw='{safe_raw_log}'",
+                            flush=True,
+                        )
+                        print(
+                            f"  BASE: pred='{base_display}' | raw='{base_raw_log}'",
+                            flush=True,
+                        )
+                        print(
+                            f"  ACC: SAFE={safe_acc_value:.3f}, BASE={base_acc_value:.3f}",
+                            flush=True,
+                        )
 
                 except Exception as e:
                     # Handle decoding errors gracefully
