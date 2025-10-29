@@ -146,6 +146,20 @@ class CombinedAudioDataset(Dataset):
         raise IndexError(f"Invalid index: {idx}")
 
 
+class DatasetSubset(Dataset):
+    """Lightweight subset wrapper with deterministic ordering."""
+
+    def __init__(self, dataset: Dataset, indices: Sequence[int]):
+        self.dataset = dataset
+        self.indices = list(indices)
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, idx: int):
+        return self.dataset[self.indices[idx]]
+
+
 class AudioValidationMixDataset(Dataset):
     """Blend multiple audio validation datasets with controllable ratios."""
 
@@ -472,9 +486,22 @@ def run_experiment(args: argparse.Namespace) -> None:
                 print(f"Loaded WavCaps val: {len(wavcaps_val)} samples", flush=True)
             except Exception as exc:
                 print(f"Warning: Failed to load WavCaps val split ({exc}).", flush=True)
-                print("Falling back to AudioCaps-only validation.", flush=True)
-                wavcaps_val = None
-                wavcaps_share = 0.0
+                fallback_samples = int(args.val_wavcaps_sample_size)
+                if fallback_samples > 0 and wavcaps_train is not None:
+                    sample_rng = random.Random(args.seed + 97)
+                    total_wavcaps = len(wavcaps_train)
+                    sample_size = min(total_wavcaps, fallback_samples)
+                    sampled_indices = sample_rng.sample(range(total_wavcaps), sample_size)
+                    sampled_indices.sort()
+                    wavcaps_val = DatasetSubset(wavcaps_train, sampled_indices)
+                    print(
+                        f"Using {sample_size} WavCaps training samples for validation (seed={args.seed + 97}).",
+                        flush=True,
+                    )
+                else:
+                    print("Falling back to AudioCaps-only validation.", flush=True)
+                    wavcaps_val = None
+                    wavcaps_share = 0.0
 
     audio_val_limit = args.max_audio_val_samples if args.max_audio_val_samples > 0 else None
 
@@ -666,6 +693,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wavcaps-ratio", type=float, default=0.5, help="Ratio of WavCaps samples to use (0.0-1.0)")
     parser.add_argument("--val-wavcaps-share", type=float, default=0.5, help="Fraction of audio validation samples to draw from WavCaps (0.0-1.0)")
     parser.add_argument("--val-wavcaps-split", type=str, default="val", help="WavCaps split for validation when available")
+    parser.add_argument("--val-wavcaps-sample-size", type=int, default=2048, help="If validation split is missing, sample this many examples from WavCaps train (<=0 disables)")
     parser.add_argument("--val-vqa-split", type=str, default="val", help="VQA split for validation")
     parser.add_argument("--train-batch-size", type=int, default=32, help="Training batch size")
     parser.add_argument("--val-batch-size", type=int, default=64, help="Validation batch size")
