@@ -3279,6 +3279,22 @@ class StageATrainer:
         if "audio_cider" in metrics and "audio_spice" in metrics:
             metrics["audio_spider"] = (metrics["audio_cider"] + metrics["audio_spice"]) / 2.0
 
+        try:
+            spider_fl_metric = _metric("spider_fl")
+            spider_fl_result = spider_fl_metric.compute(predictions=preds_list, references=refs_list)
+            if spider_fl_result and "score" in spider_fl_result:
+                metrics["audio_spider_fl"] = float(spider_fl_result["score"])
+        except Exception as exc:
+            self._log_caption_metric_warning("SPIDEr-FL", exc)
+
+        try:
+            aces_metric = _metric("aces")
+            aces_result = aces_metric.compute(predictions=preds_list, references=refs_list)
+            if aces_result and "score" in aces_result:
+                metrics["audio_aces"] = float(aces_result["score"])
+        except Exception as exc:
+            self._log_caption_metric_warning("ACES", exc)
+
         metrics["audio_caption_samples"] = float(len(preds_list))
 
         return metrics
