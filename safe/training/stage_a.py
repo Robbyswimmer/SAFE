@@ -3177,8 +3177,21 @@ class StageATrainer:
 
         metrics: Dict[str, float] = {}
 
+        metric_cache = getattr(self, "_caption_metric_cache", None)
+        if metric_cache is None:
+            metric_cache = {}
+            self._caption_metric_cache = metric_cache
+
+        def _metric(name: str, **load_kwargs):
+            """Load caption metric once and reuse across evaluations."""
+
+            cache_key = (name, tuple(sorted(load_kwargs.items())))
+            if cache_key not in metric_cache:
+                metric_cache[cache_key] = evaluate.load(name, **load_kwargs)
+            return metric_cache[cache_key]
+
         try:
-            bleu_metric = evaluate.load("bleu")
+            bleu_metric = _metric("bleu")
             bleu_result = bleu_metric.compute(predictions=preds_list, references=refs_list)
             if bleu_result:
                 precisions = bleu_result.get("precisions", [])
@@ -3190,7 +3203,7 @@ class StageATrainer:
             self._log_caption_metric_warning("BLEU", exc)
 
         try:
-            meteor_metric = evaluate.load("meteor")
+            meteor_metric = _metric("meteor")
             meteor_result = meteor_metric.compute(predictions=preds_list, references=refs_list)
             if meteor_result and "meteor" in meteor_result:
                 metrics["audio_meteor"] = float(meteor_result["meteor"])
@@ -3198,15 +3211,25 @@ class StageATrainer:
             self._log_caption_metric_warning("METEOR", exc)
 
         try:
-            rouge_metric = evaluate.load("rouge")
-            rouge_result = rouge_metric.compute(predictions=preds_list, references=refs_list)
-            if rouge_result and "rougeL" in rouge_result:
-                metrics["audio_rouge_l"] = float(rouge_result["rougeL"])
+            rouge_metric = _metric("rouge")
+            rouge_scores = []
+            for pred, refs in zip(preds_list, refs_list):
+                best_score = 0.0
+                for ref in refs:
+                    try:
+                        rouge_result = rouge_metric.compute(predictions=[pred], references=[ref])
+                        best_score = max(best_score, float(rouge_result.get("rougeL", 0.0)))
+                    except Exception as rouge_exc:
+                        self._log_caption_metric_warning("ROUGE-L", rouge_exc)
+                        best_score = max(best_score, 0.0)
+                rouge_scores.append(best_score)
+            if rouge_scores:
+                metrics["audio_rouge_l"] = float(sum(rouge_scores) / len(rouge_scores))
         except Exception as exc:
             self._log_caption_metric_warning("ROUGE-L", exc)
 
         try:
-            cider_metric = evaluate.load("cider")
+            cider_metric = _metric("cider")
             cider_result = cider_metric.compute(predictions=preds_list, references=refs_list)
             if cider_result and "score" in cider_result:
                 metrics["audio_cider"] = float(cider_result["score"])
@@ -3214,7 +3237,7 @@ class StageATrainer:
             self._log_caption_metric_warning("CIDEr", exc)
 
         try:
-            spice_metric = evaluate.load("spice")
+            spice_metric = _metric("spice")
             spice_result = spice_metric.compute(predictions=preds_list, references=refs_list)
             if spice_result and "score" in spice_result:
                 metrics["audio_spice"] = float(spice_result["score"])

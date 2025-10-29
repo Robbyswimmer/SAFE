@@ -13,10 +13,11 @@ import argparse
 import json
 import os
 import random
+import math
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 print("[run_full_training.py] Importing numpy...", flush=True)
 sys.stdout.flush()
@@ -143,6 +144,120 @@ class CombinedAudioDataset(Dataset):
             if name == dataset_name:
                 return dataset[local_idx]
         raise IndexError(f"Invalid index: {idx}")
+
+
+class AudioValidationMixDataset(Dataset):
+    """Blend multiple audio validation datasets with controllable ratios."""
+
+    def __init__(
+        self,
+        sources: Sequence[Tuple[str, Dataset]],
+        *,
+        weights: Optional[Sequence[float]] = None,
+        max_samples: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 42,
+    ) -> None:
+        if not sources:
+            raise ValueError("At least one audio dataset must be provided")
+
+        self.sources: List[Tuple[str, Dataset]] = list(sources)
+
+        rng = random.Random(seed)
+        self._index_map: List[Tuple[int, int]] = []
+        self._source_counts: Dict[str, int] = {}
+
+        # Prepare per-source indices (optionally shuffled for diversity)
+        per_source_indices: List[List[int]] = []
+        for name, dataset in self.sources:
+            indices = list(range(len(dataset)))
+            if shuffle:
+                rng.shuffle(indices)
+            per_source_indices.append(indices)
+
+        total_available = sum(len(indices) for indices in per_source_indices)
+        max_samples = int(max_samples) if max_samples is not None and max_samples > 0 else None
+        total_samples = total_available if max_samples is None else min(max_samples, total_available)
+
+        raw_weights: List[float]
+        if weights is None:
+            raw_weights = [1.0] * len(self.sources)
+        else:
+            if len(weights) != len(self.sources):
+                raise ValueError("weights length must match number of sources")
+            raw_weights = [max(0.0, float(w)) for w in weights]
+
+        weight_sum = sum(raw_weights)
+        if weight_sum <= 0:
+            raw_weights = [1.0] * len(self.sources)
+            weight_sum = float(len(self.sources))
+
+        # Initial allocation using fractional targets
+        target_floats = [total_samples * (w / weight_sum) for w in raw_weights]
+        base_counts: List[int] = []
+        fractional_parts: List[Tuple[float, int]] = []
+        for idx, (target, indices) in enumerate(zip(target_floats, per_source_indices)):
+            capacity = len(indices)
+            base = min(int(math.floor(target)), capacity)
+            base_counts.append(base)
+            fractional_parts.append((target - base, idx))
+
+        assigned = sum(base_counts)
+        leftover = max(0, total_samples - assigned)
+
+        if leftover > 0:
+            # Prioritize sources with largest fractional remainder and available capacity
+            fractional_parts.sort(reverse=True)
+            for _, idx in fractional_parts:
+                if leftover <= 0:
+                    break
+                capacity = len(per_source_indices[idx]) - base_counts[idx]
+                if capacity <= 0:
+                    continue
+                base_counts[idx] += 1
+                leftover -= 1
+
+        if leftover > 0:
+            # Distribute any remaining samples to sources with spare capacity
+            for idx in range(len(per_source_indices)):
+                if leftover <= 0:
+                    break
+                capacity = len(per_source_indices[idx]) - base_counts[idx]
+                if capacity <= 0:
+                    continue
+                take = min(capacity, leftover)
+                base_counts[idx] += take
+                leftover -= take
+
+        # Build final index map and keep per-source counts for reporting
+        for source_idx, (name, _) in enumerate(self.sources):
+            count = base_counts[source_idx]
+            if count <= 0:
+                continue
+            selected = per_source_indices[source_idx][:count]
+            self._source_counts[name] = count
+            for item_idx in selected:
+                self._index_map.append((source_idx, item_idx))
+
+        if shuffle:
+            rng.shuffle(self._index_map)
+
+    def __len__(self) -> int:
+        return len(self._index_map)
+
+    def __getitem__(self, idx: int):
+        source_idx, local_idx = self._index_map[idx]
+        name, dataset = self.sources[source_idx]
+        sample = dataset[local_idx]
+        if isinstance(sample, dict):
+            sample = dict(sample)
+            sample.setdefault("dataset_name", name)
+        return sample
+
+    def get_source_counts(self) -> Dict[str, int]:
+        """Return number of samples drawn from each source."""
+
+        return dict(self._source_counts)
 
 
 class CombinedValidationDataset(Dataset):
@@ -338,14 +453,65 @@ def run_experiment(args: argparse.Namespace) -> None:
     else:
         train_dataset = audiocaps_train
 
-    # Validation datasets (only AudioCaps for audio validation)
-    val_audio_dataset = AudioCapsDataset(data_path=data_root, split=args.val_audio_split)
+    # Validation datasets (blend AudioCaps with WavCaps when available)
     val_vl_dataset = VQADataset(data_path=data_root, split=args.val_vqa_split)
 
+    val_audio_sources: List[Tuple[str, Dataset]] = []
+    val_audio_weights: List[float] = []
+
+    audiocaps_val = AudioCapsDataset(data_path=data_root, split=args.val_audio_split)
+    print(f"Loaded AudioCaps val: {len(audiocaps_val)} samples", flush=True)
+
+    wavcaps_val = None
+    wavcaps_share = 0.0
+    if args.use_wavcaps:
+        wavcaps_share = max(0.0, min(1.0, float(args.val_wavcaps_share)))
+        if wavcaps_share > 0:
+            try:
+                wavcaps_val = WavCapsDataset(data_path=data_root, split=args.val_wavcaps_split)
+                print(f"Loaded WavCaps val: {len(wavcaps_val)} samples", flush=True)
+            except Exception as exc:
+                print(f"Warning: Failed to load WavCaps val split ({exc}).", flush=True)
+                print("Falling back to AudioCaps-only validation.", flush=True)
+                wavcaps_val = None
+                wavcaps_share = 0.0
+
+    audio_val_limit = args.max_audio_val_samples if args.max_audio_val_samples > 0 else None
+
+    audio_share = 1.0
+    if wavcaps_val is not None:
+        audio_share = 1.0 - wavcaps_share
+
+    if audio_share > 0:
+        val_audio_sources.append(("audiocaps", audiocaps_val))
+        val_audio_weights.append(audio_share)
+
+    if wavcaps_val is not None and wavcaps_share > 0:
+        val_audio_sources.append(("wavcaps", wavcaps_val))
+        val_audio_weights.append(wavcaps_share)
+
+    if not val_audio_sources:
+        # Fallback: ensure at least AudioCaps is present
+        val_audio_sources.append(("audiocaps", audiocaps_val))
+        val_audio_weights.append(1.0)
+        wavcaps_share = 0.0
+
+    audio_mix_dataset = AudioValidationMixDataset(
+        val_audio_sources,
+        weights=val_audio_weights,
+        max_samples=audio_val_limit,
+        shuffle=not args.disable_val_shuffle,
+        seed=args.seed,
+    )
+
+    mix_counts = audio_mix_dataset.get_source_counts()
+    mix_summary = ", ".join(f"{name}: {count}" for name, count in mix_counts.items())
+    print(f"Validation audio mix → {mix_summary}", flush=True)
+
     val_dataset = CombinedValidationDataset(
-        val_audio_dataset,
+        audio_mix_dataset,
         val_vl_dataset,
-        max_audio_samples=args.max_audio_val_samples if args.max_audio_val_samples > 0 else None,
+        max_audio_samples=None,
         max_vl_samples=args.max_vqa_val_samples if args.max_vqa_val_samples > 0 else None,
         shuffle=not args.disable_val_shuffle,
         seed=args.seed,
@@ -498,6 +664,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-audio-split", type=str, default="val", help="AudioCaps split for validation")
     parser.add_argument("--use-wavcaps", action="store_true", help="Include WavCaps dataset for training")
     parser.add_argument("--wavcaps-ratio", type=float, default=0.5, help="Ratio of WavCaps samples to use (0.0-1.0)")
+    parser.add_argument("--val-wavcaps-share", type=float, default=0.5, help="Fraction of audio validation samples to draw from WavCaps (0.0-1.0)")
+    parser.add_argument("--val-wavcaps-split", type=str, default="val", help="WavCaps split for validation when available")
     parser.add_argument("--val-vqa-split", type=str, default="val", help="VQA split for validation")
     parser.add_argument("--train-batch-size", type=int, default=32, help="Training batch size")
     parser.add_argument("--val-batch-size", type=int, default=64, help="Validation batch size")
