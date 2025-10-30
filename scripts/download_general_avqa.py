@@ -400,7 +400,9 @@ class GeneralAVQADownloader:
 
                 for item in data:
                     # Extract video ID from various possible fields
-                    video_id = item.get("video_id") or item.get("video") or item.get("id")
+                    # Use "video_name" which contains VGG-Sound ID like "-HG3Omg_89c_000030"
+                    # NOT "video_id" which is just an integer index
+                    video_id = item.get("video_name") or item.get("video") or item.get("id")
 
                     if video_id:
                         # VGG-Sound format: video IDs are typically like "---1_cCGK4M_000001"
