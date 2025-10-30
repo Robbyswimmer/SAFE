@@ -66,7 +66,8 @@ class GeneralAVQADownloader:
         sleep_between_downloads: float = 3.0,
         video_format: str = "mp4",
         audio_format: str = "wav",
-        quality: str = "360"  # 360p or 480p
+        quality: str = "360",  # 360p or 480p
+        max_videos: Optional[int] = None
     ):
         """
         Initialize General AVQA downloader.
@@ -80,6 +81,7 @@ class GeneralAVQADownloader:
             video_format: Video format to download
             audio_format: Audio format to extract
             quality: Video quality (360 or 480)
+            max_videos: Maximum number of videos to download (None for all)
         """
         self.data_dir = Path(data_dir)
         self.workers = workers
@@ -89,6 +91,7 @@ class GeneralAVQADownloader:
         self.video_format = video_format
         self.audio_format = audio_format
         self.quality = quality
+        self.max_videos = max_videos
 
         # Create directories
         self.videos_dir = self.data_dir / "videos"
@@ -580,7 +583,17 @@ class GeneralAVQADownloader:
             if vid not in self.completed_videos
         ]
 
-        logger.info(f"Already completed: {len(video_url_map) - len(remaining_items)}")
+        # Limit to max_videos if specified
+        if self.max_videos is not None:
+            total_to_download = self.max_videos - len(self.completed_videos)
+            if total_to_download > 0:
+                remaining_items = remaining_items[:total_to_download]
+                logger.info(f"Limiting download to {self.max_videos} total videos")
+            else:
+                logger.info(f"Already reached max_videos limit ({self.max_videos})")
+                return
+
+        logger.info(f"Already completed: {len(self.completed_videos)}")
         logger.info(f"Remaining: {len(remaining_items)}")
 
         if not remaining_items:
@@ -693,6 +706,8 @@ def main():
     parser.add_argument("--quality", type=str, default="360",
                         choices=["360", "480", "720"],
                         help="Video quality (default: 360)")
+    parser.add_argument("--max-videos", type=int, default=None,
+                        help="Maximum number of videos to download (default: all)")
 
     args = parser.parse_args()
 
@@ -702,7 +717,8 @@ def main():
         rate_limit=args.rate_limit,
         retry_attempts=args.retry_attempts,
         sleep_between_downloads=args.sleep,
-        quality=args.quality
+        quality=args.quality,
+        max_videos=args.max_videos
     )
 
     try:
