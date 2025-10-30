@@ -174,36 +174,35 @@ class GeneralAVQADownloader:
         logger.info("DOWNLOADING GENERAL AVQA METADATA")
         logger.info("="*60)
 
-        metadata_files = {
-            "train_qa.json": f"{self.GITHUB_BASE}/data/train_qa.json",
-            "val_qa.json": f"{self.GITHUB_BASE}/data/val_qa.json"
-        }
+        required_files = ["train_qa.json", "val_qa.json"]
 
-        success = True
-        for filename, url in metadata_files.items():
-            output_path = self.metadata_dir / filename
+        # Check if files already exist
+        all_exist = all((self.metadata_dir / f).exists() for f in required_files)
 
-            if output_path.exists():
-                logger.info(f"✓ Already exists: {filename}")
-                continue
+        if all_exist:
+            logger.info("✓ All metadata files already exist!")
+            return True
 
-            logger.info(f"Downloading {filename}...")
+        # Files need to be downloaded manually from OneDrive
+        logger.error("=" * 60)
+        logger.error("METADATA FILES NOT FOUND")
+        logger.error("=" * 60)
+        logger.error("The AVQA metadata files are not available via direct download.")
+        logger.error("You need to download them manually from OneDrive:")
+        logger.error("")
+        logger.error("1. Visit: https://mn.cs.tsinghua.edu.cn/avqa/")
+        logger.error("2. Click the OneDrive link")
+        logger.error("3. Download: train_qa.json and val_qa.json")
+        logger.error(f"4. Place them in: {self.metadata_dir}")
+        logger.error("")
+        logger.error("Required files:")
+        for filename in required_files:
+            file_path = self.metadata_dir / filename
+            status = "✓ EXISTS" if file_path.exists() else "✗ MISSING"
+            logger.error(f"  {status}: {filename}")
+        logger.error("=" * 60)
 
-            try:
-                response = requests.get(url, timeout=60)
-                response.raise_for_status()
-
-                # Save JSON
-                with open(output_path, 'w') as f:
-                    json.dump(response.json(), f, indent=2)
-
-                logger.info(f"✓ Saved {filename}: {len(response.json())} samples")
-
-            except Exception as e:
-                logger.error(f"✗ Failed to download {filename}: {e}")
-                success = False
-
-        return success
+        return False
 
     def download_vggsound_csv(self) -> Optional[Path]:
         """Download VGG-Sound CSV with video URLs."""
