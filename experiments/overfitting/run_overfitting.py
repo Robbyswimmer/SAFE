@@ -66,6 +66,7 @@ class ExperimentConfig:
     train_accuracy_warmup: int
     train_eval_batches: int
     generation_max_new_tokens: int
+    audio_generation_max_new_tokens: int
 
 
 def set_random_seeds(seed: int) -> None:
@@ -416,6 +417,7 @@ def build_stage_a_config(config: ExperimentConfig) -> Dict[str, float | int | bo
         "train_accuracy_interval": config.train_accuracy_interval,
         "train_accuracy_warmup": config.train_accuracy_warmup,
         "generation_max_new_tokens": config.generation_max_new_tokens,
+        "audio_generation_max_new_tokens": config.audio_generation_max_new_tokens,
         "output_dir": config.output_dir,
     }
 
@@ -614,6 +616,7 @@ def run_experiment(args: argparse.Namespace) -> None:
         train_accuracy_warmup=max(0, args.train_accuracy_warmup),
         train_eval_batches=args.train_eval_batches,
         generation_max_new_tokens=max(1, args.generation_max_new_tokens),
+        audio_generation_max_new_tokens=max(1, args.audio_generation_max_new_tokens),
     )
 
     print(f"[DEBUG] Configuring variant: {args.variant}", flush=True)
@@ -780,6 +783,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=12,
         help="Max new tokens to use during accuracy generation sweeps",
+    )
+    parser.add_argument(
+        "--audio-generation-max-new-tokens",
+        type=int,
+        default=20,
+        help="Max new tokens for audio-only caption sweeps",
     )
     parser.add_argument(
         "--debug-logging",

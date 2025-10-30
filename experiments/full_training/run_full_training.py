@@ -79,6 +79,7 @@ class TrainingConfig:
     train_accuracy_warmup: int
     train_eval_batches: int
     generation_max_new_tokens: int
+    audio_generation_max_new_tokens: int
     gradient_accumulation_steps: int
     disable_bertscore: bool
     progress_log_timeout: int
@@ -392,6 +393,7 @@ def build_stage_a_config(cfg: TrainingConfig) -> Dict[str, object]:
         "train_accuracy_interval": cfg.train_accuracy_interval,
         "train_accuracy_warmup": cfg.train_accuracy_warmup,
         "generation_max_new_tokens": cfg.generation_max_new_tokens,
+        "audio_generation_max_new_tokens": cfg.audio_generation_max_new_tokens,
         "gradient_accumulation_steps": cfg.gradient_accumulation_steps,
         "disable_bertscore": cfg.disable_bertscore,
         "output_dir": cfg.output_dir,
@@ -636,6 +638,7 @@ def run_experiment(args: argparse.Namespace) -> None:
         train_accuracy_warmup=args.train_accuracy_warmup,
         train_eval_batches=args.train_eval_batches,
         generation_max_new_tokens=args.generation_max_new_tokens,
+        audio_generation_max_new_tokens=args.audio_generation_max_new_tokens,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         disable_bertscore=args.disable_bertscore,
         progress_log_timeout=args.progress_log_timeout,
@@ -717,6 +720,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-accuracy-warmup", type=int, default=5, help="Warmup epochs before accuracy logging")
     parser.add_argument("--train-eval-batches", type=int, default=0, help="Evaluate training split after fit")
     parser.add_argument("--generation-max-new-tokens", type=int, default=32, help="Generation token budget")
+    parser.add_argument("--audio-generation-max-new-tokens", type=int, default=20, help="Generation token budget for audio-only tasks")
     parser.add_argument("--output-root", type=str, default="experiments/full_training/runs", help="Run output directory")
     parser.add_argument("--model-config", choices=["demo", "full", "multimodal"], default="full", help="Model config preset")
     parser.add_argument("--disable-train-shuffle", action="store_true", help="Disable shuffling for training dataloader")

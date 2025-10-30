@@ -50,8 +50,9 @@ class CrossAttentionBlock(nn.Module):
         # Attention dropout
         self.attention_dropout = nn.Dropout(attention_dropout)
         
-        # Residual scaling for gentle fusion start
-        self.residual_scale = nn.Parameter(torch.tensor(0.05), requires_grad=False)
+        # Residual scaling for gentle fusion start (trainable with clamp)
+        self.residual_scale = nn.Parameter(torch.tensor(0.05), requires_grad=True)
+        self.register_buffer("residual_scale_max", torch.tensor(0.3), persistent=False)
         
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         """Transpose tensor for multi-head attention computation."""
@@ -188,7 +189,14 @@ class CrossAttentionBlock(nn.Module):
         delta = self.output_dropout(delta)
         delta = delta.to(input_dtype)
 
-        delta = self.residual_scale * delta
+        # Allow residual scale to grow but keep it bounded for stability
+        residual_scale = torch.clamp(self.residual_scale, 0.0, float(self.residual_scale_max))
+        if getattr(self, "debug_logging", False) and torch.rand(1).item() < 0.01:
+            print(
+                f"[ResidualScale] scale={float(residual_scale.item()):.4f}",
+                flush=True,
+            )
+        delta = residual_scale * delta
 
         if self.layer_norm is not None:
             delta = self.layer_norm(delta)

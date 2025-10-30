@@ -125,6 +125,7 @@ class StageATrainer:
             "train_accuracy_interval": 0,
             "train_accuracy_warmup": 5,
             "generation_max_new_tokens": 12,
+            "audio_generation_max_new_tokens": 20,
             "vl_max_new_tokens": 4,  # Encourage one-word/short answers for VQA
             "gradient_accumulation_steps": 1,
             "audio_bertscore_threshold": 0.7,
@@ -3422,8 +3423,12 @@ class StageATrainer:
         # AudioCaps captions are longer (e.g., "A dog barks while birds chirp in the background")
         # VQA answers are short (e.g., "blue", "2", "yes")
         if has_audio and not pixel_present:
-            # Pure audio task (AudioCaps) - allow longer generation
-            max_new_tokens = configured_max_new_tokens
+            # Pure audio task (AudioCaps) - allow longer generation budget
+            audio_max_new_tokens = int(
+                self.config.get("audio_generation_max_new_tokens", configured_max_new_tokens) or configured_max_new_tokens
+            )
+            audio_max_new_tokens = max(1, audio_max_new_tokens)
+            max_new_tokens = audio_max_new_tokens
         elif pixel_present and not has_audio:
             # Pure VL task (VQA) - restrict to short answers
             vl_max = int(self.config.get("vl_max_new_tokens", 4) or 4)
