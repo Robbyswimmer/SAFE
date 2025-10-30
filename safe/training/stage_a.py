@@ -25,7 +25,7 @@ from ..models.safe_model import SAFEModel
 from ..models.base_vl import BaseVLModel
 from ..data.datasets import create_safe_dataloader
 from ..data.curriculum import CurriculumManager, CurriculumConfig, ProgressionStatus
-from .losses import RetentionLoss, AudioTaskLoss, CombinedStageLoss
+from .losses import AudioTaskLoss
 
 
 @dataclass
@@ -85,16 +85,11 @@ class StageATrainer:
             "warmup_ratio": 0.1,
             "max_grad_norm": 1.0,
             "audio_loss_weight": 1.0,
-            "retention_loss_weight": 1.0,
-            "distillation_weight": 1.0,
-            "distillation_temperature": 3.0,
             "save_steps": 5000,
             "eval_steps": 1000,
             "logging_steps": 100,
             "progress_log_timeout": 600,
             "output_dir": "./checkpoints/stage_a",
-            "early_stopping_patience": 3,
-            "retention_tolerance": 0.005,  # 0.5% tolerance for VL degradation
             "validation_frequency": 5 if self.use_curriculum else 1000,  # More frequent validation for curriculum
             "sample_log_interval": 500,
             "sample_log_limit": 5,
@@ -187,8 +182,6 @@ class StageATrainer:
         # Training state
         self.global_step = 0
         self.epoch = 0
-        self.best_retention_score = 0.0
-        self.patience_counter = 0
         self.sample_log_interval = max(1, int(self.config.get("sample_log_interval", 500)))
         self.sample_log_limit = int(self.config.get("sample_log_limit", 5))
         self.sample_log_examples = max(1, int(self.config.get("sample_log_examples", 3)))
@@ -286,9 +279,6 @@ class StageATrainer:
         self.training_stats = {
             "total_loss": [],
             "audio_task_loss": [],
-            "retention_loss": [],
-            "distillation_loss": [],
-            "vl_retention_score": [],
             "audio_gain_score": []
         }
 
@@ -454,40 +444,15 @@ class StageATrainer:
         else:
             loss_weights = {}
 
-        dist_weight = loss_weights.get("distillation_loss", self.config.get("distillation_weight", 1.0))
-
-        self.retention_loss = RetentionLoss(
-            distillation_weight=dist_weight,
-            temperature=self.config["distillation_temperature"]
-        )
-
         self.audio_task_loss = AudioTaskLoss(
             task_type="qa",
             label_smoothing=float(self.config.get("audio_label_smoothing", 0.1)),
             debug=False,
         )
 
-        # Compute actual weights being used
-        audio_weight_used = loss_weights.get("audio_task_loss", self.config["audio_loss_weight"])
-        retention_weight_used = loss_weights.get("retention_loss", self.config["retention_loss_weight"])
+        self.audio_loss_weight = float(loss_weights.get("audio_task_loss", self.config.get("audio_loss_weight", 1.0)))
 
-        self.combined_loss = CombinedStageLoss(
-            retention_loss=self.retention_loss,
-            audio_task_loss=self.audio_task_loss,
-            audio_weight=audio_weight_used,
-            retention_weight=retention_weight_used,
-            debug=False,
-        )
-
-        # ALWAYS log loss weights for visibility (critical for debugging)
-        print(
-            f"[LossSetup] ✓ audio_weight={audio_weight_used}, retention_weight={retention_weight_used}, distillation_weight={dist_weight}",
-            flush=True,
-        )
-        print(
-            f"[LossSetup] ✓ retention_enabled={self.combined_loss.retention_enabled}",
-            flush=True,
-        )
+        print(f"[LossSetup] ✓ audio_weight={self.audio_loss_weight}", flush=True)
 
     def _shorten_text_for_log(self, text: Any, limit: int = 80) -> str:
         if text is None:
@@ -848,89 +813,40 @@ class StageATrainer:
         safe_outputs = self.safe_model(**inputs)
 
         safe_logits = safe_outputs.get("logits") if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits", None)
-        base_outputs = None
 
-        # Forward pass through base VL model (for retention loss)
-        if self.combined_loss.retention_enabled:
-            with torch.no_grad():
-                # Only sanitize if batch has audio tokens - VL-only batches don't need sanitization
-                # and sanitization corrupts legitimate tokens like <image> (ID=32000 >= original_vocab_size)
-                has_audio = inputs.get("audio_tokens") is not None
-                if has_audio:
-                    sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
-                    sanitized_labels = self.safe_model.sanitize_labels_for_base(inputs.get("labels"))
-                else:
-                    sanitized_ids = inputs.get("input_ids")  # No sanitization for VL-only
-                    sanitized_labels = inputs.get("labels")
-                base_inputs = {
-                    "attention_mask": inputs["attention_mask"],
-                }
-                if sanitized_ids is not None:
-                    base_inputs["input_ids"] = sanitized_ids
-                elif "inputs_embeds" in inputs:
-                    base_inputs["inputs_embeds"] = inputs["inputs_embeds"]
-                if sanitized_labels is not None:
-                    base_inputs["labels"] = sanitized_labels
-                if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
-                    base_inputs["pixel_values"] = inputs["pixel_values"]
+        # Audio loss only (no retention)
+        if safe_logits is not None and torch.any(has_audio):
+            audio_indices = torch.where(has_audio)[0]
+            labels = inputs.get("labels")
+            if labels is not None:
+                max_safe = safe_logits.size(0)
+                max_labels = labels.size(0)
+                max_bound = min(max_safe, max_labels)
+                audio_indices = audio_indices[audio_indices < max_bound]
+            else:
+                audio_indices = audio_indices[:0]
 
-                if self.safe_model.base_vl.model_type == "llava":
-                    base_outputs = self._forward_llava_teacher(base_inputs)
-                elif self.safe_model.base_vl.model_type == "blip2":
-                    # BLIP-2: use directly without splitting
-                    base_outputs = self.safe_model.base_vl(**base_inputs)
-                else:
-                    # For custom models, use vision features
-                    base_inputs["vision_features"] = inputs.get("vision_features")
-                    base_outputs = self.safe_model.base_vl(**base_inputs)
-
-                teacher_logits = base_outputs.get("logits") if isinstance(base_outputs, dict) else getattr(base_outputs, "logits", None)
-                if safe_logits is not None and teacher_logits is not None:
-                    trim_len = min(safe_logits.size(1), teacher_logits.size(1))
-                    if safe_logits.size(1) != trim_len:
-                        trimmed_student = safe_logits[:, -trim_len:, :]
-                        if isinstance(safe_outputs, dict):
-                            safe_outputs["logits"] = trimmed_student
-                        else:
-                            safe_outputs.logits = trimmed_student
-                        safe_logits = trimmed_student
-                        if inputs.get("labels") is not None and inputs["labels"].size(1) != trim_len:
-                            inputs["labels"] = inputs["labels"][:, -trim_len:]
-                        if inputs.get("attention_mask") is not None and inputs["attention_mask"].size(1) != trim_len:
-                            inputs["attention_mask"] = inputs["attention_mask"][:, -trim_len:]
-                    if teacher_logits.size(1) != trim_len:
-                        trimmed_teacher = teacher_logits[:, -trim_len:, :]
-                        if isinstance(base_outputs, dict):
-                            base_outputs["logits"] = trimmed_teacher
-                        else:
-                            base_outputs.logits = trimmed_teacher
-                        teacher_logits = trimmed_teacher
-
-                if safe_logits is not None and teacher_logits is not None and teacher_logits.size(0) != safe_logits.size(0):
-                    if teacher_logits.size(0) == 1:
-                        if not getattr(self, "_teacher_broadcast_warned", False):
-                            print(
-                                f"[Warn] Teacher batch={teacher_logits.size(0)} but student batch={safe_logits.size(0)}; expanding teacher logits",
-                                flush=True
-                            )
-                            self._teacher_broadcast_warned = True
-                        teacher_logits = teacher_logits.expand_as(safe_logits)
-                        if isinstance(base_outputs, dict):
-                            base_outputs["logits"] = teacher_logits
-                    else:
-                        raise RuntimeError(
-                            f"Teacher/student batch mismatch: {teacher_logits.size(0)} vs {safe_logits.size(0)}"
-                        )
+            if audio_indices.numel() > 0 and labels is not None:
+                audio_logits = safe_logits[audio_indices]
+                audio_labels = labels[audio_indices]
+                audio_mask = inputs.get("attention_mask", None)
+                if audio_mask is not None:
+                    audio_mask = audio_mask[audio_indices]
+                audio_loss = self.audio_task_loss(audio_logits, audio_labels, audio_mask)
+            else:
+                audio_loss = safe_logits.sum() * 0.0
         else:
-            base_outputs = {"logits": safe_logits.detach() if safe_logits is not None else None}
+            if safe_logits is not None:
+                audio_loss = safe_logits.sum() * 0.0
+            else:
+                audio_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
-        # Compute combined loss
-        loss_dict = self.combined_loss(
-            safe_outputs=safe_outputs,
-            base_outputs=base_outputs,
-            batch=inputs,
-            has_audio=has_audio
-        )
+        total_loss = self.audio_loss_weight * audio_loss
+
+        loss_dict = {
+            "audio_task_loss": audio_loss,
+            "total_loss": total_loss,
+        }
 
         log_metrics: Dict[str, float] = {}
         for key, value in loss_dict.items():
@@ -1070,8 +986,6 @@ class StageATrainer:
         eval_losses = {
             "total_loss": 0.0,
             "audio_task_loss": 0.0,
-            "retention_loss": 0.0,
-            "distillation_loss": 0.0
         }
         
         device = next(self.safe_model.parameters()).device
@@ -1373,108 +1287,41 @@ class StageATrainer:
                     
                     # SAFE model forward pass
                     safe_outputs = self.safe_model(**inputs)
-                    
-                    # Base VL model forward pass (skip when retention disabled)
-                    if self.combined_loss.retention_enabled:
-                        # Only sanitize if batch has audio tokens - VL-only batches don't need sanitization
-                        # and sanitization corrupts legitimate tokens like <image>
-                        has_audio = inputs.get("audio_tokens") is not None
-                        if has_audio:
-                            sanitized_ids = self._sanitize_input_ids_batch(inputs.get("input_ids"))
-                            sanitized_labels = self.safe_model.sanitize_labels_for_base(inputs.get("labels"))
-                        else:
-                            sanitized_ids = inputs.get("input_ids")  # No sanitization for VL-only
-                            sanitized_labels = inputs.get("labels")
 
-                        base_inputs = {
-                            "attention_mask": inputs["attention_mask"],
-                        }
-                        if sanitized_ids is not None:
-                            base_inputs["input_ids"] = sanitized_ids
-                        elif "inputs_embeds" in inputs:
-                            base_inputs["inputs_embeds"] = inputs["inputs_embeds"]
-                        if sanitized_labels is not None:
-                            base_inputs["labels"] = sanitized_labels
-                        if self.safe_model.base_vl.model_type in ["llava", "blip2"] and "pixel_values" in inputs:
-                            base_inputs["pixel_values"] = inputs["pixel_values"]
-    
-                        if self.safe_model.base_vl.model_type == "llava":
-                            base_outputs = self._forward_llava_teacher(base_inputs)
-                        elif self.safe_model.base_vl.model_type == "blip2":
-                            # BLIP-2: use directly without splitting
-                            base_outputs = self.safe_model.base_vl(**base_inputs)
+                    safe_logits = safe_outputs.get("logits") if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits", None)
+
+                    if safe_logits is not None and torch.any(has_audio):
+                        audio_indices = torch.where(has_audio)[0]
+                        labels = inputs.get("labels")
+                        if labels is not None:
+                            max_safe = safe_logits.size(0)
+                            max_labels = labels.size(0)
+                            max_bound = min(max_safe, max_labels)
+                            audio_indices = audio_indices[audio_indices < max_bound]
                         else:
-                            # For custom models, use vision features
-                            base_inputs["vision_features"] = inputs.get("vision_features")
-                            base_outputs = self.safe_model.base_vl(**base_inputs)
+                            audio_indices = audio_indices[:0]
+
+                        if audio_indices.numel() > 0 and labels is not None:
+                            audio_logits = safe_logits[audio_indices]
+                            audio_labels = labels[audio_indices]
+                            audio_mask = inputs.get("attention_mask", None)
+                            if audio_mask is not None:
+                                audio_mask = audio_mask[audio_indices]
+                            batch_audio_loss = self.audio_task_loss(audio_logits, audio_labels, audio_mask)
+                        else:
+                            batch_audio_loss = safe_logits.sum() * 0.0
                     else:
-                        base_inputs = {}
-                        if isinstance(safe_outputs, dict):
-                            safe_logits = safe_outputs.get("logits")
+                        if safe_logits is not None:
+                            batch_audio_loss = safe_logits.sum() * 0.0
                         else:
-                            safe_logits = getattr(safe_outputs, "logits", None)
-                        base_outputs = {
-                            "logits": safe_logits.detach() if safe_logits is not None else None
-                        }
+                            batch_audio_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
-                    student_logits = safe_outputs.get("logits") if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits", None)
-                    teacher_logits = base_outputs.get("logits") if isinstance(base_outputs, dict) else getattr(base_outputs, "logits", None)
-                    if student_logits is not None and teacher_logits is not None:
-                        trim_len = min(student_logits.size(1), teacher_logits.size(1))
-                        if student_logits.size(1) != trim_len:
-                            trimmed_student = student_logits[:, -trim_len:, :]
-                            if isinstance(safe_outputs, dict):
-                                safe_outputs["logits"] = trimmed_student
-                            else:
-                                safe_outputs.logits = trimmed_student
-                            student_logits = trimmed_student
-                            if inputs.get("labels") is not None and inputs["labels"].size(1) != trim_len:
-                                inputs["labels"] = inputs["labels"][:, -trim_len:]
-                            if inputs.get("attention_mask") is not None and inputs["attention_mask"].size(1) != trim_len:
-                                inputs["attention_mask"] = inputs["attention_mask"][:, -trim_len:]
-                        if teacher_logits.size(1) != trim_len:
-                            trimmed_teacher = teacher_logits[:, -trim_len:, :]
-                            if isinstance(base_outputs, dict):
-                                base_outputs["logits"] = trimmed_teacher
-                            else:
-                                base_outputs.logits = trimmed_teacher
-                            teacher_logits = trimmed_teacher
-    
-                    if student_logits is not None and teacher_logits is not None and teacher_logits.size(0) != student_logits.size(0):
-                        if teacher_logits.size(0) == 1:
-                            if not getattr(self, "_teacher_broadcast_warned", False):
-                                print(
-                                    f"[Warn] Teacher batch={teacher_logits.size(0)} but student batch={student_logits.size(0)}; expanding teacher logits",
-                                    flush=True
-                                )
-                                self._teacher_broadcast_warned = True
-                            teacher_logits = teacher_logits.expand_as(student_logits)
-                            if isinstance(base_outputs, dict):
-                                base_outputs["logits"] = teacher_logits
-                        else:
-                            raise RuntimeError(
-                                f"Teacher/student batch mismatch: {teacher_logits.size(0)} vs {student_logits.size(0)}"
-                            )
-
-                    # Compute losses
-                    batch_losses = self.combined_loss(
-                        safe_outputs=safe_outputs,
-                        base_outputs=base_outputs,
-                        batch=inputs,
-                        has_audio=has_audio
-                    )
-                    
-                    # Accumulate losses
                     batch_size = len(batch["questions"])
-                    for key in eval_losses:
-                        if key in batch_losses:
-                            eval_losses[key] += batch_losses[key].item() * batch_size
-                    
-                    # Compute accuracy metrics using robust methods
-                    # Generate predictions and compute answer-level accuracy
-                    # Removed verbose progress logging
+                    eval_losses["audio_task_loss"] += batch_audio_loss.detach().item() * batch_size
+                    eval_losses["total_loss"] += (batch_audio_loss.detach().item() * batch_size)
+
                     safe_results_batch, base_results_batch = self._compute_robust_accuracy(
-                        safe_outputs, base_outputs, inputs, has_audio, batch
+                        safe_outputs, None, inputs, has_audio, batch
                     )
                     # Removed verbose progress logging
 
@@ -3058,7 +2905,6 @@ class StageATrainer:
             print(f"  Metrics:", flush=True)
             print(f"    Audio Accuracy: {eval_metrics['audio_accuracy']:.4f}", flush=True)
             print(f"    VL Retention: {eval_metrics['retention_score']:.4f}", flush=True)
-            print(f"    Retention Loss: {eval_metrics['retention_loss']:.4f}", flush=True)
             print(f"    Samples in Stage: {samples_in_stage}", flush=True)
             
             # Check curriculum progression
@@ -3278,7 +3124,6 @@ class StageATrainer:
             print(f"Epoch {epoch+1} Results:", flush=True)
             print(f"  Retention Score: {epoch_metrics['retention_score']:.4f}", flush=True)
             print(f"  Audio Accuracy: {epoch_metrics['audio_accuracy']:.4f}", flush=True)
-            print(f"  Retention Loss: {epoch_metrics['retention_loss']:.4f}", flush=True)
             self.logger.info(
                 "[Eval][epoch=%s] retention=%.4f audio_acc=%.4f retention_loss=%.4f",
                 epoch + 1,
