@@ -504,6 +504,7 @@ class GeneralAVQADownloader:
 
         try:
             # Download video with yt-dlp
+            # Use Android client to bypass YouTube 403 errors
             cmd = [
                 "yt-dlp",
                 "--quiet",
@@ -513,6 +514,7 @@ class GeneralAVQADownloader:
                 f"--output={video_path}",
                 "--no-playlist",
                 "--no-overwrites",
+                "--extractor-args", "youtube:player_client=android",
                 youtube_url
             ]
 
@@ -537,6 +539,7 @@ class GeneralAVQADownloader:
                 f"--output={audio_path}",
                 "--no-playlist",
                 "--no-overwrites",
+                "--extractor-args", "youtube:player_client=android",
                 youtube_url
             ]
 
