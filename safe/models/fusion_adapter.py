@@ -191,7 +191,7 @@ class CrossAttentionBlock(nn.Module):
 
         # Allow residual scale to grow but keep it bounded for stability
         residual_scale = torch.clamp(self.residual_scale, 0.0, float(self.residual_scale_max))
-        if getattr(self, "debug_logging", False) or not self.training:
+        if getattr(self, "debug_logging", False):
             print(
                 f"[ResidualScale] scale={float(residual_scale.item()):.4f}",
                 flush=True,
