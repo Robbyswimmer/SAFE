@@ -20,6 +20,7 @@ import argparse
 import logging
 import subprocess
 import csv
+import zipfile
 from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -43,12 +44,15 @@ logger = logging.getLogger(__name__)
 class GeneralAVQADownloader:
     """Download General AVQA dataset with YouTube throttling protection."""
 
-    # OneDrive base URL (users need to fill in the actual link from the website)
-    # Visit https://mn.cs.tsinghua.edu.cn/avqa/ to get the current link
-    ONEDRIVE_BASE = "https://tsinghuaeducn-my.sharepoint.com/:u:/g/personal/xin_wang_tsinghua_edu_cn"
+    # OneDrive share link from official website
+    ONEDRIVE_SHARE_LINK = "https://tsinghuaeducn-my.sharepoint.com/:u:/g/personal/xin_wang_tsinghua_edu_cn/EQ_7OroeDPZFjajxJXsCh34BtYs-6GDdb-KFPfqgsu50cw?e=qeCgOO"
 
-    # GitHub backup URLs for metadata
-    GITHUB_BASE = "https://raw.githubusercontent.com/AlyssaYoung/AVQA/main"
+    # Alternative: Direct file download attempts
+    # These might work if OneDrive link is publicly accessible
+    METADATA_URLS = {
+        "train_qa.json": "https://tsinghuaeducn-my.sharepoint.com/:u:/g/personal/xin_wang_tsinghua_edu_cn/EQ_7OroeDPZFjajxJXsCh34BtYs-6GDdb-KFPfqgsu50cw?download=1",
+        "val_qa.json": "https://tsinghuaeducn-my.sharepoint.com/:u:/g/personal/xin_wang_tsinghua_edu_cn/EQ_7OroeDPZFjajxJXsCh34BtYs-6GDdb-KFPfqgsu50cw?download=1"
+    }
 
     # VGG-Sound CSV URL
     VGGSOUND_CSV_URL = "https://www.robots.ox.ac.uk/~vgg/data/vggsound/vggsound.csv"
@@ -168,38 +172,182 @@ class GeneralAVQADownloader:
         logger.error("yt-dlp not found. Install with: pip install yt-dlp")
         return False
 
+    def _download_from_onedrive(self, url: str, output_path: Path, description: str) -> bool:
+        """
+        Attempt to download a file from OneDrive share link.
+        Tries multiple methods to handle OneDrive redirects and authentication.
+        """
+        try:
+            logger.info(f"Attempting to download {description}...")
+
+            # Method 1: Try direct download with redirects
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+
+            response = session.get(url, allow_redirects=True, timeout=120, stream=True)
+
+            # Check if we got actual content
+            content_type = response.headers.get('content-type', '').lower()
+
+            if response.status_code == 200:
+                # Check if it's JSON or a download page
+                if 'application/json' in content_type or 'text/plain' in content_type:
+                    # Likely got JSON directly
+                    with open(output_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+
+                    # Verify it's valid JSON
+                    try:
+                        with open(output_path) as f:
+                            json.load(f)
+                        logger.info(f"✓ Successfully downloaded {description}")
+                        return True
+                    except json.JSONDecodeError:
+                        logger.warning(f"Downloaded file is not valid JSON")
+                        output_path.unlink(missing_ok=True)
+                        return False
+
+                elif 'application/octet-stream' in content_type or 'application/zip' in content_type:
+                    # Might be a download
+                    with open(output_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+
+                    # Try to parse as JSON
+                    try:
+                        with open(output_path) as f:
+                            json.load(f)
+                        logger.info(f"✓ Successfully downloaded {description}")
+                        return True
+                    except:
+                        output_path.unlink(missing_ok=True)
+                        return False
+                else:
+                    logger.warning(f"Got unexpected content type: {content_type}")
+                    return False
+            else:
+                logger.warning(f"HTTP {response.status_code} for {description}")
+                return False
+
+        except Exception as e:
+            logger.warning(f"Could not download {description}: {e}")
+            return False
+
     def download_metadata(self) -> bool:
         """Download AVQA metadata files (train_qa.json, val_qa.json)."""
         logger.info("="*60)
         logger.info("DOWNLOADING GENERAL AVQA METADATA")
         logger.info("="*60)
 
-        required_files = ["train_qa.json", "val_qa.json"]
+        required_files = {
+            "train_qa.json": "Training QA pairs",
+            "val_qa.json": "Validation QA pairs"
+        }
 
         # Check if files already exist
-        all_exist = all((self.metadata_dir / f).exists() for f in required_files)
+        all_exist = all((self.metadata_dir / f).exists() for f in required_files.keys())
 
         if all_exist:
             logger.info("✓ All metadata files already exist!")
             return True
 
-        # Files need to be downloaded manually from OneDrive
+        # Try to download from OneDrive automatically
+        logger.info("Attempting automatic download from OneDrive...")
+        logger.info("Note: This requires the OneDrive link to be publicly accessible")
+
+        success_count = 0
+
+        # Try downloading the shared folder/file
+        # OneDrive shared links often point to a folder or ZIP
+        # We'll try to download and extract if it's a ZIP
+
+        try:
+            logger.info(f"Accessing OneDrive share link...")
+            response = requests.get(self.ONEDRIVE_SHARE_LINK, allow_redirects=True, timeout=120)
+
+            if response.status_code == 200:
+                content_type = response.headers.get('content-type', '').lower()
+
+                # Check if it's a ZIP file
+                if 'zip' in content_type or 'application/octet-stream' in content_type:
+                    logger.info("Detected ZIP archive, downloading and extracting...")
+
+                    zip_path = self.metadata_dir / "avqa_data.zip"
+                    with open(zip_path, 'wb') as f:
+                        f.write(response.content)
+
+                    # Extract JSON files
+                    import zipfile
+                    try:
+                        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                            # Extract only JSON files
+                            for member in zip_ref.namelist():
+                                if member.endswith('.json') and ('train_qa' in member or 'val_qa' in member):
+                                    # Extract to metadata dir
+                                    zip_ref.extract(member, self.metadata_dir)
+
+                                    # Move to correct location if in subdirectory
+                                    extracted_path = self.metadata_dir / member
+                                    if '/' in member:
+                                        filename = Path(member).name
+                                        target_path = self.metadata_dir / filename
+                                        extracted_path.rename(target_path)
+
+                                    logger.info(f"✓ Extracted {Path(member).name}")
+                                    success_count += 1
+
+                        zip_path.unlink()  # Clean up ZIP
+
+                    except zipfile.BadZipFile:
+                        logger.warning("Downloaded file is not a valid ZIP archive")
+                        zip_path.unlink(missing_ok=True)
+                else:
+                    logger.warning(f"OneDrive returned unexpected content type: {content_type}")
+            else:
+                logger.warning(f"OneDrive returned status code: {response.status_code}")
+
+        except Exception as e:
+            logger.warning(f"Could not access OneDrive share link: {e}")
+
+        # Check what we got
+        for filename, description in required_files.items():
+            file_path = self.metadata_dir / filename
+            if file_path.exists():
+                logger.info(f"✓ Found {filename}")
+                success_count += 1
+
+        # If we have all files, success
+        if success_count == len(required_files):
+            logger.info("✓ All metadata files downloaded successfully!")
+            return True
+
+        # If automatic download failed, provide instructions
         logger.error("=" * 60)
-        logger.error("METADATA FILES NOT FOUND")
+        logger.error("AUTOMATIC DOWNLOAD FAILED")
         logger.error("=" * 60)
-        logger.error("The AVQA metadata files are not available via direct download.")
-        logger.error("You need to download them manually from OneDrive:")
+        logger.error("Could not automatically download metadata from OneDrive.")
+        logger.error("This usually happens because:")
+        logger.error("1. The OneDrive link requires authentication")
+        logger.error("2. The link structure has changed")
+        logger.error("3. Network/firewall restrictions")
         logger.error("")
+        logger.error("MANUAL STEPS REQUIRED:")
         logger.error("1. Visit: https://mn.cs.tsinghua.edu.cn/avqa/")
         logger.error("2. Click the OneDrive link")
-        logger.error("3. Download: train_qa.json and val_qa.json")
-        logger.error(f"4. Place them in: {self.metadata_dir}")
+        logger.error("3. Download the files (likely a ZIP archive)")
+        logger.error("4. Extract train_qa.json and val_qa.json")
+        logger.error(f"5. Place them in: {self.metadata_dir}")
         logger.error("")
         logger.error("Required files:")
-        for filename in required_files:
+        for filename in required_files.keys():
             file_path = self.metadata_dir / filename
             status = "✓ EXISTS" if file_path.exists() else "✗ MISSING"
             logger.error(f"  {status}: {filename}")
+        logger.error("")
+        logger.error("After placing files, run this script again to continue.")
         logger.error("=" * 60)
 
         return False
