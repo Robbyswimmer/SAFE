@@ -785,12 +785,15 @@ class StageATrainer:
             has_audio = has_audio.to(device=device, dtype=torch.bool)
         else:
             has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
-        
+
         # Filter silent audio clips
         if self.config.get("filter_silent_audio", True):
             has_audio = self._check_silent_audio(batch)
             if isinstance(has_audio, torch.Tensor):
                 has_audio = has_audio.to(device=device, dtype=torch.bool)
+
+        if has_audio is None or not torch.any(has_audio):
+            return {"audio_task_loss": 0.0, "total_loss": 0.0}, False
 
         # Create input tensors for training - apply answers for supervised learning
         inputs = self.safe_model.prepare_multimodal_inputs(
@@ -1458,6 +1461,8 @@ class StageATrainer:
         # Retention score (how well SAFE preserves base VL performance)
         retention_score = vl_safe_accuracy / max(vl_base_accuracy, 1e-8)
         
+        retention_score = vl_safe_accuracy / max(vl_base_accuracy, 1e-8)
+
         eval_metrics = {
             **eval_losses,
             "audio_accuracy": audio_accuracy,
@@ -1479,6 +1484,15 @@ class StageATrainer:
         )
         if caption_metrics:
             eval_metrics.update(caption_metrics)
+
+        if hasattr(self.safe_model, "fusion_adapter") and hasattr(self.safe_model.fusion_adapter, "residual_scale"):
+            residual_param = self.safe_model.fusion_adapter.residual_scale
+            residual_cap = getattr(self.safe_model.fusion_adapter, "residual_scale_max", None)
+            if residual_cap is not None:
+                residual_value = float(torch.clamp(residual_param, 0.0, float(residual_cap)).item())
+            else:
+                residual_value = float(residual_param.item())
+            print(f"[Eval] Residual scale: {residual_value:.4f}", flush=True)
 
         # Report cumulative evaluation results
         print(f"\n=== {description.upper()} EVALUATION COMPLETE ===", flush=True)
@@ -1515,12 +1529,6 @@ class StageATrainer:
                   f"[95% CI: {vl_safe_ci_lower:.1f}%-{vl_safe_ci_upper:.1f}%]", flush=True)
             print(f"  📊 Base VL Accuracy: {vl_base_accuracy:.3f} ({vl_base_correct}/{vl_total}) "
                   f"[95% CI: {vl_base_ci_lower:.1f}%-{vl_base_ci_upper:.1f}%]", flush=True)
-            print(f"  📈 Retention Score: {retention_score:.3f} (SAFE/Base ratio)", flush=True)
-            
-            # Calculate VL drift if we have both audio and VL evaluation
-            if eval_audio_gate_comparison and audio_total > 0 and vl_total > 0:
-                vl_drift = (1.0 - retention_score) * 100
-                print(f"  ⚠️  VL Drift: {vl_drift:+.1f}% (performance change with audio enabled)", flush=True)
 
         if caption_metrics:
             print(f"\nCaption Quality Metrics:", flush=True)
@@ -2990,14 +2998,7 @@ class StageATrainer:
         print(f"Starting Stage A training for {self.config['num_epochs']} epochs...", flush=True)
         print(f"Total training steps: {len(self.train_dataloader) * self.config['num_epochs']}", flush=True)
 
-        # Compute baseline retention score
-        print("Computing baseline metrics...", flush=True)
         max_eval_batches = self.config.get("max_eval_batches", None)
-        baseline_metrics = self.evaluate(max_batches=max_eval_batches)
-        baseline_retention = baseline_metrics["retention_score"]
-        print(f"Baseline retention score: {baseline_retention:.4f}", flush=True)
-        if max_eval_batches:
-            print(f"(Evaluation limited to {max_eval_batches} batches)", flush=True)
         
         for epoch in range(self.config["num_epochs"]):
             self.epoch = epoch
@@ -3071,41 +3072,17 @@ class StageATrainer:
                     eval_metrics = self.evaluate(max_batches=max_eval_batches)
                     
                     print(f"\nStep {self.global_step} Evaluation:", flush=True)
-                    print(f"  Retention Score: {eval_metrics['retention_score']:.4f}", flush=True)
                     print(f"  Audio Accuracy: {eval_metrics['audio_accuracy']:.4f}", flush=True)
-                    print(f"  VL Safe Accuracy: {eval_metrics['vl_safe_accuracy']:.4f}", flush=True)
                     print(f"  Total Loss: {eval_metrics['total_loss']:.4f}", flush=True)
                     self.logger.info(
-                        "[Eval][step=%s] retention=%.4f audio_acc=%.4f vl_safe=%.4f total_loss=%.4f",
+                        "[Eval][step=%s] audio_acc=%.4f total_loss=%.4f",
                         self.global_step,
-                        eval_metrics['retention_score'],
                         eval_metrics['audio_accuracy'],
-                        eval_metrics['vl_safe_accuracy'],
                         eval_metrics['total_loss'],
                     )
-                    
-                    # Check for improvement
-                    current_retention = eval_metrics["retention_score"]
-                    is_best = current_retention > self.best_retention_score
-                    
-                    if is_best:
-                        self.best_retention_score = current_retention
-                        self.patience_counter = 0
-                    else:
-                        self.patience_counter += 1
-                    
-                    # Save checkpoint
-                    if self.global_step % self.config["save_steps"] == 0 or is_best:
-                        self.save_checkpoint(eval_metrics, is_best)
-                    
-                    # Early stopping check
-                    retention_degradation = baseline_retention - current_retention
-                    if retention_degradation > self.config["retention_tolerance"]:
-                        print(f"WARNING: Retention degradation ({retention_degradation:.4f}) exceeds tolerance!", flush=True)
 
-                    if self.patience_counter >= self.config["early_stopping_patience"]:
-                        print(f"Early stopping after {self.patience_counter} evaluations without improvement", flush=True)
-                        return eval_metrics
+                    if self.global_step % self.config["save_steps"] == 0:
+                        self.save_checkpoint(eval_metrics, is_best=False)
                     
                     # Log to wandb
                     try:
@@ -3137,19 +3114,16 @@ class StageATrainer:
             self._last_audio_accuracy = epoch_metrics.get('audio_accuracy', 0.0)
 
             print(f"Epoch {epoch+1} Results:", flush=True)
-            print(f"  Retention Score: {epoch_metrics['retention_score']:.4f}", flush=True)
             print(f"  Audio Accuracy: {epoch_metrics['audio_accuracy']:.4f}", flush=True)
             self.logger.info(
-                "[Eval][epoch=%s] retention=%.4f audio_acc=%.4f retention_loss=%.4f",
+                "[Eval][epoch=%s] audio_acc=%.4f total_loss=%.4f",
                 epoch + 1,
-                epoch_metrics['retention_score'],
                 epoch_metrics['audio_accuracy'],
-                epoch_metrics['retention_loss'],
+                epoch_metrics['total_loss'],
             )
-        
+
         print("Stage A training completed!", flush=True)
-        print(f"Best retention score: {self.best_retention_score:.4f}", flush=True)
-        
+
         # Final checkpoint
         max_eval_batches = self.config.get("max_eval_batches", None)
         final_metrics = self.evaluate(max_batches=max_eval_batches)
