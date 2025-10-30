@@ -447,8 +447,9 @@ class GeneralAVQADownloader:
 
                     youtube_id, start_time, label, split = row[0], row[1], row[2], row[3]
 
-                    # VGG-Sound video ID format: {youtube_id}_{start_time}
-                    video_id = f"{youtube_id}_{start_time}"
+                    # VGG-Sound video ID format: {youtube_id}_{start_time:06d}
+                    # Timestamps are zero-padded to 6 digits (e.g., 000001, 000030)
+                    video_id = f"{youtube_id}_{int(start_time):06d}"
 
                     if video_id in required_ids:
                         youtube_url = f"https://www.youtube.com/watch?v={youtube_id}"
