@@ -834,14 +834,29 @@ class StageATrainer:
                     audio_mask = audio_mask[audio_indices]
                 audio_loss = self.audio_task_loss(audio_logits, audio_labels, audio_mask)
             else:
+                # Create zero loss while maintaining gradient connection via safe_logits
                 audio_loss = safe_logits.sum() * 0.0
         else:
             if safe_logits is not None:
+                # Create zero loss while maintaining gradient connection via safe_logits
                 audio_loss = safe_logits.sum() * 0.0
             else:
+                # No logits available - create zero tensor with gradients
                 audio_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
         total_loss = self.audio_loss_weight * audio_loss
+
+        # Ensure total_loss has gradients
+        if not total_loss.requires_grad:
+            print(f"WARNING: total_loss does not require gradients!", flush=True)
+            print(f"  audio_loss.requires_grad: {audio_loss.requires_grad}", flush=True)
+            print(f"  safe_logits.requires_grad: {safe_logits.requires_grad if safe_logits is not None else 'N/A'}", flush=True)
+            print(f"  Model training mode: {self.safe_model.training}", flush=True)
+            # Try to fix by creating a proper zero loss with gradients
+            if safe_logits is not None and safe_logits.requires_grad:
+                total_loss = (safe_logits.sum() * 0.0) * self.audio_loss_weight
+            else:
+                raise RuntimeError("Cannot create loss with gradients - model outputs don't require grad")
 
         loss_dict = {
             "audio_task_loss": audio_loss,
