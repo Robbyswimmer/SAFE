@@ -858,6 +858,9 @@ class StageATrainer:
             # Try to fix by creating a proper zero loss with gradients
             if safe_logits is not None and safe_logits.requires_grad:
                 total_loss = (safe_logits.sum() * 0.0) * self.audio_loss_weight
+            elif safe_logits is None or not safe_logits.requires_grad:
+                # No gradient path (e.g., gate=0) -> skip this micro step
+                return {"audio_task_loss": 0.0, "total_loss": 0.0}, False
             else:
                 raise RuntimeError("Cannot create loss with gradients - model outputs don't require grad")
 
