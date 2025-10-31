@@ -1455,11 +1455,6 @@ class StageATrainer:
         vl_safe_accuracy = vl_safe_correct / max(vl_total, 1)
         vl_base_accuracy = vl_base_correct / max(vl_total, 1)
         
-        # Retention score (how well SAFE preserves base VL performance)
-        retention_score = vl_safe_accuracy / max(vl_base_accuracy, 1e-8)
-        
-        retention_score = vl_safe_accuracy / max(vl_base_accuracy, 1e-8)
-
         eval_metrics = {
             **eval_losses,
             "audio_accuracy": audio_accuracy,
@@ -1468,7 +1463,6 @@ class StageATrainer:
             "audio_bertscore": audio_bertscore_avg,
             "vl_safe_accuracy": vl_safe_accuracy,
             "vl_base_accuracy": vl_base_accuracy,
-            "retention_score": retention_score,
             "audio_gain": audio_accuracy,  # Simplified audio gain metric
             "audio_samples": audio_samples,
             "vl_samples": vl_samples,
@@ -1482,13 +1476,16 @@ class StageATrainer:
         if caption_metrics:
             eval_metrics.update(caption_metrics)
 
-        if hasattr(self.safe_model, "fusion_adapter") and hasattr(self.safe_model.fusion_adapter, "residual_scale"):
-            residual_param = self.safe_model.fusion_adapter.residual_scale
-            residual_cap = getattr(self.safe_model.fusion_adapter, "residual_scale_max", None)
+        residual_value = None
+        fusion_adapter = getattr(self.safe_model, "fusion_adapter", None)
+        if fusion_adapter is not None and hasattr(fusion_adapter, "residual_scale"):
+            residual_param = fusion_adapter.residual_scale
+            residual_cap = getattr(fusion_adapter, "residual_scale_max", None)
             if residual_cap is not None:
                 residual_value = float(torch.clamp(residual_param, 0.0, float(residual_cap)).item())
             else:
                 residual_value = float(residual_param.item())
+            eval_metrics["residual_scale"] = residual_value
             print(f"[Eval] Residual scale: {residual_value:.4f}", flush=True)
 
         # Report cumulative evaluation results
