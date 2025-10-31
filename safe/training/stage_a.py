@@ -186,6 +186,7 @@ class StageATrainer:
         self.sample_log_limit = int(self.config.get("sample_log_limit", 5))
         self.sample_log_examples = max(1, int(self.config.get("sample_log_examples", 3)))
         self.sample_logs_emitted = 0
+        self._gate_warm_counter = 0
         self._robust_error_logged = False
         self._teacher_shape_warned = False
         self._teacher_broadcast_warned = False
@@ -809,8 +810,8 @@ class StageATrainer:
         if hasattr(self.safe_model, "set_gate_warmup"):
             warmup_steps = int(self.config.get("gate_warmup_steps", self.warmup_steps))
             warmup_steps = max(1, warmup_steps)
-            effective_step = self.global_step * self.grad_accum_steps + self._micro_step
-            self.safe_model.set_gate_warmup(effective_step, warmup_steps)
+            self._gate_warm_counter += 1
+            self.safe_model.set_gate_warmup(self._gate_warm_counter, warmup_steps)
 
         # Forward pass through SAFE model
         safe_outputs = self.safe_model(**inputs)
