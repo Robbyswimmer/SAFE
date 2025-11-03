@@ -162,11 +162,12 @@ def download_audio_segment(
     url = f'https://www.youtube.com/watch?v={youtube_id}'
 
     # Strategies for retry attempts
+    # Note: Android client bypasses most bot detection without cookies
     retry_configs = [
-        {},
-        {'force_ipv4': True},
-        {'force_android_client': True},
+        {'force_android_client': True},  # Try Android client first (no auth needed)
         {'force_ipv4': True, 'force_android_client': True},
+        {},  # Fallback to default
+        {'force_ipv4': True},
     ]
 
     def build_cmd(force_ipv4: bool = False, force_android_client: bool = False) -> List[str]:
