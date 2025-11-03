@@ -27,8 +27,8 @@ def download_audio(youtube_id, output_path, max_retries=3, cookies_file=None):
     """Download audio from YouTube using yt-dlp."""
     url = f"https://www.youtube.com/watch?v={youtube_id}"
 
-    # yt-dlp command for audio-only download
-    cmd = [
+    # Base yt-dlp command for audio-only download
+    base_cmd = [
         'yt-dlp',
         '--extract-audio',
         '--audio-format', 'wav',
@@ -39,15 +39,24 @@ def download_audio(youtube_id, output_path, max_retries=3, cookies_file=None):
         '--sleep-interval', '1',  # Sleep 1-2 seconds between downloads
         '--max-sleep-interval', '2',
         '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        url
     ]
 
     # Add cookies if provided
     if cookies_file and os.path.exists(cookies_file):
-        cmd.insert(-1, '--cookies')
-        cmd.insert(-1, cookies_file)
+        base_cmd.extend(['--cookies', cookies_file])
+
+    # Retry strategies: Android client first (no auth needed), then fallback
+    retry_strategies = [
+        ['--extractor-args', 'youtube:player_client=android'],  # Android client (bypasses bot detection)
+        ['--force-ipv4', '--extractor-args', 'youtube:player_client=android'],
+        [],  # Default (no extra args)
+    ]
 
     for attempt in range(max_retries):
+        # Use different strategy for each attempt
+        strategy = retry_strategies[min(attempt, len(retry_strategies) - 1)]
+        cmd = base_cmd + strategy + [url]
+
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
             if result.returncode == 0:
@@ -57,7 +66,7 @@ def download_audio(youtube_id, output_path, max_retries=3, cookies_file=None):
                 stderr_lower = result.stderr.lower()
                 if 'sign in' in stderr_lower or 'bot' in stderr_lower:
                     if attempt == 0:
-                        print(f"⚠ {youtube_id}: YouTube bot detection - consider using --cookies")
+                        print(f"⚠ {youtube_id}: YouTube bot detection - trying Android client...")
                 elif 'private' in stderr_lower:
                     # Don't retry private videos
                     return False
@@ -139,14 +148,41 @@ def process_audiocaps_csv(csv_path, output_dir, max_downloads=None, num_workers=
 
     print(f"Download complete: {successful} successful ({already_exists} already existed), {failed} failed")
 
+def download_metadata_csv(split, metadata_dir):
+    """Download AudioCaps metadata CSV from GitHub if not present."""
+    csv_path = metadata_dir / f"{split}.csv"
+    if csv_path.exists():
+        return csv_path
+
+    # Download from official AudioCaps GitHub
+    base_url = "https://raw.githubusercontent.com/cdjkim/audiocaps/master/dataset"
+    url = f"{base_url}/{split}.csv"
+
+    print(f"Downloading metadata for {split} split from {url}...")
+    try:
+        import requests
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        csv_path.write_text(response.text)
+        print(f"✓ Downloaded metadata: {csv_path}")
+        return csv_path
+    except Exception as e:
+        print(f"✗ Failed to download metadata: {e}")
+        return None
+
+
 def main():
     """Main download function."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Download AudioCaps audio from YouTube")
     parser.add_argument("--cookies", type=str, help="Path to cookies.txt file for YouTube authentication")
-    parser.add_argument("--max-downloads", type=int, default=2000, help="Maximum downloads per split")
+    parser.add_argument("--max-downloads", type=int, default=None, help="Maximum downloads per split (default: all)")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers (reduce if rate limited)")
+    parser.add_argument("--data-root", type=str, default="experiments/full_training/data/audiocaps",
+                        help="Root directory for AudioCaps data")
     args = parser.parse_args()
 
     print("AudioCaps Audio Downloader")
@@ -159,34 +195,32 @@ def main():
         else:
             print(f"✓ Using cookies from: {args.cookies}")
     else:
-        print("ℹ No cookies file specified. If you encounter bot detection errors:")
-        print("  1. Install browser extension 'Get cookies.txt' or 'cookies.txt'")
-        print("  2. Export YouTube cookies to cookies.txt")
-        print("  3. Run with: python download_audiocaps_audio.py --cookies cookies.txt")
+        print("ℹ No cookies specified - using Android client to bypass bot detection")
 
     # Check dependencies
     if not check_ytdlp():
         return
 
     # Set up paths
-    data_dir = Path("./data/audiocaps")
-    metadata_dir = data_dir / "metadata"
+    data_dir = Path(args.data_root).expanduser().resolve()
     audio_dir = data_dir / "audio"
 
-    if not metadata_dir.exists():
-        print(f"Metadata directory not found: {metadata_dir}")
-        print("Please run the dataset setup script first:")
-        print("bash scripts/setup_datasets.sh")
-        return
+    data_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Downloading up to {args.max_downloads} AudioCaps samples per split...")
+    print(f"Data directory: {data_dir}")
+    print(f"Downloading up to {args.max_downloads or 'all'} AudioCaps samples per split...")
     print(f"Using {args.workers} parallel workers")
 
-    print(f"\nStarting download (max: {args.max_downloads or 'unlimited'} per split)...")
+    print(f"\nStarting download...")
 
     # Download each split
     for split in ["train", "val", "test"]:
-        csv_path = metadata_dir / f"{split}.csv"
+        # Download metadata CSV if needed
+        csv_path = download_metadata_csv(split, data_dir)
+        if not csv_path:
+            print(f"Skipping {split}: metadata not available")
+            continue
+
         split_audio_dir = audio_dir / split
 
         if csv_path.exists():
