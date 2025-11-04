@@ -20,30 +20,34 @@ eval_every_n_epochs: 1
 max_eval_batches: 25  # Reasonable evaluation size
 validation_frequency: 1
 
-# Loss weights - emphasis on retention
+# Loss weights - emphasis on retention with exact phrasing
 audio_loss_weight: 0.8  # Slightly lower audio weight
-retention_loss_weight: 1.2  # Higher retention weight  
+retention_loss_weight: 1.2  # Higher retention weight
 distillation_temperature: 3.0
 fisher_weight: 0.15  # Higher Fisher weight for retention
 retention_tolerance: 0.005  # Strict 0.5% tolerance
-audio_contrastive_weight: 0.1
+audio_contrastive_weight: 0.0  # DISABLED: Temporarily off to focus on reranking & SCST
 audio_contrastive_temperature: 0.07
 audio_contrastive_answer_max_length: 64
 audio_contrastive_metric_weight: 0.2
 audio_contrastive_negative_threshold: 0.3
 audio_contrastive_max_negatives: 16
-audio_num_beams: 3
-audio_num_return_sequences: 3
-audio_num_samples: 3
+
+# Generation parameters - increased candidates for better reranking
+audio_num_beams: 5  # Scaled for retention config (smaller than full)
+audio_num_return_sequences: 5
+audio_num_samples: 5  # Total 10 candidates (balanced for retention study)
 audio_sample_top_p: 0.9
 audio_sample_temperature: 0.85
 audio_length_penalty: 0.9
+
+# Reranking weights - aggressive tuning for exact phrase matching
 audio_rerank_with_clap: true
 audio_rerank_logprob_weight: 1.0
 audio_rerank_clap_weight: 0.3
-audio_rerank_ngram_weight: 0.4
+audio_rerank_ngram_weight: 0.6  # Increased from 0.4 - prioritize n-gram overlap
 audio_rerank_coverage_weight: 0.1
-audio_rerank_cider_weight: 0.4
+audio_rerank_cider_weight: 0.7  # Increased from 0.4 - prioritize CIDEr metric
 audio_rerank_spider_weight: 0.2
 audio_rerank_tag_vocab: "configs/tags/audio_tag_vocab.txt"
 audio_rerank_num_tags: 4
@@ -62,3 +66,14 @@ compute_requirements: "moderate"
 compute_baseline_metrics: true
 track_retention_per_epoch: true
 retention_failure_threshold: 0.02  # Stop if retention drops >2%
+
+# SCST Fine-tuning (auto-triggers after plateau for direct metric optimization)
+enable_scst_finetune: true
+scst_epochs: 1  # Conservative for retention study
+scst_learning_rate: 5e-6  # Low LR for policy gradient stability
+scst_num_samples: 2  # Scaled for retention config
+scst_sample_top_p: 0.9
+scst_sample_temperature: 0.85
+scst_reward_metric: "cider"  # Optimize for CIDEr (exact phrase matching)
+scst_patience_epochs: 2  # Trigger after 2 epochs without improvement
+scst_improvement_threshold: 0.001  # 0.1% improvement required to reset patience
