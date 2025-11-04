@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import torch.nn as nn
 import librosa
-from typing import Any, Optional, Union, List, Tuple
+from typing import Any, Optional, Union, List, Tuple, Sequence
 import laion_clap
 import whisper
 from transformers import WhisperFeatureExtractor, WhisperModel
@@ -217,6 +217,23 @@ class CLAPAudioEncoder(nn.Module):
             
         return audio_embeddings  # (batch_size, audio_embed_dim)
 
+    def encode_text(self, texts: Union[str, Sequence[str]]) -> torch.Tensor:
+        """Encode caption text using CLAP's text tower."""
+
+        if isinstance(texts, str):
+            texts = [texts]
+
+        if not texts:
+            return torch.empty(0, self.audio_embed_dim)
+
+        with torch.no_grad():
+            text_embeddings = self.model.get_text_embedding(texts, use_tensor=False)
+
+        if not isinstance(text_embeddings, torch.Tensor):
+            text_embeddings = torch.from_numpy(text_embeddings)
+
+        return text_embeddings
+
 
 class WhisperAudioEncoder(nn.Module):
     """
@@ -369,8 +386,13 @@ class WhisperAudioEncoder(nn.Module):
         
         # Stack embeddings
         embeddings = torch.stack(embeddings_list)  # (batch_size, seq_len, embed_dim)
-        
+
         return embeddings, transcripts_list
+
+    def encode_text(self, texts: Union[str, Sequence[str]]) -> torch.Tensor:
+        if not self.use_clap or self.clap_encoder is None:
+            raise ValueError("CLAP encoder is disabled; cannot encode text")
+        return self.clap_encoder.encode_text(texts)
 
 
 class MultiModalAudioEncoder(nn.Module):

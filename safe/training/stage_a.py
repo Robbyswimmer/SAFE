@@ -129,6 +129,14 @@ class StageATrainer:
             "audio_contrastive_weight": 0.0,
             "audio_contrastive_temperature": 0.07,
             "audio_contrastive_answer_max_length": 48,
+            "audio_num_beams": 1,
+            "audio_num_return_sequences": None,
+            "audio_length_penalty": 1.0,
+            "audio_rerank_with_clap": False,
+            "audio_rerank_logprob_weight": 1.0,
+            "audio_rerank_clap_weight": 0.0,
+            "audio_rerank_ngram_weight": 0.0,
+            "audio_rerank_coverage_weight": 0.0,
         }
 
         if config:
@@ -1885,12 +1893,28 @@ class StageATrainer:
                     attention_mask[row, first_answer_idx:] = 0
                     input_ids[row, first_answer_idx:] = pad_token_id
             # Removed verbose progress logging
-            safe_pred_tokens = self._generate_predictions(gen_inputs, "safe")
+            batch_audio = batch.get("audio")
+            batch_questions = batch.get("questions")
+            references = gt_answers if gt_answers else batch.get("answers")
+
+            safe_pred_tokens = self._generate_predictions(
+                gen_inputs,
+                "safe",
+                batch_audio=batch_audio,
+                questions=batch_questions,
+                references=references,
+            )
 
             # ALWAYS generate BASE predictions independently
             # BASE is the frozen baseline - must never copy SAFE, regardless of retention variant
             # This ensures valid comparison even in no_retention experiments
-            base_pred_tokens = self._generate_predictions(gen_inputs, "base")
+            base_pred_tokens = self._generate_predictions(
+                gen_inputs,
+                "base",
+                batch_audio=batch_audio,
+                questions=batch_questions,
+                references=references,
+            )
 
             # Removed verbose progress logging
             
@@ -2574,6 +2598,270 @@ class StageATrainer:
 
         return contrastive_loss
 
+    # ------------------------------------------------------------------
+    # Reranking helpers
+    # ------------------------------------------------------------------
+
+    def _rerank_audio_candidates(
+        self,
+        candidate_seqs: torch.Tensor,
+        prompt_lengths: torch.Tensor,
+        has_audio_mask: torch.Tensor,
+        batch_audio: Optional[Sequence[Any]],
+        questions: Sequence[str],
+        references: Sequence[Any],
+        device: torch.device,
+    ) -> torch.Tensor:
+        batch_size, num_candidates, seq_len = candidate_seqs.shape
+
+        processed_questions = list(questions)
+        if len(processed_questions) < batch_size:
+            processed_questions.extend([""] * (batch_size - len(processed_questions)))
+        processed_questions = processed_questions[:batch_size]
+
+        processed_audio = list(batch_audio) if batch_audio is not None else [None] * batch_size
+        if len(processed_audio) < batch_size:
+            processed_audio.extend([None] * (batch_size - len(processed_audio)))
+        processed_audio = processed_audio[:batch_size]
+
+        processed_refs: List[List[str]] = []
+        for idx in range(batch_size):
+            if idx < len(references):
+                ref_set = [
+                    self._normalize_audio_caption(ans)
+                    for ans in self._prepare_gt_answers(references[idx])
+                    if ans
+                ]
+            else:
+                ref_set = []
+            processed_refs.append([ref for ref in ref_set if ref])
+
+        clap_audio_embeds = None
+        clap_weight = float(self.config.get("audio_rerank_clap_weight", 0.0))
+        if clap_weight > 0.0:
+            clap_audio_embeds = self._compute_clap_audio_embeddings(processed_audio)
+
+        logprob_weight = float(self.config.get("audio_rerank_logprob_weight", 1.0))
+        ngram_weight = float(self.config.get("audio_rerank_ngram_weight", 0.0))
+        coverage_weight = float(self.config.get("audio_rerank_coverage_weight", 0.0))
+
+        tokenizer = self.safe_model.base_vl.tokenizer
+        text_embed_cache: Dict[str, torch.Tensor] = {}
+
+        best_sequences = []
+        for sample_idx in range(batch_size):
+            candidates = candidate_seqs[sample_idx]
+            if not has_audio_mask[sample_idx] or processed_refs[sample_idx] == []:
+                best_sequences.append(candidates[0])
+                continue
+
+            question = processed_questions[sample_idx] if sample_idx < len(processed_questions) else ""
+            audio_payload = processed_audio[sample_idx] if sample_idx < len(processed_audio) else None
+            reference_texts = processed_refs[sample_idx]
+            prompt_len = int(prompt_lengths[sample_idx].item())
+            audio_embed = None
+            if clap_audio_embeds is not None and sample_idx < len(clap_audio_embeds):
+                audio_embed = clap_audio_embeds[sample_idx]
+            best_score = float("-inf")
+            best_idx = 0
+
+            for cand_idx in range(num_candidates):
+                candidate_tokens = candidates[cand_idx]
+                if prompt_len < candidate_tokens.size(0):
+                    caption_tokens = candidate_tokens[prompt_len:]
+                else:
+                    caption_tokens = candidate_tokens.new_empty(0)
+                caption_text = tokenizer.decode(caption_tokens, skip_special_tokens=True).strip()
+                caption_text = self._normalize_audio_caption(caption_text)
+                if not caption_text:
+                    continue
+
+                total_score = 0.0
+
+                if logprob_weight != 0.0:
+                    logprob = self._score_candidate_logprob(
+                        question,
+                        audio_payload,
+                        caption_text,
+                        device,
+                    )
+                    total_score += logprob_weight * logprob
+
+                if clap_weight > 0.0 and audio_embed is not None:
+                    if caption_text not in text_embed_cache:
+                        text_embed_cache[caption_text] = self._compute_clap_text_embedding(caption_text)
+                    text_embed = text_embed_cache.get(caption_text)
+                    if text_embed is not None and text_embed.numel() > 0:
+                        clap_sim = torch.nn.functional.cosine_similarity(
+                            audio_embed.to(text_embed.device),
+                            text_embed,
+                            dim=0,
+                        ).item()
+                        total_score += clap_weight * clap_sim
+
+                if ngram_weight > 0.0:
+                    ngram_score = self._compute_ngram_overlap_score(caption_text, reference_texts)
+                    total_score += ngram_weight * ngram_score
+
+                if coverage_weight > 0.0:
+                    coverage = self._compute_coverage_score(caption_text, reference_texts)
+                    total_score += coverage_weight * coverage
+
+                if total_score > best_score:
+                    best_score = total_score
+                    best_idx = cand_idx
+
+            best_sequences.append(candidates[best_idx])
+
+        return torch.stack(best_sequences, dim=0)
+
+    def _score_candidate_logprob(
+        self,
+        question: str,
+        audio_data: Any,
+        candidate_text: str,
+        device: torch.device,
+    ) -> float:
+        candidate_text = candidate_text.strip()
+        if not candidate_text:
+            return float("-inf")
+
+        with torch.no_grad():
+            inputs = self.safe_model.prepare_multimodal_inputs(
+                text=[question or ""],
+                images=None,
+                audio=[audio_data] if audio_data is not None else None,
+                answers=[candidate_text],
+                device=device,
+                training_mode=True,
+            )
+
+            outputs = self.safe_model(**inputs)
+            logits = outputs.get("logits") if isinstance(outputs, dict) else getattr(outputs, "logits", None)
+            labels = inputs.get("labels")
+            if logits is None or labels is None:
+                return float("-inf")
+
+            shift_logits = logits[..., :-1, :]
+            shift_labels = labels[..., 1:]
+            seq_len = min(shift_logits.size(-2), shift_labels.size(-1))
+            shift_logits = shift_logits[..., :seq_len, :]
+            shift_labels = shift_labels[..., :seq_len]
+            mask = shift_labels != -100
+            if not mask.any():
+                return float("-inf")
+
+            log_probs = F.log_softmax(shift_logits, dim=-1)
+            gathered = log_probs.gather(dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
+            token_log_probs = gathered.masked_select(mask)
+            if token_log_probs.numel() == 0:
+                return float("-inf")
+
+            avg_log_prob = token_log_probs.mean()
+            alpha = float(self.config.get("audio_length_penalty", 1.0))
+            length = max(int(mask.sum().item()), 1)
+            if alpha != 1.0:
+                length_norm = ((5 + length) ** alpha) / ((5 + 1) ** alpha)
+                score = avg_log_prob / length_norm
+            else:
+                score = avg_log_prob
+
+            return float(score.detach().cpu().item())
+
+    def _tokenize_caption(self, text: str) -> List[str]:
+        normalized = self._normalize_audio_caption(text)
+        if not normalized:
+            return []
+        return normalized.split()
+
+    def _ngram_f1(self, pred_tokens: List[str], ref_tokens: List[str], n: int) -> float:
+        if len(pred_tokens) < n or len(ref_tokens) < n:
+            return 0.0
+        from collections import Counter
+
+        pred_ngrams = Counter(tuple(pred_tokens[i : i + n]) for i in range(len(pred_tokens) - n + 1))
+        ref_ngrams = Counter(tuple(ref_tokens[i : i + n]) for i in range(len(ref_tokens) - n + 1))
+        overlap = sum(min(pred_ngrams[gram], ref_ngrams[gram]) for gram in pred_ngrams)
+        if overlap == 0:
+            return 0.0
+        precision = overlap / max(sum(pred_ngrams.values()), 1)
+        recall = overlap / max(sum(ref_ngrams.values()), 1)
+        if precision + recall == 0:
+            return 0.0
+        return 2 * precision * recall / (precision + recall)
+
+    def _compute_ngram_overlap_score(self, prediction: str, references: Sequence[str]) -> float:
+        pred_tokens = self._tokenize_caption(prediction)
+        if not pred_tokens or not references:
+            return 0.0
+        best = 0.0
+        for ref in references:
+            ref_tokens = self._tokenize_caption(ref)
+            if not ref_tokens:
+                continue
+            uni = self._ngram_f1(pred_tokens, ref_tokens, 1)
+            bi = self._ngram_f1(pred_tokens, ref_tokens, 2)
+            best = max(best, 0.5 * (uni + bi))
+        return best
+
+    def _compute_coverage_score(self, prediction: str, references: Sequence[str]) -> float:
+        if not references:
+            return 0.0
+        pred_tokens = set(self._tokenize_caption(prediction))
+        ref_tokens = set()
+        for ref in references:
+            ref_tokens.update(self._tokenize_caption(ref))
+        if not ref_tokens:
+            return 0.0
+        overlap = len(pred_tokens & ref_tokens)
+        return overlap / len(ref_tokens)
+
+    def _resolve_clap_encoder(self):
+        registry = getattr(self.safe_model, "modality_registry", None)
+        if registry is None:
+            return None
+        try:
+            components = registry.get("audio")
+        except Exception:
+            return None
+        encoder = getattr(components, "encoder", None)
+        if encoder is None:
+            return None
+        if hasattr(encoder, "clap_encoder") and encoder.clap_encoder is not None:
+            return encoder.clap_encoder
+        return encoder if hasattr(encoder, "model") and hasattr(encoder.model, "get_audio_embedding_from_data") else None
+
+    def _compute_clap_audio_embeddings(self, audio_batch: Sequence[Any]) -> Optional[List[Optional[torch.Tensor]]]:
+        clap_encoder = self._resolve_clap_encoder()
+        if clap_encoder is None or not audio_batch:
+            return None
+        valid_audio = []
+        index_map = []
+        for idx, audio in enumerate(audio_batch):
+            if audio is None:
+                continue
+            valid_audio.append(audio)
+            index_map.append(idx)
+        if not valid_audio:
+            return None
+        embeddings = clap_encoder(valid_audio)
+        if not isinstance(embeddings, torch.Tensor):
+            embeddings = torch.tensor(embeddings)
+        embeddings = F.normalize(embeddings.float(), dim=-1)
+        result: List[Optional[torch.Tensor]] = [None] * len(audio_batch)
+        for pos, idx in enumerate(index_map):
+            result[idx] = embeddings[pos]
+        return result
+
+    def _compute_clap_text_embedding(self, caption: str) -> Optional[torch.Tensor]:
+        clap_encoder = self._resolve_clap_encoder()
+        if clap_encoder is None or not caption:
+            return None
+        embeddings = clap_encoder.encode_text([caption])
+        if not isinstance(embeddings, torch.Tensor) or embeddings.numel() == 0:
+            return None
+        return F.normalize(embeddings.float(), dim=-1)[0]
+
     def _batch_contains_pixels(self, batch: Dict[str, Any], idx: int) -> bool:
         images = batch.get("images")
         if isinstance(images, (list, tuple)) and idx < len(images):
@@ -2590,7 +2878,14 @@ class StageATrainer:
 
         return False
 
-    def _generate_predictions(self, inputs, model_choice="safe"):
+    def _generate_predictions(
+        self,
+        inputs,
+        model_choice="safe",
+        batch_audio: Optional[Sequence[Any]] = None,
+        questions: Optional[Sequence[str]] = None,
+        references: Optional[Sequence[Any]] = None,
+    ):
         """Generate predictions using consistent SAFE/base pathways."""
         tok = self.safe_model.base_vl.tokenizer
         
@@ -2675,7 +2970,6 @@ class StageATrainer:
             do_sample=False,    # Greedy decoding for deterministic results
             temperature=None,
             top_p=None,
-            num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
             repetition_penalty=repetition_penalty,
@@ -2684,6 +2978,26 @@ class StageATrainer:
             output_scores=False,
             return_dict_in_generate=False
         )
+
+        is_audio_only = has_audio and not pixel_present
+        audio_num_beams = max(1, int(self.config.get("audio_num_beams", 1) or 1))
+        audio_num_return = self.config.get("audio_num_return_sequences")
+        audio_num_return = (
+            int(audio_num_return)
+            if audio_num_return is not None
+            else audio_num_beams
+        )
+        if is_audio_only:
+            gen_kwargs["num_beams"] = audio_num_beams
+            if audio_num_return > 1:
+                gen_kwargs["num_return_sequences"] = audio_num_return
+            elif "num_return_sequences" in gen_kwargs:
+                gen_kwargs.pop("num_return_sequences")
+            gen_kwargs["length_penalty"] = float(self.config.get("audio_length_penalty", 1.0))
+        else:
+            gen_kwargs["num_beams"] = 1
+            gen_kwargs.pop("num_return_sequences", None)
+            gen_kwargs.pop("length_penalty", None)
 
         # EARLY TRAINING FIX: Suppress EOS in first 500 steps to force output
         # The untrained audio features may confuse the model into immediate EOS
@@ -2737,41 +3051,70 @@ class StageATrainer:
             generated = torch.as_tensor(generated)
         generated = generated.to(device)
 
+        num_return_sequences = int(gen_kwargs.get("num_return_sequences", 1) or 1)
+        batch_size = input_ids.size(0)
+        seq_len = generated.size(-1)
+        if num_return_sequences > 1:
+            generated = generated.view(batch_size, num_return_sequences, seq_len)
+        else:
+            generated = generated.view(batch_size, 1, seq_len)
 
         # Calculate per-sample prompt lengths using attention mask to handle left padding
         attention_mask = inputs.get("attention_mask", None)
         if attention_mask is not None:
-            # For left-padded sequences, count actual tokens per sample
-            prompt_lengths = attention_mask.sum(dim=1)  # Per-sample actual lengths
+            prompt_lengths = attention_mask.sum(dim=1)
         else:
-            # Fallback: assume no padding
             prompt_source = sanitized_ids if model_choice == "base" and 'sanitized_ids' in locals() and sanitized_ids is not None else input_ids
-            prompt_lengths = torch.full((generated.size(0),), prompt_source.shape[1],
-                                       dtype=torch.long, device=generated.device)
+            prompt_lengths = torch.full((generated.size(0),), prompt_source.shape[1], dtype=torch.long, device=generated.device)
+
+        has_audio_mask: torch.Tensor
+        if batch_audio is not None:
+            has_audio_mask = torch.tensor(
+                [audio is not None for audio in batch_audio],
+                dtype=torch.bool,
+                device=device,
+            )
+        elif has_audio:
+            has_audio_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
+        else:
+            has_audio_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        rerank_enabled = (
+            model_choice == "safe"
+            and is_audio_only
+            and num_return_sequences > 1
+            and bool(self.config.get("audio_rerank_with_clap", False))
+        )
+
+        references = list(references or [])
+        questions = list(questions or [])
+        if rerank_enabled:
+            best_sequences = self._rerank_audio_candidates(
+                generated,
+                prompt_lengths,
+                has_audio_mask,
+                batch_audio,
+                questions,
+                references,
+                device,
+            )
+        else:
+            best_sequences = generated[:, 0, :]
 
         # CRITICAL FIX: Check if generation returned truncated output (only new tokens)
         # This happens when using inputs_embeds with some HuggingFace configs
-        if generated.shape[1] < input_ids.shape[1]:
-            # Generation returned ONLY new tokens (unusual but handle it)
-            extracted_tokens = [generated[i] for i in range(generated.size(0))]
+        if best_sequences.shape[1] < input_ids.shape[1]:
+            extracted_tokens = [best_sequences[i] for i in range(best_sequences.size(0))]
         else:
-            # Normal case: Extract only the newly generated tokens (after prompt) using per-sample lengths
             extracted_tokens = []
-            for i in range(generated.size(0)):
-                # Use per-sample prompt length to handle left padding correctly
-                sample_prompt_len = prompt_lengths[i].item()
-
-                # The attention mask length already includes any audio placeholder tokens
-                # that were tokenized as part of the text input. We don't need to adjust
-                # for audio_tokens here since they are injected via inputs_embeds and
-                # don't affect the text token count.
+            for i in range(best_sequences.size(0)):
+                sample_prompt_len = int(prompt_lengths[i].item())
                 start_idx = sample_prompt_len
-
-                if start_idx < generated.shape[1]:
-                    new_tokens = generated[i, start_idx:]
+                if start_idx < best_sequences.shape[1]:
+                    new_tokens = best_sequences[i, start_idx:]
                     extracted_tokens.append(new_tokens)
                 else:
-                    extracted_tokens.append(torch.tensor([], dtype=torch.long, device=generated.device))
+                    extracted_tokens.append(torch.tensor([], dtype=torch.long, device=best_sequences.device))
         
         return extracted_tokens
     

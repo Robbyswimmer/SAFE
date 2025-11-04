@@ -29,6 +29,14 @@ retention_tolerance: 0.005  # Strict tolerance for production
 audio_contrastive_weight: 0.12
 audio_contrastive_temperature: 0.07
 audio_contrastive_answer_max_length: 64
+audio_num_beams: 4
+audio_num_return_sequences: 4
+audio_length_penalty: 0.85
+audio_rerank_with_clap: true
+audio_rerank_logprob_weight: 1.0
+audio_rerank_clap_weight: 0.35
+audio_rerank_ngram_weight: 0.55
+audio_rerank_coverage_weight: 0.1
 
 # Logging and saving
 logging_steps: 100
