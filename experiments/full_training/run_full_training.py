@@ -86,6 +86,15 @@ class TrainingConfig:
     save_audio_csv: bool
     csv_min_accuracy: float
     csv_max_samples: int
+    enable_scst_finetune: bool = False
+    scst_epochs: int = 1
+    scst_learning_rate: float = 5e-6
+    scst_num_samples: int = 1
+    scst_sample_top_p: float = 0.9
+    scst_sample_temperature: float = 0.9
+    scst_reward_metric: str = "cider"
+    scst_patience_epochs: int = 2
+    scst_improvement_threshold: float = 1e-4
 
 
 class CombinedAudioDataset(Dataset):
@@ -370,6 +379,7 @@ def build_stage_a_config(cfg: TrainingConfig) -> Dict[str, object]:
         "learning_rate_projector": cfg.learning_rate_projector,
         "learning_rate_adapter": cfg.learning_rate_adapter,
         "num_epochs": cfg.num_epochs,
+        "variant": cfg.variant,
         "eval_steps": 5_000,
         "save_steps": 5_000,
         "logging_steps": 100,
@@ -400,6 +410,15 @@ def build_stage_a_config(cfg: TrainingConfig) -> Dict[str, object]:
         "save_audio_csv": cfg.save_audio_csv,
         "csv_min_accuracy": cfg.csv_min_accuracy,
         "csv_max_samples": cfg.csv_max_samples,
+        "enable_scst_finetune": cfg.enable_scst_finetune,
+        "scst_epochs": cfg.scst_epochs,
+        "scst_learning_rate": cfg.scst_learning_rate,
+        "scst_num_samples": cfg.scst_num_samples,
+        "scst_sample_top_p": cfg.scst_sample_top_p,
+        "scst_sample_temperature": cfg.scst_sample_temperature,
+        "scst_reward_metric": cfg.scst_reward_metric,
+        "scst_patience_epochs": cfg.scst_patience_epochs,
+        "scst_improvement_threshold": cfg.scst_improvement_threshold,
     }
 
 
@@ -645,6 +664,15 @@ def run_experiment(args: argparse.Namespace) -> None:
         save_audio_csv=args.save_audio_csv,
         csv_min_accuracy=args.csv_min_accuracy,
         csv_max_samples=args.csv_max_samples,
+        enable_scst_finetune=args.enable_scst_finetune,
+        scst_epochs=args.scst_epochs,
+        scst_learning_rate=args.scst_learning_rate,
+        scst_num_samples=args.scst_num_samples,
+        scst_sample_top_p=args.scst_sample_top_p,
+        scst_sample_temperature=args.scst_sample_temperature,
+        scst_reward_metric=args.scst_reward_metric,
+        scst_patience_epochs=args.scst_patience_epochs,
+        scst_improvement_threshold=args.scst_improvement_threshold,
     )
 
     variant_config = configure_variant(args.variant, base_config)
@@ -733,6 +761,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-audio-csv", action="store_true", help="Save audio evaluation samples to CSV")
     parser.add_argument("--csv-min-accuracy", type=float, default=0.45, help="Minimum audio accuracy to trigger CSV export")
     parser.add_argument("--csv-max-samples", type=int, default=500, help="Maximum audio samples to save to CSV")
+    parser.add_argument("--enable-scst-finetune", action="store_true", help="Enable SCST fine-tuning after plateau")
+    parser.add_argument("--scst-epochs", type=int, default=1, help="Number of SCST fine-tune epochs")
+    parser.add_argument("--scst-learning-rate", type=float, default=5e-6, help="Learning rate during SCST")
+    parser.add_argument("--scst-num-samples", type=int, default=1, help="Samples per clip for SCST updates")
+    parser.add_argument("--scst-sample-top-p", type=float, default=0.9, help="Top-p for SCST sampling")
+    parser.add_argument("--scst-sample-temperature", type=float, default=0.9, help="Temperature for SCST sampling")
+    parser.add_argument(
+        "--scst-reward-metric",
+        choices=["cider", "spice", "spider"],
+        default="cider",
+        help="Reward metric for SCST",
+    )
+    parser.add_argument("--scst-patience-epochs", type=int, default=2, help="Epochs without improvement before SCST")
+    parser.add_argument("--scst-improvement-threshold", type=float, default=1e-4, help="Minimum improvement to reset SCST patience")
 
     return parser.parse_args()
 

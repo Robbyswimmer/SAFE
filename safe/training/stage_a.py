@@ -1,5 +1,5 @@
 import math
-import random
+import shutil
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 import wandb
 import os
 from pathlib import Path
@@ -137,10 +137,32 @@ class StageATrainer:
             "audio_rerank_clap_weight": 0.0,
             "audio_rerank_ngram_weight": 0.0,
             "audio_rerank_coverage_weight": 0.0,
+            "audio_rerank_cider_weight": 0.0,
+            "audio_rerank_spider_weight": 0.0,
+            "audio_rerank_tag_vocab": None,
+            "audio_rerank_num_tags": 3,
+            "audio_rerank_tag_weight": 0.0,
+            "audio_num_samples": 0,
+            "audio_sample_top_p": 0.9,
+            "audio_sample_temperature": 1.0,
+            "enable_scst_finetune": False,
+            "scst_epochs": 1,
+            "scst_learning_rate": 5e-6,
+            "scst_num_samples": 1,
+            "scst_sample_top_p": 0.9,
+            "scst_sample_temperature": 0.9,
+            "scst_reward_metric": "cider",
+            "scst_patience_epochs": 2,
+            "scst_improvement_threshold": 1e-4,
         }
 
         if config:
             self.config.update(config)
+
+        if isinstance(config, dict) and config.get("variant") is not None:
+            self.config["variant"] = config.get("variant")
+        elif "variant" not in self.config:
+            self.config["variant"] = "unknown"
 
         self.grad_accum_steps = max(1, int(self.config.get("gradient_accumulation_steps", 1)))
         self._micro_step = 0
@@ -150,6 +172,22 @@ class StageATrainer:
         self.audio_contrastive_answer_max_length = int(
             self.config.get("audio_contrastive_answer_max_length", 48)
         )
+        self.audio_contrastive_metric_weight = float(
+            self.config.get("audio_contrastive_metric_weight", 0.0)
+        )
+        self.audio_contrastive_negative_threshold = float(
+            self.config.get("audio_contrastive_negative_threshold", 0.0)
+        )
+        self.audio_contrastive_max_negatives = int(
+            self.config.get("audio_contrastive_max_negatives", 0)
+        )
+
+        self.scst_enabled = bool(self.config.get("enable_scst_finetune", False))
+        self.scst_patience_epochs = max(1, int(self.config.get("scst_patience_epochs", 2)))
+        self.scst_min_delta = float(self.config.get("scst_improvement_threshold", 1e-4))
+        self._best_audio_accuracy = float("-inf")
+        self._epochs_since_improvement = 0
+        self._scst_triggered = False
 
         self.log_interval = max(1, int(self.config.get("logging_steps", 50)))
         self.config["logging_steps"] = self.log_interval
@@ -173,6 +211,15 @@ class StageATrainer:
         
         # Setup optimizer
         self._setup_optimizer()
+
+        self.audio_rerank_num_tags = int(self.config.get("audio_rerank_num_tags", 3) or 0)
+        self.audio_rerank_tag_weight = float(self.config.get("audio_rerank_tag_weight", 0.0))
+        self.audio_rerank_cider_weight = float(self.config.get("audio_rerank_cider_weight", 0.0))
+        self.audio_rerank_spider_weight = float(self.config.get("audio_rerank_spider_weight", 0.0))
+        self._tag_vocab_terms: Optional[List[str]] = None
+        self._tag_vocab_embeddings: Optional[torch.Tensor] = None
+        self._cider_scorer = None
+        self._spice_scorer = None
 
         # Derive a dataset-aware warmup schedule so tiny overfit packs are not stuck in warmup
         nominal_epochs = self.config.get("num_epochs") or 1
@@ -812,19 +859,40 @@ class StageATrainer:
             if isinstance(has_audio, torch.Tensor):
                 has_audio = has_audio.to(device=device, dtype=torch.bool)
 
-        audio_indices = torch.where(has_audio)[0]
-        if has_audio is None or audio_indices.numel() == 0:
+        if has_audio is None or has_audio.numel() == 0 or not bool(has_audio.any()):
             return {"audio_task_loss": 0.0, "total_loss": 0.0}, False
 
-        batch_questions = batch.get("questions", [])
+        batch_questions = list(batch.get("questions", []))
+        batch_images = batch.get("images", None)
+        batch_audio = batch.get("audio", None)
         batch_size = len(batch_questions)
-        sampled_answers = self._sample_training_answers(batch.get("answers"), batch_size)
+        reference_answer_list = self._build_training_answer_list(batch.get("answers"), batch_size)
+
+        (
+            batch_questions,
+            batch_images,
+            batch_audio,
+            sampled_answers,
+            has_audio,
+            reference_answer_list,
+        ) = self._expand_audio_caption_training_batch(
+            batch_questions,
+            batch_images,
+            batch_audio,
+            reference_answer_list,
+            has_audio,
+        )
+
+        has_audio = has_audio.to(device=device, dtype=torch.bool)
+        audio_indices = torch.where(has_audio)[0]
+        if audio_indices.numel() == 0:
+            return {"audio_task_loss": 0.0, "total_loss": 0.0}, False
 
         # Create input tensors for training - apply answers for supervised learning
         inputs = self.safe_model.prepare_multimodal_inputs(
             text=batch_questions,
-            images=batch.get("images", None),
-            audio=batch.get("audio", None),
+            images=batch_images if batch_images is not None else None,
+            audio=batch_audio if batch_audio is not None else None,
             answers=sampled_answers,
             device=device,
             training_mode=True  # Apply answers during training
@@ -885,6 +953,7 @@ class StageATrainer:
                 audio_token_tensor,
                 sampled_answers,
                 audio_indices,
+                reference_answers=reference_answer_list,
             )
             if contrastive_raw is not None:
                 total_loss = total_loss + (self.audio_contrastive_weight * contrastive_raw)
@@ -2111,21 +2180,96 @@ class StageATrainer:
 
         return answers_list
 
-    def _sample_training_answers(self, answers: Any, batch_size: int) -> List[str]:
-        answer_list = self._build_training_answer_list(answers, batch_size)
-        sampled: List[str] = []
-        for entry in answer_list:
-            refs = [
-                self._normalize_audio_caption(ref)
-                for ref in self._prepare_gt_answers(entry)
-                if ref
-            ]
-            refs = [ref for ref in refs if ref]
-            if not refs:
-                sampled.append("")
+    def _expand_audio_caption_training_batch(
+        self,
+        questions: Sequence[str],
+        images: Optional[Sequence[Any]],
+        audio: Optional[Sequence[Any]],
+        reference_answers: Sequence[Any],
+        has_audio_mask: torch.Tensor,
+    ) -> Tuple[List[str], Optional[List[Any]], Optional[List[Any]], List[str], torch.Tensor, List[Sequence[str]]]:
+        question_list = list(questions)
+
+        if isinstance(images, torch.Tensor):
+            if images.dim() == 0:
+                image_list: Optional[List[Any]] = [images]
             else:
-                sampled.append(random.choice(refs))
-        return sampled
+                image_list = [images[idx] for idx in range(images.size(0))]
+        elif isinstance(images, (list, tuple)):
+            image_list = list(images)
+        else:
+            image_list = None
+
+        if isinstance(audio, torch.Tensor):
+            if audio.dim() == 0:
+                audio_list: Optional[List[Any]] = [audio]
+            else:
+                audio_list = [audio[idx] for idx in range(audio.size(0))]
+        elif isinstance(audio, (list, tuple)):
+            audio_list = list(audio)
+        else:
+            audio_list = None
+
+        if isinstance(has_audio_mask, torch.Tensor):
+            has_audio_flags = has_audio_mask.detach().cpu().tolist()
+        else:
+            has_audio_flags = list(has_audio_mask)
+
+        expanded_questions: List[str] = []
+        expanded_answers: List[str] = []
+        expanded_references: List[Sequence[str]] = []
+        expanded_images: Optional[List[Any]] = [] if image_list is not None else None
+        expanded_audio: Optional[List[Any]] = [] if audio_list is not None else None
+        expanded_has_audio: List[bool] = []
+
+        total_items = max(len(question_list), len(reference_answers))
+
+        for idx in range(total_items):
+            question = question_list[idx] if idx < len(question_list) else ""
+            has_audio_flag = bool(has_audio_flags[idx]) if idx < len(has_audio_flags) else False
+
+            refs_raw = self._prepare_gt_answers(reference_answers[idx] if idx < len(reference_answers) else "")
+            normalized_refs: List[str] = []
+            seen: Set[str] = set()
+            for candidate in refs_raw:
+                normalized = self._normalize_audio_caption(candidate)
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    normalized_refs.append(normalized)
+
+            if not normalized_refs:
+                normalized_refs = [""]
+
+            reference_tuple = tuple(normalized_refs)
+
+            def append_sample(answer_text: str, audio_flag: bool) -> None:
+                expanded_questions.append(question)
+                if expanded_images is not None:
+                    image_value = image_list[idx] if image_list is not None and idx < len(image_list) else None
+                    expanded_images.append(image_value)
+                if expanded_audio is not None:
+                    audio_value = audio_list[idx] if audio_list is not None and idx < len(audio_list) else None
+                    expanded_audio.append(audio_value)
+                expanded_answers.append(answer_text)
+                expanded_references.append(reference_tuple)
+                expanded_has_audio.append(audio_flag)
+
+            if has_audio_flag:
+                for answer_text in normalized_refs:
+                    append_sample(answer_text, True)
+            else:
+                append_sample(normalized_refs[0], False)
+
+        expanded_has_audio_tensor = torch.tensor(expanded_has_audio, dtype=torch.bool)
+
+        return (
+            expanded_questions,
+            expanded_images,
+            expanded_audio,
+            expanded_answers,
+            expanded_has_audio_tensor,
+            expanded_references,
+        )
 
     def _compute_answer_accuracy(self, pred_answer: str, gt_answer: Any) -> float:
         """Compute answer accuracy with proper handling for single vs. multiple ground truths."""
@@ -2153,20 +2297,66 @@ class StageATrainer:
     def _normalize_audio_caption(self, text: Any) -> str:
         if text is None:
             return ""
+
         if isinstance(text, (list, tuple)):
             text = " ".join(str(t) for t in text if t)
         elif isinstance(text, dict):
             value = text.get("answer") or text.get("text")
             text = value if value is not None else ""
 
-        normalized = str(text)
         import re
         import unicodedata
 
-        normalized = unicodedata.normalize("NFKC", normalized)
-        normalized = normalized.strip()
-        normalized = re.sub(r"\s+", " ", normalized)
-        return normalized.lower()
+        normalized = unicodedata.normalize("NFKC", str(text))
+        normalized = normalized.replace("\u2019", "'")  # Normalise curly apostrophes
+        normalized = normalized.lower()
+
+        # Collapse possessives before stripping punctuation so "dog's" -> "dogs"
+        normalized = re.sub(r"'s\b", "s", normalized)
+
+        # Remove residual apostrophes and punctuation (keep alphanumerics + whitespace)
+        normalized = re.sub(r"'", " ", normalized)
+        normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+
+        tokens = [tok for tok in normalized.split() if tok]
+        if not tokens:
+            return ""
+
+        number_map = {
+            "zero": "0",
+            "one": "1",
+            "two": "2",
+            "three": "3",
+            "four": "4",
+            "five": "5",
+            "six": "6",
+            "seven": "7",
+            "eight": "8",
+            "nine": "9",
+            "ten": "10",
+            "eleven": "11",
+            "twelve": "12",
+            "thirteen": "13",
+            "fourteen": "14",
+            "fifteen": "15",
+            "sixteen": "16",
+            "seventeen": "17",
+            "eighteen": "18",
+            "nineteen": "19",
+            "twenty": "20",
+        }
+
+        articles = {"a", "an", "the"}
+        cleaned_tokens: List[str] = []
+        for tok in tokens:
+            if tok in articles:
+                continue
+            cleaned_tokens.append(number_map.get(tok, tok))
+
+        if not cleaned_tokens:
+            return ""
+
+        return " ".join(cleaned_tokens)
 
     def _get_bertscore_metric(self):
         """Lazy load BERTScore metric."""
@@ -2200,11 +2390,10 @@ class StageATrainer:
 
     def _tokenize_caption(self, text: str) -> List[str]:
         """Tokenize caption into words (keeps duplicates for F1)."""
-        if not text:
+        normalized = self._normalize_audio_caption(text)
+        if not normalized:
             return []
-        text = text.lower()
-        text = re.sub(r'[^\w\s]', ' ', text)
-        return [token for token in text.split() if token]
+        return normalized.split()
 
     def _compute_token_f1(self, pred_caption: str, gt_caption: str) -> float:
         """Compute token-level F1 score using multisets (preserves duplicates)."""
@@ -2521,8 +2710,9 @@ class StageATrainer:
                 candidate = answers_list
 
             text = self._resolve_answer_text(candidate)
-            if text:
-                texts.append(text)
+            normalized = self._normalize_audio_caption(text)
+            if normalized:
+                texts.append(normalized)
 
         return texts
 
@@ -2531,6 +2721,7 @@ class StageATrainer:
         audio_tokens: torch.Tensor,
         answers: Any,
         audio_indices: torch.Tensor,
+        reference_answers: Optional[Sequence[Any]] = None,
     ) -> Optional[torch.Tensor]:
         if audio_tokens is None or audio_indices.numel() == 0:
             return None
@@ -2544,14 +2735,10 @@ class StageATrainer:
             return None
 
         selected = token_matrix.index_select(0, audio_indices.to(audio_tokens.device))
-        if selected.dim() == 3:
-            audio_vecs = selected.mean(dim=1)
-        else:
-            audio_vecs = selected
+        audio_vecs = selected.mean(dim=1) if selected.dim() == 3 else selected
 
         texts = self._gather_answer_texts(answers, audio_indices)
         if len(texts) != audio_vecs.size(0):
-            # Fallback: ensure lengths match by filtering empty texts
             paired = [
                 (vec, text)
                 for vec, text in zip(audio_vecs, texts)
@@ -2565,38 +2752,83 @@ class StageATrainer:
         if not texts:
             return None
 
-        tokenizer = self.safe_model.base_vl.tokenizer
-        encoded = tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=self.audio_contrastive_answer_max_length,
-            return_tensors="pt",
-        )
-        input_ids = encoded["input_ids"].to(audio_vecs.device)
-        attention_mask = encoded["attention_mask"].to(audio_vecs.device)
-
-        embedding_layer = self.safe_model.base_vl.llm.get_input_embeddings()
-        with torch.no_grad():
-            text_embeds = embedding_layer(input_ids)
-        mask = attention_mask.unsqueeze(-1)
-        text_vecs = (text_embeds * mask).sum(dim=1)
-        denom = mask.sum(dim=1).clamp_min(1.0)
-        text_vecs = text_vecs / denom
-
+        device = audio_vecs.device
         audio_vecs = F.normalize(audio_vecs, dim=-1)
+
+        text_vecs = self._embed_texts(texts, device)
+        if text_vecs.numel() == 0:
+            return None
         text_vecs = F.normalize(text_vecs, dim=-1)
 
-        logits = torch.matmul(audio_vecs, text_vecs.transpose(0, 1))
+        reference_sets: List[List[str]] = []
+        if reference_answers is not None:
+            for idx in audio_indices.tolist():
+                raw_answer = reference_answers[idx] if idx < len(reference_answers) else None
+                ref_texts = [
+                    self._normalize_audio_caption(ans)
+                    for ans in self._prepare_gt_answers(raw_answer)
+                    if ans
+                ]
+                reference_sets.append([ref for ref in ref_texts if ref])
+        else:
+            reference_sets = [[] for _ in texts]
+
         temperature = max(self.audio_contrastive_temperature, 1e-5)
-        logits = logits / temperature
-        targets = torch.arange(audio_vecs.size(0), device=audio_vecs.device)
 
-        loss_a2t = F.cross_entropy(logits, targets)
-        loss_t2a = F.cross_entropy(logits.transpose(0, 1), targets)
-        contrastive_loss = 0.5 * (loss_a2t + loss_t2a)
+        extra_texts: List[str] = []
+        threshold = self.audio_contrastive_negative_threshold
+        max_neg = self.audio_contrastive_max_negatives
+        if threshold > 0.0 and max_neg > 0 and reference_sets:
+            for i, ref_list in enumerate(reference_sets):
+                for j, other_refs in enumerate(reference_sets):
+                    if i == j:
+                        continue
+                    for candidate in other_refs:
+                        if candidate in texts:
+                            continue
+                        score = self._compute_ngram_overlap_score(candidate, ref_list)
+                        if score >= threshold:
+                            extra_texts.append(candidate)
+            dedup: List[str] = []
+            seen = set()
+            for text in extra_texts:
+                if text not in seen:
+                    dedup.append(text)
+                    seen.add(text)
+                if len(dedup) >= max_neg:
+                    break
+            extra_texts = dedup
+        else:
+            extra_texts = []
 
-        return contrastive_loss
+        if extra_texts:
+            neg_vecs = self._embed_texts(extra_texts, device)
+            neg_vecs = F.normalize(neg_vecs, dim=-1) if neg_vecs.numel() > 0 else torch.empty(0, text_vecs.size(1), device=device)
+            text_vecs_extended = torch.cat([text_vecs, neg_vecs], dim=0)
+        else:
+            text_vecs_extended = text_vecs
+
+        logits = torch.matmul(audio_vecs, text_vecs_extended.transpose(0, 1)) / temperature
+        targets = torch.arange(audio_vecs.size(0), device=device)
+
+        weights = torch.ones(audio_vecs.size(0), device=device)
+        if self.audio_contrastive_metric_weight != 0.0 and reference_sets:
+            for idx, refs in enumerate(reference_sets):
+                if not refs:
+                    continue
+                score = self._compute_ngram_overlap_score(texts[idx], refs)
+                weights[idx] += self.audio_contrastive_metric_weight * score
+        if weights.numel() > 0:
+            weights = weights / weights.mean().clamp_min(1e-6)
+
+        loss_a2t = F.cross_entropy(logits, targets, reduction='none')
+        loss_a2t = (loss_a2t * weights).mean()
+
+        logits_t2a = torch.matmul(text_vecs, audio_vecs.transpose(0, 1)) / temperature
+        loss_t2a = F.cross_entropy(logits_t2a, targets, reduction='none')
+        loss_t2a = (loss_t2a * weights).mean()
+
+        return 0.5 * (loss_a2t + loss_t2a)
 
     # ------------------------------------------------------------------
     # Reranking helpers
@@ -2662,6 +2894,13 @@ class StageATrainer:
             audio_embed = None
             if clap_audio_embeds is not None and sample_idx < len(clap_audio_embeds):
                 audio_embed = clap_audio_embeds[sample_idx]
+            predicted_tags: List[str] = []
+            if (
+                self.audio_rerank_tag_weight > 0.0
+                and self.audio_rerank_num_tags > 0
+                and audio_embed is not None
+            ):
+                predicted_tags = self._predict_audio_tags(audio_embed)
             best_score = float("-inf")
             best_idx = 0
 
@@ -2706,6 +2945,22 @@ class StageATrainer:
                 if coverage_weight > 0.0:
                     coverage = self._compute_coverage_score(caption_text, reference_texts)
                     total_score += coverage_weight * coverage
+
+                cider_score = 0.0
+                spice_score = 0.0
+                if (self.audio_rerank_cider_weight > 0.0 or self.audio_rerank_spider_weight > 0.0) and reference_texts:
+                    cider_score = self._compute_cider_score(caption_text, reference_texts)
+                    if self.audio_rerank_cider_weight > 0.0:
+                        total_score += self.audio_rerank_cider_weight * cider_score
+                if self.audio_rerank_spider_weight > 0.0 and reference_texts:
+                    if spice_score == 0.0:
+                        spice_score = self._compute_spice_score(caption_text, reference_texts)
+                    spider_score = 0.5 * (cider_score + spice_score)
+                    total_score += self.audio_rerank_spider_weight * spider_score
+
+                if self.audio_rerank_tag_weight > 0.0 and predicted_tags:
+                    tag_bonus = self._score_tag_bonus(caption_text, predicted_tags)
+                    total_score += self.audio_rerank_tag_weight * tag_bonus
 
                 if total_score > best_score:
                     best_score = total_score
@@ -2854,13 +3109,153 @@ class StageATrainer:
         return result
 
     def _compute_clap_text_embedding(self, caption: str) -> Optional[torch.Tensor]:
+        embeddings = self._compute_clap_text_embeddings([caption])
+        if embeddings is None or embeddings.numel() == 0:
+            return None
+        return embeddings[0]
+
+    def _compute_clap_text_embeddings(self, captions: Sequence[str]) -> Optional[torch.Tensor]:
         clap_encoder = self._resolve_clap_encoder()
-        if clap_encoder is None or not caption:
+        if clap_encoder is None:
             return None
-        embeddings = clap_encoder.encode_text([caption])
-        if not isinstance(embeddings, torch.Tensor) or embeddings.numel() == 0:
+        texts = [c for c in captions if c]
+        if not texts:
             return None
-        return F.normalize(embeddings.float(), dim=-1)[0]
+        embeddings = clap_encoder.encode_text(texts)
+        if not isinstance(embeddings, torch.Tensor):
+            embeddings = torch.from_numpy(embeddings)
+        return F.normalize(embeddings.float(), dim=-1)
+
+    def _load_tag_vocab(self) -> Optional[List[str]]:
+        if self._tag_vocab_terms is not None:
+            return self._tag_vocab_terms
+        vocab_path = self.config.get("audio_rerank_tag_vocab")
+        if not vocab_path:
+            self._tag_vocab_terms = None
+            return None
+        path = Path(vocab_path).expanduser()
+        if not path.exists():
+            print(f"⚠️  Tag vocabulary file not found: {path}", flush=True)
+            self._tag_vocab_terms = None
+            return None
+        with path.open("r", encoding="utf-8") as handle:
+            terms = [line.strip() for line in handle if line.strip()]
+        self._tag_vocab_terms = terms if terms else None
+        if self._tag_vocab_terms:
+            embeddings = self._compute_clap_text_embeddings(self._tag_vocab_terms)
+            if embeddings is None:
+                self._tag_vocab_terms = None
+                self._tag_vocab_embeddings = None
+            else:
+                self._tag_vocab_embeddings = embeddings
+        else:
+            self._tag_vocab_embeddings = None
+        return self._tag_vocab_terms
+
+    def _predict_audio_tags(self, audio_embedding: torch.Tensor) -> List[str]:
+        vocab = self._load_tag_vocab()
+        if not vocab or self._tag_vocab_embeddings is None:
+            return []
+        if audio_embedding is None or audio_embedding.numel() == 0:
+            return []
+        tag_embeddings = self._tag_vocab_embeddings.to(audio_embedding.device)
+        sims = torch.matmul(tag_embeddings, audio_embedding)
+        topk = min(self.audio_rerank_num_tags, sims.size(0))
+        if topk <= 0:
+            return []
+        values, indices = torch.topk(sims, topk)
+        tags: List[str] = []
+        for score, idx in zip(values.tolist(), indices.tolist()):
+            if score > 0:
+                tags.append(vocab[idx])
+        return tags
+
+    def _score_tag_bonus(self, caption_text: str, tags: Sequence[str]) -> float:
+        if not tags:
+            return 0.0
+        tokens = set(self._tokenize_caption(caption_text))
+        if not tokens:
+            return 0.0
+        matches = 0
+        for tag in tags:
+            tag_tokens = self._tokenize_caption(tag)
+            if tag_tokens and all(token in tokens for token in tag_tokens):
+                matches += 1
+        return matches / len(tags)
+
+    def _ensure_cider_scorer(self):
+        if self._cider_scorer is None:
+            try:
+                from pycocoevalcap.cider.cider import Cider
+
+                self._cider_scorer = Cider()
+            except Exception as exc:
+                self._log_caption_metric_warning("CIDEr", exc)
+                self._cider_scorer = False
+        return self._cider_scorer if self._cider_scorer is not False else None
+
+    def _ensure_spice_scorer(self):
+        if self._spice_scorer is None:
+            try:
+                from pycocoevalcap.spice.spice import Spice
+
+                self._spice_scorer = Spice()
+            except Exception as exc:
+                self._log_caption_metric_warning("SPICE", exc)
+                self._spice_scorer = False
+        return self._spice_scorer if self._spice_scorer is not False else None
+
+    def _compute_cider_score(self, caption: str, references: Sequence[str]) -> float:
+        if not caption or not references:
+            return 0.0
+        scorer = self._ensure_cider_scorer()
+        if scorer is None:
+            return 0.0
+        try:
+            score, _ = scorer.compute_score({"0": list(references)}, {"0": [caption]})
+            if isinstance(score, (list, tuple)):
+                score = score[0]
+            return float(score)
+        except Exception as exc:
+            self._log_caption_metric_warning("CIDEr", exc)
+            return 0.0
+
+    def _compute_spice_score(self, caption: str, references: Sequence[str]) -> float:
+        if not caption or not references:
+            return 0.0
+        scorer = self._ensure_spice_scorer()
+        if scorer is None:
+            return 0.0
+        try:
+            score, details = scorer.compute_score({"0": list(references)}, {"0": [caption]})
+            if isinstance(score, (list, tuple)):
+                score = score[0]
+            return float(score)
+        except Exception as exc:
+            self._log_caption_metric_warning("SPICE", exc)
+            return 0.0
+
+    def _embed_texts(self, texts: Sequence[str], device: torch.device) -> torch.Tensor:
+        tokenizer = self.safe_model.base_vl.tokenizer
+        embedding_layer = self.safe_model.base_vl.llm.get_input_embeddings()
+        hidden_size = embedding_layer.weight.size(1)
+        if not texts:
+            return torch.empty(0, hidden_size, device=device)
+        encoded = tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=self.audio_contrastive_answer_max_length,
+            return_tensors="pt",
+        )
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device)
+        with torch.no_grad():
+            text_embeds = embedding_layer(input_ids)
+        mask = attention_mask.unsqueeze(-1)
+        pooled = (text_embeds * mask).sum(dim=1).float()
+        denom = mask.sum(dim=1).clamp_min(1.0)
+        return pooled / denom
 
     def _batch_contains_pixels(self, batch: Dict[str, Any], idx: int) -> bool:
         images = batch.get("images")
@@ -2964,7 +3359,7 @@ class StageATrainer:
         else:
             repetition_penalty = audio_rep
 
-        gen_kwargs = dict(
+        base_gen_kwargs = dict(
             max_new_tokens=max_new_tokens,
             min_new_tokens=1,  # CRITICAL FIX: Force at least 1 token to prevent empty generation
             do_sample=False,    # Greedy decoding for deterministic results
@@ -2987,17 +3382,37 @@ class StageATrainer:
             if audio_num_return is not None
             else audio_num_beams
         )
+
+        beam_kwargs = dict(base_gen_kwargs)
+        sample_kwargs: Optional[Dict[str, Any]] = None
+
         if is_audio_only:
-            gen_kwargs["num_beams"] = audio_num_beams
+            beam_kwargs["num_beams"] = audio_num_beams
             if audio_num_return > 1:
-                gen_kwargs["num_return_sequences"] = audio_num_return
-            elif "num_return_sequences" in gen_kwargs:
-                gen_kwargs.pop("num_return_sequences")
-            gen_kwargs["length_penalty"] = float(self.config.get("audio_length_penalty", 1.0))
+                beam_kwargs["num_return_sequences"] = audio_num_return
+            elif "num_return_sequences" in beam_kwargs:
+                beam_kwargs.pop("num_return_sequences")
+            beam_kwargs["length_penalty"] = float(self.config.get("audio_length_penalty", 1.0))
+
+            audio_num_samples = max(0, int(self.config.get("audio_num_samples", 0) or 0))
+            if audio_num_samples > 0:
+                sample_kwargs = dict(base_gen_kwargs)
+                sample_kwargs["do_sample"] = True
+                temperature_val = float(self.config.get("audio_sample_temperature", 1.0))
+                sample_kwargs["temperature"] = temperature_val if temperature_val > 0 else None
+                top_p_val = float(self.config.get("audio_sample_top_p", 0.9))
+                if 0.0 < top_p_val < 1.0:
+                    sample_kwargs["top_p"] = top_p_val
+                else:
+                    sample_kwargs["top_p"] = None
+                sample_kwargs["num_beams"] = 1
+                sample_kwargs["num_return_sequences"] = audio_num_samples
+                sample_kwargs["length_penalty"] = float(self.config.get("audio_length_penalty", 1.0))
         else:
-            gen_kwargs["num_beams"] = 1
-            gen_kwargs.pop("num_return_sequences", None)
-            gen_kwargs.pop("length_penalty", None)
+            beam_kwargs["num_beams"] = 1
+            beam_kwargs.pop("num_return_sequences", None)
+            beam_kwargs.pop("length_penalty", None)
+            sample_kwargs = None
 
         # EARLY TRAINING FIX: Suppress EOS in first 500 steps to force output
         # The untrained audio features may confuse the model into immediate EOS
@@ -3007,64 +3422,85 @@ class StageATrainer:
             # Also suppress pad token if different from EOS
             if getattr(tok, "pad_token_id", None) is not None and tok.pad_token_id != tok.eos_token_id:
                 suppress_list.append(tok.pad_token_id)
-            gen_kwargs["suppress_tokens"] = suppress_list
+            beam_kwargs["suppress_tokens"] = suppress_list
+            if sample_kwargs is not None:
+                sample_kwargs["suppress_tokens"] = suppress_list
 
 
-        if model_choice == "safe":
+        input_ids_device = input_ids.to(device)
+        attention_mask_device = attention_mask.to(device) if isinstance(attention_mask, torch.Tensor) else None
+        pixel_values_device = pixel_values.to(device) if isinstance(pixel_values, torch.Tensor) else None
+        audio_tokens_device = audio_tokens.to(device) if isinstance(audio_tokens, torch.Tensor) else None
+        audio_attention_mask = inputs.get("audio_attention_mask")
+        if isinstance(audio_attention_mask, torch.Tensor):
+            audio_attention_mask = audio_attention_mask.to(device)
 
-            generated = self.safe_model.generate(
-                input_ids=input_ids.to(device),
-                attention_mask=attention_mask.to(device) if isinstance(attention_mask, torch.Tensor) else None,
-                pixel_values=pixel_values.to(device) if isinstance(pixel_values, torch.Tensor) else None,
-                audio_tokens=audio_tokens.to(device) if isinstance(audio_tokens, torch.Tensor) else None,
-                audio_attention_mask=inputs.get("audio_attention_mask"),
-                **gen_kwargs,
+        sanitized_ids: Optional[torch.Tensor] = None
+        base_input_ids_device: Optional[torch.Tensor] = None
+        if model_choice != "safe":
+            has_audio_tokens = (
+                audio_tokens is not None
+                and isinstance(audio_tokens, torch.Tensor)
+                and audio_tokens.numel() > 0
             )
-
-        else:
-            # BASE model: Use raw base_vl directly to avoid audio_token_embeddings contamination
-            # Even with gate=0, SAFE's get_input_embeddings() uses trained audio_token_embeddings
-            # which causes BASE to improve over time. True baseline must use frozen base_vl.
-
-            # CRITICAL FIX: Only sanitize if audio_tokens present (to remove audio token IDs)
-            # VL-only batches have no audio tokens to remove, and sanitization would
-            # incorrectly replace image tokens (ID=32000) since they're >= original_vocab_size (32000)
-            has_audio_tokens = audio_tokens is not None and (isinstance(audio_tokens, torch.Tensor) and audio_tokens.numel() > 0)
-
             if has_audio_tokens:
-                # Audio batch: sanitize to remove audio token placeholders
                 sanitized_ids = self._sanitize_input_ids_batch(input_ids)
                 if sanitized_ids is None:
                     sanitized_ids = input_ids
             else:
-                # VL-only batch: NO sanitization (preserve image tokens)
                 sanitized_ids = input_ids
+            base_input_ids_device = sanitized_ids.to(device)
 
-            generated = self.safe_model.base_vl.llm.generate(
-                input_ids=sanitized_ids.to(device),
-                attention_mask=attention_mask.to(device) if isinstance(attention_mask, torch.Tensor) else None,
-                pixel_values=pixel_values.to(device) if isinstance(pixel_values, torch.Tensor) else None,
-                **gen_kwargs,
-            )
+        def _run_generate(kwargs: Dict[str, Any]) -> torch.Tensor:
+            if model_choice == "safe":
+                output = self.safe_model.generate(
+                    input_ids=input_ids_device,
+                    attention_mask=attention_mask_device,
+                    pixel_values=pixel_values_device,
+                    audio_tokens=audio_tokens_device,
+                    audio_attention_mask=audio_attention_mask,
+                    **kwargs,
+                )
+            else:
+                output = self.safe_model.base_vl.llm.generate(
+                    input_ids=base_input_ids_device,
+                    attention_mask=attention_mask_device,
+                    pixel_values=pixel_values_device,
+                    **kwargs,
+                )
+            if not isinstance(output, torch.Tensor):
+                output = torch.as_tensor(output)
+            return output.to(device)
 
-        if not isinstance(generated, torch.Tensor):
-            generated = torch.as_tensor(generated)
-        generated = generated.to(device)
-
-        num_return_sequences = int(gen_kwargs.get("num_return_sequences", 1) or 1)
         batch_size = input_ids.size(0)
-        seq_len = generated.size(-1)
-        if num_return_sequences > 1:
-            generated = generated.view(batch_size, num_return_sequences, seq_len)
-        else:
-            generated = generated.view(batch_size, 1, seq_len)
+        beam_output = _run_generate(beam_kwargs)
+        beam_return = int(beam_kwargs.get("num_return_sequences", 1) or 1)
+        beam_output = beam_output.view(batch_size, beam_return, beam_output.size(-1))
+
+        candidate_groups: List[torch.Tensor] = [beam_output]
+
+        if sample_kwargs is not None:
+            sample_output = _run_generate(sample_kwargs)
+            sample_return = int(sample_kwargs.get("num_return_sequences", 1) or 1)
+            sample_output = sample_output.view(batch_size, sample_return, sample_output.size(-1))
+            candidate_groups.append(sample_output)
+
+        max_seq_len = max(group.size(-1) for group in candidate_groups)
+        if any(group.size(-1) != max_seq_len for group in candidate_groups):
+            candidate_groups = [
+                F.pad(group, (0, max_seq_len - group.size(-1))) if group.size(-1) != max_seq_len else group
+                for group in candidate_groups
+            ]
+
+        generated = torch.cat(candidate_groups, dim=1)
+        total_candidates = generated.size(1)
 
         # Calculate per-sample prompt lengths using attention mask to handle left padding
-        attention_mask = inputs.get("attention_mask", None)
-        if attention_mask is not None:
-            prompt_lengths = attention_mask.sum(dim=1)
+        attention_mask_tensor = inputs.get("attention_mask", None)
+        if isinstance(attention_mask_tensor, torch.Tensor):
+            prompt_lengths = attention_mask_tensor.to(device).sum(dim=1)
         else:
-            prompt_source = sanitized_ids if model_choice == "base" and 'sanitized_ids' in locals() and sanitized_ids is not None else input_ids
+            prompt_source = sanitized_ids if (model_choice == "base" and sanitized_ids is not None) else input_ids
             prompt_lengths = torch.full((generated.size(0),), prompt_source.shape[1], dtype=torch.long, device=generated.device)
 
         has_audio_mask: torch.Tensor
@@ -3082,7 +3518,7 @@ class StageATrainer:
         rerank_enabled = (
             model_choice == "safe"
             and is_audio_only
-            and num_return_sequences > 1
+            and total_candidates > 1
             and bool(self.config.get("audio_rerank_with_clap", False))
         )
 
@@ -3117,7 +3553,7 @@ class StageATrainer:
                     extracted_tokens.append(torch.tensor([], dtype=torch.long, device=best_sequences.device))
         
         return extracted_tokens
-    
+
     def _normalize_answer(self, s: str) -> str:
         """Normalize answer text for consistent comparison."""
         if not s:
@@ -3237,7 +3673,347 @@ class StageATrainer:
                 break
 
         return " ".join(tokens)
-    
+
+    # ------------------------------------------------------------------
+    # SCST Finetuning helpers
+    # ------------------------------------------------------------------
+
+    def _run_scst_finetune(self) -> Optional[Dict[str, float]]:
+        if not self.scst_enabled:
+            return None
+
+        print(
+            f"\n🚀 Starting SCST fine-tune for {self.config.get('variant', 'unknown')} "
+            f"(epochs_since_improvement={self._epochs_since_improvement})",
+            flush=True,
+        )
+
+        scst_epochs = max(1, int(self.config.get("scst_epochs", 1)))
+        scst_lr = float(self.config.get("scst_learning_rate", 5e-6))
+        scst_num_samples = max(1, int(self.config.get("scst_num_samples", 1)))
+        scst_top_p = float(self.config.get("scst_sample_top_p", 0.9))
+        scst_temperature = float(self.config.get("scst_sample_temperature", 0.9))
+        scst_reward_metric = str(self.config.get("scst_reward_metric", "cider")).lower()
+        max_grad_norm = float(self.config.get("max_grad_norm", 1.0))
+
+        device = next(self.safe_model.parameters()).device
+
+        # Preserve optimizer state (learning rate) and disable scheduler for SCST stage
+        original_lrs = [group.get("lr", scst_lr) for group in self.optimizer.param_groups]
+        for group in self.optimizer.param_groups:
+            group["lr"] = scst_lr
+
+        original_scheduler = self.scheduler
+        self.scheduler = None
+
+        self.safe_model.enable_audio_training()
+        self.safe_model.train()
+        self.optimizer.zero_grad(set_to_none=True)
+
+        total_steps = 0
+        accum_loss = []
+
+        for epoch in range(scst_epochs):
+            print(f"[SCST] Epoch {epoch + 1}/{scst_epochs}", flush=True)
+            for batch in self.train_dataloader:
+                # Move tensors to device
+                for key in list(batch.keys()):
+                    if isinstance(batch[key], torch.Tensor):
+                        batch[key] = batch[key].to(device)
+
+                has_audio = batch.get(
+                    "has_audio",
+                    torch.zeros(len(batch.get("questions", [])), dtype=torch.bool, device=device),
+                )
+                if isinstance(has_audio, torch.Tensor):
+                    has_audio = has_audio.to(device=device, dtype=torch.bool)
+                else:
+                    has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
+
+                if self.config.get("filter_silent_audio", True):
+                    filtered = self._check_silent_audio(batch)
+                    if isinstance(filtered, torch.Tensor) and filtered.numel() == has_audio.numel():
+                        has_audio = filtered.to(device=device, dtype=torch.bool)
+
+                audio_indices = torch.where(has_audio)[0]
+                if audio_indices.numel() == 0:
+                    continue
+
+                audio_subset = self._select_batch_indices(batch, audio_indices, clone=True)
+                scst_loss = self._compute_scst_loss(
+                    audio_subset,
+                    scst_top_p=scst_top_p,
+                    scst_temperature=scst_temperature,
+                    scst_num_samples=scst_num_samples,
+                    reward_metric=scst_reward_metric,
+                )
+
+                if scst_loss is None:
+                    continue
+
+                (scst_loss).backward()
+                self._sanitize_audio_gradients()
+                if self.trainable_param_list:
+                    torch.nn.utils.clip_grad_norm_(self.trainable_param_list, max_grad_norm)
+
+                self.optimizer.step()
+                self._sanitize_audio_parameters()
+                self.optimizer.zero_grad(set_to_none=True)
+
+                total_steps += 1
+                accum_loss.append(float(scst_loss.detach().cpu().item()))
+
+            if accum_loss:
+                print(
+                    f"[SCST] Epoch {epoch + 1} average loss: {np.mean(accum_loss[-len(self.train_dataloader):]):.4f}",
+                    flush=True,
+                )
+
+        # Restore optimizer learning rates
+        for group, lr in zip(self.optimizer.param_groups, original_lrs):
+            group["lr"] = lr
+
+        self.scheduler = original_scheduler
+        self._scst_triggered = True
+
+        print("[SCST] Fine-tune complete. Running final evaluation...", flush=True)
+        scst_metrics = self.evaluate(max_batches=self.config.get("max_eval_batches", None))
+
+        self.save_checkpoint(scst_metrics, is_best=False, suffix="scst")
+        self._export_scst_checkpoint()
+
+        print(
+            f"[SCST] Final Audio Accuracy: {scst_metrics.get('audio_accuracy', 0.0):.4f}",
+            flush=True,
+        )
+        return scst_metrics
+
+    def _compute_scst_loss(
+        self,
+        batch: Dict[str, Any],
+        *,
+        scst_top_p: float,
+        scst_temperature: float,
+        scst_num_samples: int,
+        reward_metric: str,
+    ) -> Optional[torch.Tensor]:
+        device = next(self.safe_model.parameters()).device
+
+        questions = batch.get("questions", [])
+        images = batch.get("images")
+        audio = batch.get("audio")
+        answers = batch.get("answers")
+        batch_size = len(questions)
+        if batch_size == 0:
+            return None
+
+        reference_answers = self._build_training_answer_list(answers, batch_size)
+        reference_texts: List[List[str]] = []
+        for raw in reference_answers:
+            refs = [
+                self._normalize_audio_caption(ans)
+                for ans in self._prepare_gt_answers(raw)
+                if ans
+            ]
+            reference_texts.append([ref for ref in refs if ref])
+
+        inputs = self.safe_model.prepare_multimodal_inputs(
+            text=questions,
+            images=images,
+            audio=audio,
+            answers=None,
+            device=device,
+            training_mode=False,
+        )
+
+        baseline_texts, _ = self._scst_generate_texts(inputs, do_sample=False)
+        baseline_rewards = self._scst_compute_rewards(baseline_texts, reference_texts, reward_metric)
+
+        losses: List[torch.Tensor] = []
+        for _ in range(scst_num_samples):
+            sample_texts, _ = self._scst_generate_texts(
+                inputs,
+                do_sample=True,
+                top_p=scst_top_p,
+                temperature=scst_temperature,
+            )
+
+            log_probs, valid_mask = self._scst_sequence_log_probs(
+                questions,
+                images,
+                audio,
+                sample_texts,
+            )
+
+            if log_probs is None:
+                continue
+
+            sample_rewards = self._scst_compute_rewards(sample_texts, reference_texts, reward_metric)
+            rewards_tensor = torch.tensor(sample_rewards, dtype=torch.float32, device=device)
+            baseline_tensor = torch.tensor(baseline_rewards, dtype=torch.float32, device=device)
+            advantage = rewards_tensor - baseline_tensor
+            if valid_mask is not None:
+                log_probs = log_probs * valid_mask
+                advantage = advantage * valid_mask
+                effective = valid_mask.sum().item()
+                if effective == 0:
+                    continue
+
+            advantage = advantage.detach()
+            loss = -(advantage * log_probs).mean()
+            losses.append(loss)
+
+        if not losses:
+            return None
+
+        return torch.stack(losses).mean()
+
+    def _scst_generate_texts(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        *,
+        do_sample: bool,
+        top_p: Optional[float] = None,
+        temperature: Optional[float] = None,
+    ) -> Tuple[List[str], torch.Tensor]:
+        tok = self.safe_model.base_vl.tokenizer
+        gen_kwargs = dict(
+            max_new_tokens=int(self.config.get("audio_generation_max_new_tokens", self.config.get("generation_max_new_tokens", 32))),
+            min_new_tokens=1,
+            do_sample=do_sample,
+            temperature=temperature if do_sample else None,
+            top_p=top_p if do_sample and top_p and 0.0 < top_p < 1.0 else None,
+            num_beams=1,
+            pad_token_id=tok.pad_token_id,
+            eos_token_id=getattr(tok, "eos_token_id", None),
+            repetition_penalty=float(self.config.get("audio_repetition_penalty", 1.1)),
+            output_scores=False,
+            return_dict_in_generate=False,
+        )
+
+        generated = self.safe_model.generate(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+            pixel_values=inputs.get("pixel_values"),
+            audio_tokens=inputs.get("audio_tokens"),
+            audio_attention_mask=inputs.get("audio_attention_mask"),
+            **gen_kwargs,
+        )
+
+        if not isinstance(generated, torch.Tensor):
+            generated = torch.as_tensor(generated)
+        generated = generated.to(inputs["input_ids"].device)
+
+        if generated.dim() == 2:
+            generated = generated.unsqueeze(1)
+
+        attention_mask = inputs.get("attention_mask")
+        if isinstance(attention_mask, torch.Tensor):
+            prompt_lengths = attention_mask.sum(dim=1)
+        else:
+            prompt_lengths = torch.full(
+                (generated.size(0),),
+                inputs["input_ids"].shape[1],
+                dtype=torch.long,
+                device=generated.device,
+            )
+
+        captions: List[str] = []
+        sequences: List[torch.Tensor] = []
+        for batch_idx in range(generated.size(0)):
+            sample_prompt_len = int(prompt_lengths[batch_idx].item())
+            tokens = generated[batch_idx, 0, sample_prompt_len:]
+            sequences.append(tokens)
+            text = tok.decode(tokens, skip_special_tokens=True).strip()
+            captions.append(text)
+
+        return captions, generated[:, 0, :]
+
+    def _scst_sequence_log_probs(
+        self,
+        questions: Sequence[str],
+        images: Optional[Sequence[Any]],
+        audio: Optional[Sequence[Any]],
+        captions: Sequence[str],
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        device = next(self.safe_model.parameters()).device
+        inputs = self.safe_model.prepare_multimodal_inputs(
+            text=questions,
+            images=images,
+            audio=audio,
+            answers=captions,
+            device=device,
+            training_mode=True,
+        )
+
+        logits = self.safe_model(**inputs)
+        logits = logits.get("logits") if isinstance(logits, dict) else getattr(logits, "logits", None)
+        if logits is None:
+            return None, None
+
+        labels = inputs.get("labels")
+        if labels is None:
+            return None, None
+
+        mask = (labels != -100)
+        if mask.sum() == 0:
+            return None, None
+
+        log_probs = F.log_softmax(logits, dim=-1)
+        gathered = log_probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+        gathered = gathered * mask
+        seq_log_probs = gathered.sum(dim=1)
+        valid_mask = (mask.sum(dim=1) > 0)
+        return seq_log_probs, valid_mask.to(logits.dtype)
+
+    def _scst_compute_rewards(
+        self,
+        captions: Sequence[str],
+        references: Sequence[Sequence[str]],
+        reward_metric: str,
+    ) -> List[float]:
+        rewards: List[float] = []
+        for caption, refs in zip(captions, references):
+            normalized_caption = self._normalize_audio_caption(caption)
+            if not normalized_caption or not refs:
+                rewards.append(0.0)
+                continue
+
+            if reward_metric == "spider":
+                cider = self._compute_cider_score(normalized_caption, refs)
+                spice = self._compute_spice_score(normalized_caption, refs)
+                rewards.append((cider + spice) / 2.0)
+            elif reward_metric == "spice":
+                rewards.append(self._compute_spice_score(normalized_caption, refs))
+            else:
+                rewards.append(self._compute_cider_score(normalized_caption, refs))
+        return rewards
+
+    def _export_scst_checkpoint(self) -> None:
+        output_dir = Path(self.config.get("output_dir", ".")).resolve()
+        scst_checkpoint = output_dir / f"checkpoint_scst_epoch_{self.epoch}_step_{self.global_step}.pt"
+        if not scst_checkpoint.exists():
+            return
+
+        try:
+            run_dir = output_dir.parent
+            runs_dir = run_dir.parent
+            if runs_dir.name == "runs":
+                experiments_root = runs_dir.parent
+            else:
+                experiments_root = runs_dir
+            finetune_dir = experiments_root / "finetuned"
+            finetune_dir.mkdir(parents=True, exist_ok=True)
+
+            run_stamp = run_dir.name
+            variant = self.config.get("variant", "variant")
+            target_name = f"{run_stamp}_{variant}_scst.pt"
+            target_path = finetune_dir / target_name
+            shutil.copy2(scst_checkpoint, target_path)
+            print(f"[SCST] Checkpoint copied to {target_path}", flush=True)
+        except Exception as exc:
+            print(f"[SCST] Failed to export checkpoint: {exc}", flush=True)
+
     def save_checkpoint(self, metrics: Dict[str, float], is_best: bool = False, suffix: str = ""):
         """Save model checkpoint with error handling."""
         try:
@@ -3664,10 +4440,28 @@ class StageATrainer:
                 epoch_metrics['total_loss'],
             )
 
+            current_acc = epoch_metrics.get('audio_accuracy', 0.0)
+            improvement = current_acc - self._best_audio_accuracy
+            if improvement > self.scst_min_delta:
+                self._best_audio_accuracy = current_acc
+                self._epochs_since_improvement = 0
+            else:
+                self._epochs_since_improvement += 1
+
         print("Stage A training completed!", flush=True)
 
         # Final checkpoint
         max_eval_batches = self.config.get("max_eval_batches", None)
         final_metrics = self.evaluate(max_batches=max_eval_batches)
         self.save_checkpoint(final_metrics, is_best=False)
+
+        if (
+            self.scst_enabled
+            and not self._scst_triggered
+            and self._epochs_since_improvement >= self.scst_patience_epochs
+        ):
+            scst_metrics = self._run_scst_finetune()
+            if scst_metrics is not None:
+                final_metrics = scst_metrics
+
         return final_metrics

@@ -29,14 +29,25 @@ retention_tolerance: 0.005  # Strict tolerance for production
 audio_contrastive_weight: 0.12
 audio_contrastive_temperature: 0.07
 audio_contrastive_answer_max_length: 64
-audio_num_beams: 4
-audio_num_return_sequences: 4
+audio_contrastive_metric_weight: 0.3
+audio_contrastive_negative_threshold: 0.4
+audio_contrastive_max_negatives: 32
+audio_num_beams: 5
+audio_num_return_sequences: 5
+audio_num_samples: 5
+audio_sample_top_p: 0.9
+audio_sample_temperature: 0.85
 audio_length_penalty: 0.85
 audio_rerank_with_clap: true
 audio_rerank_logprob_weight: 1.0
 audio_rerank_clap_weight: 0.35
 audio_rerank_ngram_weight: 0.55
 audio_rerank_coverage_weight: 0.1
+audio_rerank_cider_weight: 0.6
+audio_rerank_spider_weight: 0.2
+audio_rerank_tag_vocab: "configs/tags/audio_tag_vocab.txt"
+audio_rerank_num_tags: 5
+audio_rerank_tag_weight: 0.25
 
 # Logging and saving
 logging_steps: 100
