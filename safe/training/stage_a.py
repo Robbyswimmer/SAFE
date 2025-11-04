@@ -2330,40 +2330,37 @@ class StageATrainer:
         except Exception as exc:
             self._log_caption_metric_warning("ROUGE-L", exc)
 
+        # Use pycocoevalcap directly for CIDEr/SPICE (not available in evaluate)
         try:
-            cider_metric = _metric("cider")
-            cider_result = cider_metric.compute(predictions=preds_list, references=refs_list)
-            if cider_result and "score" in cider_result:
-                metrics["audio_cider"] = float(cider_result["score"])
-        except Exception as exc:
-            self._log_caption_metric_warning("CIDEr", exc)
+            from pycocoevalcap.cider.cider import Cider
+            from pycocoevalcap.spice.spice import Spice
 
-        try:
-            spice_metric = _metric("spice")
-            spice_result = spice_metric.compute(predictions=preds_list, references=refs_list)
-            if spice_result and "score" in spice_result:
-                metrics["audio_spice"] = float(spice_result["score"])
-        except Exception as exc:
-            self._log_caption_metric_warning("SPICE", exc)
+            # Convert to pycocoevalcap format: {id: [refs]} and {id: [pred]}
+            gts = {str(i): refs for i, refs in enumerate(refs_list)}
+            res = {str(i): [pred] for i, pred in enumerate(preds_list)}
 
-        if "audio_cider" in metrics and "audio_spice" in metrics:
-            metrics["audio_spider"] = (metrics["audio_cider"] + metrics["audio_spice"]) / 2.0
+            # Compute CIDEr
+            try:
+                cider_scorer = Cider()
+                cider_score, _ = cider_scorer.compute_score(gts, res)
+                metrics["audio_cider"] = float(cider_score)
+            except Exception as cider_exc:
+                self._log_caption_metric_warning("CIDEr", cider_exc)
 
-        try:
-            spider_fl_metric = _metric("spider_fl")
-            spider_fl_result = spider_fl_metric.compute(predictions=preds_list, references=refs_list)
-            if spider_fl_result and "score" in spider_fl_result:
-                metrics["audio_spider_fl"] = float(spider_fl_result["score"])
-        except Exception as exc:
-            self._log_caption_metric_warning("SPIDEr-FL", exc)
+            # Compute SPICE
+            try:
+                spice_scorer = Spice()
+                spice_score, _ = spice_scorer.compute_score(gts, res)
+                metrics["audio_spice"] = float(spice_score)
+            except Exception as spice_exc:
+                self._log_caption_metric_warning("SPICE", spice_exc)
 
-        try:
-            aces_metric = _metric("aces")
-            aces_result = aces_metric.compute(predictions=preds_list, references=refs_list)
-            if aces_result and "score" in aces_result:
-                metrics["audio_aces"] = float(aces_result["score"])
-        except Exception as exc:
-            self._log_caption_metric_warning("ACES", exc)
+            # Compute SPIDEr (average of CIDEr and SPICE)
+            if "audio_cider" in metrics and "audio_spice" in metrics:
+                metrics["audio_spider"] = (metrics["audio_cider"] + metrics["audio_spice"]) / 2.0
+
+        except ImportError as import_exc:
+            self._log_caption_metric_warning("pycocoevalcap (CIDEr/SPICE/SPIDEr)", import_exc)
 
         metrics["audio_caption_samples"] = float(len(preds_list))
 
