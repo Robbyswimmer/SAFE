@@ -183,6 +183,8 @@ def main():
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers (reduce if rate limited)")
     parser.add_argument("--data-root", type=str, default="experiments/full_training/data/audiocaps",
                         help="Root directory for AudioCaps data")
+    parser.add_argument("--split", type=str, choices=["train", "val", "test"],
+                        help="Specific split to download (default: all splits)")
     args = parser.parse_args()
 
     print("AudioCaps Audio Downloader")
@@ -213,8 +215,11 @@ def main():
 
     print(f"\nStarting download...")
 
+    # Determine which splits to download
+    splits_to_download = [args.split] if args.split else ["train", "val", "test"]
+
     # Download each split
-    for split in ["train", "val", "test"]:
+    for split in splits_to_download:
         # Download metadata CSV if needed
         csv_path = download_metadata_csv(split, data_dir)
         if not csv_path:
