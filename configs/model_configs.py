@@ -34,14 +34,14 @@ DEMO_CONFIG = {
     
     # Fusion configuration - Updated for OPT 2.7B architecture
     "fusion_type": "multilayer",
-    "fusion_layer_indices": [16, 24],  # Mid-layers for OPT 2.7B (32 layers total)
+    "fusion_layer_indices": [6, 16, 24],  # Early, mid, and late fusion for OPT 2.7B
     "lora_rank": 8,
     "fusion_config": {
         "num_attention_heads": 20,  # OPT 2.7B attention heads
         "attention_dropout": 0.1,
         "modalities": {
             "audio": {
-                "layer_indices": [16, 24],
+                "layer_indices": [6, 16, 24],
                 "num_tokens": 8
             }
         }
@@ -89,14 +89,14 @@ FULL_CONFIG = {
 
     # Fusion configuration
     "fusion_type": "multilayer",
-    "fusion_layer_indices": [12, 24],   # Earlier fusion (30%, 60%) for better acoustic-linguistic alignment
+    "fusion_layer_indices": [6, 12, 24],   # Add early fusion tap-in for richer alignment
     "lora_rank": 8,
     "fusion_config": {
         "num_attention_heads": 40,  # LLaVA 13B attention heads
         "attention_dropout": 0.1,
         "modalities": {
             "audio": {
-                "layer_indices": [12, 24],  # Match fusion_layer_indices
+                "layer_indices": [6, 12, 24],  # Match fusion_layer_indices
                 "num_tokens": 16  # Match num_audio_tokens
             }
         }

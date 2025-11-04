@@ -26,6 +26,9 @@ retention_loss_weight: 1.2  # Higher retention weight
 distillation_temperature: 3.0
 fisher_weight: 0.15  # Higher Fisher weight for retention
 retention_tolerance: 0.005  # Strict 0.5% tolerance
+audio_contrastive_weight: 0.1
+audio_contrastive_temperature: 0.07
+audio_contrastive_answer_max_length: 64
 
 # Logging and saving
 logging_steps: 25

@@ -1,11 +1,13 @@
 import math
+import random
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import wandb
 import os
 from pathlib import Path
@@ -124,6 +126,9 @@ class StageATrainer:
             "audio_repetition_penalty": 1.1,
             # Only suppress EOS early in training for audio batches (not VL)
             "suppress_eos_for_audio_early_steps": True,
+            "audio_contrastive_weight": 0.0,
+            "audio_contrastive_temperature": 0.07,
+            "audio_contrastive_answer_max_length": 48,
         }
 
         if config:
@@ -131,6 +136,12 @@ class StageATrainer:
 
         self.grad_accum_steps = max(1, int(self.config.get("gradient_accumulation_steps", 1)))
         self._micro_step = 0
+
+        self.audio_contrastive_weight = float(self.config.get("audio_contrastive_weight", 0.0))
+        self.audio_contrastive_temperature = float(self.config.get("audio_contrastive_temperature", 0.07))
+        self.audio_contrastive_answer_max_length = int(
+            self.config.get("audio_contrastive_answer_max_length", 48)
+        )
 
         self.log_interval = max(1, int(self.config.get("logging_steps", 50)))
         self.config["logging_steps"] = self.log_interval
@@ -793,15 +804,20 @@ class StageATrainer:
             if isinstance(has_audio, torch.Tensor):
                 has_audio = has_audio.to(device=device, dtype=torch.bool)
 
-        if has_audio is None or not torch.any(has_audio):
+        audio_indices = torch.where(has_audio)[0]
+        if has_audio is None or audio_indices.numel() == 0:
             return {"audio_task_loss": 0.0, "total_loss": 0.0}, False
+
+        batch_questions = batch.get("questions", [])
+        batch_size = len(batch_questions)
+        sampled_answers = self._sample_training_answers(batch.get("answers"), batch_size)
 
         # Create input tensors for training - apply answers for supervised learning
         inputs = self.safe_model.prepare_multimodal_inputs(
-            text=batch["questions"],
+            text=batch_questions,
             images=batch.get("images", None),
             audio=batch.get("audio", None),
-            answers=batch.get("answers", None),
+            answers=sampled_answers,
             device=device,
             training_mode=True  # Apply answers during training
         )
@@ -813,14 +829,15 @@ class StageATrainer:
             self._gate_warm_counter += 1
             self.safe_model.set_gate_warmup(self._gate_warm_counter, warmup_steps)
 
+        audio_token_tensor = inputs.get("audio_tokens")
+
         # Forward pass through SAFE model
         safe_outputs = self.safe_model(**inputs)
 
         safe_logits = safe_outputs.get("logits") if isinstance(safe_outputs, dict) else getattr(safe_outputs, "logits", None)
 
         # Audio loss only (no retention)
-        if safe_logits is not None and torch.any(has_audio):
-            audio_indices = torch.where(has_audio)[0]
+        if safe_logits is not None and audio_indices.numel() > 0:
             labels = inputs.get("labels")
             if labels is not None:
                 max_safe = safe_logits.size(0)
@@ -850,6 +867,20 @@ class StageATrainer:
 
         total_loss = self.audio_loss_weight * audio_loss
 
+        contrastive_raw = None
+        if (
+            self.audio_contrastive_weight > 0.0
+            and audio_token_tensor is not None
+            and audio_indices.numel() > 0
+        ):
+            contrastive_raw = self._compute_audio_contrastive_loss(
+                audio_token_tensor,
+                sampled_answers,
+                audio_indices,
+            )
+            if contrastive_raw is not None:
+                total_loss = total_loss + (self.audio_contrastive_weight * contrastive_raw)
+
         # Ensure total_loss has gradients
         if not total_loss.requires_grad:
             if safe_logits is None or not safe_logits.requires_grad:
@@ -862,6 +893,8 @@ class StageATrainer:
             "audio_task_loss": audio_loss,
             "total_loss": total_loss,
         }
+        if contrastive_raw is not None:
+            loss_dict["audio_contrastive_loss"] = contrastive_raw * self.audio_contrastive_weight
 
         log_metrics: Dict[str, float] = {}
         for key, value in loss_dict.items():
@@ -2031,6 +2064,45 @@ class StageATrainer:
             return answers
         return [str(gt_answer)]
 
+    def _build_training_answer_list(self, answers: Any, batch_size: int) -> List[Any]:
+        if batch_size <= 0:
+            return []
+        if answers is None:
+            return [""] * batch_size
+
+        if torch.is_tensor(answers):
+            if answers.dim() == 0:
+                answers_list = [answers.item()]
+            else:
+                answers_list = answers.detach().cpu().tolist()
+        elif isinstance(answers, (list, tuple)):
+            answers_list = list(answers)
+        else:
+            answers_list = [answers]
+
+        if len(answers_list) < batch_size:
+            answers_list.extend([""] * (batch_size - len(answers_list)))
+        elif len(answers_list) > batch_size:
+            answers_list = answers_list[:batch_size]
+
+        return answers_list
+
+    def _sample_training_answers(self, answers: Any, batch_size: int) -> List[str]:
+        answer_list = self._build_training_answer_list(answers, batch_size)
+        sampled: List[str] = []
+        for entry in answer_list:
+            refs = [
+                self._normalize_audio_caption(ref)
+                for ref in self._prepare_gt_answers(entry)
+                if ref
+            ]
+            refs = [ref for ref in refs if ref]
+            if not refs:
+                sampled.append("")
+            else:
+                sampled.append(random.choice(refs))
+        return sampled
+
     def _compute_answer_accuracy(self, pred_answer: str, gt_answer: Any) -> float:
         """Compute answer accuracy with proper handling for single vs. multiple ground truths."""
 
@@ -2259,8 +2331,14 @@ class StageATrainer:
 
         paired_data: List[Tuple[str, List[str]]] = []
         for pred, refs in zip(predictions, references):
-            pred_clean = str(pred).strip()
-            refs_clean = [str(ref).strip() for ref in refs if str(ref).strip()]
+            pred_clean = self._normalize_audio_caption(str(pred).strip())
+            refs_clean = [
+                self._normalize_audio_caption(str(ref).strip())
+                for ref in refs
+                if str(ref).strip()
+            ]
+            pred_clean = pred_clean.strip()
+            refs_clean = [ref for ref in refs_clean if ref.strip()]
             if pred_clean and refs_clean:
                 paired_data.append((pred_clean, refs_clean))
 
@@ -2365,6 +2443,136 @@ class StageATrainer:
         metrics["audio_caption_samples"] = float(len(preds_list))
 
         return metrics
+
+    def _resolve_answer_text(self, answer: Any) -> str:
+        if hasattr(self.safe_model, "_select_training_answer"):
+            resolved = self.safe_model._select_training_answer(answer)
+            if resolved:
+                return resolved
+
+        if answer is None:
+            return ""
+        if isinstance(answer, str):
+            return answer
+        if isinstance(answer, dict):
+            return str(answer.get("answer") or answer.get("text") or "")
+        if isinstance(answer, (list, tuple)):
+            for item in answer:
+                text = self._resolve_answer_text(item)
+                if text:
+                    return text
+            return ""
+        if torch.is_tensor(answer):
+            if answer.dim() == 0:
+                return str(answer.item())
+            tokens = answer.detach().cpu().tolist()
+            tokenizer = self.safe_model.base_vl.tokenizer
+            return tokenizer.decode(tokens, skip_special_tokens=True)
+        return str(answer)
+
+    def _gather_answer_texts(self, answers: Any, indices: torch.Tensor) -> List[str]:
+        if answers is None or indices.numel() == 0:
+            return []
+
+        texts: List[str] = []
+        if isinstance(answers, (list, tuple)):
+            answers_list = list(answers)
+        elif torch.is_tensor(answers):
+            answers_list = answers.detach().cpu().tolist()
+        else:
+            answers_list = [answers]
+
+        for idx in indices.tolist():
+            candidate = None
+            if isinstance(answers_list, list) and idx < len(answers_list):
+                candidate = answers_list[idx]
+            elif torch.is_tensor(answers_list):
+                if answers_list.dim() == 1:
+                    candidate = answers_list[idx].item()
+                else:
+                    candidate = answers_list[idx]
+            elif isinstance(answers_list, tuple) and idx < len(answers_list):
+                candidate = answers_list[idx]
+            else:
+                candidate = answers_list
+
+            text = self._resolve_answer_text(candidate)
+            if text:
+                texts.append(text)
+
+        return texts
+
+    def _compute_audio_contrastive_loss(
+        self,
+        audio_tokens: torch.Tensor,
+        answers: Any,
+        audio_indices: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        if audio_tokens is None or audio_indices.numel() == 0:
+            return None
+
+        if audio_tokens.dim() == 2:
+            token_matrix = audio_tokens.unsqueeze(1)
+        else:
+            token_matrix = audio_tokens
+
+        if token_matrix.size(0) <= audio_indices.max().item():
+            return None
+
+        selected = token_matrix.index_select(0, audio_indices.to(audio_tokens.device))
+        if selected.dim() == 3:
+            audio_vecs = selected.mean(dim=1)
+        else:
+            audio_vecs = selected
+
+        texts = self._gather_answer_texts(answers, audio_indices)
+        if len(texts) != audio_vecs.size(0):
+            # Fallback: ensure lengths match by filtering empty texts
+            paired = [
+                (vec, text)
+                for vec, text in zip(audio_vecs, texts)
+                if text.strip()
+            ]
+            if not paired:
+                return None
+            audio_vecs = torch.stack([p[0] for p in paired], dim=0)
+            texts = [p[1] for p in paired]
+
+        if not texts:
+            return None
+
+        tokenizer = self.safe_model.base_vl.tokenizer
+        encoded = tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=self.audio_contrastive_answer_max_length,
+            return_tensors="pt",
+        )
+        input_ids = encoded["input_ids"].to(audio_vecs.device)
+        attention_mask = encoded["attention_mask"].to(audio_vecs.device)
+
+        embedding_layer = self.safe_model.base_vl.llm.get_input_embeddings()
+        with torch.no_grad():
+            text_embeds = embedding_layer(input_ids)
+        mask = attention_mask.unsqueeze(-1)
+        text_vecs = (text_embeds * mask).sum(dim=1)
+        denom = mask.sum(dim=1).clamp_min(1.0)
+        text_vecs = text_vecs / denom
+
+        audio_vecs = F.normalize(audio_vecs, dim=-1)
+        text_vecs = F.normalize(text_vecs, dim=-1)
+
+        logits = torch.matmul(audio_vecs, text_vecs.transpose(0, 1))
+        temperature = max(self.audio_contrastive_temperature, 1e-5)
+        logits = logits / temperature
+        targets = torch.arange(audio_vecs.size(0), device=audio_vecs.device)
+
+        loss_a2t = F.cross_entropy(logits, targets)
+        loss_t2a = F.cross_entropy(logits.transpose(0, 1), targets)
+        contrastive_loss = 0.5 * (loss_a2t + loss_t2a)
+
+        return contrastive_loss
 
     def _batch_contains_pixels(self, batch: Dict[str, Any], idx: int) -> bool:
         images = batch.get("images")

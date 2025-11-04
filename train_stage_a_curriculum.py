@@ -80,24 +80,51 @@ def create_datasets_with_config(config: dict, data_path="./data"):
     
     else:
         print("Creating real datasets...")
-        from safe.data.datasets import AVQADataset, AudioCapsDataset, VQADataset
+        from safe.data.datasets import AudioCapsDataset, VQADataset, WavCapsDataset
         from torch.utils.data import ConcatDataset
-        
-        # Create real datasets (skip AVQA for now, use AudioCaps + VQA)
+
+        audio_train_split = dataset_config.get("audio_train_split", "train")
+        audio_eval_split = dataset_config.get("audio_eval_split", "val")
+        use_vqa_in_train = dataset_config.get("include_vqa_in_train", True)
+        use_wavcaps_in_train = dataset_config.get("include_wavcaps_in_train", True)
+        wavcaps_split = dataset_config.get("wavcaps_train_split", "train")
+
+        # Create real datasets (skip AVQA for now, prioritize AudioCaps for eval)
         try:
             # Load available datasets
-            audiocaps_dataset = AudioCapsDataset(data_path=data_path, split="train")
+            audiocaps_train = AudioCapsDataset(data_path=data_path, split=audio_train_split)
+            audiocaps_eval = AudioCapsDataset(data_path=data_path, split=audio_eval_split)
             vqa_train_dataset = VQADataset(data_path=data_path, split="train")
             vqa_val_dataset = VQADataset(data_path=data_path, split="val")
-            
-            # Use AudioCaps + VQA for training to expose both modalities
-            train_dataset = ConcatDataset([audiocaps_dataset, vqa_train_dataset])
-            val_dataset = vqa_val_dataset
-            
+            wavcaps_train = None
+            if use_wavcaps_in_train:
+                try:
+                    wavcaps_train = WavCapsDataset(data_path=data_path, split=wavcaps_split)
+                except Exception as wav_exc:
+                    print(f"Warning: Failed to load WavCaps ({wav_exc}). Continuing without it.", flush=True)
+
+            train_parts = [audiocaps_train]
+            if wavcaps_train is not None:
+                train_parts.append(wavcaps_train)
+            if use_vqa_in_train:
+                train_parts.append(vqa_train_dataset)
+
+            train_dataset = ConcatDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
+
+            # Validation combines AudioCaps (audio metrics) + VQA (VL metrics)
+            val_dataset = ConcatDataset([audiocaps_eval, vqa_val_dataset])
+
             print(f"✓ Real datasets loaded:")
-            print(f"  - Train samples: {len(train_dataset)}")
-            print(f"  - Val samples: {len(val_dataset)}")
-            
+            print(f"  - AudioCaps train samples: {len(audiocaps_train)} (split='{audio_train_split}')")
+            if wavcaps_train is not None:
+                print(f"  - WavCaps train samples: {len(wavcaps_train)} (split='{wavcaps_split}')")
+            if use_vqa_in_train:
+                print(f"  - VQA train samples: {len(vqa_train_dataset)}")
+            print(f"  - Combined train samples: {len(train_dataset)}")
+            print(f"  - AudioCaps eval samples: {len(audiocaps_eval)} (split='{audio_eval_split}')")
+            print(f"  - VQA val samples: {len(vqa_val_dataset)}")
+            print(f"  - Combined val samples: {len(val_dataset)}")
+
             # Validate dataset sizes
             if len(train_dataset) < 10:
                 print(f"Warning: Very small training dataset ({len(train_dataset)} samples)")
