@@ -1649,7 +1649,11 @@ class StageATrainer:
             ]
             for key in caption_order:
                 if key in caption_metrics:
-                    print(f"  - {key.replace('audio_', '').upper()}: {caption_metrics[key]:.3f}", flush=True)
+                    # CIDEr/SPICE/SPIDEr are on 0-100 scale, show 1 decimal; others are 0-1 scale, show 3 decimals
+                    if key in ["audio_cider", "audio_spice", "audio_spider"]:
+                        print(f"  - {key.replace('audio_', '').upper()}: {caption_metrics[key]:.1f}", flush=True)
+                    else:
+                        print(f"  - {key.replace('audio_', '').upper()}: {caption_metrics[key]:.3f}", flush=True)
             if "audio_caption_samples" in caption_metrics:
                 print(f"  - CAPTION_SAMPLES: {int(caption_metrics['audio_caption_samples'])}", flush=True)
 
@@ -2634,7 +2638,8 @@ class StageATrainer:
             try:
                 cider_scorer = Cider()
                 cider_score, _ = cider_scorer.compute_score(gts, res)
-                metrics["audio_cider"] = float(cider_score)
+                # Scale to 0-100 range (standard reporting format)
+                metrics["audio_cider"] = float(cider_score) * 100.0
             except Exception as cider_exc:
                 self._log_caption_metric_warning("CIDEr", cider_exc)
 
@@ -2642,7 +2647,8 @@ class StageATrainer:
             try:
                 spice_scorer = Spice()
                 spice_score, _ = spice_scorer.compute_score(gts, res)
-                metrics["audio_spice"] = float(spice_score)
+                # Scale to 0-100 range (standard reporting format)
+                metrics["audio_spice"] = float(spice_score) * 100.0
             except Exception as spice_exc:
                 self._log_caption_metric_warning("SPICE", spice_exc)
 

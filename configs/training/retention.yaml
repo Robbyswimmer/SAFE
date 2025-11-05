@@ -42,13 +42,14 @@ audio_sample_temperature: 0.85
 audio_length_penalty: 0.9
 
 # Reranking weights - aggressive tuning for exact phrase matching
+# NOTE: log-prob is negative (-5 to -1), so must be heavily down-weighted
 audio_rerank_with_clap: true
-audio_rerank_logprob_weight: 1.0
+audio_rerank_logprob_weight: 0.05  # CRITICAL: Reduced from 1.0 to prevent negative log-prob dominance
 audio_rerank_clap_weight: 0.3
-audio_rerank_ngram_weight: 0.6  # Increased from 0.4 - prioritize n-gram overlap
+audio_rerank_ngram_weight: 1.2  # Increased from 0.6 - strong n-gram emphasis
 audio_rerank_coverage_weight: 0.1
-audio_rerank_cider_weight: 0.7  # Increased from 0.4 - prioritize CIDEr metric
-audio_rerank_spider_weight: 0.2
+audio_rerank_cider_weight: 1.5  # Increased from 0.7 - strongest signal for exact phrasing
+audio_rerank_spider_weight: 0.25  # Increased from 0.2
 audio_rerank_tag_vocab: "configs/tags/audio_tag_vocab.txt"
 audio_rerank_num_tags: 4
 audio_rerank_tag_weight: 0.2
