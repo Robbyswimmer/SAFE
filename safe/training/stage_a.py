@@ -1471,6 +1471,9 @@ class StageATrainer:
                                     if clean_pred and ref_candidates:
                                         audio_caption_predictions.append(clean_pred)
                                         audio_caption_references.append(ref_candidates)
+                                        # Log first sample to validate reference count
+                                        if len(audio_caption_references) == 1:
+                                            print(f"[RefValidation] First sample has {len(ref_candidates)} reference(s)", flush=True)
 
                                 # Collect CSV samples if enabled (up to max_csv_samples)
                                 if csv_samples is not None and len(csv_samples) < max_csv_samples:
@@ -2350,11 +2353,14 @@ class StageATrainer:
             "twenty": "20",
         }
 
-        articles = {"a", "an", "the"}
+        # DISABLED: Article removal is not standard for AudioCaps/Clotho benchmarks
+        # Keeping articles preserves caption length and improves n-gram overlap
+        # articles = {"a", "an", "the"}
         cleaned_tokens: List[str] = []
         for tok in tokens:
-            if tok in articles:
-                continue
+            # DISABLED: Don't skip articles - keep them for proper BLEU/CIDEr evaluation
+            # if tok in articles:
+            #     continue
             cleaned_tokens.append(number_map.get(tok, tok))
 
         if not cleaned_tokens:
@@ -2565,6 +2571,16 @@ class StageATrainer:
         preds, refs = zip(*paired_data)
         preds_list = list(preds)
         refs_list = [list(r) for r in refs]
+
+        # Validate reference count (AudioCaps should have ~5 references per sample)
+        ref_counts = [len(r) for r in refs_list]
+        if ref_counts:
+            avg_refs = sum(ref_counts) / len(ref_counts)
+            min_refs = min(ref_counts)
+            max_refs = max(ref_counts)
+            print(f"[RefValidation] References per sample: avg={avg_refs:.1f}, min={min_refs}, max={max_refs}, total_samples={len(refs_list)}", flush=True)
+            if avg_refs < 2.0:
+                print(f"⚠️  WARNING: Low reference count (avg={avg_refs:.1f}). AudioCaps should have ~5 references per sample for proper CIDEr computation!", flush=True)
 
         try:
             import evaluate
