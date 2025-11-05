@@ -302,16 +302,80 @@ class AudioCapsDataset(_BaseQADataset):
     dataset_name = "audiocaps"
     file_stem = "audiocaps"
 
+    def __init__(self, data_path: Path, split: str = "train"):
+        """Initialize AudioCaps dataset with multi-reference grouping for val/test splits."""
+        super().__init__(data_path, split)
+
+        # For validation/test splits, group multiple captions per audio
+        # AudioCaps has 5 captions per audio in val/test (same ytid + start_time)
+        if split in ["val", "validation", "test"]:
+            self._group_multiple_references()
+
+    def _group_multiple_references(self):
+        """Group multiple captions for the same audio clip into single samples with multiple references."""
+        from collections import defaultdict
+
+        # Group by (youtube_id, start_time) or (ytid, start_time)
+        audio_groups = defaultdict(list)
+
+        for entry in self.examples:
+            # Extract audio identifier
+            ytid = entry.get("ytid") or entry.get("youtube_id")
+            start_time = entry.get("start_time")
+
+            if ytid and start_time is not None:
+                key = (ytid, start_time)
+                audio_groups[key].append(entry)
+
+        # Create new examples list with grouped captions
+        grouped_examples = []
+        for (ytid, start_time), entries in audio_groups.items():
+            if not entries:
+                continue
+
+            # Use first entry as base, collect all captions
+            base_entry = entries[0].copy()
+
+            # Collect all captions as references
+            captions = []
+            for entry in entries:
+                caption = (
+                    entry.get("caption") or
+                    entry.get("answer") or
+                    entry.get("captions")
+                )
+                if caption:
+                    if isinstance(caption, list):
+                        captions.extend(caption)
+                    else:
+                        captions.append(caption)
+
+            # Store as list of references
+            base_entry["captions"] = captions  # Use plural for multiple refs
+            base_entry["answer"] = captions    # Also store in answer field
+
+            grouped_examples.append(base_entry)
+
+        original_count = len(self.examples)
+        self.examples = grouped_examples
+        new_count = len(self.examples)
+
+        if grouped_examples:
+            avg_refs = sum(len(e.get("captions", [])) for e in grouped_examples) / len(grouped_examples)
+            print(f"[AudioCaps] Grouped {original_count} samples into {new_count} unique audios "
+                  f"with avg {avg_refs:.1f} references per audio", flush=True)
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
         entry = self.examples[idx]
         question = entry.get("question") or "What is happening in the audio?"
 
         # Try multiple field names for answers (datasets use different conventions)
+        # For grouped validation data, this will be a list of multiple references
         answers = (
             entry.get("answers") or      # Plural form
             entry.get("answer") or        # Singular form (what full_training data uses)
             entry.get("caption") or       # AudioCaps caption field
-            entry.get("captions")         # Plural captions
+            entry.get("captions")         # Plural captions (used after grouping)
         )
 
         # Debug: Log first few samples to verify answer loading
@@ -320,6 +384,8 @@ class AudioCapsDataset(_BaseQADataset):
             print(f"  Entry keys: {list(entry.keys())}", flush=True)
             print(f"  'answer' field: {entry.get('answer')}", flush=True)
             print(f"  Final answers value: {answers}", flush=True)
+            if isinstance(answers, list):
+                print(f"  Number of references: {len(answers)}", flush=True)
 
         sample = {
             "sample_id": entry.get("id") or entry.get("ytid"),
