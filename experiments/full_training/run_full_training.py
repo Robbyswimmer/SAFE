@@ -738,7 +738,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-eval-batches", type=int, default=-1, help="Limit validation batches (<=0 = full)")
     parser.add_argument("--max-audio-eval-batches", type=int, default=0, help="Audio eval batch cap (<=0 disables)")
     parser.add_argument("--max-vl-eval-batches", type=int, default=0, help="VL eval batch cap (<=0 disables)")
-    parser.add_argument("--max-audio-eval-samples", type=int, default=600, help="Audio evaluation sample cap (<=0 disables)")
+    parser.add_argument("--max-audio-eval-samples", type=int, default=0, help="Audio evaluation sample cap (<=0 disables = full eval)")
     parser.add_argument("--max-vl-eval-samples", type=int, default=600, help="VL evaluation sample cap (<=0 disables)")
     parser.add_argument("--max-audio-val-samples", type=int, default=4096, help="Audio validation sample cap (<=0 disables)")
     parser.add_argument("--max-vqa-val-samples", type=int, default=4096, help="VQA validation sample cap (<=0 disables)")
