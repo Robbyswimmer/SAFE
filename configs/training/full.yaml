@@ -34,9 +34,9 @@ audio_contrastive_negative_threshold: 0.4
 audio_contrastive_max_negatives: 32
 
 # Generation parameters - increased candidates for better reranking
-audio_num_beams: 8  # Increased from 5 for more diverse candidates
-audio_num_return_sequences: 8  # Match beam count
-audio_num_samples: 8  # Increased from 5 for diversity (total 16 candidates)
+audio_num_beams: 5  # Reduced from 8 to save memory during eval
+audio_num_return_sequences: 5  # Match beam count
+audio_num_samples: 5  # Reduced from 8 (total 10 candidates instead of 16)
 audio_sample_top_p: 0.9
 audio_sample_temperature: 0.85
 audio_length_penalty: 0.85

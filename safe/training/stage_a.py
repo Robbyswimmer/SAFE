@@ -1062,6 +1062,11 @@ class StageATrainer:
         previous_mode = self.safe_model.training
         self.safe_model.eval()
 
+        # Clear GPU cache before evaluation to free memory from training
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
         data_source = dataloader if dataloader is not None else self.val_dataloader
         if data_source is None:
             raise ValueError("No dataloader available for evaluation")
