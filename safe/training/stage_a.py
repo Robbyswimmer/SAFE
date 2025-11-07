@@ -1059,17 +1059,25 @@ class StageATrainer:
         Returns:
             Dictionary with evaluation metrics
         """
+        print(f"[Eval] Starting evaluation: {description}", flush=True)
         previous_mode = self.safe_model.training
         self.safe_model.eval()
 
         # Clear GPU cache before evaluation to free memory from training
+        print(f"[Eval] Clearing GPU cache...", flush=True)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+            # Log GPU memory status
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            print(f"[Eval] GPU memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved", flush=True)
 
         data_source = dataloader if dataloader is not None else self.val_dataloader
         if data_source is None:
             raise ValueError("No dataloader available for evaluation")
+
+        print(f"[Eval] DataLoader ready, beginning batch iteration...", flush=True)
 
         dataset_len = None
         dataset_obj = getattr(data_source, "dataset", None)
@@ -1201,7 +1209,12 @@ class StageATrainer:
 
                     # Collect batches and separate them
                     batch_count = 0
+                    print(f"[Eval] Starting batch collection loop...", flush=True)
                     for batch in data_source:
+                        batch_count += 1
+                        if batch_count % 10 == 1:
+                            print(f"[Eval] Processing batch {batch_count}, collected audio={audio_samples_collected}, vl={vl_samples_collected}", flush=True)
+
                         # Move batch to device
                         for key in batch:
                             if isinstance(batch[key], torch.Tensor):
@@ -2652,25 +2665,37 @@ class StageATrainer:
             from pycocoevalcap.spice.spice import Spice
 
             # Convert to pycocoevalcap format: {id: [refs]} and {id: [pred]}
+            print(f"[MetricCompute] Converting {len(refs_list)} samples to pycocoevalcap format...", flush=True)
             gts = {str(i): refs for i, refs in enumerate(refs_list)}
             res = {str(i): [pred] for i, pred in enumerate(preds_list)}
+            print(f"[MetricCompute] Format conversion complete. Starting CIDEr computation...", flush=True)
 
             # Compute CIDEr
             try:
                 cider_scorer = Cider()
+                print(f"[MetricCompute] CIDEr scorer initialized, computing score...", flush=True)
                 cider_score, _ = cider_scorer.compute_score(gts, res)
                 # Scale to 0-100 range (standard reporting format)
                 metrics["audio_cider"] = float(cider_score) * 100.0
+                print(f"[MetricCompute] CIDEr computed: {metrics['audio_cider']:.2f}", flush=True)
             except Exception as cider_exc:
+                print(f"[MetricCompute] CIDEr computation FAILED: {cider_exc}", flush=True)
                 self._log_caption_metric_warning("CIDEr", cider_exc)
 
             # Compute SPICE
             try:
+                print(f"[MetricCompute] Starting SPICE computation (this spawns Java process)...", flush=True)
+                # Free GPU memory before spawning Java process
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 spice_scorer = Spice()
+                print(f"[MetricCompute] SPICE scorer initialized, computing score...", flush=True)
                 spice_score, _ = spice_scorer.compute_score(gts, res)
                 # Scale to 0-100 range (standard reporting format)
                 metrics["audio_spice"] = float(spice_score) * 100.0
+                print(f"[MetricCompute] SPICE computed: {metrics['audio_spice']:.2f}", flush=True)
             except Exception as spice_exc:
+                print(f"[MetricCompute] SPICE computation FAILED: {spice_exc}", flush=True)
                 self._log_caption_metric_warning("SPICE", spice_exc)
 
             # Compute SPIDEr (average of CIDEr and SPICE)
