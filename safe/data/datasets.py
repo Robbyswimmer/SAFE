@@ -198,6 +198,13 @@ class _BaseQADataset(Dataset):
         try:
             import torchaudio
 
+            # Force soundfile backend to avoid ffmpeg's large codec buffers
+            # This reduces memory usage in DataLoader workers
+            try:
+                torchaudio.set_audio_backend("soundfile")
+            except Exception:
+                pass  # Fallback to default backend if soundfile not available
+
             # torchaudio.load() supports WAV, FLAC, MP3, OGG, etc.
             waveform, sample_rate = torchaudio.load(str(audio_file))
 
