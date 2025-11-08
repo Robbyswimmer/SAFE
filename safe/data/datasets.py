@@ -322,17 +322,29 @@ class AudioCapsDataset(_BaseQADataset):
         """Group multiple captions for the same audio clip into single samples with multiple references."""
         from collections import defaultdict
 
-        # Group by (youtube_id, start_time) or (ytid, start_time)
+        # Group by (youtube_id, start_time) when metadata is available
         audio_groups = defaultdict(list)
+        single_entries = []
 
         for entry in self.examples:
-            # Extract audio identifier
             ytid = entry.get("ytid") or entry.get("youtube_id")
+            if not ytid:
+                meta = entry.get("metadata")
+                if isinstance(meta, dict):
+                    ytid = meta.get("youtube_id") or meta.get("ytid")
+
             start_time = entry.get("start_time")
+            if start_time is None:
+                meta = entry.get("metadata")
+                if isinstance(meta, dict):
+                    start_time = meta.get("start_time")
 
             if ytid and start_time is not None:
                 key = (ytid, start_time)
                 audio_groups[key].append(entry)
+            else:
+                # Missing metadata (common in some community JSON dumps) – keep as-is
+                single_entries.append(entry.copy())
 
         # Create new examples list with grouped captions
         grouped_examples = []
@@ -362,6 +374,9 @@ class AudioCapsDataset(_BaseQADataset):
             base_entry["answer"] = captions    # Also store in answer field
 
             grouped_examples.append(base_entry)
+
+        # Add un-grouped entries (missing metadata) back so they aren't dropped
+        grouped_examples.extend(single_entries)
 
         original_count = len(self.examples)
         self.examples = grouped_examples
