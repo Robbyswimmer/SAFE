@@ -4090,10 +4090,10 @@ class StageATrainer:
                 )
             else:
                 checkpoint_path = os.path.join(
-                    self.config["output_dir"], 
-                    f"checkpoint_epoch_{self.epoch}_step_{self.global_step}.pt"
+                    self.config["output_dir"],
+                    "last_checkpoint.pt"
                 )
-            
+
             print(f"Saving checkpoint to: {checkpoint_path}", flush=True)
             torch.save(checkpoint, checkpoint_path)
             print(f"Successfully saved checkpoint: {checkpoint_path}", flush=True)

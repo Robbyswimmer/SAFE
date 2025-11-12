@@ -94,9 +94,12 @@ class _BaseQADataset(Dataset):
     dataset_name: str = "generic"
     file_stem: str = "data"
 
-    def __init__(self, data_path: str | Path, split: str = "train"):
+    def __init__(self, data_path: str | Path, split: str = "train", *, lazy: bool = False):
         self.data_path = Path(data_path)
         self.split = split
+        self._lazy = False
+        self._lazy_file_path: Optional[Path] = None
+        self._line_offsets: List[int] = []
 
         dataset_dir = self.data_path / self.dataset_name
         if not dataset_dir.exists():
@@ -119,29 +122,60 @@ class _BaseQADataset(Dataset):
             )
 
         self.examples: List[Dict[str, Any]] = []
-        if data_file.suffix == ".jsonl":
-            with open(data_file, "r", encoding="utf-8") as f:
+        if lazy and data_file.suffix == ".jsonl":
+            self._lazy = True
+            self._lazy_file_path = data_file
+            offset = 0
+            with open(data_file, "rb") as f:
                 for line in f:
-                    line = line.strip()
-                    if line:
-                        self.examples.append(json.loads(line))
+                    self._line_offsets.append(offset)
+                    offset += len(line)
         else:
-            with open(data_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict) and "data" in data:
-                    data = data["data"]
-                if not isinstance(data, list):
-                    raise ValueError(f"Unexpected format for {data_file}")
-                self.examples = data
+            if lazy and data_file.suffix != ".jsonl":
+                print(
+                    f"[Dataset] Lazy loading requested for {data_file.name} but only JSONL is supported."
+                    " Proceeding with eager load.",
+                    flush=True,
+                )
+            if data_file.suffix == ".jsonl":
+                with open(data_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            self.examples.append(json.loads(line))
+            else:
+                with open(data_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict) and "data" in data:
+                        data = data["data"]
+                    if not isinstance(data, list):
+                        raise ValueError(f"Unexpected format for {data_file}")
+                    self.examples = data
 
-        if not self.examples:
+        if not self._lazy and not self.examples:
             raise ValueError(f"No examples found in {data_file}")
 
     # ------------------------------------------------------------------
     def __len__(self) -> int:  # type: ignore[override]
+        if self._lazy:
+            return len(self._line_offsets)
         return len(self.examples)
 
     # ------------------------------------------------------------------
+    def _get_entry(self, idx: int) -> Dict[str, Any]:
+        if not self._lazy:
+            return self.examples[idx]
+        return self._load_lazy_entry(idx)
+
+    def _load_lazy_entry(self, idx: int) -> Dict[str, Any]:
+        if self._lazy_file_path is None:
+            raise RuntimeError("Lazy dataset missing file path")
+        offset = self._line_offsets[idx]
+        with open(self._lazy_file_path, "rb") as f:
+            f.seek(offset)
+            line = f.readline()
+        return json.loads(line.decode("utf-8"))
+
     def _extract_answer(self, raw_answer: Any) -> Any:
         if raw_answer is None:
             return ""
@@ -283,7 +317,7 @@ class _BaseQADataset(Dataset):
 
     # ------------------------------------------------------------------
     def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
-        entry = self.examples[idx]
+        entry = self._get_entry(idx)
         answer_value = entry.get("answers") or entry.get("answer")
 
         # Debug: Log first sample to verify data loading
@@ -388,7 +422,7 @@ class AudioCapsDataset(_BaseQADataset):
                   f"with avg {avg_refs:.1f} references per audio", flush=True)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
-        entry = self.examples[idx]
+        entry = self._get_entry(idx)
         question = entry.get("question") or "What is happening in the audio?"
 
         # Try multiple field names for answers (datasets use different conventions)
@@ -425,7 +459,7 @@ class VQADataset(_BaseQADataset):
     file_stem = "vqa"
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
-        entry = self.examples[idx]
+        entry = self._get_entry(idx)
         sample = {
             "sample_id": entry.get("question_id") or entry.get("id"),
             "question": entry.get("question") or entry.get("question_text") or "",
@@ -442,7 +476,7 @@ class AVQADataset(_BaseQADataset):
     file_stem = "avqa"
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
-        entry = self.examples[idx]
+        entry = self._get_entry(idx)
         sample = {
             "sample_id": entry.get("id") or entry.get("sample_id"),
             "question": entry.get("question") or "",
@@ -458,8 +492,11 @@ class WavCapsDataset(_BaseQADataset):
     dataset_name = "wavcaps"
     file_stem = "wavcaps"
 
+    def __init__(self, data_path: Path, split: str = "train"):
+        super().__init__(data_path, split, lazy=True)
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
-        entry = self.examples[idx]
+        entry = self._get_entry(idx)
 
         # WavCaps uses standardized format from download script
         question = entry.get("question") or "What is happening in the audio?"

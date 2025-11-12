@@ -494,8 +494,19 @@ def run_experiment(args: argparse.Namespace) -> None:
     val_audio_sources: List[Tuple[str, Dataset]] = []
     val_audio_weights: List[float] = []
 
-    audiocaps_val = AudioCapsDataset(data_path=data_root, split=args.val_audio_split)
-    print(f"Loaded AudioCaps val: {len(audiocaps_val)} samples", flush=True)
+    try:
+        audiocaps_val = AudioCapsDataset(data_path=data_root, split=args.val_audio_split)
+    except FileNotFoundError as exc:
+        if args.val_audio_split != "val":
+            fallback_split = "val"
+            print(
+                f"Warning: AudioCaps split '{args.val_audio_split}' not found ({exc}). Falling back to '{fallback_split}'.",
+                flush=True,
+            )
+            audiocaps_val = AudioCapsDataset(data_path=data_root, split=fallback_split)
+        else:
+            raise
+    print(f"Loaded AudioCaps val: {len(audiocaps_val)} samples (split={audiocaps_val.split})", flush=True)
 
     wavcaps_val = None
     wavcaps_share = 0.0
@@ -719,7 +730,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--data-root", type=str, default="experiments/full_training/data", help="Dataset root")
     parser.add_argument("--train-split", type=str, default="train", help="AudioCaps split for training")
-    parser.add_argument("--val-audio-split", type=str, default="val", help="AudioCaps split for validation")
+    parser.add_argument("--val-audio-split", type=str, default="audiocaps_val", help="AudioCaps split for validation")
     parser.add_argument("--use-wavcaps", action="store_true", help="Include WavCaps dataset for training")
     parser.add_argument("--wavcaps-ratio", type=float, default=0.5, help="Ratio of WavCaps samples to use (0.0-1.0)")
     parser.add_argument("--val-wavcaps-share", type=float, default=0.5, help="Fraction of audio validation samples to draw from WavCaps (0.0-1.0)")

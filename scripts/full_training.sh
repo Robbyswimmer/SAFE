@@ -32,7 +32,7 @@ echo "Starting SAFE full-scale training at $(date)"
 DATA_ROOT=${DATA_ROOT:-"$PWD/experiments/full_training/data"}
 OUTPUT_ROOT=${OUTPUT_ROOT:-"$PWD/experiments/full_training/runs/${SLURM_JOB_ID}"}
 TRAIN_SPLIT=${TRAIN_SPLIT:-train}
-VAL_AUDIO_SPLIT=${VAL_AUDIO_SPLIT:-val}
+VAL_AUDIO_SPLIT=${VAL_AUDIO_SPLIT:-audiocaps_val}
 VAL_VQA_SPLIT=${VAL_VQA_SPLIT:-val}
 NUM_EPOCHS=${NUM_EPOCHS:-100}
 TRAIN_BS=${TRAIN_BS:-8}
