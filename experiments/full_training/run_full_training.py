@@ -239,7 +239,7 @@ class AudioValidationMixDataset(Dataset):
             for _, idx in fractional_parts:
                 if leftover <= 0:
                     break
-                capacity = len(per_source_indices[idx]) - base_counts[idx]
+                capacity = dataset_lengths[idx] - base_counts[idx]
                 if capacity <= 0:
                     continue
                 base_counts[idx] += 1
@@ -247,10 +247,10 @@ class AudioValidationMixDataset(Dataset):
 
         if leftover > 0:
             # Distribute any remaining samples to sources with spare capacity
-            for idx in range(len(per_source_indices)):
+            for idx in range(len(dataset_lengths)):
                 if leftover <= 0:
                     break
-                capacity = len(per_source_indices[idx]) - base_counts[idx]
+                capacity = dataset_lengths[idx] - base_counts[idx]
                 if capacity <= 0:
                     continue
                 take = min(capacity, leftover)
