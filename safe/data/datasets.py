@@ -94,7 +94,12 @@ class _BaseQADataset(Dataset):
     dataset_name: str = "generic"
     file_stem: str = "data"
 
-    def __init__(self, data_path: str | Path, split: str = "train"):
+    def __init__(
+        self,
+        data_path: str | Path,
+        split: str = "train",
+        preferred_file: Optional[Path] = None,
+    ):
         self.data_path = Path(data_path)
         self.split = split
 
@@ -104,12 +109,27 @@ class _BaseQADataset(Dataset):
                 f"Expected directory {dataset_dir} for {self.dataset_name} dataset"
             )
 
-        candidates = [
+        candidate_paths: List[Path] = []
+        if preferred_file is not None:
+            candidate_paths.append(Path(preferred_file))
+
+        default_candidates = [
             dataset_dir / f"{self.file_stem}_{split}.jsonl",
             dataset_dir / f"{self.file_stem}_{split}.json",
             dataset_dir / f"{split}.jsonl",
             dataset_dir / f"{split}.json",
         ]
+        candidate_paths.extend(default_candidates)
+
+        # Remove duplicates while preserving order
+        seen: set[Path] = set()
+        candidates: List[Path] = []
+        for path in candidate_paths:
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            candidates.append(path)
+            seen.add(resolved)
 
         data_file = next((p for p in candidates if p.exists()), None)
         if data_file is None:
@@ -172,9 +192,14 @@ class _BaseQADataset(Dataset):
         Returns:
             Tuple of (waveform, sample_rate) or None if loading fails
         """
-        audio_path = entry.get("audio") or entry.get("audio_path")
+        audio_path = entry.get("audio") or entry.get("audio_path") or entry.get("file_path")
         if not audio_path:
-            return None
+            sound_name = entry.get("sound_name") or entry.get("ytid") or entry.get("id")
+            split = entry.get("split") or self.split
+            if sound_name and split:
+                audio_path = Path("audio") / str(split) / sound_name
+            else:
+                return None
 
         # Support both relative and absolute paths
         audio_file = Path(audio_path)
@@ -302,17 +327,33 @@ class AudioCapsDataset(_BaseQADataset):
     dataset_name = "audiocaps"
     file_stem = "audiocaps"
 
+    def __init__(self, data_path: str | Path, split: str = "train"):
+        data_root = Path(data_path)
+        dataset_dir = data_root / self.dataset_name
+        preferred_file: Optional[Path] = None
+
+        # For evaluation (val split), always prefer the curated multi-caption JSON
+        if split.lower().startswith("val"):
+            hardcoded = dataset_dir / "audiocaps_val.json"
+            if hardcoded.exists():
+                preferred_file = hardcoded
+
+        super().__init__(data_path=data_path, split=split, preferred_file=preferred_file)
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
         entry = self.examples[idx]
         question = entry.get("question") or "What is happening in the audio?"
 
         # Try multiple field names for answers (datasets use different conventions)
-        answers = (
-            entry.get("answers") or      # Plural form
-            entry.get("answer") or        # Singular form (what full_training data uses)
-            entry.get("caption") or       # AudioCaps caption field
-            entry.get("captions")         # Plural captions
-        )
+        captions = entry.get("captions")
+        if isinstance(captions, (list, tuple)):
+            answers = [str(cap).strip() for cap in captions if str(cap).strip()]
+        else:
+            answers = (
+                entry.get("answers") or      # Plural form
+                entry.get("answer") or        # Singular form (what full_training data uses)
+                entry.get("caption")          # AudioCaps single caption field
+            )
 
         # Debug: Log first few samples to verify answer loading
         if idx < 3:
@@ -322,7 +363,7 @@ class AudioCapsDataset(_BaseQADataset):
             print(f"  Final answers value: {answers}", flush=True)
 
         sample = {
-            "sample_id": entry.get("id") or entry.get("ytid"),
+            "sample_id": entry.get("id") or entry.get("ytid") or entry.get("sound_name"),
             "question": question,
             "answers": answers,
             "audio": self._load_audio(entry),

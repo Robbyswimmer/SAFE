@@ -1340,9 +1340,12 @@ class StageATrainer:
                     )
                     if isinstance(has_audio, torch.Tensor):
                         has_audio = has_audio.to(device=device, dtype=torch.bool)
+                        batch_contains_audio = bool(torch.any(has_audio).item())
                     else:
-                        has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
-                    
+                        bool_list = [bool(flag) for flag in has_audio]
+                        has_audio = torch.tensor(bool_list, dtype=torch.bool, device=device)
+                        batch_contains_audio = any(bool_list)
+
                     # Prepare inputs - always pass images/audio if available, don't gate on flags
                     # Hard assert audio presence for audio batches
                     if batch_label.startswith("AUDIO"):
@@ -1359,7 +1362,8 @@ class StageATrainer:
                     pass
 
                     # Ensure include_audio_tokens=True for audio samples to guarantee audio placeholders in prompts
-                    has_audio_data = batch.get("audio", None) is not None
+                    audio_entries = batch.get("audio", None)
+                    has_audio_data = bool(batch_contains_audio and audio_entries is not None)
                     inputs = self.safe_model.prepare_multimodal_inputs(
                         text=batch["questions"],
                         images=batch.get("images", None),
@@ -1374,17 +1378,15 @@ class StageATrainer:
                     inputs["original_answers"] = original_answers
 
                     # Apply audio gate control if configured
-                    if eval_audio_gate_comparison and hasattr(self.safe_model, 'set_gate'):
-                        # Run evaluation with both audio gate on/off to measure VL drift
-                        if batch_label.startswith("AUDIO"):
-                            # For audio batches, use gate=1.0 (with audio)
-                            self.safe_model.set_gate(1.0)
+                    gate_controller = getattr(self.safe_model, 'set_gate', None)
+                    if callable(gate_controller):
+                        if eval_audio_gate_comparison:
+                            gate_value = 1.0 if batch_contains_audio else 0.0
+                        elif not eval_with_audio_gate:
+                            gate_value = 0.0
                         else:
-                            # For VL batches, use gate=0.0 (without audio) to measure drift
-                            self.safe_model.set_gate(0.0)
-                    elif not eval_with_audio_gate and hasattr(self.safe_model, 'set_gate'):
-                        # Disable audio entirely if configured
-                        self.safe_model.set_gate(0.0)
+                            gate_value = 1.0 if batch_contains_audio else 0.0
+                        gate_controller(gate_value)
                     
                     # Handle pixel_values based on model type (AFTER gate settings)
                     if self.safe_model.base_vl.model_type == "llava":
@@ -2051,15 +2053,24 @@ class StageATrainer:
                         base_pred = self._clean_answer(self._extract_answer(base_pred_full))
 
                         gt_raw = gt_answers[i] if i < len(gt_answers) else ""
-                        gt_answer = self._clean_answer(gt_raw)
-
-                        gt_display = gt_answer
+                        gt_candidates = self._prepare_gt_answers(gt_raw)
+                        gt_display_source = gt_candidates[0] if gt_candidates else gt_raw
+                        gt_display = self._shorten_text_for_log(gt_display_source)
                         safe_display = safe_pred
                         base_display = base_pred
 
+                        normalized_gt = [
+                            self._clean_answer(candidate)
+                            for candidate in gt_candidates
+                            if candidate is not None
+                        ]
+                        normalized_gt = [ans for ans in normalized_gt if ans]
+                        if not normalized_gt:
+                            normalized_gt = [self._clean_answer(gt_display_source)] if gt_display_source else [""]
+
                         # Compute answer-level accuracy (exact match or fuzzy match)
-                        safe_score = self._compute_answer_accuracy(safe_pred, gt_answer)
-                        base_score = self._compute_answer_accuracy(base_pred, gt_answer)
+                        safe_score = self._compute_answer_accuracy(safe_pred, normalized_gt)
+                        base_score = self._compute_answer_accuracy(base_pred, normalized_gt)
                         safe_results[i] = AccuracyResult(safe_score, {"exact": safe_score})
                         base_results[i] = AccuracyResult(base_score, {"exact": base_score})
 
@@ -3581,13 +3592,20 @@ class StageATrainer:
         if not s:
             return ""
             
-        s = s.strip().lower()
-        
+        import re
+        import unicodedata
+
+        s = unicodedata.normalize("NFKC", str(s)).strip().lower()
+
         # Remove common answer prefixes
         if "answer:" in s:
             s = s.split("answer:")[-1].strip()
-        
-        # Map common words to digits
+
+        # Remove punctuation while preserving alphanumerics/spaces
+        s = re.sub(r"[^a-z0-9\s]", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+
+        # Map common words to digits but keep full sequence
         word_to_digit = {
             "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
             "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9", 
@@ -3596,21 +3614,15 @@ class StageATrainer:
             "eighteen": "18", "nineteen": "19", "twenty": "20",
             "yes": "yes", "no": "no"
         }
-        
-        # Check if answer starts with a known word
-        for word, digit in word_to_digit.items():
-            if s.startswith(word):
-                return digit
-        
-        # Extract first number if present
-        import re
-        number_match = re.search(r'-?\d+', s)
-        if number_match:
-            return number_match.group(0)
-        
-        # Return first word if no number found
-        first_word = s.split()[0] if s.split() else ""
-        return first_word
+        tokens = [tok for tok in s.split() if tok]
+        normalized_tokens: List[str] = []
+        for tok in tokens:
+            normalized_tokens.append(word_to_digit.get(tok, tok))
+
+        if not normalized_tokens:
+            return ""
+
+        return " ".join(normalized_tokens)
 
     def _clean_answer(self, s: str) -> str:
         """Clean and normalize answer text (legacy method)."""
@@ -3684,15 +3696,13 @@ class StageATrainer:
         if not answer:
             return ""
 
-        # Split into tokens, strip punctuation per token, and cap at 3 tokens.
+        # Split into tokens, strip punctuation per token, and keep the full response
         tokens = []
         for raw_token in answer.split():
             token = re.sub(r"^[^a-z0-9]+", "", raw_token, flags=re.IGNORECASE)
             token = re.sub(r"[^a-z0-9]+$", "", token, flags=re.IGNORECASE)
             if token:
                 tokens.append(token)
-            if len(tokens) >= 3:
-                break
 
         return " ".join(tokens)
 
