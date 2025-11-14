@@ -104,6 +104,7 @@ class _BaseQADataset(Dataset):
         self.split = split
 
         dataset_dir = self.data_path / self.dataset_name
+        self.dataset_dir = dataset_dir
         if not dataset_dir.exists():
             raise FileNotFoundError(
                 f"Expected directory {dataset_dir} for {self.dataset_name} dataset"
@@ -192,27 +193,49 @@ class _BaseQADataset(Dataset):
         Returns:
             Tuple of (waveform, sample_rate) or None if loading fails
         """
-        audio_path = entry.get("audio") or entry.get("audio_path") or entry.get("file_path")
-        if not audio_path:
-            sound_name = entry.get("sound_name") or entry.get("ytid") or entry.get("id")
-            split = entry.get("split") or self.split
-            if sound_name and split:
-                audio_path = Path("audio") / str(split) / sound_name
-            else:
-                return None
+        raw_audio_path = entry.get("audio") or entry.get("audio_path") or entry.get("file_path")
+        split_name = entry.get("split") or self.split
+        sound_name = entry.get("sound_name") or entry.get("ytid") or entry.get("id")
 
-        # Support both relative and absolute paths
-        audio_file = Path(audio_path)
-        if not audio_file.is_absolute():
-            audio_file = self.data_path / audio_path
+        candidate_paths: List[Path] = []
 
-        if not audio_file.exists():
+        def _add_candidate(path_value: Any) -> None:
+            if not path_value:
+                return
+            candidate = Path(path_value)
+            if not candidate.is_absolute():
+                candidate = self.dataset_dir / candidate
+            if candidate not in candidate_paths:
+                candidate_paths.append(candidate)
+
+        _add_candidate(raw_audio_path)
+
+        if sound_name and split_name:
+            base_candidate = Path("audio") / str(split_name) / sound_name
+            _add_candidate(base_candidate)
+
+            base = Path(sound_name)
+            suffix = base.suffix or ".wav"
+            stem = base.stem
+            parts = stem.split("_")
+            if len(parts) > 1 and parts[-1].isdigit():
+                trimmed_stem = "_".join(parts[:-1])
+                _add_candidate(Path("audio") / str(split_name) / f"{trimmed_stem}{suffix}")
+                if suffix.lower() != ".wav":
+                    _add_candidate(Path("audio") / str(split_name) / f"{trimmed_stem}.wav")
+            elif suffix.lower() != ".wav":
+                _add_candidate(Path("audio") / str(split_name) / f"{stem}.wav")
+
+        audio_file = next((candidate for candidate in candidate_paths if candidate and candidate.exists()), None)
+
+        if audio_file is None:
             # Only log first few missing files to avoid spam
             if not hasattr(self, '_missing_audio_count'):
                 self._missing_audio_count = 0
 
             if self._missing_audio_count < 5:
-                print(f"[Dataset] Warning: Audio file not found: {audio_path}", flush=True)
+                missing_label = raw_audio_path or sound_name or "<unknown>"
+                print(f"[Dataset] Warning: Audio file not found: {missing_label}", flush=True)
                 self._missing_audio_count += 1
             elif self._missing_audio_count == 5:
                 print(f"[Dataset] Warning: Additional missing audio files will not be logged", flush=True)
