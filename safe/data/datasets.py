@@ -347,9 +347,20 @@ class AudioCapsDataset(_BaseQADataset):
         """Initialize AudioCaps dataset with multi-reference grouping for val/test splits."""
         super().__init__(data_path, split)
 
-        # For validation/test splits, group multiple captions per audio
-        # AudioCaps has 5 captions per audio in val/test (same ytid + start_time)
-        if split in ["val", "validation", "test"]:
+        # For validation/test-style splits, group multiple captions per audio. Users often
+        # pass aliases such as "audiocaps_val" or "val_full", so we normalize the split
+        # name instead of checking for literal equality.
+        normalized_split = split.lower()
+        is_eval_split = normalized_split in {"val", "validation", "test", "dev"} or (
+            normalized_split.endswith("_val")
+            or normalized_split.endswith("_validation")
+            or normalized_split.endswith("_test")
+        )
+
+        # AudioCaps has 5 captions per audio clip in the official val/test JSON files
+        # (same youtube_id + start_time). Grouping ensures we surface all references so
+        # downstream metrics (CIDEr/SPIDEr) behave correctly.
+        if is_eval_split:
             self._group_multiple_references()
 
     def _group_multiple_references(self):

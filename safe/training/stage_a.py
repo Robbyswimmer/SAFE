@@ -1196,10 +1196,12 @@ class StageATrainer:
                         flush=True,
                     )
 
-                    audio_batches: List[Dict[str, Any]] = []
-                    vl_batches: List[Dict[str, Any]] = []
-                    audio_samples_collected = 0
-                    vl_samples_collected = 0
+                    split_stats = {
+                        "audio_batches": 0,
+                        "vl_batches": 0,
+                        "audio_samples": 0,
+                        "vl_samples": 0,
+                    }
 
                     def _can_collect(sample_limit: Optional[int], collected_samples: int,
                                      batch_limit: Optional[int], collected_batches: int) -> bool:
@@ -1207,113 +1209,102 @@ class StageATrainer:
                         batch_ok = True if batch_limit is None else collected_batches < batch_limit
                         return sample_ok and batch_ok
 
-                    # Collect batches and separate them
-                    batch_count = 0
-                    print(f"[Eval] Starting batch collection loop...", flush=True)
-                    for batch in data_source:
-                        batch_count += 1
-                        if batch_count % 10 == 1:
-                            print(f"[Eval] Processing batch {batch_count}, collected audio={audio_samples_collected}, vl={vl_samples_collected}", flush=True)
+                    def _split_generator():
+                        audio_samples_collected = 0
+                        vl_samples_collected = 0
+                        audio_batches = 0
+                        vl_batches = 0
+                        batch_count = 0
+                        for batch in data_source:
+                            batch_count += 1
+                            if batch_count % 10 == 1:
+                                print(
+                                    f"[Eval] Processing batch {batch_count}, collected audio={audio_samples_collected}, vl={vl_samples_collected}",
+                                    flush=True,
+                                )
 
-                        # Move batch to device
-                        for key in batch:
-                            if isinstance(batch[key], torch.Tensor):
-                                batch[key] = batch[key].to(device)
+                            for key in batch:
+                                if isinstance(batch[key], torch.Tensor):
+                                    batch[key] = batch[key].to(device)
 
-                        # Determine if batch has audio samples
-                        has_audio = batch.get(
-                            "has_audio",
-                            torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device),
-                        )
-                        if isinstance(has_audio, torch.Tensor):
-                            has_audio = has_audio.to(device=device, dtype=torch.bool)
-                        else:
-                            has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
+                            has_audio = batch.get(
+                                "has_audio",
+                                torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device),
+                            )
+                            if isinstance(has_audio, torch.Tensor):
+                                has_audio = has_audio.to(device=device, dtype=torch.bool)
+                            else:
+                                has_audio = torch.tensor(has_audio, dtype=torch.bool, device=device)
 
-                        # Debug batch composition
-                        audio_indices = torch.nonzero(has_audio, as_tuple=False).flatten()
-                        vl_indices = torch.nonzero(~has_audio, as_tuple=False).flatten()
+                            audio_indices = torch.nonzero(has_audio, as_tuple=False).flatten()
+                            vl_indices = torch.nonzero(~has_audio, as_tuple=False).flatten()
 
-                        if audio_indices.numel() > 0 and _can_collect(audio_sample_limit, audio_samples_collected, audio_batch_limit, len(audio_batches)):
-                            if audio_sample_limit is not None:
-                                remaining = audio_sample_limit - audio_samples_collected
-                                if remaining <= 0:
-                                    audio_indices = audio_indices[:0]
-                                else:
-                                    audio_indices = audio_indices[:remaining]
-                            if audio_indices.numel() > 0:
-                                audio_subset = self._select_batch_indices(batch, audio_indices, clone=True)
-                                if audio_subset:
-                                    audio_batches.append(audio_subset)
-                                    added = len(audio_subset.get("questions", []))
-                                    if added == 0:
-                                        tensor_candidate = next(
-                                            (
-                                                v
-                                                for v in audio_subset.values()
-                                                if isinstance(v, torch.Tensor) and v.dim() > 0
-                                            ),
-                                            None,
-                                        )
-                                        if tensor_candidate is not None:
-                                            added = int(tensor_candidate.size(0))
-                                    audio_samples_collected += added
-                        elif audio_indices.numel() > 0 and audio_batch_limit is not None:
-                            pass  # Audio batch limit reached
-                        elif audio_indices.numel() > 0 and audio_sample_limit is not None:
-                            pass  # Audio sample limit reached
+                            if audio_indices.numel() > 0 and _can_collect(audio_sample_limit, audio_samples_collected, audio_batch_limit, audio_batches):
+                                if audio_sample_limit is not None:
+                                    remaining = audio_sample_limit - audio_samples_collected
+                                    if remaining <= 0:
+                                        audio_indices = audio_indices[:0]
+                                    else:
+                                        audio_indices = audio_indices[:remaining]
+                                if audio_indices.numel() > 0:
+                                    audio_subset = self._select_batch_indices(batch, audio_indices, clone=True)
+                                    if audio_subset:
+                                        added = len(audio_subset.get("questions", []))
+                                        if added == 0:
+                                            tensor_candidate = next(
+                                                (
+                                                    v
+                                                    for v in audio_subset.values()
+                                                    if isinstance(v, torch.Tensor) and v.dim() > 0
+                                                ),
+                                                None,
+                                            )
+                                            if tensor_candidate is not None:
+                                                added = int(tensor_candidate.size(0))
+                                        audio_samples_collected += added
+                                        audio_batches += 1
+                                        split_stats["audio_samples"] = audio_samples_collected
+                                        split_stats["audio_batches"] = audio_batches
+                                        yield (f"AUDIO-{audio_batches}", audio_subset)
 
-                        if vl_indices.numel() > 0 and _can_collect(vl_sample_limit, vl_samples_collected, vl_batch_limit, len(vl_batches)):
-                            if vl_sample_limit is not None:
-                                remaining_vl = vl_sample_limit - vl_samples_collected
-                                if remaining_vl <= 0:
-                                    vl_indices = vl_indices[:0]
-                                else:
-                                    vl_indices = vl_indices[:remaining_vl]
-                            if vl_indices.numel() > 0:
-                                vl_subset = self._select_batch_indices(batch, vl_indices, clone=True)
-                                if vl_subset:
-                                    vl_batches.append(vl_subset)
-                                    added_vl = len(vl_subset.get("questions", []))
-                                    if added_vl == 0:
-                                        tensor_candidate_vl = next(
-                                            (
-                                                v
-                                                for v in vl_subset.values()
-                                                if isinstance(v, torch.Tensor) and v.dim() > 0
-                                            ),
-                                            None,
-                                        )
-                                        if tensor_candidate_vl is not None:
-                                            added_vl = int(tensor_candidate_vl.size(0))
-                                    vl_samples_collected += added_vl
-                        elif vl_indices.numel() > 0 and vl_batch_limit is not None:
-                            pass  # VL batch limit reached
-                        elif vl_indices.numel() > 0 and vl_sample_limit is not None:
-                            pass  # VL sample limit reached
+                            if vl_indices.numel() > 0 and _can_collect(vl_sample_limit, vl_samples_collected, vl_batch_limit, vl_batches):
+                                if vl_sample_limit is not None:
+                                    remaining_vl = vl_sample_limit - vl_samples_collected
+                                    if remaining_vl <= 0:
+                                        vl_indices = vl_indices[:0]
+                                    else:
+                                        vl_indices = vl_indices[:remaining_vl]
+                                if vl_indices.numel() > 0:
+                                    vl_subset = self._select_batch_indices(batch, vl_indices, clone=True)
+                                    if vl_subset:
+                                        added_vl = len(vl_subset.get("questions", []))
+                                        if added_vl == 0:
+                                            tensor_candidate_vl = next(
+                                                (
+                                                    v
+                                                    for v in vl_subset.values()
+                                                    if isinstance(v, torch.Tensor) and v.dim() > 0
+                                                ),
+                                                None,
+                                            )
+                                            if tensor_candidate_vl is not None:
+                                                added_vl = int(tensor_candidate_vl.size(0))
+                                        vl_samples_collected += added_vl
+                                        vl_batches += 1
+                                        split_stats["vl_samples"] = vl_samples_collected
+                                        split_stats["vl_batches"] = vl_batches
+                                        yield (f"VL-{vl_batches}", vl_subset)
 
-                        batch_count += 1
+                            audio_done = not _can_collect(audio_sample_limit, audio_samples_collected, audio_batch_limit, audio_batches)
+                            vl_done = not _can_collect(vl_sample_limit, vl_samples_collected, vl_batch_limit, vl_batches)
+                            if audio_done and vl_done:
+                                break
 
-                        audio_done = not _can_collect(audio_sample_limit, audio_samples_collected, audio_batch_limit, len(audio_batches))
-                        vl_done = not _can_collect(vl_sample_limit, vl_samples_collected, vl_batch_limit, len(vl_batches))
-                        if audio_done and vl_done:
-                            break
+                        split_stats["audio_batches"] = audio_batches
+                        split_stats["vl_batches"] = vl_batches
 
-                    # Create combined evaluation list
-                    eval_batch_list = []
-                    for i, batch in enumerate(audio_batches):
-                        eval_batch_list.append((f"AUDIO-{i+1}", batch))
-                    for i, batch in enumerate(vl_batches):
-                        eval_batch_list.append((f"VL-{i+1}", batch))
-
-                    batch_iterable = eval_batch_list
-                    total_eval_batches = len(eval_batch_list)
-                    collected_audio_batches = len(audio_batches)
-                    collected_vl_batches = len(vl_batches)
-                    print(
-                        f"Split evaluation prepared {collected_audio_batches} audio + {collected_vl_batches} VL batches (total={total_eval_batches})",
-                        flush=True,
-                    )
+                    batch_iterable = _split_generator()
+                    total_eval_batches = None
                 else:
                     # Original evaluation logic
                     batch_iterable = data_source
@@ -1548,6 +1539,13 @@ class StageATrainer:
                             flush=True
                         )
             
+            if split_batches:
+                print(
+                    f"[Eval] Split summary: audio_batches={split_stats['audio_batches']} "
+                    f"vl_batches={split_stats['vl_batches']}",
+                    flush=True,
+                )
+
         except Exception as e:
             print(f"ERROR during evaluation: {e}", flush=True)
             raise
