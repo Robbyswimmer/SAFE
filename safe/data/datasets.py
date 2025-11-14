@@ -121,6 +121,8 @@ class _BaseQADataset(Dataset):
                 f"Looked for: {', '.join(str(p) for p in candidates)}"
             )
 
+        print(f"[{self.dataset_name.upper()}] Loading {split} split from: {data_file.name}", flush=True)
+
         self.examples: List[Dict[str, Any]] = []
         if lazy and data_file.suffix == ".jsonl":
             self._lazy = True
@@ -366,6 +368,24 @@ class AudioCapsDataset(_BaseQADataset):
     def _group_multiple_references(self):
         """Group multiple captions for the same audio clip into single samples with multiple references."""
         from collections import defaultdict
+
+        # FIRST: Check if data is already pre-grouped (has 'captions' as a list)
+        if self.examples:
+            first_entry = self.examples[0]
+            existing_captions = first_entry.get("captions")
+
+            # Data is already grouped if 'captions' exists and is a list with multiple items
+            if isinstance(existing_captions, list) and len(existing_captions) > 1:
+                print(f"[AudioCaps] Data is already pre-grouped with multi-reference captions", flush=True)
+                # Just ensure answer field is populated
+                for entry in self.examples:
+                    if "answer" not in entry and "captions" in entry:
+                        entry["answer"] = entry["captions"]
+
+                # Report statistics
+                avg_refs = sum(len(e.get("captions", [])) for e in self.examples) / len(self.examples)
+                print(f"[AudioCaps] {len(self.examples)} samples with avg {avg_refs:.1f} references per audio", flush=True)
+                return  # Skip grouping
 
         # Group by (youtube_id, start_time) when metadata is available
         audio_groups = defaultdict(list)
