@@ -100,10 +100,10 @@ class _BaseQADataset(Dataset):
         split: str = "train",
         preferred_file: Optional[Path] = None,
     ):
-        self.data_path = Path(data_path)
+        self.data_path = Path(data_path).expanduser().resolve()
         self.split = split
 
-        dataset_dir = self.data_path / self.dataset_name
+        dataset_dir = (self.data_path / self.dataset_name).expanduser().resolve()
         self.dataset_dir = dataset_dir
         if not dataset_dir.exists():
             raise FileNotFoundError(
@@ -202,9 +202,10 @@ class _BaseQADataset(Dataset):
         def _add_candidate(path_value: Any) -> None:
             if not path_value:
                 return
-            candidate = Path(path_value)
+            candidate = Path(path_value).expanduser()
             if not candidate.is_absolute():
                 candidate = self.dataset_dir / candidate
+            candidate = candidate.resolve(strict=False)
             if candidate not in candidate_paths:
                 candidate_paths.append(candidate)
 
