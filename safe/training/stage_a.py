@@ -2063,17 +2063,19 @@ class StageATrainer:
                         safe_results[i] = AccuracyResult(safe_metrics["composite"], safe_metrics)
                         base_results[i] = AccuracyResult(base_metrics["composite"], base_metrics)
                     else:
-                        safe_pred = self._clean_answer(self._extract_answer(safe_pred_full))
-                        base_pred = self._clean_answer(self._extract_answer(base_pred_full))
+                        # Extract answer text but DON'T normalize yet - let _compute_answer_accuracy do it
+                        safe_pred = self._extract_answer(safe_pred_full)
+                        base_pred = self._extract_answer(base_pred_full)
 
                         gt_raw = gt_answers[i] if i < len(gt_answers) else ""
-                        gt_answer = self._clean_answer(gt_raw)
+                        gt_answer = gt_raw  # Don't pre-normalize - _compute_answer_accuracy will handle it
 
-                        gt_display = gt_answer
+                        gt_display = str(gt_answer) if gt_answer else ""
                         safe_display = safe_pred
                         base_display = base_pred
 
                         # Compute answer-level accuracy (exact match or fuzzy match)
+                        # _compute_answer_accuracy handles all normalization internally
                         safe_score = self._compute_answer_accuracy(safe_pred, gt_answer)
                         base_score = self._compute_answer_accuracy(base_pred, gt_answer)
                         safe_results[i] = AccuracyResult(safe_score, {"exact": safe_score})
@@ -4498,20 +4500,49 @@ class StageATrainer:
             else:
                 self._epochs_since_improvement += 1
 
+            # Check if we should trigger SCST fine-tuning (early stopping plateau)
+            if (
+                self.scst_enabled
+                and not self._scst_triggered
+                and self._epochs_since_improvement >= self.scst_patience_epochs
+            ):
+                print(
+                    f"\n🎯 SCST trigger condition met: {self._epochs_since_improvement} epochs without improvement "
+                    f"(threshold: {self.scst_patience_epochs})",
+                    flush=True
+                )
+                scst_metrics = self._run_scst_finetune()
+                if scst_metrics is not None:
+                    # Update final metrics and break out of training loop
+                    epoch_metrics = scst_metrics
+                    print("[SCST] Breaking out of training loop after SCST fine-tune", flush=True)
+                    break
+
         print("Stage A training completed!", flush=True)
 
-        # Final checkpoint
+        # Final checkpoint and metrics
         max_eval_batches = self.config.get("max_eval_batches", None)
-        final_metrics = self.evaluate(max_batches=max_eval_batches)
-        self.save_checkpoint(final_metrics, is_best=False)
 
-        if (
-            self.scst_enabled
-            and not self._scst_triggered
-            and self._epochs_since_improvement >= self.scst_patience_epochs
-        ):
-            scst_metrics = self._run_scst_finetune()
-            if scst_metrics is not None:
-                final_metrics = scst_metrics
+        # If SCST already triggered during training, use those metrics
+        # Otherwise run final evaluation
+        if self._scst_triggered:
+            final_metrics = epoch_metrics  # Use metrics from SCST run
+            print("[SCST] Using SCST metrics as final metrics", flush=True)
+        else:
+            final_metrics = self.evaluate(max_batches=max_eval_batches)
+            self.save_checkpoint(final_metrics, is_best=False)
+
+            # Check if SCST should trigger at the very end (no improvement throughout training)
+            if (
+                self.scst_enabled
+                and self._epochs_since_improvement >= self.scst_patience_epochs
+            ):
+                print(
+                    f"\n🎯 SCST trigger at end of training: {self._epochs_since_improvement} epochs without improvement",
+                    flush=True
+                )
+                scst_metrics = self._run_scst_finetune()
+                if scst_metrics is not None:
+                    final_metrics = scst_metrics
 
         return final_metrics
