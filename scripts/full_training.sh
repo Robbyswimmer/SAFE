@@ -64,6 +64,7 @@ DISABLE_TRAIN_SHUFFLE=${DISABLE_TRAIN_SHUFFLE:-0}
 DISABLE_VAL_SHUFFLE=${DISABLE_VAL_SHUFFLE:-1}
 USE_WAVCAPS=${USE_WAVCAPS:-0}
 WAVCAPS_RATIO=${WAVCAPS_RATIO:-0.5}
+VAL_WAVCAPS_SHARE=${VAL_WAVCAPS_SHARE:-0.5}
 GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-1}
 DISABLE_BERTSCORE=${DISABLE_BERTSCORE:-0}  # Default: enabled (use Token F1 as fallback)
 PROGRESS_LOG_TIMEOUT=${PROGRESS_LOG_TIMEOUT:-600}
@@ -112,7 +113,7 @@ fi
 
 wavcaps_flags=()
 if [[ "$USE_WAVCAPS" != "0" ]]; then
-  wavcaps_flags+=(--use-wavcaps --wavcaps-ratio "${WAVCAPS_RATIO}")
+  wavcaps_flags+=(--use-wavcaps --wavcaps-ratio "${WAVCAPS_RATIO}" --val-wavcaps-share "${VAL_WAVCAPS_SHARE}")
 fi
 
 bertscore_flag=()

@@ -1620,6 +1620,10 @@ class StageATrainer:
         # Report cumulative evaluation results
         print(f"\n=== {description.upper()} EVALUATION COMPLETE ===", flush=True)
         if split_batches:
+            # Get actual batch counts from split_stats
+            collected_audio_batches = split_stats.get("audio_batches", 0)
+            collected_vl_batches = split_stats.get("vl_batches", 0)
+
             def _summary_limit(sample_limit: Optional[int], batch_limit: Optional[int]) -> str:
                 sample_str = str(sample_limit) if sample_limit is not None else "∞"
                 batch_str = str(batch_limit) if batch_limit is not None else "∞"
@@ -2070,6 +2074,16 @@ class StageATrainer:
                         gt_raw = gt_answers[i] if i < len(gt_answers) else ""
                         gt_answer = gt_raw  # Don't pre-normalize - _compute_answer_accuracy will handle it
 
+                        # DEBUG: Log first 5 VL samples to diagnose 6.3% accuracy issue
+                        if i < 5:
+                            print(f"\n[VL_DEBUG] Sample {i}:", flush=True)
+                            print(f"  GT type: {type(gt_raw)}", flush=True)
+                            print(f"  GT value: {repr(gt_raw)[:200]}", flush=True)
+                            print(f"  Safe pred: '{safe_pred}'", flush=True)
+                            print(f"  Base pred: '{base_pred}'", flush=True)
+                            if isinstance(has_audio, torch.Tensor) and i < has_audio.numel():
+                                print(f"  has_audio[{i}]: {has_audio[i].item()}", flush=True)
+
                         gt_display = str(gt_answer) if gt_answer else ""
                         safe_display = safe_pred
                         base_display = base_pred
@@ -2078,6 +2092,11 @@ class StageATrainer:
                         # _compute_answer_accuracy handles all normalization internally
                         safe_score = self._compute_answer_accuracy(safe_pred, gt_answer)
                         base_score = self._compute_answer_accuracy(base_pred, gt_answer)
+
+                        # DEBUG: Log accuracy result for first 5 samples
+                        if i < 5:
+                            print(f"  Accuracy: Safe={safe_score:.3f}, Base={base_score:.3f}\n", flush=True)
+
                         safe_results[i] = AccuracyResult(safe_score, {"exact": safe_score})
                         base_results[i] = AccuracyResult(base_score, {"exact": base_score})
 

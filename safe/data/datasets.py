@@ -320,7 +320,12 @@ class _BaseQADataset(Dataset):
     # ------------------------------------------------------------------
     def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
         entry = self._get_entry(idx)
-        answer_value = entry.get("answers") or entry.get("answer")
+
+        # For lazy-loaded pre-grouped data, use captions field (list of references)
+        if hasattr(self, '_is_pregrouped') and self._is_pregrouped:
+            answer_value = entry.get("captions") or entry.get("answer")
+        else:
+            answer_value = entry.get("answers") or entry.get("answer")
 
         # Debug: Log first sample to verify data loading
         if idx == 0:
@@ -368,24 +373,48 @@ class AudioCapsDataset(_BaseQADataset):
     def _group_multiple_references(self):
         """Group multiple captions for the same audio clip into single samples with multiple references."""
         from collections import defaultdict
+        import json
 
-        # FIRST: Check if data is already pre-grouped (has 'captions' as a list)
+        # Check if data is already pre-grouped (works for both lazy and eager loading)
+        first_entry = None
         if self.examples:
+            # Eager loading: examples already loaded in memory
             first_entry = self.examples[0]
-            existing_captions = first_entry.get("captions")
+        elif self._lazy and self._lazy_file_path:
+            # Lazy loading: read first line to check format
+            try:
+                with open(self._lazy_file_path, 'r') as f:
+                    first_line = f.readline().strip()
+                    if first_line:
+                        first_entry = json.loads(first_line)
+            except Exception as e:
+                print(f"[AudioCaps] Could not check pre-grouped format: {e}", flush=True)
 
+        if first_entry:
+            existing_captions = first_entry.get("captions")
             # Data is already grouped if 'captions' exists and is a list with multiple items
             if isinstance(existing_captions, list) and len(existing_captions) > 1:
                 print(f"[AudioCaps] Data is already pre-grouped with multi-reference captions", flush=True)
-                # Just ensure answer field is populated
-                for entry in self.examples:
-                    if "answer" not in entry and "captions" in entry:
-                        entry["answer"] = entry["captions"]
 
-                # Report statistics
-                avg_refs = sum(len(e.get("captions", [])) for e in self.examples) / len(self.examples)
-                print(f"[AudioCaps] {len(self.examples)} samples with avg {avg_refs:.1f} references per audio", flush=True)
+                # For eager loading: populate answer field directly
+                if self.examples:
+                    for entry in self.examples:
+                        if "answer" not in entry and "captions" in entry:
+                            entry["answer"] = entry["captions"]
+                    avg_refs = sum(len(e.get("captions", [])) for e in self.examples) / len(self.examples)
+                    print(f"[AudioCaps] {len(self.examples)} samples with avg {avg_refs:.1f} references per audio", flush=True)
+                # For lazy loading: set flag to handle in __getitem__
+                else:
+                    self._is_pregrouped = True
+                    print(f"[AudioCaps] Lazy mode: will use pre-grouped captions in __getitem__", flush=True)
+
                 return  # Skip grouping
+
+        # Cannot group with lazy loading - data must be pre-grouped
+        if self._lazy:
+            print("[AudioCaps] WARNING: Lazy loading without pre-grouped data!", flush=True)
+            print("[AudioCaps] Each sample will have only 1 reference. Metrics will be incorrect!", flush=True)
+            return
 
         # Group by (youtube_id, start_time) when metadata is available
         audio_groups = defaultdict(list)
