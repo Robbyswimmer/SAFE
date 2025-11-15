@@ -1333,7 +1333,7 @@ class StageATrainer:
                         for key in batch:
                             if isinstance(batch[key], torch.Tensor):
                                 batch[key] = batch[key].to(device)
-                    
+
                     has_audio = batch.get(
                         "has_audio",
                         torch.zeros(len(batch["questions"]), dtype=torch.bool, device=device),
@@ -1346,12 +1346,22 @@ class StageATrainer:
                         has_audio = torch.tensor(bool_list, dtype=torch.bool, device=device)
                         batch_contains_audio = any(bool_list)
 
+                    # Log first few batches with detailed info
+                    if batch_idx <= 3:
+                        audio_entries = batch.get("audio", [])
+                        num_audio_present = sum(1 for a in audio_entries if a is not None) if isinstance(audio_entries, list) else (1 if audio_entries is not None else 0)
+                        print(f"[EvalBatch {batch_idx}] label={batch_label}, size={len(batch['questions'])}, has_audio_flag={batch_contains_audio}, audio_entries_present={num_audio_present}", flush=True)
+                        if batch_idx == 1 and len(batch["questions"]) > 0:
+                            print(f"[EvalBatch {batch_idx}] Sample question: '{batch['questions'][0][:80]}...'", flush=True)
+                            answers_sample = batch.get("answers", [None])[0]
+                            if isinstance(answers_sample, list):
+                                print(f"[EvalBatch {batch_idx}] Sample has {len(answers_sample)} reference(s)", flush=True)
+
                     # Prepare inputs - always pass images/audio if available, don't gate on flags
                     # Hard assert audio presence for audio batches
                     if batch_label.startswith("AUDIO"):
                         assert batch.get("audio_tokens", None) is not None or (batch.get("has_audio", torch.zeros(1))).any(), \
                             f"Eval set has no usable audio (tokens/mask missing) for batch {batch_label}"
-                        # Removed: print(f"[AUDIO_EVAL] Audio batch confirmed: {batch_label}", flush=True)
                     
                     # IMPORTANT: Preserve original answers from batch BEFORE preprocessing
                     # These are needed for accuracy computation after generation
@@ -1387,6 +1397,10 @@ class StageATrainer:
                         else:
                             gate_value = 1.0 if batch_contains_audio else 0.0
                         gate_controller(gate_value)
+
+                        # Log gate setting for first few batches
+                        if batch_idx <= 3:
+                            print(f"[EvalBatch {batch_idx}] Gate set to: {gate_value}", flush=True)
                     
                     # Handle pixel_values based on model type (AFTER gate settings)
                     if self.safe_model.base_vl.model_type == "llava":
@@ -1473,9 +1487,15 @@ class StageATrainer:
                                     if clean_pred and ref_candidates:
                                         audio_caption_predictions.append(clean_pred)
                                         audio_caption_references.append(ref_candidates)
-                                        # Log first sample to validate reference count
-                                        if len(audio_caption_references) == 1:
-                                            print(f"[RefValidation] First sample has {len(ref_candidates)} reference(s)", flush=True)
+                                        # Log first few samples to validate predictions and references
+                                        if len(audio_caption_references) <= 3:
+                                            print(f"[AudioCaption Sample {len(audio_caption_references)}]", flush=True)
+                                            print(f"  Prediction: '{clean_pred[:100]}'", flush=True)
+                                            print(f"  References ({len(ref_candidates)}): '{ref_candidates[0][:100]}'", flush=True)
+                                            if len(ref_candidates) > 1:
+                                                print(f"                      '{ref_candidates[1][:100]}'", flush=True)
+                                            acc_score = safe_results_batch[int(idx)].score
+                                            print(f"  Accuracy: {acc_score:.3f}", flush=True)
 
                                 # Collect CSV samples if enabled (up to max_csv_samples)
                                 if csv_samples is not None and len(csv_samples) < max_csv_samples:
@@ -1584,12 +1604,19 @@ class StageATrainer:
             "total_samples": total_samples
         }
 
+        # Log caption metrics computation details
+        print(f"\n[MetricsCompute] Computing caption metrics on {len(audio_caption_predictions)} predictions with {len(audio_caption_references)} reference sets", flush=True)
+        if audio_caption_references:
+            ref_counts = [len(refs) for refs in audio_caption_references]
+            print(f"[MetricsCompute] Reference stats: avg={sum(ref_counts)/len(ref_counts):.1f}, min={min(ref_counts)}, max={max(ref_counts)}", flush=True)
+
         caption_metrics = self._compute_standard_caption_metrics(
             audio_caption_predictions,
             audio_caption_references,
         )
         if caption_metrics:
             eval_metrics.update(caption_metrics)
+            print(f"[MetricsCompute] ✓ Caption metrics computed successfully", flush=True)
 
         residual_value = None
         fusion_adapter = getattr(self.safe_model, "fusion_adapter", None)

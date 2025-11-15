@@ -341,12 +341,27 @@ class SAFEModel(nn.Module):
         Returns:
             Tuple of (audio_tokens, transcripts)
         """
+        # Log first few audio encoding calls
+        if not hasattr(self, '_encode_audio_count'):
+            self._encode_audio_count = 0
+
+        if self._encode_audio_count < 3:
+            audio_type = type(audio).__name__
+            if isinstance(audio, list):
+                audio_info = f"list[{len(audio)}], first_type={type(audio[0]).__name__ if audio else 'empty'}"
+            elif isinstance(audio, torch.Tensor):
+                audio_info = f"Tensor{list(audio.shape)}"
+            else:
+                audio_info = audio_type
+            print(f"[AudioEncode] Call {self._encode_audio_count + 1}: input={audio_info}, encoder={self.audio_encoder_type}", flush=True)
+            self._encode_audio_count += 1
+
         # Extract audio features from waveform
         if self.audio_encoder_type in ["clap", "multimodal"]:
             audio_features, transcripts = self.audio_encoder(audio), None
         else:  # whisper
             audio_features, transcripts = self.audio_encoder(audio)
-            
+
         # Establish consistent dtype/device pipeline
         embedding_weight = self.base_vl.llm.get_input_embeddings().weight
         target_dtype = embedding_weight.dtype
@@ -390,8 +405,10 @@ class SAFEModel(nn.Module):
 
         # Convert to target dtype/device
         audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
-        
-        # Final validation
+
+        # Final validation and logging
+        if self._encode_audio_count <= 3:
+            print(f"[AudioEncode] Output: tokens.shape={audio_tokens.shape}, dtype={audio_tokens.dtype}, device={audio_tokens.device}", flush=True)
 
         return audio_tokens, transcripts
 
