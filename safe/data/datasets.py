@@ -334,7 +334,8 @@ class _BaseQADataset(Dataset):
                 self._load_error_count = 0
 
             if self._load_error_count < 3:
-                print(f"[Dataset] Error loading audio {audio_path}: {e}", flush=True)
+                error_label = raw_audio_path or sound_name or str(audio_file)
+                print(f"[Dataset] Error loading audio {error_label}: {e}", flush=True)
                 self._load_error_count += 1
             elif self._load_error_count == 3:
                 print(f"[Dataset] Additional audio load errors will not be logged", flush=True)
