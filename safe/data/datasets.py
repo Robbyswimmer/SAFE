@@ -219,8 +219,12 @@ class _BaseQADataset(Dataset):
                 return
             candidate = Path(path_value).expanduser()
             if not candidate.is_absolute():
-                candidate = self.dataset_dir / candidate
-            candidate = candidate.resolve(strict=False)
+                if candidate.parts and candidate.parts[0] == self.dataset_name:
+                    candidate = (self.data_path / candidate).resolve(strict=False)
+                else:
+                    candidate = (self.dataset_dir / candidate).resolve(strict=False)
+            else:
+                candidate = candidate.resolve(strict=False)
             if candidate not in candidate_paths:
                 candidate_paths.append(candidate)
 
