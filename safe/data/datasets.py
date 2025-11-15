@@ -218,9 +218,11 @@ class _BaseQADataset(Dataset):
             base = Path(sound_name)
             suffix = base.suffix or ".wav"
             stem = base.stem
-            parts = stem.split("_")
-            if len(parts) > 1 and parts[-1].isdigit():
-                trimmed_stem = "_".join(parts[:-1])
+
+            import re
+
+            trimmed_stem = re.sub(r"_(\d+)$", "", stem)
+            if trimmed_stem != stem:
                 _add_candidate(Path("audio") / str(split_name) / f"{trimmed_stem}{suffix}")
                 if suffix.lower() != ".wav":
                     _add_candidate(Path("audio") / str(split_name) / f"{trimmed_stem}.wav")

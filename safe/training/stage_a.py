@@ -3588,41 +3588,43 @@ class StageATrainer:
         return extracted_tokens
 
     def _normalize_answer(self, s: str) -> str:
-        """Normalize answer text for consistent comparison."""
+        """Normalize answer text for consistent comparison (keep primary token)."""
         if not s:
             return ""
-            
+
         import re
         import unicodedata
 
         s = unicodedata.normalize("NFKC", str(s)).strip().lower()
 
-        # Remove common answer prefixes
         if "answer:" in s:
             s = s.split("answer:")[-1].strip()
 
-        # Remove punctuation while preserving alphanumerics/spaces
         s = re.sub(r"[^a-z0-9\s]", " ", s)
         s = re.sub(r"\s+", " ", s).strip()
 
-        # Map common words to digits but keep full sequence
+        if not s:
+            return ""
+
         word_to_digit = {
             "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
-            "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9", 
-            "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13", 
+            "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+            "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13",
             "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
             "eighteen": "18", "nineteen": "19", "twenty": "20",
             "yes": "yes", "no": "no"
         }
-        tokens = [tok for tok in s.split() if tok]
-        normalized_tokens: List[str] = []
-        for tok in tokens:
-            normalized_tokens.append(word_to_digit.get(tok, tok))
 
-        if not normalized_tokens:
-            return ""
+        for word, digit in word_to_digit.items():
+            if s.startswith(word):
+                return digit
 
-        return " ".join(normalized_tokens)
+        number_match = re.search(r"-?\d+", s)
+        if number_match:
+            return number_match.group(0)
+
+        first_word = s.split()[0]
+        return first_word
 
     def _clean_answer(self, s: str) -> str:
         """Clean and normalize answer text (legacy method)."""
@@ -3696,13 +3698,16 @@ class StageATrainer:
         if not answer:
             return ""
 
-        # Split into tokens, strip punctuation per token, and keep the full response
+        # Split into tokens, strip punctuation per token
         tokens = []
         for raw_token in answer.split():
             token = re.sub(r"^[^a-z0-9]+", "", raw_token, flags=re.IGNORECASE)
             token = re.sub(r"[^a-z0-9]+$", "", token, flags=re.IGNORECASE)
             if token:
                 tokens.append(token)
+
+        if mode != "audio" and len(tokens) > 3:
+            tokens = tokens[:3]
 
         return " ".join(tokens)
 
