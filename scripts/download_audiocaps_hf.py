@@ -176,14 +176,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data/audiocaps"),
+        default=Path("experiments/full_training/data/audiocaps"),
         help="Destination directory",
     )
     parser.add_argument(
         "--cache-dir",
         type=Path,
         default=None,
-        help="datasets cache directory (optional)",
+        help="datasets cache directory (defaults to <output-dir>/.hf_cache)",
     )
     parser.add_argument(
         "--overwrite-audio",
@@ -201,6 +201,8 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     split_requests = parse_split_requests(args.splits)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = args.cache_dir or (args.output_dir / ".hf_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     for request in split_requests:
         print(f"\n⬇️  Downloading split '{request.hf_name}' as '{request.local_name}'", flush=True)
@@ -210,7 +212,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             output_dir=args.output_dir,
             overwrite_audio=args.overwrite_audio,
             sample_limit=args.max_samples,
-            cache_dir=args.cache_dir,
+            cache_dir=cache_dir,
         )
         print(
             f"   ✓ Saved {processed} samples to {args.output_dir}/audio/{request.local_name}/"
