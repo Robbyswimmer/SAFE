@@ -406,10 +406,6 @@ class SAFEModel(nn.Module):
         # Convert to target dtype/device
         audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
 
-        # Final validation and logging
-        if self._encode_audio_count <= 3:
-            print(f"[AudioEncode] Output: tokens.shape={audio_tokens.shape}, dtype={audio_tokens.dtype}, device={audio_tokens.device}", flush=True)
-
         return audio_tokens, transcripts
 
     def _select_training_answer(self, answer: Any) -> str:
