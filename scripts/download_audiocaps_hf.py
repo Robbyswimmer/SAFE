@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import io
 import numpy as np
 import itertools
 
@@ -34,8 +35,20 @@ def _load_audio_from_path(path: str) -> Tuple[np.ndarray, int]:
     return data.astype(np.float32), int(sr)
 
 
+def _load_audio_from_bytes(blob: bytes) -> Tuple[np.ndarray, int]:
+    import soundfile as sf  # Local import to avoid mandatory dependency when not needed
+
+    with io.BytesIO(blob) as buffer:
+        data, sr = sf.read(buffer)
+    if data.ndim == 1:
+        data = data[np.newaxis, :]
+    elif data.ndim == 2:
+        data = data.transpose(1, 0)
+    return data.astype(np.float32), int(sr)
+
+
 def _resolve_audio_field(sample: Dict) -> Dict:
-    for key in ("audio", "audio_10s", "audio_segment", "clip"):
+    for key in AUDIO_COLUMNS:
         audio_value = sample.get(key)
         if audio_value is None:
             continue
@@ -46,6 +59,10 @@ def _resolve_audio_field(sample: Dict) -> Dict:
             audio_path = audio_value.get("path")
             if audio_path:
                 array, sr = _load_audio_from_path(audio_path)
+                return {"array": array, "sampling_rate": sr}
+            audio_bytes = audio_value.get("bytes")
+            if audio_bytes:
+                array, sr = _load_audio_from_bytes(audio_bytes)
                 return {"array": array, "sampling_rate": sr}
         elif isinstance(audio_value, str):
             array, sr = _load_audio_from_path(audio_value)
