@@ -8,7 +8,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import itertools
@@ -149,13 +149,16 @@ def process_split(
         dataset_name,
         split=request.hf_name,
         cache_dir=str(cache_dir) if cache_dir else None,
-        streaming=True,
+        streaming=False,
+        keep_in_memory=False,
     )
 
-    try:
-        ds = ds.cast_column("audio", Audio(decode=False))
-    except Exception:
-        pass
+    audio_columns = [col for col in AUDIO_COLUMNS if col in ds.column_names]
+    for column in audio_columns:
+        try:
+            ds = ds.cast_column(column, Audio(decode=False))
+        except Exception:
+            continue
 
     audio_root = output_dir / "audio" / request.local_name
     audio_root.mkdir(parents=True, exist_ok=True)
@@ -168,7 +171,8 @@ def process_split(
     if sample_limit is None:
         iterator = ds
     else:
-        iterator = itertools.islice(ds, sample_limit)
+        limit = min(len(ds), sample_limit)
+        iterator = ds.select(range(limit))
 
     for idx, sample in enumerate(iterator):
         if idx % 10 == 0:
