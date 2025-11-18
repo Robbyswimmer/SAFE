@@ -20,6 +20,8 @@ except Exception as exc:  # pragma: no cover - surface helpful hint
         "datasets package is required. Install with `pip install datasets soundfile`."
     ) from exc
 
+AUDIO_COLUMNS = ("audio", "audio_10s", "audio_segment", "clip")
+
 
 def _load_audio_from_path(path: str) -> Tuple[np.ndarray, int]:
     import soundfile as sf  # Local import to avoid mandatory dependency when not needed
@@ -169,6 +171,9 @@ def process_split(
         iterator = itertools.islice(ds, sample_limit)
 
     for idx, sample in enumerate(iterator):
+        if idx % 10 == 0:
+            print(f"   Processing sample {idx}...", flush=True)
+
         try:
             audio_payload = _resolve_audio_field(sample)
         except KeyError:
