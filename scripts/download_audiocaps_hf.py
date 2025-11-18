@@ -8,24 +8,48 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 import numpy as np
+import itertools
 
 try:
-    from datasets import load_dataset  # type: ignore
+    from datasets import load_dataset, Audio  # type: ignore
 except Exception as exc:  # pragma: no cover - surface helpful hint
     raise SystemExit(
         "datasets package is required. Install with `pip install datasets soundfile`."
     ) from exc
 
 
+def _load_audio_from_path(path: str) -> Tuple[np.ndarray, int]:
+    import soundfile as sf  # Local import to avoid mandatory dependency when not needed
+
+    data, sr = sf.read(path)
+    if data.ndim == 1:
+        data = data[np.newaxis, :]
+    elif data.ndim == 2:
+        data = data.transpose(1, 0)
+    return data.astype(np.float32), int(sr)
+
+
 def _resolve_audio_field(sample: Dict) -> Dict:
     for key in ("audio", "audio_10s", "audio_segment", "clip"):
         audio_value = sample.get(key)
-        if audio_value is not None:
-            return audio_value
-    raise KeyError("Sample does not contain an audio field (expected 'audio').")
+        if audio_value is None:
+            continue
+
+        if isinstance(audio_value, dict):
+            if audio_value.get("array") is not None:
+                return audio_value
+            audio_path = audio_value.get("path")
+            if audio_path:
+                array, sr = _load_audio_from_path(audio_path)
+                return {"array": array, "sampling_rate": sr}
+        elif isinstance(audio_value, str):
+            array, sr = _load_audio_from_path(audio_value)
+            return {"array": array, "sampling_rate": sr}
+
+    raise KeyError("Sample does not contain a usable audio field.")
 
 
 def _collect_captions(sample: Dict) -> List[str]:
@@ -119,7 +143,17 @@ def process_split(
     sample_limit: Optional[int],
     cache_dir: Optional[Path],
 ) -> Tuple[int, int]:
-    ds = load_dataset(dataset_name, split=request.hf_name, cache_dir=str(cache_dir) if cache_dir else None)
+    ds = load_dataset(
+        dataset_name,
+        split=request.hf_name,
+        cache_dir=str(cache_dir) if cache_dir else None,
+        streaming=True,
+    )
+
+    try:
+        ds = ds.cast_column("audio", Audio(decode=False))
+    except Exception:
+        pass
 
     audio_root = output_dir / "audio" / request.local_name
     audio_root.mkdir(parents=True, exist_ok=True)
@@ -128,7 +162,11 @@ def process_split(
     processed = 0
     skipped = 0
 
-    iterator: Iterable = ds if sample_limit is None else ds.select(range(min(len(ds), sample_limit)))
+    iterator: Iterable
+    if sample_limit is None:
+        iterator = ds
+    else:
+        iterator = itertools.islice(ds, sample_limit)
 
     for idx, sample in enumerate(iterator):
         try:
@@ -204,6 +242,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     cache_dir = args.cache_dir or (args.output_dir / ".hf_cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # Survive interrupted runs without corrupting cache directories
+    safe_cache_dir = cache_dir.resolve()
+
     for request in split_requests:
         print(f"\n⬇️  Downloading split '{request.hf_name}' as '{request.local_name}'", flush=True)
         processed, skipped = process_split(
@@ -212,7 +253,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             output_dir=args.output_dir,
             overwrite_audio=args.overwrite_audio,
             sample_limit=args.max_samples,
-            cache_dir=cache_dir,
+            cache_dir=safe_cache_dir,
         )
         print(
             f"   ✓ Saved {processed} samples to {args.output_dir}/audio/{request.local_name}/"
