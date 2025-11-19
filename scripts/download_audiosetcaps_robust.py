@@ -363,7 +363,9 @@ class RobustYouTubeDownloader:
             }],
             'quiet': True,
             'no_warnings': True,
+            'no_color': True,
             'extract_flat': False,
+            'logger': logging.getLogger('yt-dlp'),  # Use logging instead of stderr
             'postprocessor_args': [
                 '-ar', str(self.config.sample_rate),
             ],
@@ -436,15 +438,7 @@ class RobustYouTubeDownloader:
             ydl_opts = self._get_yt_dlp_opts(temp_path)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Suppress output by redirecting stderr
-                import sys
-                import os
-                old_stderr = sys.stderr
-                try:
-                    sys.stderr = open(os.devnull, 'w')
-                    ydl.download([url])
-                finally:
-                    sys.stderr = old_stderr
+                ydl.download([url])
 
             # Find the downloaded file
             downloaded_file = None
@@ -618,6 +612,10 @@ class AudioSetCapsDownloader:
         logger = logging.getLogger("AudioSetCapsDownloader")
         logger.setLevel(logging.INFO)
 
+        # Suppress yt-dlp logging
+        yt_dlp_logger = logging.getLogger('yt-dlp')
+        yt_dlp_logger.setLevel(logging.CRITICAL)  # Only show critical errors
+
         # File handler
         fh = logging.FileHandler(self.config.log_file)
         fh.setLevel(logging.DEBUG)
@@ -743,6 +741,11 @@ class AudioSetCapsDownloader:
 
         all_samples = []
         for csv_file in csv_files:
+            # Stop loading if we already have enough samples
+            if self.config.max_samples and len(all_samples) >= self.config.max_samples:
+                self.logger.info(f"Reached max_samples limit ({self.config.max_samples}), stopping CSV loading")
+                break
+
             try:
                 local_path = hf_hub_download(
                     repo_id=self.config.dataset_name,
