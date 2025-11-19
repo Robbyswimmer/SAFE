@@ -204,8 +204,8 @@ class RobustGDriveDownloader:
                 self.logger.info(f"Download attempt {attempt}/{max_attempts}")
                 self.logger.info("=" * 70)
 
-                # Count current files
-                current_count = len(list(Path('.').glob("*.tar*")))
+                # Count current files (including subdirectories)
+                current_count = len(list(Path('.').glob("**/*.tar*")))
                 self.logger.info(f"Files before attempt: {current_count}")
 
                 try:
@@ -233,8 +233,8 @@ class RobustGDriveDownloader:
                     else:
                         self.logger.warning(f"Unexpected error: {error_str}")
 
-                # Count files after attempt
-                new_count = len(list(Path('.').glob("*.tar*")))
+                # Count files after attempt (including subdirectories)
+                new_count = len(list(Path('.').glob("**/*.tar*")))
                 downloaded_this_round = new_count - current_count
 
                 self.logger.info(f"Files after attempt: {new_count}")
@@ -253,8 +253,8 @@ class RobustGDriveDownloader:
                     self.logger.info("Waiting 5 seconds before next attempt...")
                     time.sleep(5)
 
-            # Final count
-            tar_files = list(Path('.').glob("*.tar")) + list(Path('.').glob("*.tar.gz"))
+            # Final count (including subdirectories)
+            tar_files = list(Path('.').glob("**/*.tar")) + list(Path('.').glob("**/*.tar.gz"))
             self.logger.info("=" * 70)
             self.logger.info(f"Download phase complete - found {len(tar_files)} tar files")
             self.logger.info("=" * 70)
