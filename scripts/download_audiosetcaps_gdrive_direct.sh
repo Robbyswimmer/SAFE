@@ -38,13 +38,44 @@ echo "Attempting to download folder (errors will be logged and skipped)..." | te
 echo "Progress will continue even if some files fail." | tee -a "$LOG_FILE"
 echo "" | tee -a "$LOG_FILE"
 
-# Run gdown with --remaining-ok to skip already downloaded files
-# Capture output and errors
-if gdown --folder https://drive.google.com/drive/folders/1ZKyRZw3AhS3HkWivgMqtMODB0TkVPNk5 --remaining-ok 2>&1 | tee -a "$LOG_FILE"; then
-    echo "Download command completed" | tee -a "$LOG_FILE"
-else
-    echo "Download command finished with some errors (continuing anyway)" | tee -a "$LOG_FILE"
-fi
+# Count files before download
+before_count=$(find . -type f \( -name "*.tar" -o -name "*.tar.gz" \) 2>/dev/null | wc -l)
+echo "Files before download: $before_count" | tee -a "$LOG_FILE"
+
+# Run gdown multiple times to ensure we get all files
+# Sometimes gdown stops early, so we retry until no new files are downloaded
+max_attempts=5
+attempt=1
+
+while [ $attempt -le $max_attempts ]; do
+    echo "" | tee -a "$LOG_FILE"
+    echo "Download attempt $attempt of $max_attempts..." | tee -a "$LOG_FILE"
+
+    # Run gdown with --remaining-ok to skip already downloaded files
+    if gdown --folder https://drive.google.com/drive/folders/1ZKyRZw3AhS3HkWivgMqtMODB0TkVPNk5 --remaining-ok 2>&1 | tee -a "$LOG_FILE"; then
+        echo "Download attempt $attempt completed" | tee -a "$LOG_FILE"
+    else
+        echo "Download attempt $attempt finished with some errors (continuing anyway)" | tee -a "$LOG_FILE"
+    fi
+
+    # Count files after this attempt
+    after_count=$(find . -type f \( -name "*.tar" -o -name "*.tar.gz" \) 2>/dev/null | wc -l)
+    new_files=$((after_count - before_count))
+
+    echo "Files downloaded in attempt $attempt: $new_files (total: $after_count)" | tee -a "$LOG_FILE"
+
+    # If no new files were downloaded, we're done
+    if [ $new_files -eq 0 ]; then
+        echo "No new files downloaded, stopping" | tee -a "$LOG_FILE"
+        break
+    fi
+
+    before_count=$after_count
+    attempt=$((attempt + 1))
+
+    # Small delay between attempts
+    sleep 2
+done
 
 echo "" | tee -a "$LOG_FILE"
 echo "=== Download Summary ===" | tee -a "$LOG_FILE"
