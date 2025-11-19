@@ -22,6 +22,11 @@ except ImportError:
     print("ERROR: gdown not installed. Install with: pip install gdown")
     sys.exit(1)
 
+try:
+    from gdown.download_folder import _get_files_by_folder_id  # type: ignore
+except Exception:  # pragma: no cover - best-effort import for runtime env
+    _get_files_by_folder_id = None
+
 
 class RobustGDriveDownloader:
     """Download Google Drive folder with skip-on-error and resume capability."""
@@ -66,6 +71,7 @@ class RobustGDriveDownloader:
         self.failed = 0
         self.skipped = 0
         self.extracted = 0
+        self.max_retries = 3
 
     def _init_db(self):
         """Initialize SQLite database for tracking downloads."""
@@ -74,46 +80,73 @@ class RobustGDriveDownloader:
             CREATE TABLE IF NOT EXISTS downloads (
                 file_id TEXT PRIMARY KEY,
                 file_name TEXT,
+                rel_path TEXT,
                 status TEXT,  -- 'pending', 'success', 'failed', 'extracted'
                 error_msg TEXT,
                 downloaded_at TIMESTAMP,
                 file_size INTEGER
             )
         """)
+        # Add missing columns when upgrading existing DBs.
+        cursor.execute("PRAGMA table_info(downloads)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        if "rel_path" not in existing_columns:
+            cursor.execute("ALTER TABLE downloads ADD COLUMN rel_path TEXT")
+        if "file_size" not in existing_columns:
+            cursor.execute("ALTER TABLE downloads ADD COLUMN file_size INTEGER")
         self.conn.commit()
 
     def _get_file_list(self) -> List[Dict[str, str]]:
-        """
-        Get list of files in Google Drive folder.
+        """Fetch manifest of Drive files if gdown exposes the helper."""
+        if _get_files_by_folder_id is None:
+            self.logger.info("gdown manifest helper unavailable - using legacy download flow")
+            return []
 
-        Returns list of dicts with keys: id, name, mimeType
-        """
         self.logger.info(f"Fetching file list from: {self.folder_url}")
 
         try:
-            # Extract folder ID from URL
             folder_id = self.folder_url.split('/')[-1]
             if '?' in folder_id:
                 folder_id = folder_id.split('?')[0]
 
-            # Use gdown's internal method to list folder contents
-            # This is a bit hacky but works
-            import re
-            from gdown.download_folder import _parse_google_drive_file
+            files = list(
+                _get_files_by_folder_id(  # type: ignore[misc]
+                    folder_id,
+                    use_cookies=False,
+                    remaining_ok=True,
+                )
+            )
 
-            # Try to get the file listing page
-            url = f"https://drive.google.com/drive/folders/{folder_id}"
+            manifest: List[Dict[str, str]] = []
+            for entry in files:
+                file_id = entry.get("id")
+                if not file_id:
+                    continue
 
-            self.logger.info("Note: Falling back to downloading with gdown cache...")
-            self.logger.info("This will download the folder structure first.")
+                mime = entry.get("mimeType") or entry.get("mime_type")
+                if mime == "application/vnd.google-apps.folder" or entry.get("type") == "folder":
+                    continue
 
-            # For now, we'll work with the files that gdown discovers
-            # during the download process
-            return []
+                rel_path = entry.get("path") or entry.get("title") or entry.get("name")
+                name = entry.get("name") or entry.get("title") or rel_path
 
-        except Exception as e:
-            self.logger.error(f"Error getting file list: {e}")
-            self.logger.info("Will attempt to download using gdown's folder method...")
+                if not rel_path or not name:
+                    continue
+
+                manifest.append(
+                    {
+                        "id": file_id,
+                        "name": name,
+                        "rel_path": rel_path,
+                        "size": entry.get("sizeBytes") or entry.get("size"),
+                    }
+                )
+
+            self.logger.info(f"Discovered {len(manifest)} files via manifest")
+            return manifest
+
+        except Exception as exc:  # pragma: no cover - network-driven
+            self.logger.warning(f"Unable to fetch manifest via gdown internals: {exc}")
             return []
 
     def _download_file(self, file_id: str, file_name: str, output_path: Path) -> Tuple[bool, Optional[str]]:
@@ -151,13 +184,27 @@ class RobustGDriveDownloader:
             else:
                 return False, f"Error: {error_msg}"
 
-    def _mark_status(self, file_id: str, file_name: str, status: str, error_msg: Optional[str] = None):
+    def _get_status(self, file_id: str) -> Optional[str]:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT status FROM downloads WHERE file_id = ?", (file_id,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def _mark_status(
+        self,
+        file_id: str,
+        file_name: str,
+        status: str,
+        error_msg: Optional[str] = None,
+        rel_path: Optional[str] = None,
+        file_size: Optional[int] = None,
+    ):
         """Mark file status in database."""
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT OR REPLACE INTO downloads (file_id, file_name, status, error_msg, downloaded_at)
-            VALUES (?, ?, ?, ?, datetime('now'))
-        """, (file_id, file_name, status, error_msg))
+            INSERT OR REPLACE INTO downloads (file_id, file_name, rel_path, status, error_msg, downloaded_at, file_size)
+            VALUES (?, ?, ?, ?, ?, datetime('now'), ?)
+        """, (file_id, file_name, rel_path, status, error_msg, file_size))
         self.conn.commit()
 
     def _extract_tarfile(self, tar_path: Path) -> bool:
@@ -176,84 +223,167 @@ class RobustGDriveDownloader:
             self.logger.error(f"✗ Failed to extract {tar_path.name}: {e}")
             return False
 
+    def _download_with_manifest(self, manifest: List[Dict[str, str]]) -> bool:
+        """Download files one-by-one using the manifest returned by gdown."""
+        if not manifest:
+            return False
+
+        tar_entries = [m for m in manifest if m["rel_path"].endswith((".tar", ".tar.gz"))]
+        if not tar_entries:
+            self.logger.warning("Manifest does not contain tar files - falling back to legacy mode")
+            return False
+
+        skipped_permission = []
+        total = len(tar_entries)
+        self.logger.info(f"Starting manifest-driven download of {total} files")
+
+        for idx, entry in enumerate(tar_entries, start=1):
+            rel_path = Path(entry["rel_path"])  # type: ignore[arg-type]
+            safe_rel = Path(*[part for part in rel_path.parts if part not in ("..", ".")])
+            if not safe_rel.parts:
+                safe_rel = Path(entry["name"])
+            output_path = self.temp_dir / safe_rel
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            status = self._get_status(entry["id"])
+            if status == "success" and output_path.exists():
+                self.logger.info(f"[{idx}/{total}] Already have {safe_rel}, skipping")
+                continue
+
+            self.logger.info(f"[{idx}/{total}] Downloading {safe_rel}")
+
+            attempt = 1
+            success = False
+            last_error: Optional[str] = None
+            while attempt <= self.max_retries:
+                success, error_msg = self._download_file(entry["id"], entry["name"], output_path)
+                if success:
+                    size = output_path.stat().st_size if output_path.exists() else None
+                    self._mark_status(
+                        entry["id"],
+                        entry["name"],
+                        "success",
+                        rel_path=str(safe_rel),
+                        file_size=size,
+                    )
+                    self.downloaded += 1
+                    break
+
+                last_error = error_msg or "unknown error"
+                if last_error and "permission" in last_error.lower():
+                    self.logger.warning(f"Permission denied for {entry['name']} ({entry['id']}), skipping")
+                    skipped_permission.append(entry)
+                    self._mark_status(
+                        entry["id"],
+                        entry["name"],
+                        "permission_denied",
+                        error_msg=last_error,
+                        rel_path=str(safe_rel),
+                    )
+                    self.skipped += 1
+                    break
+
+                self.logger.warning(
+                    f"Failed to download {entry['name']} (attempt {attempt}/{self.max_retries}): {last_error}"
+                )
+                attempt += 1
+                if attempt <= self.max_retries:
+                    sleep_time = min(5 * attempt, 30)
+                    self.logger.info(f"Retrying in {sleep_time}s...")
+                    time.sleep(sleep_time)
+
+            if not success and (not last_error or "permission" not in (last_error or "").lower()):
+                self.failed += 1
+                self._mark_status(
+                    entry["id"],
+                    entry["name"],
+                    "failed",
+                    error_msg=last_error,
+                    rel_path=str(safe_rel),
+                )
+
+        if skipped_permission:
+            self.logger.warning("The following files were skipped due to permission errors:")
+            for entry in skipped_permission:
+                self.logger.warning(f"  - {entry['name']} ({entry['id']})")
+
+        return True
+
+    def _legacy_gdown_download(self, folder_id: str):
+        """Fallback to gdown's folder downloader when manifest is unavailable."""
+        max_attempts = 10
+        attempt = 1
+        previous_count = 0
+
+        while attempt <= max_attempts:
+            self.logger.info("=" * 70)
+            self.logger.info(f"Download attempt {attempt}/{max_attempts}")
+            self.logger.info("=" * 70)
+
+            current_count = len(list(Path('.').glob("**/*.tar*")))
+            self.logger.info(f"Files before attempt: {current_count}")
+
+            try:
+                gdown.download_folder(
+                    id=folder_id,
+                    quiet=False,
+                    use_cookies=False,
+                    remaining_ok=True,
+                )
+                self.logger.info(f"✓ Attempt {attempt} completed successfully")
+            except KeyboardInterrupt:
+                self.logger.warning("Download interrupted by user")
+                raise
+            except Exception as e:
+                error_str = str(e)
+                self.logger.warning(f"Attempt {attempt} encountered error: {error_str}")
+                if "permission" in error_str.lower() or "retrieve" in error_str.lower():
+                    self.logger.info("Permission error detected - will skip this file and continue")
+                else:
+                    self.logger.warning(f"Unexpected error: {error_str}")
+
+            new_count = len(list(Path('.').glob("**/*.tar*")))
+            downloaded_this_round = new_count - current_count
+
+            self.logger.info(f"Files after attempt: {new_count}")
+            self.logger.info(f"Downloaded in this attempt: {downloaded_this_round}")
+
+            if downloaded_this_round == 0 and previous_count == current_count:
+                self.logger.info("No new files in this attempt and count stable - download appears complete")
+                break
+
+            previous_count = new_count
+            attempt += 1
+
+            if attempt <= max_attempts:
+                self.logger.info("Waiting 5 seconds before next attempt...")
+                time.sleep(5)
+
     def download_folder_robust(self):
-        """Download folder using gdown with manual error recovery and retries."""
+        """Download folder using manifest when possible, fallback to gdown loop."""
         self.logger.info("=" * 70)
         self.logger.info("Starting robust Google Drive folder download")
         self.logger.info(f"Folder: {self.folder_url}")
         self.logger.info(f"Output: {self.temp_dir}")
         self.logger.info("=" * 70)
 
-        # Change to temp directory
         import os
         original_dir = os.getcwd()
         os.chdir(self.temp_dir)
-
-        max_attempts = 10  # Keep trying until we get all files
-        attempt = 1
-        previous_count = 0
+        tar_files: List[Path] = []
 
         try:
-            # Extract folder ID
             folder_id = self.folder_url.split('/')[-1]
             if '?' in folder_id:
                 folder_id = folder_id.split('?')[0]
 
-            while attempt <= max_attempts:
-                self.logger.info("=" * 70)
-                self.logger.info(f"Download attempt {attempt}/{max_attempts}")
-                self.logger.info("=" * 70)
+            manifest = self._get_file_list()
+            manifest_used = self._download_with_manifest(manifest) if manifest else False
 
-                # Count current files (including subdirectories)
-                current_count = len(list(Path('.').glob("**/*.tar*")))
-                self.logger.info(f"Files before attempt: {current_count}")
+            if not manifest_used:
+                self.logger.info("Manifest unavailable or download failed - falling back to legacy gdown mode")
+                self._legacy_gdown_download(folder_id)
 
-                try:
-                    # Use gdown.download_folder with remaining-ok to skip already downloaded
-                    gdown.download_folder(
-                        id=folder_id,
-                        quiet=False,
-                        use_cookies=False,
-                        remaining_ok=True
-                    )
-
-                    self.logger.info(f"✓ Attempt {attempt} completed successfully")
-
-                except KeyboardInterrupt:
-                    self.logger.warning("Download interrupted by user")
-                    raise
-
-                except Exception as e:
-                    error_str = str(e)
-                    self.logger.warning(f"Attempt {attempt} encountered error: {error_str}")
-
-                    # Check if it's a permission error
-                    if "permission" in error_str.lower() or "retrieve" in error_str.lower():
-                        self.logger.info("Permission error detected - will skip this file and continue")
-                    else:
-                        self.logger.warning(f"Unexpected error: {error_str}")
-
-                # Count files after attempt (including subdirectories)
-                new_count = len(list(Path('.').glob("**/*.tar*")))
-                downloaded_this_round = new_count - current_count
-
-                self.logger.info(f"Files after attempt: {new_count}")
-                self.logger.info(f"Downloaded in this attempt: {downloaded_this_round}")
-
-                # If no new files and we haven't seen new files in last attempt, we're likely done
-                if downloaded_this_round == 0 and previous_count == current_count:
-                    self.logger.info("No new files in this attempt and count stable - download appears complete")
-                    break
-
-                previous_count = new_count
-                attempt += 1
-
-                # Small delay between attempts to avoid rate limiting
-                if attempt <= max_attempts:
-                    self.logger.info("Waiting 5 seconds before next attempt...")
-                    time.sleep(5)
-
-            # Final count (including subdirectories)
             tar_files = list(Path('.').glob("**/*.tar")) + list(Path('.').glob("**/*.tar.gz"))
             self.logger.info("=" * 70)
             self.logger.info(f"Download phase complete - found {len(tar_files)} tar files")
@@ -266,7 +396,6 @@ class RobustGDriveDownloader:
                 self.logger.error("  - Folder ID incorrect")
                 return
 
-            # Extract all tar files
             self.logger.info("=" * 70)
             self.logger.info("Extracting downloaded tar files...")
             self.logger.info("=" * 70)
