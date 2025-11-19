@@ -110,6 +110,19 @@ def _save_audio(target: Path, audio_payload: Dict) -> None:
     if np_array.ndim == 1:
         np_array = np_array[np.newaxis, :]
 
+    def _pcm16_write_fallback() -> None:
+        import wave
+
+        clipped = np.clip(np_array, -1.0, 1.0)
+        pcm16 = (clipped * 32767.0).astype("<i2")
+        channels, length = pcm16.shape
+        with wave.open(str(target), "wb") as handle:
+            handle.setnchannels(int(channels))
+            handle.setsampwidth(2)
+            handle.setframerate(int(sr))
+            # wave expects frames x channels in row-major order
+            handle.writeframes(np.ascontiguousarray(pcm16.T).tobytes())
+
     try:
         import soundfile as sf  # type: ignore
 
@@ -125,10 +138,14 @@ def _save_audio(target: Path, audio_payload: Dict) -> None:
         tensor = torch.from_numpy(np_array)
         torchaudio.save(target, tensor, int(sr))
         return
-    except Exception as exc:  # pragma: no cover - fallback seldom used
-        raise SystemExit(
-            "Failed to save audio. Install either soundfile or torchaudio"
-        ) from exc
+    except Exception:
+        try:
+            _pcm16_write_fallback()
+            return
+        except Exception as exc:  # pragma: no cover - fallback seldom used
+            raise SystemExit(
+                "Failed to save audio. Install either soundfile or torchaudio"
+            ) from exc
 
 
 @dataclass

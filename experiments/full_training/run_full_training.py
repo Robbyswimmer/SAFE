@@ -86,7 +86,7 @@ class TrainingConfig:
     save_audio_csv: bool
     csv_min_accuracy: float
     csv_max_samples: int
-    enable_scst_finetune: bool = False
+    enable_scst_finetune: bool = True
     scst_epochs: int = 1
     scst_learning_rate: float = 5e-6
     scst_num_samples: int = 1
@@ -761,7 +761,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-audio-csv", action="store_true", help="Save audio evaluation samples to CSV")
     parser.add_argument("--csv-min-accuracy", type=float, default=0.45, help="Minimum audio accuracy to trigger CSV export")
     parser.add_argument("--csv-max-samples", type=int, default=500, help="Maximum audio samples to save to CSV")
-    parser.add_argument("--enable-scst-finetune", action="store_true", help="Enable SCST fine-tuning after plateau")
+    parser.add_argument("--enable-scst-finetune", action="store_true", help="Enable SCST fine-tuning after plateau (default on)")
     parser.add_argument("--scst-epochs", type=int, default=1, help="Number of SCST fine-tune epochs")
     parser.add_argument("--scst-learning-rate", type=float, default=5e-6, help="Learning rate during SCST")
     parser.add_argument("--scst-num-samples", type=int, default=1, help="Samples per clip for SCST updates")
