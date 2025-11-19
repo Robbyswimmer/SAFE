@@ -669,6 +669,14 @@ class AudioSetCapsDownloader:
             else:
                 youtube_id = audio_id
 
+            # Skip invalid YouTube IDs (must be 11 characters, alphanumeric with - and _)
+            if not youtube_id or len(youtube_id) != 11:
+                continue
+
+            # Basic validation: YouTube IDs are alphanumeric with - and _
+            if not all(c.isalnum() or c in '-_' for c in youtube_id):
+                continue
+
             # AudioSetCaps doesn't provide start times in the CSV
             # These are 10-second clips but we need to check if the full video
             # or a specific segment is meant. For now, start at 0.
