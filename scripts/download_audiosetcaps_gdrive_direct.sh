@@ -16,18 +16,23 @@ pip install -q gdown
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$TEMP_DIR"
 
+# Ensure we're in temp dir for log files
+cd "$TEMP_DIR"
+
 # Initialize log files
-touch "$LOG_FILE"
-touch "$FAILED_FILE"
-touch "$SUCCESS_FILE"
+touch "download.log"
+touch "failed_downloads.txt"
+touch "successful_downloads.txt"
+
+# Set absolute paths
+LOG_FILE="$(pwd)/download.log"
+FAILED_FILE="$(pwd)/failed_downloads.txt"
+SUCCESS_FILE="$(pwd)/successful_downloads.txt"
 
 echo "=== AudioSetCaps Download ===" | tee -a "$LOG_FILE"
 echo "Started: $(date)" | tee -a "$LOG_FILE"
 echo "Folder: https://drive.google.com/drive/folders/1ZKyRZw3AhS3HkWivgMqtMODB0TkVPNk5" | tee -a "$LOG_FILE"
 echo "" | tee -a "$LOG_FILE"
-
-# Download entire folder using gdown with error handling
-cd "$TEMP_DIR"
 
 echo "Attempting to download folder (errors will be logged and skipped)..." | tee -a "$LOG_FILE"
 echo "Progress will continue even if some files fail." | tee -a "$LOG_FILE"
@@ -55,11 +60,11 @@ echo "=== Extracting tar files ===" | tee -a "$LOG_FILE"
 extracted_count=0
 failed_extract_count=0
 
-for tarfile in *.tar *.tar.gz 2>/dev/null; do
+# Process .tar files
+shopt -s nullglob  # Make globs expand to nothing if no matches
+for tarfile in *.tar *.tar.gz; do
     # Skip if no files match (glob didn't expand)
-    if [ ! -f "$tarfile" ]; then
-        continue
-    fi
+    [ -f "$tarfile" ] || continue
 
     echo "Extracting $tarfile..." | tee -a "$LOG_FILE"
 
