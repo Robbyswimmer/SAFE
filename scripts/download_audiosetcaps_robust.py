@@ -669,15 +669,11 @@ class AudioSetCapsDownloader:
 
         self.logger.info("Downloading metadata files from HuggingFace...")
 
-        # AudioSetCaps has multiple CSV files
+        # AudioSetCaps CSV files on HuggingFace
         csv_files = [
-            "AudioSet.csv",
-            "AudioSet_QA.csv",
-            "VGGSound.csv",
-            "YouTube8M_part1.csv",
-            "YouTube8M_part2.csv",
-            "YouTube8M_part3.csv",
-            "YouTube8M_part4.csv",
+            "AudioSetCaps_caption.csv",  # Main AudioSet captions (~1.9M)
+            "VGGSound_AudioSetCaps_caption.csv",  # VGGSound captions (~182K)
+            "YouTube-8M_AudioSetCaps_caption.csv",  # YouTube-8M captions (~4M)
         ]
 
         all_samples = []
