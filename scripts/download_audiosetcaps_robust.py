@@ -37,12 +37,13 @@ from datetime import datetime, timedelta
 import numpy as np
 
 try:
-    from datasets import load_dataset
     import yt_dlp
+    import pandas as pd
+    from huggingface_hub import hf_hub_download
 except ImportError as exc:
     raise SystemExit(
         "Required packages missing. Install with:\n"
-        "pip install datasets yt-dlp"
+        "pip install yt-dlp pandas huggingface-hub soundfile"
     ) from exc
 
 
@@ -55,7 +56,8 @@ class DownloadConfig:
     """Configuration for robust downloading."""
 
     # Dataset settings
-    dataset_name: str = "JishengBai/AudioSetCaps"
+    dataset_name: str = "baijs/AudioSetCaps"
+    metadata_file: Optional[str] = None  # Path to local CSV if already downloaded
     output_dir: Path = Path("data/audiosetcaps")
 
     # Download settings
@@ -623,27 +625,78 @@ class AudioSetCapsDownloader:
         return logger
 
     def load_metadata(self):
-        """Load AudioSetCaps metadata from HuggingFace."""
-        self.logger.info(f"Loading dataset metadata from {self.config.dataset_name}...")
-
-        # Load dataset (metadata only, no audio)
-        ds = load_dataset(
-            self.config.dataset_name,
-            split="train",
-            streaming=False,
-        )
+        """Load AudioSetCaps metadata from CSV or HuggingFace."""
+        if self.config.metadata_file:
+            self.logger.info(f"Loading metadata from CSV: {self.config.metadata_file}")
+            samples = self._load_csv_metadata(self.config.metadata_file)
+        else:
+            self.logger.info(f"Downloading metadata from {self.config.dataset_name}...")
+            samples = self._download_metadata_from_hf()
 
         if self.config.max_samples:
-            ds = ds.select(range(min(len(ds), self.config.max_samples)))
+            samples = samples[:self.config.max_samples]
 
-        self.logger.info(f"Loaded {len(ds)} samples")
+        self.logger.info(f"Loaded {len(samples)} samples")
 
         # Add to state tracker
-        samples = list(ds)
         self.state_tracker.add_samples(samples)
 
         stats = self.state_tracker.get_stats()
         self.logger.info(f"State: {stats}")
+
+    def _load_csv_metadata(self, csv_path: str) -> List[Dict]:
+        """Load metadata from CSV file."""
+        import pandas as pd
+
+        df = pd.read_csv(csv_path)
+
+        # Expected columns: youtube_id, start_time, caption, etc.
+        samples = []
+        for _, row in df.iterrows():
+            sample = {
+                "youtube_id": str(row.get("ytid") or row.get("youtube_id", "")),
+                "start_time": int(row.get("start_time", 0)),
+                "caption": str(row.get("caption", "")),
+            }
+            samples.append(sample)
+
+        return samples
+
+    def _download_metadata_from_hf(self) -> List[Dict]:
+        """Download metadata CSV files from HuggingFace."""
+        # Download the CSV files from the dataset repo
+        from huggingface_hub import hf_hub_download
+
+        self.logger.info("Downloading metadata files from HuggingFace...")
+
+        # AudioSetCaps has multiple CSV files
+        csv_files = [
+            "AudioSet.csv",
+            "AudioSet_QA.csv",
+            "VGGSound.csv",
+            "YouTube8M_part1.csv",
+            "YouTube8M_part2.csv",
+            "YouTube8M_part3.csv",
+            "YouTube8M_part4.csv",
+        ]
+
+        all_samples = []
+        for csv_file in csv_files:
+            try:
+                local_path = hf_hub_download(
+                    repo_id=self.config.dataset_name,
+                    filename=f"Dataset/{csv_file}",
+                    repo_type="dataset",
+                )
+                self.logger.info(f"Downloaded {csv_file}")
+                samples = self._load_csv_metadata(local_path)
+                all_samples.extend(samples)
+                self.logger.info(f"  Loaded {len(samples)} samples from {csv_file}")
+            except Exception as e:
+                self.logger.warning(f"Failed to download {csv_file}: {e}")
+
+        self.logger.info(f"Total samples from all files: {len(all_samples)}")
+        return all_samples
 
     def download_single(self, sample: Dict) -> tuple[str, bool, Optional[str]]:
         """Download a single audio sample."""
@@ -765,6 +818,12 @@ def main():
         help="Output directory for downloaded audio"
     )
     parser.add_argument(
+        "--metadata-file",
+        type=str,
+        default=None,
+        help="Path to local CSV metadata file (optional, will download from HF if not provided)"
+    )
+    parser.add_argument(
         "--max-workers",
         type=int,
         default=4,
@@ -798,6 +857,7 @@ def main():
 
     config = DownloadConfig(
         output_dir=args.output_dir,
+        metadata_file=args.metadata_file,
         max_workers=args.max_workers,
         max_retries=args.max_retries,
         rate_limit_delay=args.rate_limit,
