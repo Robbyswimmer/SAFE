@@ -99,66 +99,75 @@ class RobustGDriveDownloader:
         self.conn.commit()
 
     def _get_file_list(self) -> List[Dict[str, str]]:
-        """Fetch manifest of Drive files recursively if helper is available."""
+        """Fetch manifest of Drive files if gdown exposes the helper."""
         if _get_files_by_folder_id is None:
             self.logger.info("gdown manifest helper unavailable - using legacy download flow")
             return []
 
         self.logger.info(f"Fetching file list from: {self.folder_url}")
 
-        try:
-            folder_id = self.folder_url.split('/')[-1]
-            if '?' in folder_id:
-                folder_id = folder_id.split('?')[0]
+        folder_id = self.folder_url.split('/')[-1]
+        if '?' in folder_id:
+            folder_id = folder_id.split('?')[0]
 
-            def walk(current_id: str, prefix: Path) -> List[Dict[str, str]]:
-                entries: List[Dict[str, str]] = []
+        def try_fetch(use_cookies: bool) -> Optional[List[Dict[str, str]]]:
+            try:
                 raw_entries = list(
                     _get_files_by_folder_id(  # type: ignore[misc]
-                        current_id,
-                        use_cookies=False,
+                        folder_id,
+                        use_cookies=use_cookies,
                         remaining_ok=True,
                     )
                 )
 
+                manifest: List[Dict[str, str]] = []
                 for entry in raw_entries:
                     file_id = entry.get("id")
-                    if not file_id:
-                        continue
-
-                    name = entry.get("name") or entry.get("title")
-                    if not name:
+                    if not file_id or file_id in self.skip_ids:
                         continue
 
                     mime = entry.get("mimeType") or entry.get("mime_type")
-                    is_folder = mime == "application/vnd.google-apps.folder" or entry.get("type") == "folder"
+                    entry_type = entry.get("type")
+                    if mime == "application/vnd.google-apps.folder" or entry_type == "folder":
+                        continue
 
-                    rel_path = prefix / name
+                    rel_path = (
+                        entry.get("path")
+                        or entry.get("name")
+                        or entry.get("title")
+                    )
+                    name = entry.get("name") or entry.get("title") or rel_path
 
-                    if is_folder:
-                        entries.extend(walk(file_id, rel_path))
-                    else:
-                        entries.append(
-                            {
-                                "id": file_id,
-                                "name": name,
-                                "rel_path": str(rel_path),
-                                "size": entry.get("sizeBytes") or entry.get("size"),
-                            }
-                        )
+                    if not rel_path or not name:
+                        continue
 
-                return entries
+                    manifest.append(
+                        {
+                            "id": file_id,
+                            "name": name,
+                            "rel_path": rel_path,
+                            "size": entry.get("sizeBytes") or entry.get("size"),
+                        }
+                    )
 
-            manifest = walk(folder_id, Path())
-            if self.skip_ids:
-                manifest = [m for m in manifest if m["id"] not in self.skip_ids]
+                return manifest
 
-            self.logger.info(f"Discovered {len(manifest)} files via manifest")
-            return manifest
+            except Exception as exc:  # pragma: no cover - network-driven
+                self.logger.warning(
+                    f"Manifest fetch failed with use_cookies={use_cookies}: {exc}"
+                )
+                return None
 
-        except Exception as exc:  # pragma: no cover - network-driven
-            self.logger.warning(f"Unable to fetch manifest via gdown internals: {exc}")
+        manifest = try_fetch(use_cookies=True)
+        if manifest is None:
+            manifest = try_fetch(use_cookies=False)
+
+        if manifest is None:
+            self.logger.error("Unable to fetch manifest via gdown - falling back to legacy mode")
             return []
+
+        self.logger.info(f"Discovered {len(manifest)} files via manifest")
+        return manifest
 
     def _download_file(self, file_id: str, file_name: str, output_path: Path) -> Tuple[bool, Optional[str]]:
         """
