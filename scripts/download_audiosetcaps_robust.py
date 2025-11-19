@@ -648,18 +648,30 @@ class AudioSetCapsDownloader:
         """Load metadata from CSV file."""
         import pandas as pd
 
+        self.logger.info(f"  Reading CSV file...")
         df = pd.read_csv(csv_path)
+        self.logger.info(f"  CSV loaded, parsing {len(df)} rows...")
 
         # Expected columns: youtube_id, start_time, caption, etc.
+        # Use vectorized operations instead of iterrows for speed
         samples = []
-        for _, row in df.iterrows():
+
+        # Get column names (different files may have different names)
+        ytid_col = "ytid" if "ytid" in df.columns else "youtube_id"
+        start_col = "start_time" if "start_time" in df.columns else "start"
+
+        for i, row in enumerate(df.itertuples(index=False)):
+            if i % 100000 == 0 and i > 0:
+                self.logger.info(f"    Parsed {i}/{len(df)} rows...")
+
             sample = {
-                "youtube_id": str(row.get("ytid") or row.get("youtube_id", "")),
-                "start_time": int(row.get("start_time", 0)),
-                "caption": str(row.get("caption", "")),
+                "youtube_id": str(getattr(row, ytid_col, "")),
+                "start_time": int(getattr(row, start_col, 0)),
+                "caption": str(getattr(row, "caption", "")),
             }
             samples.append(sample)
 
+        self.logger.info(f"  ✓ Parsed {len(samples)} samples")
         return samples
 
     def _download_metadata_from_hf(self) -> List[Dict]:
