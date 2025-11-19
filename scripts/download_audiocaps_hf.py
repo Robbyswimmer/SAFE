@@ -47,27 +47,68 @@ def _load_audio_from_bytes(blob: bytes) -> Tuple[np.ndarray, int]:
     return data.astype(np.float32), int(sr)
 
 
+def _clip_audio_10s(audio_array: np.ndarray, sample_rate: int, start_time: Optional[int] = None) -> np.ndarray:
+    """Extract 10-second clip from audio, optionally starting at start_time."""
+    clip_duration = 10.0  # seconds
+    clip_samples = int(clip_duration * sample_rate)
+
+    if start_time is not None and start_time > 0:
+        start_sample = int(start_time * sample_rate)
+    else:
+        start_sample = 0
+
+    # Handle mono vs stereo
+    if audio_array.ndim == 1:
+        end_sample = min(start_sample + clip_samples, len(audio_array))
+        clipped = audio_array[start_sample:end_sample]
+    else:
+        # Assume shape (channels, samples)
+        end_sample = min(start_sample + clip_samples, audio_array.shape[1])
+        clipped = audio_array[:, start_sample:end_sample]
+
+    # Pad if shorter than 10 seconds
+    if audio_array.ndim == 1:
+        if len(clipped) < clip_samples:
+            clipped = np.pad(clipped, (0, clip_samples - len(clipped)), mode='constant')
+    else:
+        if clipped.shape[1] < clip_samples:
+            pad_amount = clip_samples - clipped.shape[1]
+            clipped = np.pad(clipped, ((0, 0), (0, pad_amount)), mode='constant')
+
+    return clipped
+
+
 def _resolve_audio_field(sample: Dict) -> tuple[Dict, str]:
     """Resolve audio field from sample, returning (audio_payload, field_name)."""
+    start_time = sample.get("start_time")
+
     for key in AUDIO_COLUMNS:
         audio_value = sample.get(key)
         if audio_value is None:
             continue
 
+        audio_array = None
+        sampling_rate = None
+
         if isinstance(audio_value, dict):
             if audio_value.get("array") is not None:
-                return audio_value, key
-            audio_path = audio_value.get("path")
-            if audio_path:
-                array, sr = _load_audio_from_path(audio_path)
-                return {"array": array, "sampling_rate": sr}, key
-            audio_bytes = audio_value.get("bytes")
-            if audio_bytes:
-                array, sr = _load_audio_from_bytes(audio_bytes)
-                return {"array": array, "sampling_rate": sr}, key
+                audio_array = np.asarray(audio_value["array"])
+                sampling_rate = audio_value.get("sampling_rate")
+            else:
+                audio_path = audio_value.get("path")
+                if audio_path:
+                    audio_array, sampling_rate = _load_audio_from_path(audio_path)
+                else:
+                    audio_bytes = audio_value.get("bytes")
+                    if audio_bytes:
+                        audio_array, sampling_rate = _load_audio_from_bytes(audio_bytes)
         elif isinstance(audio_value, str):
-            array, sr = _load_audio_from_path(audio_value)
-            return {"array": array, "sampling_rate": sr}, key
+            audio_array, sampling_rate = _load_audio_from_path(audio_value)
+
+        if audio_array is not None and sampling_rate is not None:
+            # Clip to 10 seconds using start_time if available
+            clipped_array = _clip_audio_10s(audio_array, sampling_rate, start_time)
+            return {"array": clipped_array, "sampling_rate": sampling_rate}, key
 
     raise KeyError("Sample does not contain a usable audio field.")
 
