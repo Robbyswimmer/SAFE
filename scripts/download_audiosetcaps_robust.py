@@ -659,28 +659,21 @@ class AudioSetCapsDownloader:
             if i % 100000 == 0 and i > 0:
                 self.logger.info(f"    Parsed {i}/{len(df)} rows...")
 
-            # Parse ID field: Format is Y{youtube_id}_{start}_{end} or Y{youtube_id}
+            # Parse ID field: Format is Y{youtube_id}
+            # The ID is just Y + youtube_id, no timestamp info
             audio_id = str(row.id)
 
-            # Remove 'Y' prefix
+            # Remove 'Y' prefix to get youtube_id
             if audio_id.startswith('Y'):
-                audio_id = audio_id[1:]
-
-            # Split by underscore to get youtube_id and timestamps
-            parts = audio_id.split('_')
-
-            if len(parts) >= 3:
-                # Format: youtube_id_start_end
-                youtube_id = '_'.join(parts[:-2])  # Handle IDs with underscores
-                start_time = int(parts[-2])
-            elif len(parts) == 2:
-                # Format: youtube_id_start (assuming 10s duration)
-                youtube_id = parts[0]
-                start_time = int(parts[1])
+                youtube_id = audio_id[1:]
             else:
-                # Format: youtube_id (no timestamp, start at 0)
                 youtube_id = audio_id
-                start_time = 0
+
+            # AudioSetCaps doesn't provide start times in the CSV
+            # These are 10-second clips but we need to check if the full video
+            # or a specific segment is meant. For now, start at 0.
+            # TODO: May need to find original AudioSet metadata for exact timestamps
+            start_time = 0
 
             sample = {
                 "youtube_id": youtube_id,
