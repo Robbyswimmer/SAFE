@@ -9,7 +9,10 @@ remaining files.
 
 import argparse
 import logging
+import os
+import re
 import sqlite3
+import subprocess
 import sys
 import tarfile
 import time
@@ -22,10 +25,19 @@ except ImportError:
     print("ERROR: gdown not installed. Install with: pip install gdown")
     sys.exit(1)
 
+_GDOWN_FOLDER_IMPORT_ERROR: Optional[str] = None
 try:
-    from gdown.download_folder import _get_files_by_folder_id  # type: ignore
-except Exception:  # pragma: no cover - best-effort import for runtime env
+    import gdown.download_folder as _gdown_download_folder  # type: ignore
+except Exception as exc:  # pragma: no cover - best-effort import for runtime env
     _get_files_by_folder_id = None
+    _GDOWN_FOLDER_IMPORT_ERROR = str(exc)
+else:
+    _get_files_by_folder_id = getattr(_gdown_download_folder, "_get_files_by_folder_id", None)
+    if _get_files_by_folder_id is None:
+        _GDOWN_FOLDER_IMPORT_ERROR = (
+            "gdown.download_folder does not expose _get_files_by_folder_id. "
+            f"Available names: {', '.join(dir(_gdown_download_folder))}"
+        )
 
 
 class RobustGDriveDownloader:
@@ -99,10 +111,16 @@ class RobustGDriveDownloader:
         self.conn.commit()
 
     def _get_file_list(self) -> List[Dict[str, str]]:
-        """Fetch manifest of Drive files if gdown exposes the helper."""
+        """Fetch manifest of Drive files if possible, else fall back to CLI probe."""
         if _get_files_by_folder_id is None:
-            self.logger.info("gdown manifest helper unavailable - using legacy download flow")
-            return []
+            if _GDOWN_FOLDER_IMPORT_ERROR:
+                self.logger.info(
+                    "gdown manifest helper unavailable (%s) - probing via CLI",
+                    _GDOWN_FOLDER_IMPORT_ERROR,
+                )
+            else:
+                self.logger.info("gdown manifest helper unavailable - probing via CLI")
+            return self._fetch_manifest_via_cli()
 
         self.logger.info(f"Fetching file list from: {self.folder_url}")
 
@@ -110,63 +128,51 @@ class RobustGDriveDownloader:
         if '?' in folder_id:
             folder_id = folder_id.split('?')[0]
 
-        def try_fetch(use_cookies: bool) -> Optional[List[Dict[str, str]]]:
-            try:
-                raw_entries = list(
-                    _get_files_by_folder_id(  # type: ignore[misc]
-                        folder_id,
-                        use_cookies=use_cookies,
-                        remaining_ok=True,
-                    )
+        try:
+            raw_entries = list(
+                _get_files_by_folder_id(  # type: ignore[misc]
+                    folder_id,
+                    use_cookies=True,
+                    remaining_ok=True,
                 )
+            )
+        except Exception as exc:  # pragma: no cover - network-driven
+            self.logger.warning(
+                f"Unable to fetch manifest via gdown helper ({exc}) - probing via CLI"
+            )
+            return self._fetch_manifest_via_cli()
 
-                manifest: List[Dict[str, str]] = []
-                for entry in raw_entries:
-                    file_id = entry.get("id")
-                    if not file_id or file_id in self.skip_ids:
-                        continue
+        manifest: List[Dict[str, str]] = []
+        for entry in raw_entries:
+            file_id = entry.get("id")
+            if not file_id or file_id in self.skip_ids:
+                continue
 
-                    mime = entry.get("mimeType") or entry.get("mime_type")
-                    entry_type = entry.get("type")
-                    if mime == "application/vnd.google-apps.folder" or entry_type == "folder":
-                        continue
+            mime = entry.get("mimeType") or entry.get("mime_type")
+            entry_type = entry.get("type")
+            if mime == "application/vnd.google-apps.folder" or entry_type == "folder":
+                continue
 
-                    rel_path = (
-                        entry.get("path")
-                        or entry.get("name")
-                        or entry.get("title")
-                    )
-                    name = entry.get("name") or entry.get("title") or rel_path
+            rel_path = entry.get("path") or entry.get("name") or entry.get("title")
+            name = entry.get("name") or entry.get("title") or rel_path
 
-                    if not rel_path or not name:
-                        continue
+            if not rel_path or not name:
+                continue
 
-                    manifest.append(
-                        {
-                            "id": file_id,
-                            "name": name,
-                            "rel_path": rel_path,
-                            "size": entry.get("sizeBytes") or entry.get("size"),
-                        }
-                    )
+            manifest.append(
+                {
+                    "id": file_id,
+                    "name": name,
+                    "rel_path": rel_path,
+                    "size": entry.get("sizeBytes") or entry.get("size"),
+                }
+            )
 
-                return manifest
+        if not manifest:
+            self.logger.warning("Manifest helper returned no files - probing via CLI fallback")
+            return self._fetch_manifest_via_cli()
 
-            except Exception as exc:  # pragma: no cover - network-driven
-                self.logger.warning(
-                    f"Manifest fetch failed with use_cookies={use_cookies}: {exc}"
-                )
-                return None
-
-        manifest = try_fetch(use_cookies=True)
-        if manifest is None:
-            manifest = try_fetch(use_cookies=False)
-
-        if manifest is None:
-            self.logger.error("Unable to fetch manifest via gdown - falling back to legacy mode")
-            return []
-
-        self.logger.info(f"Discovered {len(manifest)} files via manifest")
+        self.logger.info(f"Discovered {len(manifest)} files via manifest helper")
         return manifest
 
     def _download_file(self, file_id: str, file_name: str, output_path: Path) -> Tuple[bool, Optional[str]]:
@@ -242,6 +248,76 @@ class RobustGDriveDownloader:
         except Exception as e:
             self.logger.error(f"✗ Failed to extract {tar_path.name}: {e}")
             return False
+
+    def _fetch_manifest_via_cli(self) -> List[Dict[str, str]]:
+        """Use `gdown --folder` output to capture the manifest before download starts."""
+        cmd = [
+            sys.executable,
+            "-m",
+            "gdown",
+            "--folder",
+            self.folder_url,
+            "--remaining-ok",
+        ]
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+
+        self.logger.info("Collecting manifest via gdown CLI probe (will stop before downloads)...")
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=self.temp_dir,
+            env=env,
+        )
+
+        manifest: Dict[str, Dict[str, str]] = {}
+        processing_re = re.compile(r"Processing file\\s+([^\\s]+)\\s+(.+)")
+        finished_listing = False
+
+        try:
+            assert proc.stdout is not None
+            for raw_line in proc.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+
+                match = processing_re.match(line)
+                if match:
+                    file_id, name = match.groups()
+                    if file_id in self.skip_ids:
+                        continue
+                    manifest[file_id] = {
+                        "id": file_id,
+                        "name": name,
+                        "rel_path": name,
+                    }
+                    continue
+
+                if "Building directory structure completed" in line:
+                    finished_listing = True
+                    break
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+
+        if not finished_listing:
+            self.logger.warning("Could not capture manifest via CLI probe")
+            return []
+
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+        manifest_list = list(manifest.values())
+        self.logger.info(f"Captured {len(manifest_list)} files via CLI manifest probe")
+        return manifest_list
 
     def _download_with_manifest(self, manifest: List[Dict[str, str]]) -> bool:
         """Download files one-by-one using the manifest returned by gdown."""
