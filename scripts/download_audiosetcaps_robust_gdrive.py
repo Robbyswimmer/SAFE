@@ -38,12 +38,14 @@ class RobustGDriveDownloader:
         temp_dir: Path,
         log_file: Path,
         db_file: Path,
+        skip_ids: Optional[List[str]] = None,
     ):
         self.folder_url = folder_url
         self.output_dir = output_dir
         self.temp_dir = temp_dir
         self.log_file = log_file
         self.db_file = db_file
+        self.skip_ids = set(skip_ids or [])
 
         # Setup logging
         self.logger = logging.getLogger("GDriveDownloader")
@@ -97,7 +99,7 @@ class RobustGDriveDownloader:
         self.conn.commit()
 
     def _get_file_list(self) -> List[Dict[str, str]]:
-        """Fetch manifest of Drive files if gdown exposes the helper."""
+        """Fetch manifest of Drive files recursively if helper is available."""
         if _get_files_by_folder_id is None:
             self.logger.info("gdown manifest helper unavailable - using legacy download flow")
             return []
@@ -109,38 +111,47 @@ class RobustGDriveDownloader:
             if '?' in folder_id:
                 folder_id = folder_id.split('?')[0]
 
-            files = list(
-                _get_files_by_folder_id(  # type: ignore[misc]
-                    folder_id,
-                    use_cookies=False,
-                    remaining_ok=True,
+            def walk(current_id: str, prefix: Path) -> List[Dict[str, str]]:
+                entries: List[Dict[str, str]] = []
+                raw_entries = list(
+                    _get_files_by_folder_id(  # type: ignore[misc]
+                        current_id,
+                        use_cookies=False,
+                        remaining_ok=True,
+                    )
                 )
-            )
 
-            manifest: List[Dict[str, str]] = []
-            for entry in files:
-                file_id = entry.get("id")
-                if not file_id:
-                    continue
+                for entry in raw_entries:
+                    file_id = entry.get("id")
+                    if not file_id:
+                        continue
 
-                mime = entry.get("mimeType") or entry.get("mime_type")
-                if mime == "application/vnd.google-apps.folder" or entry.get("type") == "folder":
-                    continue
+                    name = entry.get("name") or entry.get("title")
+                    if not name:
+                        continue
 
-                rel_path = entry.get("path") or entry.get("title") or entry.get("name")
-                name = entry.get("name") or entry.get("title") or rel_path
+                    mime = entry.get("mimeType") or entry.get("mime_type")
+                    is_folder = mime == "application/vnd.google-apps.folder" or entry.get("type") == "folder"
 
-                if not rel_path or not name:
-                    continue
+                    rel_path = prefix / name
 
-                manifest.append(
-                    {
-                        "id": file_id,
-                        "name": name,
-                        "rel_path": rel_path,
-                        "size": entry.get("sizeBytes") or entry.get("size"),
-                    }
-                )
+                    if is_folder:
+                        entries.extend(walk(file_id, rel_path))
+                    else:
+                        entries.append(
+                            {
+                                "id": file_id,
+                                "name": name,
+                                "rel_path": str(rel_path),
+                                "size": entry.get("sizeBytes") or entry.get("size"),
+                            }
+                        )
+
+                return entries
+
+            manifest = walk(folder_id, Path())
+            if self.skip_ids:
+                manifest = [m for m in manifest if m["id"] not in self.skip_ids]
 
             self.logger.info(f"Discovered {len(manifest)} files via manifest")
             return manifest
@@ -440,6 +451,12 @@ def main():
         default=Path("data/audiosetcaps_temp"),
         help="Temporary directory for downloaded tar files"
     )
+    parser.add_argument(
+        "--skip-file-id",
+        action="append",
+        default=[],
+        help="Google Drive file IDs to skip (can be provided multiple times)",
+    )
 
     args = parser.parse_args()
 
@@ -458,6 +475,7 @@ def main():
         temp_dir=args.temp_dir,
         log_file=log_file,
         db_file=db_file,
+        skip_ids=args.skip_file_id,
     )
 
     try:
