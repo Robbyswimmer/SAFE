@@ -652,22 +652,40 @@ class AudioSetCapsDownloader:
         df = pd.read_csv(csv_path)
         self.logger.info(f"  CSV loaded, parsing {len(df)} rows...")
 
-        # Expected columns: youtube_id, start_time, caption, etc.
-        # Use vectorized operations instead of iterrows for speed
+        # AudioSetCaps CSV format: id (e.g., "Y---1_cCGK4M" or "Y1ZooVL-H9A_30_40"), caption
         samples = []
-
-        # Get column names (different files may have different names)
-        ytid_col = "ytid" if "ytid" in df.columns else "youtube_id"
-        start_col = "start_time" if "start_time" in df.columns else "start"
 
         for i, row in enumerate(df.itertuples(index=False)):
             if i % 100000 == 0 and i > 0:
                 self.logger.info(f"    Parsed {i}/{len(df)} rows...")
 
+            # Parse ID field: Format is Y{youtube_id}_{start}_{end} or Y{youtube_id}
+            audio_id = str(row.id)
+
+            # Remove 'Y' prefix
+            if audio_id.startswith('Y'):
+                audio_id = audio_id[1:]
+
+            # Split by underscore to get youtube_id and timestamps
+            parts = audio_id.split('_')
+
+            if len(parts) >= 3:
+                # Format: youtube_id_start_end
+                youtube_id = '_'.join(parts[:-2])  # Handle IDs with underscores
+                start_time = int(parts[-2])
+            elif len(parts) == 2:
+                # Format: youtube_id_start (assuming 10s duration)
+                youtube_id = parts[0]
+                start_time = int(parts[1])
+            else:
+                # Format: youtube_id (no timestamp, start at 0)
+                youtube_id = audio_id
+                start_time = 0
+
             sample = {
-                "youtube_id": str(getattr(row, ytid_col, "")),
-                "start_time": int(getattr(row, start_col, 0)),
-                "caption": str(getattr(row, "caption", "")),
+                "youtube_id": youtube_id,
+                "start_time": start_time,
+                "caption": str(row.caption if hasattr(row, 'caption') else ""),
             }
             samples.append(sample)
 
