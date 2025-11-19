@@ -8,6 +8,7 @@ remaining files.
 """
 
 import argparse
+import importlib.util
 import logging
 import os
 import re
@@ -27,16 +28,26 @@ except ImportError:
 
 _GDOWN_FOLDER_IMPORT_ERROR: Optional[str] = None
 try:
-    import gdown.download_folder as _gdown_download_folder  # type: ignore
+    _get_files_by_folder_id = None
+    spec = importlib.util.find_spec("gdown.download_folder")
+    if spec and spec.loader:
+        _gdown_download_folder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_gdown_download_folder)  # type: ignore[call-arg]
+        _get_files_by_folder_id = getattr(_gdown_download_folder, "_get_files_by_folder_id", None)
+    else:
+        _GDOWN_FOLDER_IMPORT_ERROR = "Unable to locate gdown.download_folder module"
 except Exception as exc:  # pragma: no cover - best-effort import for runtime env
     _get_files_by_folder_id = None
     _GDOWN_FOLDER_IMPORT_ERROR = str(exc)
 else:
-    _get_files_by_folder_id = getattr(_gdown_download_folder, "_get_files_by_folder_id", None)
     if _get_files_by_folder_id is None:
+        exported = (
+            ", ".join(sorted(name for name in dir(_gdown_download_folder) if not name.startswith("__")))
+            or "<none>"
+        )
         _GDOWN_FOLDER_IMPORT_ERROR = (
-            "gdown.download_folder does not expose _get_files_by_folder_id. "
-            f"Available names: {', '.join(dir(_gdown_download_folder))}"
+            "gdown.download_folder module does not expose _get_files_by_folder_id. "
+            f"Available names: {exported}"
         )
 
 
