@@ -35,7 +35,7 @@ from configs.retention_variants import get_variant_config, RETENTION_VARIANTS
 
 print("[run_full_training.py] Importing SAFE datasets...", flush=True)
 sys.stdout.flush()
-from safe.data.datasets import AudioCapsDataset, VQADataset, WavCapsDataset, create_safe_dataloader
+from safe.data.datasets import AudioCapsDataset, VQADataset, WavCapsDataset, AudioSetCapsDataset, create_safe_dataloader
 
 print("[run_full_training.py] Importing SAFE model...", flush=True)
 sys.stdout.flush()
@@ -98,14 +98,16 @@ class TrainingConfig:
 
 
 class CombinedAudioDataset(Dataset):
-    """Combine AudioCaps and WavCaps with configurable ratio."""
+    """Combine AudioCaps, WavCaps, and AudioSetCaps with configurable ratios."""
 
     def __init__(
         self,
         audiocaps_dataset: Optional[Dataset] = None,
         wavcaps_dataset: Optional[Dataset] = None,
+        audiosetcaps_dataset: Optional[Dataset] = None,
         *,
         wavcaps_ratio: float = 0.5,
+        audiosetcaps_ratio: float = 1.0,
         shuffle: bool = True,
         seed: int = 42,
     ) -> None:
@@ -117,10 +119,13 @@ class CombinedAudioDataset(Dataset):
         if wavcaps_dataset is not None:
             self.datasets.append(("wavcaps", wavcaps_dataset))
 
-        if not self.datasets:
-            raise ValueError("At least one dataset (AudioCaps or WavCaps) must be provided")
+        if audiosetcaps_dataset is not None:
+            self.datasets.append(("audiosetcaps", audiosetcaps_dataset))
 
-        # Build index map based on ratio
+        if not self.datasets:
+            raise ValueError("At least one dataset (AudioCaps, WavCaps, or AudioSetCaps) must be provided")
+
+        # Build index map based on ratios
         self.index_map: List[Tuple[str, int]] = []
 
         if len(self.datasets) == 1:
@@ -128,18 +133,41 @@ class CombinedAudioDataset(Dataset):
             name, dataset = self.datasets[0]
             self.index_map = [(name, idx) for idx in range(len(dataset))]
         else:
-            # Both datasets: mix based on ratio
+            # Multiple datasets: mix based on ratios
             audiocaps_count = len(audiocaps_dataset) if audiocaps_dataset else 0
             wavcaps_count = len(wavcaps_dataset) if wavcaps_dataset else 0
+            audiosetcaps_count = len(audiosetcaps_dataset) if audiosetcaps_dataset else 0
 
             # Calculate samples to use from each dataset
-            total_samples = audiocaps_count + int(wavcaps_count * wavcaps_ratio)
+            # AudioCaps: use all samples
+            # WavCaps: use wavcaps_ratio of samples
+            # AudioSetCaps: use audiosetcaps_ratio of samples
+            wavcaps_samples = int(wavcaps_count * wavcaps_ratio)
+            audiosetcaps_samples = int(audiosetcaps_count * audiosetcaps_ratio)
 
-            self.index_map = [
-                ("audiocaps", idx) for idx in range(audiocaps_count)
-            ] + [
-                ("wavcaps", idx) for idx in range(int(wavcaps_count * wavcaps_ratio))
-            ]
+            total_samples = audiocaps_count + wavcaps_samples + audiosetcaps_samples
+
+            # Build index map
+            if audiocaps_dataset is not None:
+                self.index_map.extend([
+                    ("audiocaps", idx) for idx in range(audiocaps_count)
+                ])
+
+            if wavcaps_dataset is not None:
+                self.index_map.extend([
+                    ("wavcaps", idx) for idx in range(wavcaps_samples)
+                ])
+
+            if audiosetcaps_dataset is not None:
+                self.index_map.extend([
+                    ("audiosetcaps", idx) for idx in range(audiosetcaps_samples)
+                ])
+
+            print(f"[CombinedAudioDataset] Mixing datasets:", flush=True)
+            print(f"  AudioCaps: {audiocaps_count:,} samples (100%)", flush=True)
+            print(f"  WavCaps: {wavcaps_samples:,} / {wavcaps_count:,} samples ({wavcaps_ratio*100:.1f}%)", flush=True)
+            print(f"  AudioSetCaps: {audiosetcaps_samples:,} / {audiosetcaps_count:,} samples ({audiosetcaps_ratio*100:.1f}%)", flush=True)
+            print(f"  Total: {total_samples:,} samples", flush=True)
 
         if shuffle:
             rng = random.Random(seed)
@@ -475,12 +503,39 @@ def run_experiment(args: argparse.Namespace) -> None:
             print(f"Warning: WavCaps directory not found at {wavcaps_path}")
             print("Continuing with AudioCaps only")
 
-    # Combine datasets if WavCaps is available
-    if wavcaps_train is not None:
+    # Optionally load AudioSetCaps
+    audiosetcaps_train = None
+    if args.use_audiosetcaps:
+        # Allow override path or use default
+        if args.audiosetcaps_path:
+            audiosetcaps_root = Path(args.audiosetcaps_path).expanduser().resolve()
+        else:
+            audiosetcaps_root = data_root
+
+        audiosetcaps_path = audiosetcaps_root if args.audiosetcaps_path else audiosetcaps_root / "audiosetcaps"
+        if audiosetcaps_path.exists():
+            try:
+                audiosetcaps_train = AudioSetCapsDataset(
+                    data_path=audiosetcaps_root if args.audiosetcaps_path else data_root,
+                    split="train"
+                )
+                print(f"Loaded AudioSetCaps train: {len(audiosetcaps_train)} samples", flush=True)
+                print(f"Using AudioSetCaps ratio: {args.audiosetcaps_ratio}", flush=True)
+            except Exception as e:
+                print(f"Warning: Failed to load AudioSetCaps: {e}", flush=True)
+                print("Continuing without AudioSetCaps", flush=True)
+        else:
+            print(f"Warning: AudioSetCaps directory not found at {audiosetcaps_path}", flush=True)
+            print("Continuing without AudioSetCaps", flush=True)
+
+    # Combine datasets if WavCaps or AudioSetCaps is available
+    if wavcaps_train is not None or audiosetcaps_train is not None:
         train_dataset = CombinedAudioDataset(
             audiocaps_dataset=audiocaps_train,
             wavcaps_dataset=wavcaps_train,
+            audiosetcaps_dataset=audiosetcaps_train,
             wavcaps_ratio=args.wavcaps_ratio,
+            audiosetcaps_ratio=args.audiosetcaps_ratio,
             shuffle=not args.disable_train_shuffle,
             seed=args.seed,
         )
@@ -722,6 +777,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-audio-split", type=str, default="val", help="AudioCaps split for validation")
     parser.add_argument("--use-wavcaps", action="store_true", help="Include WavCaps dataset for training")
     parser.add_argument("--wavcaps-ratio", type=float, default=0.5, help="Ratio of WavCaps samples to use (0.0-1.0)")
+    parser.add_argument("--use-audiosetcaps", action="store_true", help="Include AudioSetCaps dataset for training")
+    parser.add_argument("--audiosetcaps-ratio", type=float, default=1.0, help="Ratio of AudioSetCaps samples to use (0.0-1.0)")
+    parser.add_argument("--audiosetcaps-path", type=str, default=None, help="Override path to AudioSetCaps data (default: data-root/audiosetcaps)")
     parser.add_argument("--val-wavcaps-share", type=float, default=0.5, help="Fraction of audio validation samples to draw from WavCaps (0.0-1.0)")
     parser.add_argument("--val-wavcaps-split", type=str, default="val", help="WavCaps split for validation when available")
     parser.add_argument("--val-wavcaps-sample-size", type=int, default=2048, help="If validation split is missing, sample this many examples from WavCaps train (<=0 disables)")

@@ -18,6 +18,7 @@ __all__ = [
     "VQADataset",
     "AVQADataset",
     "WavCapsDataset",
+    "AudioSetCapsDataset",
 ]
 
 
@@ -485,6 +486,103 @@ class WavCapsDataset(_BaseQADataset):
             "audio": self._load_audio(entry),
             "images": None,  # WavCaps is audio-only
             "subset": entry.get("subset"),  # Track which subset (FreeSound, BBC, etc.)
+        }
+        return sample
+
+
+class AudioSetCapsDataset(_BaseQADataset):
+    """
+    AudioSetCaps dataset from Google Drive tar archives.
+
+    Expects JSONL files in format:
+    {"id": "youtube_id", "question": "What is happening in the audio?", "answer": "caption"}
+
+    Audio files should be in: data/audiosetcaps/audio/train/{youtube_id}.wav
+    """
+    dataset_name = "audiosetcaps"
+    file_stem = "audiosetcaps"
+
+    def __init__(
+        self,
+        data_path: str | Path,
+        split: str = "train",
+        sources: Optional[List[str]] = None,
+    ):
+        """
+        Initialize AudioSetCaps dataset.
+
+        Args:
+            data_path: Root data directory
+            split: Dataset split (default: "train")
+            sources: List of sources to include. Options: ["audiosetcaps", "vggsound", "youtube8m"]
+                    If None, includes all available sources.
+        """
+        self.sources = sources or ["audiosetcaps", "vggsound", "youtube8m"]
+
+        # Load each source separately and combine
+        self.data_path = Path(data_path).expanduser().resolve()
+        dataset_dir = (self.data_path / self.dataset_name).expanduser().resolve()
+        self.dataset_dir = dataset_dir
+
+        if not dataset_dir.exists():
+            raise FileNotFoundError(
+                f"Expected directory {dataset_dir} for {self.dataset_name} dataset"
+            )
+
+        # Map source names to JSONL file names
+        source_files = {
+            "audiosetcaps": f"audiosetcaps_{split}.jsonl",
+            "vggsound": f"vggsound_audiosetcaps_{split}.jsonl",
+            "youtube8m": f"youtube8m_audiosetcaps_{split}.jsonl",
+        }
+
+        self.examples: List[Dict[str, Any]] = []
+        loaded_sources = []
+
+        for source in self.sources:
+            if source not in source_files:
+                print(f"[AudioSetCaps] Warning: Unknown source '{source}', skipping", flush=True)
+                continue
+
+            jsonl_file = dataset_dir / source_files[source]
+            if not jsonl_file.exists():
+                print(f"[AudioSetCaps] Warning: {jsonl_file} not found, skipping {source}", flush=True)
+                continue
+
+            # Load JSONL
+            source_examples = []
+            with open(jsonl_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        source_examples.append(json.loads(line))
+
+            print(f"[AudioSetCaps] Loaded {len(source_examples):,} samples from {source}", flush=True)
+            self.examples.extend(source_examples)
+            loaded_sources.append(source)
+
+        if not self.examples:
+            raise ValueError(
+                f"No examples found for AudioSetCaps. Looked for sources: {self.sources}\n"
+                f"In directory: {dataset_dir}"
+            )
+
+        print(f"[AudioSetCaps] Total samples: {len(self.examples):,} from {len(loaded_sources)} source(s)", flush=True)
+        self.split = split
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
+        entry = self.examples[idx]
+
+        # AudioSetCaps uses standardized format from converter script
+        question = entry.get("question") or "What is happening in the audio?"
+        answers = entry.get("answer") or entry.get("answers")
+
+        sample = {
+            "sample_id": entry.get("id"),
+            "question": question,
+            "answers": answers,
+            "audio": self._load_audio(entry),
+            "images": None,  # AudioSetCaps is audio-only
         }
         return sample
 

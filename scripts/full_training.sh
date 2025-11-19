@@ -64,6 +64,9 @@ DISABLE_TRAIN_SHUFFLE=${DISABLE_TRAIN_SHUFFLE:-0}
 DISABLE_VAL_SHUFFLE=${DISABLE_VAL_SHUFFLE:-1}
 USE_WAVCAPS=${USE_WAVCAPS:-0}
 WAVCAPS_RATIO=${WAVCAPS_RATIO:-0.5}
+USE_AUDIOSETCAPS=${USE_AUDIOSETCAPS:-0}
+AUDIOSETCAPS_RATIO=${AUDIOSETCAPS_RATIO:-1.0}
+AUDIOSETCAPS_PATH=${AUDIOSETCAPS_PATH:-}
 GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-1}
 DISABLE_BERTSCORE=${DISABLE_BERTSCORE:-0}  # Default: enabled (use Token F1 as fallback)
 PROGRESS_LOG_TIMEOUT=${PROGRESS_LOG_TIMEOUT:-600}
@@ -113,6 +116,14 @@ fi
 wavcaps_flags=()
 if [[ "$USE_WAVCAPS" != "0" ]]; then
   wavcaps_flags+=(--use-wavcaps --wavcaps-ratio "${WAVCAPS_RATIO}")
+fi
+
+audiosetcaps_flags=()
+if [[ "$USE_AUDIOSETCAPS" != "0" ]]; then
+  audiosetcaps_flags+=(--use-audiosetcaps --audiosetcaps-ratio "${AUDIOSETCAPS_RATIO}")
+  if [[ -n "$AUDIOSETCAPS_PATH" ]]; then
+    audiosetcaps_flags+=(--audiosetcaps-path "${AUDIOSETCAPS_PATH}")
+  fi
 fi
 
 bertscore_flag=()
@@ -169,6 +180,7 @@ for variant in "${variants[@]}"; do
     "${train_shuffle_flag[@]}" \
     "${val_shuffle_flag[@]}" \
     "${wavcaps_flags[@]}" \
+    "${audiosetcaps_flags[@]}" \
     "${bertscore_flag[@]}" \
     "${csv_flags[@]}"
 
