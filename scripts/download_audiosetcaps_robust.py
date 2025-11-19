@@ -436,7 +436,15 @@ class RobustYouTubeDownloader:
             ydl_opts = self._get_yt_dlp_opts(temp_path)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+                # Suppress output by redirecting stderr
+                import sys
+                import os
+                old_stderr = sys.stderr
+                try:
+                    sys.stderr = open(os.devnull, 'w')
+                    ydl.download([url])
+                finally:
+                    sys.stderr = old_stderr
 
             # Find the downloaded file
             downloaded_file = None
@@ -464,7 +472,10 @@ class RobustYouTubeDownloader:
             return True
 
         except Exception as e:
-            self.logger.warning(f"Failed to download {youtube_id}: {str(e)}")
+            # Only log if it's not a common "video unavailable" error
+            error_str = str(e).lower()
+            if "unavailable" not in error_str and "not available" not in error_str:
+                self.logger.debug(f"Failed to download {youtube_id}: {str(e)}")
             # Clean up any temp files
             for ext in ['wav', 'webm', 'mp4', 'm4a', 'opus', 'temp.wav']:
                 temp_file = temp_path.with_suffix(f'.{ext}')
@@ -808,13 +819,20 @@ class AudioSetCapsDownloader:
 
                 if success:
                     self.completed_count += 1
+                    # Report every 5 successful downloads
+                    if self.completed_count % 5 == 0:
+                        self.logger.info(
+                            f"✓ Successfully downloaded {self.completed_count} files "
+                            f"(processed {i + 1}/{len(pending)}, "
+                            f"skipped: {self.skipped_count})"
+                        )
                 else:
                     if self.config.skip_on_error:
                         self.skipped_count += 1
                     else:
                         self.failed_count += 1
 
-                # Progress update every 100 samples
+                # Full progress update every 100 samples
                 if (i + 1) % 100 == 0:
                     self._print_progress(i + 1, len(pending))
 
