@@ -835,8 +835,17 @@ class AudioSetCapsDownloader:
                     else:
                         self.failed_count += 1
 
-                # Full progress update every 100 samples
-                if (i + 1) % 100 == 0:
+                # Show progress every 50 attempts (even without successes)
+                if (i + 1) % 50 == 0:
+                    success_rate = (self.completed_count / (i + 1)) * 100 if i > 0 else 0
+                    self.logger.info(
+                        f"Progress: {i + 1}/{len(pending)} processed | "
+                        f"✓ {self.completed_count} | ✗ {self.skipped_count} | "
+                        f"Success rate: {success_rate:.1f}%"
+                    )
+
+                # Full progress update every 200 samples
+                if (i + 1) % 200 == 0:
                     self._print_progress(i + 1, len(pending))
 
         self._print_final_stats()
