@@ -21,7 +21,7 @@ except Exception as exc:  # pragma: no cover - surface helpful hint
         "datasets package is required. Install with `pip install datasets soundfile`."
     ) from exc
 
-AUDIO_COLUMNS = ("audio", "audio_10s", "audio_segment", "clip")
+AUDIO_COLUMNS = ("audio_10s", "audio_segment", "clip", "audio")  # Prioritize 10-second clips
 
 
 def _load_audio_from_path(path: str) -> Tuple[np.ndarray, int]:
@@ -47,7 +47,8 @@ def _load_audio_from_bytes(blob: bytes) -> Tuple[np.ndarray, int]:
     return data.astype(np.float32), int(sr)
 
 
-def _resolve_audio_field(sample: Dict) -> Dict:
+def _resolve_audio_field(sample: Dict) -> tuple[Dict, str]:
+    """Resolve audio field from sample, returning (audio_payload, field_name)."""
     for key in AUDIO_COLUMNS:
         audio_value = sample.get(key)
         if audio_value is None:
@@ -55,18 +56,18 @@ def _resolve_audio_field(sample: Dict) -> Dict:
 
         if isinstance(audio_value, dict):
             if audio_value.get("array") is not None:
-                return audio_value
+                return audio_value, key
             audio_path = audio_value.get("path")
             if audio_path:
                 array, sr = _load_audio_from_path(audio_path)
-                return {"array": array, "sampling_rate": sr}
+                return {"array": array, "sampling_rate": sr}, key
             audio_bytes = audio_value.get("bytes")
             if audio_bytes:
                 array, sr = _load_audio_from_bytes(audio_bytes)
-                return {"array": array, "sampling_rate": sr}
+                return {"array": array, "sampling_rate": sr}, key
         elif isinstance(audio_value, str):
             array, sr = _load_audio_from_path(audio_value)
-            return {"array": array, "sampling_rate": sr}
+            return {"array": array, "sampling_rate": sr}, key
 
     raise KeyError("Sample does not contain a usable audio field.")
 
@@ -200,6 +201,7 @@ def process_split(
     metadata_entries: List[Dict] = []
     processed = 0
     skipped = 0
+    audio_field_counts = {}
 
     iterator: Iterable
     if sample_limit is None:
@@ -209,11 +211,12 @@ def process_split(
         iterator = ds.select(range(limit))
 
     for idx, sample in enumerate(iterator):
-        if idx % 10 == 0:
+        if idx % 100 == 0:
             print(f"   Processing sample {idx}...", flush=True)
 
         try:
-            audio_payload = _resolve_audio_field(sample)
+            audio_payload, audio_field = _resolve_audio_field(sample)
+            audio_field_counts[audio_field] = audio_field_counts.get(audio_field, 0) + 1
         except KeyError:
             skipped += 1
             continue
@@ -234,6 +237,11 @@ def process_split(
             }
         )
         processed += 1
+
+    # Report which audio fields were used
+    if audio_field_counts:
+        field_summary = ", ".join(f"{field}: {count}" for field, count in sorted(audio_field_counts.items()))
+        print(f"   Audio fields used → {field_summary}", flush=True)
 
     meta_path = output_dir / f"AudioCaps_{request.local_name}.json"
     with open(meta_path, "w", encoding="utf-8") as fh:
