@@ -659,29 +659,52 @@ class AudioSetCapsDownloader:
             if i % 100000 == 0 and i > 0:
                 self.logger.info(f"    Parsed {i}/{len(df)} rows...")
 
-            # Parse ID field: Format is Y{youtube_id}
-            # The ID is just Y + youtube_id, no timestamp info
+            # Parse ID field - three different formats:
+            # 1. AudioSetCaps: Y{youtube_id} (e.g., Y---1_cCGK4M) - 11 char YT ID
+            # 2. VGGSound: {youtube_id}_{timestamp} (e.g., OxPnZzn1_L8_000883)
+            # 3. YouTube-8M: {youtube_id}_{start}_{duration} (e.g., 9eUrEyAR3xk_84_10)
             audio_id = str(row.id)
 
-            # Remove 'Y' prefix to get youtube_id
-            if audio_id.startswith('Y'):
-                youtube_id = audio_id[1:]
+            # Handle AudioSetCaps format with 'Y' prefix
+            if audio_id.startswith('Y') and len(audio_id) == 12:
+                youtube_id = audio_id[1:]  # Remove 'Y' prefix
+                start_time = 0
             else:
-                youtube_id = audio_id
+                # Handle VGGSound and YouTube-8M formats with timestamps
+                parts = audio_id.split('_')
 
-            # Skip invalid YouTube IDs (must be 11 characters, alphanumeric with - and _)
-            if not youtube_id or len(youtube_id) != 11:
+                # Last part is always numeric (timestamp or duration)
+                if len(parts) >= 2 and parts[-1].isdigit():
+                    # YouTube ID is everything except the last 1 or 2 numeric parts
+                    # VGGSound: ytid_timestamp (2 parts after ytid)
+                    # YouTube-8M: ytid_start_duration (2 parts after ytid)
+
+                    # YouTube IDs are 11 characters, so find where it ends
+                    # Try to reconstruct by taking parts until we have 11 chars
+                    for split_idx in range(1, len(parts)):
+                        potential_ytid = '_'.join(parts[:split_idx])
+                        if len(potential_ytid) == 11:
+                            youtube_id = potential_ytid
+                            # Remaining parts are timestamps
+                            remaining = parts[split_idx:]
+                            if len(remaining) >= 1 and remaining[0].isdigit():
+                                start_time = int(remaining[0])
+                            else:
+                                start_time = 0
+                            break
+                    else:
+                        # Couldn't find valid split, skip
+                        continue
+                else:
+                    # No timestamp info, try as-is
+                    youtube_id = audio_id
+                    start_time = 0
+
+            # Validate YouTube ID (11 chars, alphanumeric + - and _)
+            if len(youtube_id) != 11:
                 continue
-
-            # Basic validation: YouTube IDs are alphanumeric with - and _
             if not all(c.isalnum() or c in '-_' for c in youtube_id):
                 continue
-
-            # AudioSetCaps doesn't provide start times in the CSV
-            # These are 10-second clips but we need to check if the full video
-            # or a specific segment is meant. For now, start at 0.
-            # TODO: May need to find original AudioSet metadata for exact timestamps
-            start_time = 0
 
             sample = {
                 "youtube_id": youtube_id,
