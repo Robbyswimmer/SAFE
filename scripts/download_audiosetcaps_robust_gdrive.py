@@ -251,6 +251,7 @@ class RobustGDriveDownloader:
 
     def _fetch_manifest_via_cli(self) -> List[Dict[str, str]]:
         """Use `gdown --folder` output to capture the manifest before download starts."""
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
         cmd = [
             sys.executable,
             "-m",
@@ -269,7 +270,7 @@ class RobustGDriveDownloader:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            cwd=self.temp_dir,
+            cwd=str(self.temp_dir),
             env=env,
         )
 
