@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 from tqdm import tqdm
 import time
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def check_ytdlp():
@@ -23,11 +24,46 @@ def check_ytdlp():
         print("Install with: pip install yt-dlp")
         return False
 
-def download_audio(youtube_id, output_path, max_retries=3, cookies_file=None):
-    """Download audio from YouTube using yt-dlp."""
+
+def get_random_user_agent():
+    """Get random user agent to avoid bot detection."""
+    user_agents = [
+        # Android YouTube app (most effective for bypassing restrictions)
+        'com.google.android.youtube/17.36.4 (Linux; U; Android 11) gzip',
+        'com.google.android.youtube/18.11.34 (Linux; U; Android 13) gzip',
+        'com.google.android.youtube/19.09.36 (Linux; U; Android 14) gzip',
+        # iOS
+        'com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iOS 16_0 like Mac OS X)',
+        # Desktop browsers
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    ]
+    return random.choice(user_agents)
+
+def download_audio(youtube_id, output_path, start_time=0, max_retries=3, cookies_file=None, adaptive_rate_limit=True):
+    """
+    Download audio from YouTube using yt-dlp with advanced anti-bot detection.
+
+    Args:
+        youtube_id: YouTube video ID
+        output_path: Directory to save audio file
+        start_time: Start time in seconds for 10-second clip (default: 0)
+        max_retries: Number of download attempts
+        cookies_file: Path to cookies.txt file
+        adaptive_rate_limit: Enable human-like timing and rate limiting
+    """
     url = f"https://www.youtube.com/watch?v={youtube_id}"
 
-    # Base yt-dlp command for audio-only download
+    # Human-like random delay before starting download (2-8 seconds)
+    if adaptive_rate_limit:
+        human_delay = random.uniform(2.0, 8.0)
+        time.sleep(human_delay)
+
+    # Calculate end time for 10-second clip
+    end_time = start_time + 10
+
+    # Base yt-dlp command for audio-only download with precise clipping
     base_cmd = [
         'yt-dlp',
         '--extract-audio',
@@ -36,21 +72,50 @@ def download_audio(youtube_id, output_path, max_retries=3, cookies_file=None):
         '--output', str(output_path / f'{youtube_id}.%(ext)s'),
         '--no-playlist',
         '--ignore-errors',
-        '--sleep-interval', '1',  # Sleep 1-2 seconds between downloads
-        '--max-sleep-interval', '2',
-        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        '--no-warnings',
+        '--quiet',  # Suppress most output
+        '--user-agent', get_random_user_agent(),  # Rotate user agents
+        # Download and clip to exactly 10 seconds using ffmpeg
+        '--postprocessor-args', f'ffmpeg:-ss {start_time} -t 10',
     ]
+
+    # Add human-like random sleep intervals
+    if adaptive_rate_limit:
+        sleep_min = random.uniform(1.0, 2.0)
+        sleep_max = random.uniform(3.0, 5.0)
+        base_cmd.extend([
+            '--sleep-interval', str(sleep_min),
+            '--max-sleep-interval', str(sleep_max),
+        ])
 
     # Add cookies if provided
     if cookies_file and os.path.exists(cookies_file):
         base_cmd.extend(['--cookies', cookies_file])
 
-    # Retry strategies: Android client first (no auth needed), then fallback
+    # Advanced retry strategies with anti-bot measures
     retry_strategies = [
-        ['--extractor-args', 'youtube:player_client=android'],  # Android client (bypasses bot detection)
+        # Strategy 1: Android client (most effective)
+        ['--extractor-args', 'youtube:player_client=android'],
+        # Strategy 2: Android with additional headers
+        [
+            '--extractor-args', 'youtube:player_client=android',
+            '--add-header', 'X-YouTube-Client-Name:3',
+            '--add-header', 'X-YouTube-Client-Version:17.36.4',
+        ],
+        # Strategy 3: iOS client
+        ['--extractor-args', 'youtube:player_client=ios'],
+        # Strategy 4: Force IPv4 with Android
         ['--force-ipv4', '--extractor-args', 'youtube:player_client=android'],
-        [],  # Default (no extra args)
+        # Strategy 5: Web client with custom headers
+        [
+            '--add-header', 'Accept-Language:en-US,en;q=0.9',
+            '--add-header', 'Sec-Fetch-Dest:document',
+            '--add-header', 'Sec-Fetch-Mode:navigate',
+        ],
     ]
+
+    bot_detected = False
+    rate_limited = False
 
     for attempt in range(max_retries):
         # Use different strategy for each attempt
@@ -58,47 +123,70 @@ def download_audio(youtube_id, output_path, max_retries=3, cookies_file=None):
         cmd = base_cmd + strategy + [url]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
                 return True
             else:
                 # Check for specific errors
                 stderr_lower = result.stderr.lower()
-                if 'sign in' in stderr_lower or 'bot' in stderr_lower:
-                    if attempt == 0:
-                        print(f"⚠ {youtube_id}: YouTube bot detection - trying Android client...")
-                elif 'private' in stderr_lower:
-                    # Don't retry private videos
+
+                # Detect bot/rate limit patterns (silently)
+                if any(indicator in stderr_lower for indicator in [
+                    'sign in', 'bot', 'captcha', 'too many requests',
+                    'rate limit', 'unusual traffic', '403', '429'
+                ]):
+                    bot_detected = True
+
+                if any(indicator in stderr_lower for indicator in ['rate', 'quota', 'limit']):
+                    if not rate_limited:
+                        rate_limited = True
+                        # Adaptive backoff for rate limiting
+                        backoff = random.uniform(10.0, 20.0) * (attempt + 1)
+                        time.sleep(backoff)
+
+                # Don't retry unavailable/private videos
+                if any(indicator in stderr_lower for indicator in [
+                    'private', 'unavailable', 'not available', 'removed'
+                ]):
                     return False
 
-                if attempt == max_retries - 1:
-                    # Only print error on final attempt
-                    error_msg = result.stderr.split('\n')[0] if result.stderr else 'Unknown error'
-                    print(f"✗ {youtube_id}: {error_msg}")
         except subprocess.TimeoutExpired:
-            print(f"⏱ Timeout downloading {youtube_id} (attempt {attempt + 1})")
+            pass  # Silent - will be counted in stats
         except Exception as e:
-            print(f"✗ Error downloading {youtube_id}: {e}")
+            pass  # Silent - will be counted in stats
 
-        # Exponential backoff between retries
-        time.sleep(2 ** attempt)
+        # Exponential backoff with jitter between retries
+        if attempt < max_retries - 1:
+            backoff = (2 ** attempt) + random.uniform(0, 2)
+            time.sleep(backoff)
 
     return False
 
-def download_single_clip(youtube_id, output_dir, cookies_file=None):
-    """Download a single audio clip. Returns (youtube_id, success)."""
+def download_single_clip(youtube_id, output_dir, start_time=0, cookies_file=None):
+    """
+    Download a single 10-second audio clip.
+
+    Args:
+        youtube_id: YouTube video ID
+        output_dir: Directory to save audio
+        start_time: Start time in seconds for the 10-second clip
+        cookies_file: Path to cookies.txt file
+
+    Returns:
+        Tuple of (youtube_id, success, status_message)
+    """
     # Skip if already downloaded
     potential_files = list(output_dir.glob(f"{youtube_id}.*"))
     if potential_files:
         return (youtube_id, True, "already_exists")
 
-    # Download
-    success = download_audio(youtube_id, output_dir, cookies_file=cookies_file)
+    # Download 10-second clip starting at start_time
+    success = download_audio(youtube_id, output_dir, start_time=start_time, cookies_file=cookies_file)
     return (youtube_id, success, "success" if success else "failed")
 
 
 def process_audiocaps_csv(csv_path, output_dir, max_downloads=None, num_workers=4, cookies_file=None):
-    """Process AudioCaps CSV and download audio files in parallel."""
+    """Process AudioCaps CSV and download 10-second audio clips in parallel."""
     print(f"Processing {csv_path}...")
 
     if not csv_path.exists():
@@ -108,11 +196,19 @@ def process_audiocaps_csv(csv_path, output_dir, max_downloads=None, num_workers=
     # Read CSV
     df = pd.read_csv(csv_path)
 
+    # Check if start_time column exists
+    has_start_time = 'start_time' in df.columns
+    if not has_start_time:
+        print("⚠️  Warning: CSV does not have 'start_time' column - downloading from beginning of videos")
+        print("   For accurate 10-second clips, ensure CSV has 'start_time' column")
+        df['start_time'] = 0  # Default to start
+
     # Limit downloads for testing
     if max_downloads:
         df = df.head(max_downloads)
 
     print(f"Found {len(df)} audio clips to download")
+    print(f"Downloading 10-second clips" + (f" starting at specified times" if has_start_time else " from video start"))
     print(f"Using {num_workers} parallel workers")
 
     # Create output directory
@@ -122,31 +218,43 @@ def process_audiocaps_csv(csv_path, output_dir, max_downloads=None, num_workers=
     successful = 0
     failed = 0
     already_exists = 0
+    processed = 0
 
     # Download files in parallel (reduced workers to avoid rate limiting)
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        # Submit all download tasks
+        # Submit all download tasks with start_time
         future_to_id = {
-            executor.submit(download_single_clip, row['youtube_id'], output_dir, cookies_file): row['youtube_id']
+            executor.submit(
+                download_single_clip,
+                row['youtube_id'],
+                output_dir,
+                start_time=int(row.get('start_time', 0)),  # Get start_time from CSV
+                cookies_file=cookies_file
+            ): row['youtube_id']
             for idx, row in df.iterrows()
         }
 
-        # Process completed downloads with progress bar
-        with tqdm(total=len(df), desc="Downloading") as pbar:
-            for future in as_completed(future_to_id):
-                youtube_id, success, status = future.result()
+        # Process completed downloads with periodic updates (every 50 files)
+        print(f"Downloading {len(df)} clips...")
+        for future in as_completed(future_to_id):
+            youtube_id, success, status = future.result()
 
-                if status == "already_exists":
-                    already_exists += 1
-                    successful += 1
-                elif success:
-                    successful += 1
-                else:
-                    failed += 1
+            if status == "already_exists":
+                already_exists += 1
+                successful += 1
+            elif success:
+                successful += 1
+            else:
+                failed += 1
 
-                pbar.update(1)
+            processed += 1
 
-    print(f"Download complete: {successful} successful ({already_exists} already existed), {failed} failed")
+            # Print progress every 50 files
+            if processed % 50 == 0 or processed == len(df):
+                downloaded = successful - already_exists
+                print(f"Progress: {processed}/{len(df)} | Downloaded: {downloaded} | Skipped: {already_exists} | Failed: {failed}")
+
+    print(f"\n✓ Download complete: {successful} successful ({already_exists} already existed), {failed} failed")
 
 def download_metadata_csv(split, metadata_dir):
     """Download AudioCaps metadata CSV from GitHub if not present."""
