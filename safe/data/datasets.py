@@ -232,6 +232,11 @@ class _BaseQADataset(Dataset):
         _add_candidate(raw_audio_path)
 
         if sound_name and split_name:
+            # Prefer 10-second clipped audio directory if available
+            base_candidate_10s = Path("audio") / f"{split_name}_10s" / sound_name
+            _add_candidate(base_candidate_10s)
+
+            # Fallback to regular audio directory
             base_candidate = Path("audio") / str(split_name) / sound_name
             _add_candidate(base_candidate)
 
