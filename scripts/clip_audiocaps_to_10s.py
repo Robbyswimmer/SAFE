@@ -112,7 +112,23 @@ def process_audiocaps_directory(csv_path, audio_dir, output_dir=None, min_durati
         df['start_time'] = 0
 
     # Create mapping from youtube_id to start_time
-    id_to_start_time = dict(zip(df['youtube_id'], df['start_time']))
+    # Handle both naming schemes:
+    # 1. youtube_id.wav (from YouTube downloader)
+    # 2. youtube_id_starttime.wav (from HuggingFace downloader)
+    id_to_start_time = {}
+    for _, row in df.iterrows():
+        youtube_id = row['youtube_id']
+        start_time = row['start_time']
+
+        # Map plain youtube_id
+        id_to_start_time[youtube_id] = start_time
+
+        # Map youtube_id_starttime format (start_time in milliseconds or seconds)
+        # Try both milliseconds and seconds
+        start_ms = int(start_time * 1000)
+        start_s = int(start_time)
+        id_to_start_time[f"{youtube_id}_{start_ms:06d}"] = start_time
+        id_to_start_time[f"{youtube_id}_{start_s:06d}"] = start_time
 
     # Find all audio files
     audio_files = list(audio_dir.glob("*.wav")) + list(audio_dir.glob("*.mp3"))
@@ -127,17 +143,17 @@ def process_audiocaps_directory(csv_path, audio_dir, output_dir=None, min_durati
 
     # Process each file
     for audio_file in tqdm(audio_files, desc="Clipping audio"):
-        # Extract youtube_id from filename (assuming format: {youtube_id}.wav)
-        youtube_id = audio_file.stem
+        # Extract filename stem (handles both youtube_id.wav and youtube_id_starttime.wav)
+        file_stem = audio_file.stem
 
-        # Check if output already exists
-        output_file = output_dir / f"{youtube_id}.wav"
+        # Check if output already exists (preserve original filename)
+        output_file = output_dir / f"{file_stem}.wav"
         if output_file.exists():
             already_exists += 1
             continue
 
         # Check if we have metadata for this file
-        if youtube_id not in id_to_start_time:
+        if file_stem not in id_to_start_time:
             skipped_no_metadata += 1
             continue
 
@@ -155,8 +171,8 @@ def process_audiocaps_directory(csv_path, audio_dir, output_dir=None, min_durati
             shutil.copy2(audio_file, output_file)
             continue
 
-        # Clip to 10 seconds
-        start_time = int(id_to_start_time[youtube_id])
+        # Clip to 10 seconds using start_time from metadata
+        start_time = int(id_to_start_time[file_stem])
         success = clip_audio_file(audio_file, output_file, start_time, duration=10)
 
         if success:
