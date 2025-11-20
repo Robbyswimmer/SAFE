@@ -36,6 +36,20 @@ def load_json_metadata(json_path: Path) -> List[Dict]:
             return data if isinstance(data, list) else []
 
 
+def load_csv_metadata(csv_path: Path) -> List[Dict]:
+    """Load CSV metadata file."""
+    if not csv_path.exists():
+        return []
+
+    import csv
+    data = []
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            data.append(row)
+    return data
+
+
 def extract_identifiers(metadata: List[Dict], split_name: str) -> Tuple[Set[str], Set[str], Dict[str, List[str]]]:
     """
     Extract identifiers from metadata.
@@ -178,40 +192,49 @@ def main():
     print("="*70)
     print(f"Data root: {data_root}\n")
 
-    # Find metadata files
-    train_json_candidates = [
+    # Find metadata files (JSON or CSV)
+    train_candidates = [
         data_root / "AudioCaps_train.json",
         data_root / "audiocaps_train.json",
         data_root / "train.json",
+        data_root / "train.csv",
     ]
-    val_json_candidates = [
+    val_candidates = [
         data_root / "AudioCaps_val.json",
         data_root / "audiocaps_val.json",
         data_root / "val.json",
+        data_root / "val.csv",
     ]
 
-    train_json = next((p for p in train_json_candidates if p.exists()), None)
-    val_json = next((p for p in val_json_candidates if p.exists()), None)
+    train_file = next((p for p in train_candidates if p.exists()), None)
+    val_file = next((p for p in val_candidates if p.exists()), None)
 
-    if not train_json:
+    if not train_file:
         print(f"❌ Train metadata not found. Looked for:")
-        for p in train_json_candidates:
+        for p in train_candidates:
             print(f"   - {p}")
         return 1
 
-    if not val_json:
+    if not val_file:
         print(f"❌ Val metadata not found. Looked for:")
-        for p in val_json_candidates:
+        for p in val_candidates:
             print(f"   - {p}")
         return 1
 
-    print(f"✓ Found train metadata: {train_json.name}")
-    print(f"✓ Found val metadata: {val_json.name}\n")
+    print(f"✓ Found train metadata: {train_file.name}")
+    print(f"✓ Found val metadata: {val_file.name}\n")
 
     # Load metadata
     print("Loading metadata...")
-    train_meta = load_json_metadata(train_json)
-    val_meta = load_json_metadata(val_json)
+    if train_file.suffix == '.csv':
+        train_meta = load_csv_metadata(train_file)
+    else:
+        train_meta = load_json_metadata(train_file)
+
+    if val_file.suffix == '.csv':
+        val_meta = load_csv_metadata(val_file)
+    else:
+        val_meta = load_json_metadata(val_file)
 
     print(f"Train samples: {len(train_meta)}")
     print(f"Val samples: {len(val_meta)}\n")
