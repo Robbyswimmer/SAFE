@@ -192,89 +192,136 @@ def main():
     print("="*70)
     print(f"Data root: {data_root}\n")
 
-    # Find metadata files (JSON or CSV)
-    train_candidates = [
-        data_root / "AudioCaps_train.json",
-        data_root / "audiocaps_train.json",
-        data_root / "train.json",
-        data_root / "train.csv",
-    ]
-    val_candidates = [
-        data_root / "AudioCaps_val.json",
-        data_root / "audiocaps_val.json",
-        data_root / "val.json",
-        data_root / "val.csv",
-    ]
+    # Find ALL metadata files for thorough checking
+    train_files = []
+    val_files = []
 
-    train_file = next((p for p in train_candidates if p.exists()), None)
-    val_file = next((p for p in val_candidates if p.exists()), None)
+    for name in ["train.csv", "AudioCaps_train.json", "audiocaps_train.json", "train.json"]:
+        path = data_root / name
+        if path.exists():
+            train_files.append(path)
 
-    if not train_file:
-        print(f"❌ Train metadata not found. Looked for:")
-        for p in train_candidates:
-            print(f"   - {p}")
+    for name in ["val.csv", "AudioCaps_val.json", "audiocaps_val.json", "val.json"]:
+        path = data_root / name
+        if path.exists():
+            val_files.append(path)
+
+    if not train_files:
+        print(f"❌ No train metadata found in {data_root}")
         return 1
 
-    if not val_file:
-        print(f"❌ Val metadata not found. Looked for:")
-        for p in val_candidates:
-            print(f"   - {p}")
+    if not val_files:
+        print(f"❌ No val metadata found in {data_root}")
         return 1
 
-    print(f"✓ Found train metadata: {train_file.name}")
-    print(f"✓ Found val metadata: {val_file.name}\n")
+    print(f"✓ Found {len(train_files)} train file(s): {[f.name for f in train_files]}")
+    print(f"✓ Found {len(val_files)} val file(s): {[f.name for f in val_files]}\n")
 
-    # Load metadata
-    print("Loading metadata...")
-    if train_file.suffix == '.csv':
-        train_meta = load_csv_metadata(train_file)
-    else:
-        train_meta = load_json_metadata(train_file)
+    # Load all metadata files for comprehensive checking
+    print("Loading metadata from all files...")
 
-    if val_file.suffix == '.csv':
-        val_meta = load_csv_metadata(val_file)
-    else:
-        val_meta = load_json_metadata(val_file)
+    all_train_meta = []
+    for train_file in train_files:
+        if train_file.suffix == '.csv':
+            meta = load_csv_metadata(train_file)
+        else:
+            meta = load_json_metadata(train_file)
+        print(f"  {train_file.name}: {len(meta)} samples")
+        all_train_meta.append((train_file.name, meta))
 
-    print(f"Train samples: {len(train_meta)}")
-    print(f"Val samples: {len(val_meta)}\n")
+    all_val_meta = []
+    for val_file in val_files:
+        if val_file.suffix == '.csv':
+            meta = load_csv_metadata(val_file)
+        else:
+            meta = load_json_metadata(val_file)
+        print(f"  {val_file.name}: {len(meta)} samples")
+        all_val_meta.append((val_file.name, meta))
 
-    if not train_meta or not val_meta:
-        print("❌ Failed to load metadata")
-        return 1
+    print()
 
-    # Extract identifiers
-    print("Extracting identifiers...")
-    train_ids, train_files, train_captions = extract_identifiers(train_meta, "train")
-    val_ids, val_files, val_captions = extract_identifiers(val_meta, "val")
+    # Check each train file against each val file
+    print("="*70)
+    print("CHECKING ALL TRAIN-VAL COMBINATIONS")
+    print("="*70)
 
-    # Check for overlaps
+    all_results = []
+
+    for train_name, train_meta in all_train_meta:
+        for val_name, val_meta in all_val_meta:
+            print(f"\n--- Checking: {train_name} vs {val_name} ---")
+
+            # Extract identifiers
+            train_ids, train_audio_files, train_captions = extract_identifiers(train_meta, train_name)
+            val_ids, val_audio_files, val_captions = extract_identifiers(val_meta, val_name)
+
+            # Check overlaps
+            id_overlap = train_ids & val_ids
+            file_overlap = train_audio_files & val_audio_files
+            caption_overlaps = check_caption_overlap(train_captions, val_captions)
+
+            result = {
+                'train_file': train_name,
+                'val_file': val_name,
+                'train_count': len(train_meta),
+                'val_count': len(val_meta),
+                'id_overlap': len(id_overlap),
+                'file_overlap': len(file_overlap),
+                'caption_overlap': len(caption_overlaps),
+                'id_overlap_samples': list(id_overlap)[:5] if id_overlap else [],
+            }
+            all_results.append(result)
+
+            if id_overlap:
+                print(f"  🚨 {len(id_overlap)} YouTube IDs overlap!")
+                print(f"     Examples: {result['id_overlap_samples']}")
+            else:
+                print(f"  ✅ No YouTube ID overlap")
+
+            if file_overlap:
+                print(f"  🚨 {len(file_overlap)} audio filenames overlap!")
+            else:
+                print(f"  ✅ No audio filename overlap")
+
+            if caption_overlaps:
+                same_id_leaks = [(tid, vid, cap) for tid, vid, cap in caption_overlaps if tid == vid]
+                if same_id_leaks:
+                    print(f"  🚨 {len(same_id_leaks)} captions with matching IDs!")
+                else:
+                    print(f"  ⚠️  {len(caption_overlaps)} caption text matches (different IDs - OK)")
+            else:
+                print(f"  ✅ No caption overlap")
+
+    # Summary
     print("\n" + "="*70)
-    print("LEAKAGE CHECK RESULTS")
+    print("SUMMARY")
     print("="*70)
 
     leakage_found = False
 
-    # 1. YouTube ID overlap
-    id_overlap = train_ids & val_ids
-    if id_overlap:
-        leakage_found = True
-        print(f"\n🚨 LEAKAGE DETECTED: {len(id_overlap)} YouTube IDs in both train and val!")
-        print(f"   Examples: {list(id_overlap)[:5]}")
-    else:
-        print(f"\n✅ YouTube IDs: No overlap ({len(train_ids)} train, {len(val_ids)} val)")
+    for result in all_results:
+        if result['id_overlap'] > 0 or result['file_overlap'] > 0:
+            leakage_found = True
+            print(f"\n🚨 LEAKAGE: {result['train_file']} vs {result['val_file']}")
+            if result['id_overlap'] > 0:
+                print(f"   - {result['id_overlap']} YouTube IDs overlap")
+                print(f"   - Examples: {result['id_overlap_samples']}")
+            if result['file_overlap'] > 0:
+                print(f"   - {result['file_overlap']} audio filenames overlap")
 
-    # 2. Audio file overlap (metadata)
-    file_overlap = train_files & val_files
-    if file_overlap:
-        leakage_found = True
-        print(f"\n🚨 LEAKAGE DETECTED: {len(file_overlap)} audio filenames in both train and val!")
-        print(f"   Examples: {list(file_overlap)[:5]}")
-    else:
-        print(f"✅ Audio filenames (metadata): No overlap")
+    if not leakage_found:
+        print("\n✅ No leakage detected in any train-val combination!")
+        print("\nFile sizes:")
+        for result in all_results:
+            print(f"  {result['train_file']}: {result['train_count']} train samples")
+            print(f"  {result['val_file']}: {result['val_count']} val samples")
 
-    # 3. Audio file overlap (on disk)
+    # Audio file overlap (on disk)
     if args.check_audio_files:
+        print("\n" + "="*70)
+        print("AUDIO FILE CHECK (on disk)")
+        print("="*70)
+
         train_audio_dir = data_root / "audio" / "train"
         val_audio_dir = data_root / "audio" / "val"
 
@@ -291,30 +338,7 @@ def main():
             print(f"\n🚨 LEAKAGE DETECTED: {len(disk_overlap)} audio files on disk in both train and val!")
             print(f"   Examples: {list(disk_overlap)[:5]}")
         else:
-            print(f"✅ Audio files (on disk): No overlap")
-
-    # 4. Caption text overlap
-    caption_overlaps = check_caption_overlap(train_captions, val_captions)
-
-    if caption_overlaps:
-        print(f"\n⚠️  WARNING: {len(caption_overlaps)} exact caption text matches found")
-        print(f"   (This is expected for AudioCaps - same audio can have similar descriptions)")
-        print(f"   However, if the YouTube IDs also match, this indicates leakage!")
-
-        # Check if any overlapping captions share the same YouTube ID
-        same_id_caption_leaks = [
-            (tid, vid, cap) for tid, vid, cap in caption_overlaps if tid == vid
-        ]
-
-        if same_id_caption_leaks:
-            leakage_found = True
-            print(f"\n🚨 LEAKAGE DETECTED: {len(same_id_caption_leaks)} captions with matching YouTube IDs!")
-            for tid, vid, cap in same_id_caption_leaks[:3]:
-                print(f"   ID: {tid} | Caption: {cap[:60]}...")
-        else:
-            print(f"   ✓ No matching YouTube IDs for overlapping captions (likely coincidental)")
-    else:
-        print(f"\n✅ Captions: No exact text overlap")
+            print(f"\n✅ No audio file overlap on disk")
 
     # Summary
     print("\n" + "="*70)
