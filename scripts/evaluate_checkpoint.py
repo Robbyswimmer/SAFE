@@ -130,10 +130,21 @@ def evaluate(model, dataloader, device, generation_kwargs):
             audio_embeds = batch["audio_embeds"].to(device)
             audio_mask = batch["audio_mask"].to(device)
             
+            # Project audio embeddings if projector exists
+            if hasattr(model, "audio_projector"):
+                # Ensure audio_embeds is correct dtype
+                base_dtype = next(model.parameters()).dtype
+                audio_embeds = audio_embeds.to(dtype=base_dtype)
+                
+                # Project: (B, 1, 512) -> (B, 1, 5120)
+                audio_tokens = model.audio_projector(audio_embeds)
+            else:
+                audio_tokens = audio_embeds
+
             gen_outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                audio_tokens=audio_embeds,
+                audio_tokens=audio_tokens,
                 audio_attention_mask=audio_mask,
                 **generation_kwargs
             )
