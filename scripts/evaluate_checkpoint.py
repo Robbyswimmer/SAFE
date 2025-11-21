@@ -138,7 +138,7 @@ def evaluate(model, dataloader, device, generation_kwargs):
                 **generation_kwargs
             )
             
-            decoded_preds = model.tokenizer.batch_decode(gen_outputs, skip_special_tokens=True)
+            decoded_preds = model.base_vl.tokenizer.batch_decode(gen_outputs, skip_special_tokens=True)
             
             batch_answers = batch.get("answers") # List of lists of strings
             
@@ -241,7 +241,7 @@ def main():
     dataset = AudioCapsDataset(data_path=args.data_root, split=args.split)
     
     def smart_collate(batch):
-        tokenizer = model.tokenizer
+        tokenizer = model.base_vl.tokenizer
         input_texts = ["describe the audio" for _ in batch] 
         
         inputs = tokenizer(input_texts, padding=True, return_tensors="pt")
