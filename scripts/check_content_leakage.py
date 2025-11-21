@@ -93,6 +93,10 @@ def load_captions_and_filenames(file_path):
         # Extract YouTube ID
         ytid = item.get('youtube_id') or item.get('ytid')
         
+        # Check metadata dictionary (common in AudioCaps)
+        if not ytid and 'metadata' in item and isinstance(item['metadata'], dict):
+            ytid = item['metadata'].get('youtube_id') or item['metadata'].get('ytid')
+
         # Check wavcaps_id (e.g. "Yb0RFKhbpFJA.wav")
         if not ytid and 'wavcaps_id' in item:
             val = item['wavcaps_id']
@@ -100,19 +104,29 @@ def load_captions_and_filenames(file_path):
                 # Remove .wav or .flac extension
                 import re
                 val = re.sub(r'\.(wav|flac|mp3)$', '', val, flags=re.IGNORECASE)
+                val = val.strip()
                 if len(val) == 11:
                     ytid = val
+                elif len(samples) < 5: # Debug print for first few failures
+                    print(f"DEBUG: Rejected wavcaps_id: '{val}' (len {len(val)})")
 
         if not ytid and 'id' in item:
             # Sometimes ID is the YTID
             val = item['id']
-            if isinstance(val, str) and len(val) == 11: # Basic YTID check
-                ytid = val
-        
+            if isinstance(val, str):
+                val = val.strip()
+                if len(val) == 11: # Basic YTID check
+                    ytid = val
+
         if ytid:
             ytids.add(ytid.strip())
 
         samples.append(item)
+        
+    if len(samples) > 0:
+        print(f"DEBUG: First item keys: {list(samples[0].keys())}")
+        if 'metadata' in samples[0]:
+            print(f"DEBUG: First item metadata: {samples[0]['metadata']}")
         
     return captions, filenames, ytids, samples
 
