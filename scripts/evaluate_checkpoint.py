@@ -170,16 +170,63 @@ def evaluate(model, dataloader, device, generation_kwargs):
 
     return predictions, references
 
+from pycocoevalcap.bleu.bleu import Bleu
+from pycocoevalcap.meteor.meteor import Meteor
+from pycocoevalcap.rouge.rouge import Rouge
+from pycocoevalcap.cider.cider import Cider
+from pycocoevalcap.spice.spice import Spice
+
 def compute_metrics(predictions, references):
-    """Compute CIDEr and SPICE."""
+    """Compute all standard captioning metrics."""
     print("Computing metrics...")
     
-    cider_scorer = Cider()
-    cider_score, cider_scores = cider_scorer.compute_score(references, predictions)
+    metrics = {}
     
-    return {
-        "CIDEr": cider_score * 100.0,
-    }
+    # CIDEr
+    print("Computing CIDEr...")
+    cider_scorer = Cider()
+    cider_score, _ = cider_scorer.compute_score(references, predictions)
+    metrics["CIDEr"] = cider_score * 100.0
+    
+    # SPICE
+    print("Computing SPICE...")
+    try:
+        spice_scorer = Spice()
+        spice_score, _ = spice_scorer.compute_score(references, predictions)
+        metrics["SPICE"] = spice_score * 100.0
+    except Exception as e:
+        print(f"Warning: SPICE computation failed: {e}")
+        metrics["SPICE"] = 0.0
+
+    # BLEU
+    print("Computing BLEU...")
+    try:
+        bleu_scorer = Bleu(4)
+        bleu_score, _ = bleu_scorer.compute_score(references, predictions)
+        for i, score in enumerate(bleu_score):
+            metrics[f"BLEU-{i+1}"] = score * 100.0
+    except Exception as e:
+        print(f"Warning: BLEU computation failed: {e}")
+
+    # ROUGE-L
+    print("Computing ROUGE-L...")
+    try:
+        rouge_scorer = Rouge()
+        rouge_score, _ = rouge_scorer.compute_score(references, predictions)
+        metrics["ROUGE_L"] = rouge_score * 100.0
+    except Exception as e:
+        print(f"Warning: ROUGE computation failed: {e}")
+
+    # METEOR
+    print("Computing METEOR...")
+    try:
+        meteor_scorer = Meteor()
+        meteor_score, _ = meteor_scorer.compute_score(references, predictions)
+        metrics["METEOR"] = meteor_score * 100.0
+    except Exception as e:
+        print(f"Warning: METEOR computation failed: {e}")
+        
+    return metrics
 
 def main():
     parser = argparse.ArgumentParser()
