@@ -139,8 +139,12 @@ def main():
     val_caps, val_files, val_ytids, val_samples = load_captions_and_filenames(val_file)
     
     print(f"\nStats:")
-    print(f"Train: {len(train_caps)} unique captions, {len(train_files)} unique audio files")
-    print(f"Val:   {len(val_caps)} unique captions, {len(val_files)} unique audio files")
+    print(f"Train: {len(train_caps)} unique captions, {len(train_files)} unique audio files, {len(train_ytids)} unique YTIDs")
+    print(f"Val:   {len(val_caps)} unique captions, {len(val_files)} unique audio files, {len(val_ytids)} unique YTIDs")
+    
+    print("\n--- DEBUG: First 5 YTIDs ---")
+    print(f"Train: {list(train_ytids)[:5]}")
+    print(f"Val:   {list(val_ytids)[:5]}")
     
     # Check Overlaps
     print(f"\n--- LEAKAGE REPORT ---")
