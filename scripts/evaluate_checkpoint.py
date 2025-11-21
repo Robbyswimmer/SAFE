@@ -381,7 +381,7 @@ def main():
     parser.add_argument("--run_id", required=True, help="Run ID (e.g. 232228)")
     parser.add_argument("--checkpoint", help="Specific checkpoint filename")
     parser.add_argument("--data_root", default="experiments/full_training/data")
-    parser.add_argument("--split", default="test")
+    parser.add_argument("--split", default="val", help="Dataset split (default: validation used during Stage A)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--llm_model_name", help="Override LLM model name (e.g. google/flan-t5-base)")
