@@ -292,7 +292,7 @@ def main():
             "attention_mask": inputs.attention_mask,
             "audio_embeds": audio_embeds,
             "audio_mask": audio_mask,
-            "answers": [x.get("captions", [x.get("caption")]) for x in batch]
+            "answers": [x.get("answers") for x in batch]
         }
 
     dataloader = DataLoader(
@@ -301,6 +301,10 @@ def main():
         collate_fn=smart_collate,
         num_workers=4
     )
+    
+    # Debug: Check first batch
+    first_batch = next(iter(dataloader))
+    print(f"[Debug] First batch answers: {first_batch['answers'][:2]}")
     
     # 4. Evaluate
     gen_kwargs = {
