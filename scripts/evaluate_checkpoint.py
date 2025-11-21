@@ -124,37 +124,24 @@ def evaluate(model, dataloader, device, generation_kwargs):
     
     with torch.no_grad():
         for batch in tqdm(dataloader):
-            # Move inputs to device
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            audio_embeds = batch["audio_embeds"].to(device)
-            audio_mask = batch["audio_mask"].to(device)
+            # Prepare inputs using SAFEModel's method (handles chat templates & audio encoding)
+            inputs = model.prepare_multimodal_inputs(
+                text=batch["questions"],
+                audio=batch["audio"],
+                device=device
+            )
             
-            # Project audio embeddings if projector exists
-            if hasattr(model, "audio_projector"):
-                # Ensure audio_embeds is correct dtype
-                base_dtype = next(model.parameters()).dtype
-                audio_embeds = audio_embeds.to(dtype=base_dtype)
-                
-                # Project: (B, 1, 512) -> (B, 1, 5120)
-                audio_tokens = model.audio_projector(audio_embeds)
-            else:
-                audio_tokens = audio_embeds
-
+            # Generate
             gen_outputs = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                audio_tokens=audio_tokens,
-                audio_attention_mask=audio_mask,
+                **inputs,
                 **generation_kwargs
             )
             
             decoded_preds = model.base_vl.tokenizer.batch_decode(gen_outputs, skip_special_tokens=True)
             
-            batch_answers = batch.get("answers") # List of lists of strings
+            batch_answers = batch.get("answers")
             
             for i, pred in enumerate(decoded_preds):
-                # Use a global index or try to get ID
                 sample_id = str(len(predictions))
                 
                 pred_norm = _normalize_audio_caption(pred)
@@ -169,7 +156,6 @@ def evaluate(model, dataloader, device, generation_kwargs):
                     pass
 
     return predictions, references
-
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.meteor.meteor import Meteor
 from pycocoevalcap.rouge.rouge import Rouge
@@ -313,32 +299,9 @@ def main():
     dataset = AudioCapsDataset(data_path=args.data_root, split=args.split)
     
     def smart_collate(batch):
-        tokenizer = model.base_vl.tokenizer
-        input_texts = ["describe the audio" for _ in batch] 
-        
-        inputs = tokenizer(input_texts, padding=True, return_tensors="pt")
-        
-        audio_tensors = []
-        for x in batch:
-            if 'audio_embed' in x:
-                audio_tensors.append(torch.from_numpy(x['audio_embed']))
-            else:
-                pass
-                
-        if audio_tensors:
-            audio_embeds = torch.stack(audio_tensors)
-            if audio_embeds.dim() == 2: 
-                audio_embeds = audio_embeds.unsqueeze(1)
-        else:
-            audio_embeds = torch.zeros(len(batch), 1, 512)
-            
-        audio_mask = torch.ones(audio_embeds.shape[0], audio_embeds.shape[1])
-
         return {
-            "input_ids": inputs.input_ids,
-            "attention_mask": inputs.attention_mask,
-            "audio_embeds": audio_embeds,
-            "audio_mask": audio_mask,
+            "questions": [x.get("question", "describe the audio") for x in batch],
+            "audio": [x.get("audio") for x in batch],
             "answers": [x.get("answers") for x in batch]
         }
 
@@ -378,6 +341,8 @@ def main():
     with open(results_path, 'w') as f:
         json.dump(metrics, f, indent=2)
     print(f"Saved results to {results_path}")
+
+
 
 if __name__ == "__main__":
     main()
