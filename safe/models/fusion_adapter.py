@@ -464,6 +464,7 @@ class MultiLayerFusionAdapter(nn.Module):
             return hidden_states
 
         output = hidden_states
+        target_batch = hidden_states.size(0)
         for modality in modalities:
             tokens = modality_tokens.get(modality)
             if tokens is None:
@@ -471,6 +472,10 @@ class MultiLayerFusionAdapter(nn.Module):
             mask = None
             if modality_masks is not None:
                 mask = modality_masks.get(modality)
+
+            tokens = self._align_batch(tokens, target_batch)
+            if mask is not None:
+                mask = self._align_batch(mask, target_batch)
 
             adapter_key = self._adapter_key(modality, layer_idx)
             if adapter_key not in self.fusion_adapters:
@@ -492,6 +497,21 @@ class MultiLayerFusionAdapter(nn.Module):
             )
 
         return output
+
+    def _align_batch(self, tensor: torch.Tensor, target_batch: int):
+        if tensor is None or not torch.is_tensor(tensor):
+            return tensor
+        current = tensor.size(0)
+        if current == target_batch:
+            return tensor
+        if current == 1:
+            return tensor.expand(target_batch, *tensor.shape[1:])
+        if target_batch % current == 0:
+            repeat = target_batch // current
+            return tensor.repeat_interleave(repeat, dim=0)
+        raise ValueError(
+            f"Cannot align tensor batch dimension from {current} to {target_batch}"
+        )
 
     def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
         for adapter in self.fusion_adapters.values():
