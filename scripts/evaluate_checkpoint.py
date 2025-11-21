@@ -298,7 +298,23 @@ def main():
         else:
             new_state_dict[k] = v
             
-    model.load_state_dict(new_state_dict, strict=False) 
+    # Check for audio_projector keys
+    projector_keys = [k for k in new_state_dict.keys() if "audio_projector" in k]
+    if not projector_keys:
+        print("WARNING: No 'audio_projector' keys found in checkpoint! Audio will be random noise.")
+    else:
+        print(f"Found {len(projector_keys)} 'audio_projector' keys in checkpoint.")
+
+    # Load with strict=False but report missing keys
+    missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False) 
+    
+    if missing_keys:
+        print(f"Missing keys: {len(missing_keys)}")
+        # Filter for relevant keys (projector, adapter)
+        relevant_missing = [k for k in missing_keys if "audio_projector" in k or "fusion_adapter" in k]
+        if relevant_missing:
+            print(f"CRITICAL: Missing relevant keys: {relevant_missing}")
+            
     model.to(args.device)
     
     # 3. Load Data
