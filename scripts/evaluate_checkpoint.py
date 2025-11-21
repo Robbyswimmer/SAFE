@@ -230,6 +230,7 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--llm_model_name", help="Override LLM model name (e.g. google/flan-t5-base)")
+    parser.add_argument("--num_audio_tokens", type=int, default=16, help="Number of audio tokens")
     args = parser.parse_args()
     
     print(f"Using device: {args.device}")
@@ -243,7 +244,8 @@ def main():
     model_config = {
         "llm_model_name": args.llm_model_name or "llava-hf/llava-1.5-13b-hf", 
         "audio_encoder_type": "clap",
-        "llm_hidden_size": 5120 # Default for LLaVA-13B
+        "llm_hidden_size": 5120, # Default for LLaVA-13B
+        "num_audio_tokens": args.num_audio_tokens
     }
     
     if config_path.exists():
