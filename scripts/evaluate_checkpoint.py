@@ -306,9 +306,18 @@ def main():
     dataset = AudioCapsDataset(data_path=args.data_root, split=args.split)
     
     def smart_collate(batch):
+        audio_data = []
+        for x in batch:
+            audio_entry = x.get("audio")
+            if isinstance(audio_entry, tuple):
+                # Unpack (waveform, sr) -> waveform
+                audio_data.append(audio_entry[0])
+            else:
+                audio_data.append(audio_entry)
+                
         return {
             "questions": [x.get("question", "describe the audio") for x in batch],
-            "audio": [x.get("audio") for x in batch],
+            "audio": audio_data,
             "answers": [x.get("answers") for x in batch]
         }
 
