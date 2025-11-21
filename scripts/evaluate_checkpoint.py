@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from safe.models.safe_model import SAFEModel
 from safe.data.datasets import AudioCapsDataset
+from configs.model_configs import get_config as get_model_config
 
 def _normalize_audio_caption(text) -> str:
     if text is None:
@@ -163,6 +164,55 @@ def evaluate(model, dataloader, device, generation_kwargs):
                     print(f"  Ref:  {refs_norm[0]}")
 
     return predictions, references
+SAFE_MODEL_KEYS = {
+    "llm_model_name",
+    "vision_model_name",
+    "audio_encoder_type",
+    "audio_encoder_config",
+    "projector_type",
+    "num_audio_tokens",
+    "projector_config",
+    "fusion_type",
+    "fusion_layer_indices",
+    "lora_rank",
+    "fusion_config",
+    "freeze_base_vl",
+    "freeze_audio_encoder",
+    "llm_hidden_size",
+    "audio_embed_dim",
+}
+
+
+def _infer_hidden_size(model_name: str, fallback: int) -> int:
+    name = (model_name or "").lower()
+    if "t5-base" in name:
+        return 768
+    if "t5-large" in name:
+        return 1024
+    if "llava" in name and "7b" in name:
+        return 4096
+    return fallback
+
+
+def build_safe_model_kwargs(model_config_name: str, overrides: dict) -> dict:
+    try:
+        model_config = get_model_config(model_config_name)
+    except ValueError as exc:
+        raise SystemExit(f"Unknown model config '{model_config_name}'.") from exc
+
+    model_config.update(overrides)
+
+    llm_name = model_config.get("llm_model_name")
+    if llm_name:
+        current_hidden = model_config.get("llm_hidden_size", 4096)
+        model_config["llm_hidden_size"] = _infer_hidden_size(llm_name, current_hidden)
+
+    kwargs = {key: model_config[key] for key in SAFE_MODEL_KEYS if key in model_config}
+    if "llm_model_name" not in kwargs:
+        raise SystemExit("Model configuration missing 'llm_model_name'.")
+    return kwargs
+
+
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.meteor.meteor import Meteor
 from pycocoevalcap.rouge.rouge import Rouge
@@ -231,6 +281,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--llm_model_name", help="Override LLM model name (e.g. google/flan-t5-base)")
     parser.add_argument("--num_audio_tokens", type=int, default=16, help="Number of audio tokens")
+    parser.add_argument("--model_config", default="full", help="SAFE model preset (demo/full/multimodal)")
     args = parser.parse_args()
     
     print(f"Using device: {args.device}")
@@ -240,54 +291,26 @@ def main():
     run_dir = checkpoint_path.parent.parent
     config_path = run_dir / "config.json" 
     
-    # Default config (Match FULL_CONFIG from model_configs.py)
-    model_config = {
-        "llm_model_name": args.llm_model_name or "llava-hf/llava-1.5-13b-hf", 
-        "audio_encoder_type": "clap",
-        "llm_hidden_size": 5120, # Default for LLaVA-13B
-        "num_audio_tokens": args.num_audio_tokens
-    }
-    
     if config_path.exists():
-        print(f"Loading config from {config_path}")
-        with open(config_path, 'r') as f:
-            loaded_config = json.load(f)
-            # Map 'variant' to 'llm_model_name' if present
-            if "variant" in loaded_config:
-                 variant = loaded_config["variant"]
-                 if variant == "t5-base":
-                     model_config["llm_model_name"] = "t5-base"
-                     model_config["llm_hidden_size"] = 768
-                 elif variant == "flan-t5-base":
-                     model_config["llm_model_name"] = "google/flan-t5-base"
-                     model_config["llm_hidden_size"] = 768
-                 else:
-                     model_config["llm_model_name"] = variant
-            
-            # Allow config to override if not explicitly set by arg
-            if not args.llm_model_name and "llm_model_name" in loaded_config:
-                model_config["llm_model_name"] = loaded_config["llm_model_name"]
-            
-            if "llm_hidden_size" in loaded_config:
-                model_config["llm_hidden_size"] = loaded_config["llm_hidden_size"]
+        print(f"Loading trainer config from {config_path}")
     else:
-        print(f"WARNING: Config not found at {config_path}. Using default: {model_config['llm_model_name']}")
-        # Adjust hidden size if user overrode model name via CLI but no config file
-        if "t5-base" in model_config["llm_model_name"]:
-            model_config["llm_hidden_size"] = 768
-        elif "t5-large" in model_config["llm_model_name"]:
-            model_config["llm_hidden_size"] = 1024
-        elif "llava" in model_config["llm_model_name"] and "7b" in model_config["llm_model_name"]:
-             model_config["llm_hidden_size"] = 4096
+        print(f"WARNING: Trainer config not found at {config_path}. Continuing with defaults.")
 
-    print(f"Initializing model with LLM: {model_config['llm_model_name']} (hidden_size={model_config['llm_hidden_size']})")
-    print(f"Model Config num_audio_tokens: {model_config.get('num_audio_tokens')}")
-    model = SAFEModel(
-        llm_model_name=model_config['llm_model_name'],
-        audio_encoder_type=model_config['audio_encoder_type'],
-        llm_hidden_size=model_config['llm_hidden_size'],
-        num_audio_tokens=model_config['num_audio_tokens']
+    model_overrides = {}
+    if args.llm_model_name:
+        model_overrides["llm_model_name"] = args.llm_model_name
+    model_overrides["num_audio_tokens"] = args.num_audio_tokens
+
+    safe_model_kwargs = build_safe_model_kwargs(args.model_config, model_overrides)
+    print(
+        "Initializing model with preset '{}' (LLM: {} hidden_size={} num_audio_tokens={})".format(
+            args.model_config,
+            safe_model_kwargs.get("llm_model_name"),
+            safe_model_kwargs.get("llm_hidden_size"),
+            safe_model_kwargs.get("num_audio_tokens"),
+        )
     )
+    model = SAFEModel(**safe_model_kwargs)
     
     print("Loading weights...")
     state_dict = torch.load(checkpoint_path, map_location="cpu")
