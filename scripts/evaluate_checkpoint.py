@@ -135,54 +135,141 @@ def load_checkpoint(run_id, checkpoint_name=None, experiments_dir="experiments/f
     return checkpoint_path
 
 def evaluate(model, dataloader, device, generation_kwargs):
-    """Run evaluation loop."""
+    """Run evaluation loop with SAFE-style decoding."""
     model.eval()
-    
+
+    tokenizer = model.base_vl.tokenizer
+    pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_token_id is None:
+        pad_token_id = getattr(tokenizer, "eos_token_id", 0)
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+
     predictions = {}
     references = {}
-    
+
     print(f"Evaluating on {len(dataloader.dataset)} samples...")
-    
-    with torch.no_grad():
-        for batch in tqdm(dataloader):
-            # Generate directly with high-level API (handles prompt + audio fusion internally)
-            gen_outputs = model.generate(
-                text=batch["questions"],
-                audio=batch["audio"],
-                **generation_kwargs
-            )
 
-            if not isinstance(gen_outputs, torch.Tensor):
-                gen_outputs = torch.as_tensor(gen_outputs)
+    gate_controller = getattr(model, "set_gate", None)
+    saved_gate = None
+    if callable(gate_controller):
+        saved_gate = getattr(model, "_default_gate", None)
+        try:
+            gate_controller(1.0)
+        except Exception:
+            pass
 
-            decoded_preds = model.base_vl.tokenizer.batch_decode(gen_outputs, skip_special_tokens=True)
-            
-            batch_answers = batch.get("answers")
-            
-            for i, pred in enumerate(decoded_preds):
-                sample_id = str(len(predictions))
-
-                stripped_pred = _strip_prompt_prefix(pred)
-                pred_norm = _normalize_audio_caption(stripped_pred)
-                predictions[sample_id] = [pred_norm]
-
-                if batch_answers:
-                    refs = batch_answers[i]
-                    if isinstance(refs, str):
-                        refs = [refs]
-                    refs_norm = [_normalize_audio_caption(r) for r in refs]
-                    references[sample_id] = refs_norm
+    try:
+        with torch.no_grad():
+            for batch in tqdm(dataloader):
+                questions = batch.get("questions") or []
+                audio_entries = batch.get("audio")
+                if isinstance(audio_entries, list):
+                    has_audio = any(a is not None for a in audio_entries)
                 else:
-                    refs_norm = ["<No Reference>"]
+                    has_audio = audio_entries is not None
 
-                if int(sample_id) % 50 == 0:
-                    preview = stripped_pred.strip() or pred.strip()
-                    preview = preview[:200] if preview else "<empty>"
-                    print(f"\n[Sample {sample_id}]")
-                    print(f"  Pred: {preview}")
-                    print(f"  Ref:  {refs_norm[0]}")
+                inputs = model.prepare_multimodal_inputs(
+                    text=questions,
+                    audio=audio_entries,
+                    device=device,
+                    include_audio_tokens=has_audio,
+                    training_mode=False,
+                )
+                inputs.pop("labels", None)
+
+                input_ids = inputs.get("input_ids")
+                if input_ids is None:
+                    continue
+                attention_mask = inputs.get("attention_mask")
+                audio_tokens = inputs.get("audio_tokens")
+                audio_attention_mask = inputs.get("audio_attention_mask")
+
+                gen_inputs = {
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "audio_tokens": audio_tokens,
+                    "audio_attention_mask": audio_attention_mask,
+                }
+
+                local_kwargs = dict(generation_kwargs)
+                local_kwargs.setdefault("min_new_tokens", 1)
+                local_kwargs.setdefault("do_sample", False)
+                if "pad_token_id" not in local_kwargs:
+                    local_kwargs["pad_token_id"] = pad_token_id
+                if "eos_token_id" not in local_kwargs and eos_token_id is not None:
+                    local_kwargs["eos_token_id"] = eos_token_id
+                if has_audio:
+                    local_kwargs.setdefault("repetition_penalty", 1.1)
+
+                gen_outputs = model.generate(**gen_inputs, **local_kwargs)
+                if not isinstance(gen_outputs, torch.Tensor):
+                    gen_outputs = torch.as_tensor(gen_outputs)
+
+                if gen_outputs.dim() == 3:
+                    # HF generate can return (batch, sequences, seq_len) when num_return_sequences>1
+                    gen_outputs = gen_outputs[:, 0, :]
+
+                if isinstance(attention_mask, torch.Tensor):
+                    prompt_lengths = attention_mask.sum(dim=1)
+                else:
+                    prompt_lengths = torch.full(
+                        (gen_outputs.size(0),),
+                        input_ids.size(1),
+                        dtype=torch.long,
+                        device=gen_outputs.device,
+                    )
+
+                decoded_preds = []
+                for i in range(gen_outputs.size(0)):
+                    tokens = gen_outputs[i]
+                    start_idx = int(prompt_lengths[i].item())
+                    if start_idx < tokens.size(0):
+                        gen_tokens = tokens[start_idx:]
+                    else:
+                        gen_tokens = tokens.new_zeros(0)
+                    if gen_tokens.numel() == 0:
+                        tail = local_kwargs.get("max_new_tokens")
+                        if isinstance(tail, int) and tail > 0:
+                            gen_tokens = tokens[-tail:]
+                        else:
+                            gen_tokens = tokens
+                    decoded = tokenizer.decode(gen_tokens, skip_special_tokens=True)
+                    decoded_preds.append(decoded)
+
+                batch_answers = batch.get("answers")
+
+                for i, pred in enumerate(decoded_preds):
+                    sample_id = str(len(predictions))
+
+                    stripped_pred = _strip_prompt_prefix(pred)
+                    pred_norm = _normalize_audio_caption(stripped_pred)
+                    predictions[sample_id] = [pred_norm]
+
+                    if batch_answers:
+                        refs = batch_answers[i]
+                        if isinstance(refs, str):
+                            refs = [refs]
+                        refs_norm = [_normalize_audio_caption(r) for r in refs]
+                        references[sample_id] = refs_norm
+                    else:
+                        refs_norm = ["<No Reference>"]
+
+                    if int(sample_id) % 50 == 0:
+                        display = stripped_pred.strip()
+                        if not display:
+                            display = "<empty>"
+                        print(f"\n[Sample {sample_id}]")
+                        print(f"  Pred: {display}")
+                        print(f"  Ref:  {refs_norm[0]}")
+    finally:
+        if callable(gate_controller) and saved_gate is not None:
+            try:
+                gate_controller(saved_gate)
+            except Exception:
+                model._default_gate = saved_gate
 
     return predictions, references
+
 SAFE_MODEL_KEYS = {
     "llm_model_name",
     "vision_model_name",
@@ -230,7 +317,6 @@ def build_safe_model_kwargs(model_config_name: str, overrides: dict) -> dict:
     if "llm_model_name" not in kwargs:
         raise SystemExit("Model configuration missing 'llm_model_name'.")
     return kwargs
-
 
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.meteor.meteor import Meteor
