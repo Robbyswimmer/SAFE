@@ -29,6 +29,18 @@ def load_captions_and_filenames(file_path):
             for line in f:
                 if line.strip():
                     data.append(json.loads(line))
+    elif path.suffix == '.csv':
+        import csv
+        with open(path, 'r') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                # CSV format: id, youtube_id, start_time, caption
+                if len(row) >= 4:
+                    data.append({
+                        "id": row[0],
+                        "youtube_id": row[1],
+                        "caption": row[3]
+                    })
     else:
         with open(path, 'r') as f:
             content = json.load(f)
