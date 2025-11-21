@@ -14,12 +14,13 @@ def load_captions_and_filenames(file_path):
     """
     captions = set()
     filenames = set()
+    ytids = set()
     samples = []
     
     path = Path(file_path)
     if not path.exists():
         print(f"Warning: File not found: {path}")
-        return captions, filenames, samples
+        return captions, filenames, ytids, samples
 
     print(f"Loading {path.name}...")
     
@@ -89,9 +90,20 @@ def load_captions_and_filenames(file_path):
             fname_clean = re.sub(r'_\d+$', '', fname)
             filenames.add(fname_clean)
             
+        # Extract YouTube ID
+        ytid = item.get('youtube_id') or item.get('ytid')
+        if not ytid and 'id' in item:
+            # Sometimes ID is the YTID
+            val = item['id']
+            if isinstance(val, str) and len(val) == 11: # Basic YTID check
+                ytid = val
+        
+        if ytid:
+            ytids.add(ytid.strip())
+
         samples.append(item)
         
-    return captions, filenames, samples
+    return captions, filenames, ytids, samples
 
 def main():
     parser = argparse.ArgumentParser(description="Check for content leakage between Train and Val")
@@ -112,8 +124,8 @@ def main():
     print(f"Checking Train: {train_file}")
     print(f"Checking Val:   {val_file}")
     
-    train_caps, train_files, _ = load_captions_and_filenames(train_file)
-    val_caps, val_files, val_samples = load_captions_and_filenames(val_file)
+    train_caps, train_files, train_ytids, _ = load_captions_and_filenames(train_file)
+    val_caps, val_files, val_ytids, val_samples = load_captions_and_filenames(val_file)
     
     print(f"\nStats:")
     print(f"Train: {len(train_caps)} unique captions, {len(train_files)} unique audio files")
@@ -130,7 +142,15 @@ def main():
         for i, c in enumerate(list(cap_overlap)[:5]):
             print(f"  - '{c}'")
             
-    # 2. Audio Filename Overlap
+    # 2. YouTube ID Overlap
+    ytid_overlap = train_ytids.intersection(val_ytids)
+    print(f"YouTube ID Overlap: {len(ytid_overlap)} IDs found in both Train and Val")
+    if ytid_overlap:
+        print("Examples:")
+        for i, y in enumerate(list(ytid_overlap)[:5]):
+            print(f"  - {y}")
+
+    # 3. Audio Filename Overlap
     file_overlap = train_files.intersection(val_files)
     print(f"Audio File Overlap: {len(file_overlap)} filenames found in both Train and Val")
     if file_overlap:
@@ -138,9 +158,12 @@ def main():
         for i, f in enumerate(list(file_overlap)[:5]):
             print(f"  - {f}")
             
-    if len(cap_overlap) > 0 or len(file_overlap) > 0:
+    if len(cap_overlap) > 0 or len(file_overlap) > 0 or len(ytid_overlap) > 0:
         print("\n🚨 CONCLUSION: DATA LEAKAGE DETECTED!")
-        print("The model is seeing validation data during training.")
+        if len(ytid_overlap) > 0:
+            print("CRITICAL: The same YouTube videos are in both Train and Val.")
+        elif len(cap_overlap) > 0:
+            print("Warning: Caption overlap detected. If audio is different, this might be benign.")
     else:
         print("\n✅ CONCLUSION: No direct content leakage found.")
 
