@@ -153,7 +153,14 @@ def evaluate(model, dataloader, device, generation_kwargs):
                     refs_norm = [_normalize_audio_caption(r) for r in refs]
                     references[sample_id] = refs_norm
                 else:
+                    refs_norm = ["<No Reference>"]
                     pass
+
+                # Log every 50 samples
+                if int(sample_id) % 50 == 0:
+                    print(f"\n[Sample {sample_id}]")
+                    print(f"  Pred: {pred_norm}")
+                    print(f"  Ref:  {refs_norm[0]}")
 
     return predictions, references
 from pycocoevalcap.bleu.bleu import Bleu
