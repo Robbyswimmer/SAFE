@@ -311,6 +311,23 @@ def main():
     else:
         print(f"Found {len(projector_keys)} 'audio_projector' keys in checkpoint.")
 
+    # Remap fusion keys if needed (handle PEFT wrapping)
+    fusion_keys = [k for k in new_state_dict.keys() if "fusion_adapter" in k]
+    remapped_count = 0
+    
+    # Create a copy of keys to iterate safely
+    for k in list(new_state_dict.keys()):
+        if "fusion_adapter.cross_attention" in k and "base_model.model" not in k:
+            # Checkpoint has flattened keys (e.g. fusion_adapter.cross_attention.query.weight)
+            # Model expects nested keys (e.g. fusion_adapter.cross_attention.base_model.model.query.weight)
+            suffix = k.split("fusion_adapter.cross_attention.")[1]
+            new_key = f"fusion_adapter.cross_attention.base_model.model.{suffix}"
+            new_state_dict[new_key] = new_state_dict.pop(k)
+            remapped_count += 1
+            
+    if remapped_count > 0:
+        print(f"Remapped {remapped_count} fusion_adapter keys to match PEFT structure.")
+
     # Load with strict=False but report missing keys
     missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False) 
     
