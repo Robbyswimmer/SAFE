@@ -247,19 +247,33 @@ def main():
     
     # Default config
     model_config = {
-        "variant": "t5-base",
-        "audio_encoder_model": "laion/clap-htsat-unfused"
+        "llm_model_name": "google/flan-t5-base", # Default to flan-t5-base if not specified
+        "audio_encoder_type": "clap"
     }
     
     if config_path.exists():
         with open(config_path, 'r') as f:
             loaded_config = json.load(f)
-            model_config.update(loaded_config)
+            # Map 'variant' to 'llm_model_name' if present
+            if "variant" in loaded_config:
+                 # Handle t5-base vs google/flan-t5-base mapping if needed
+                 # Usually variant is just the model name
+                 variant = loaded_config["variant"]
+                 if variant == "t5-base":
+                     model_config["llm_model_name"] = "t5-base"
+                 elif variant == "flan-t5-base":
+                     model_config["llm_model_name"] = "google/flan-t5-base"
+                 else:
+                     model_config["llm_model_name"] = variant
             
-    print(f"Initializing model with variant: {model_config['variant']}")
+            if "audio_encoder_model" in loaded_config:
+                 # This might be part of audio_encoder_config
+                 pass
+
+    print(f"Initializing model with LLM: {model_config['llm_model_name']}")
     model = SAFEModel(
-        variant=model_config['variant'],
-        audio_encoder_model=model_config['audio_encoder_model']
+        llm_model_name=model_config['llm_model_name'],
+        audio_encoder_type=model_config['audio_encoder_type']
     )
     
     print("Loading weights...")
