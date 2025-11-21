@@ -87,8 +87,8 @@ def load_captions_and_filenames(file_path):
             # Remove timestamp suffix if present (common in AudioCaps)
             # e.g. "rqu8iB22I_Y_5000" -> "rqu8iB22I_Y"
             import re
-            fname_clean = re.sub(r'_\d+$', '', fname)
-            filenames.add(fname_clean)
+            fname = re.sub(r'_\d+$', '', fname)
+            filenames.add(fname)
             
         # Extract YouTube ID
         ytid = item.get('youtube_id') or item.get('ytid')
