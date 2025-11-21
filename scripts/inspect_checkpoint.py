@@ -14,9 +14,9 @@ def inspect_checkpoint(path):
     for k in keys[:20]:
         print("  " + k)
         
-    print("\nSearching for 'audio_projector':")
-    proj_keys = [k for k in keys if "audio_projector" in k]
-    for k in proj_keys[:10]:
+    print("\nSearching for 'fusion':")
+    fusion_keys = [k for k in keys if "fusion" in k]
+    for k in fusion_keys:
         print("  " + k)
 
 if __name__ == "__main__":
