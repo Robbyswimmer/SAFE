@@ -289,6 +289,8 @@ def main():
     state_dict = torch.load(checkpoint_path, map_location="cpu")
     if "state_dict" in state_dict:
         state_dict = state_dict["state_dict"]
+    elif "model_state_dict" in state_dict:
+        state_dict = state_dict["model_state_dict"]
         
     # Handle prefix 'safe_model.' if present (from Lightning)
     new_state_dict = {}
