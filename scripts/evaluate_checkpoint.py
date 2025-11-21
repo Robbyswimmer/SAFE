@@ -133,8 +133,8 @@ def evaluate(model, dataloader, device, generation_kwargs):
             gen_outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                audio_embeds=audio_embeds,
-                audio_mask=audio_mask,
+                audio_tokens=audio_embeds,
+                audio_attention_mask=audio_mask,
                 **generation_kwargs
             )
             
