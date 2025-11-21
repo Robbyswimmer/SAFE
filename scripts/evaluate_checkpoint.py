@@ -77,6 +77,26 @@ def _normalize_audio_caption(text) -> str:
 
     return " ".join(cleaned_tokens)
 
+
+def _strip_prompt_prefix(text: str) -> str:
+    """Remove chat template prefixes so only the assistant reply remains."""
+    if not text:
+        return ""
+
+    lowered = text.lower()
+    marker = "assistant:"
+    idx = lowered.rfind(marker)
+    if idx != -1:
+        return text[idx + len(marker):].lstrip()
+
+    user_idx = lowered.rfind("user:")
+    if user_idx != -1:
+        remainder = text[user_idx + len("user:"):].lstrip()
+        if remainder:
+            return remainder
+    return text
+
+
 def load_checkpoint(run_id, checkpoint_name=None, experiments_dir="experiments/full_training"):
     """Find and load the specified checkpoint."""
     runs_dir = Path(experiments_dir) / "runs" / run_id
@@ -125,42 +145,41 @@ def evaluate(model, dataloader, device, generation_kwargs):
     
     with torch.no_grad():
         for batch in tqdm(dataloader):
-            # Prepare inputs using SAFEModel's method (handles chat templates & audio encoding)
-            inputs = model.prepare_multimodal_inputs(
+            # Generate directly with high-level API (handles prompt + audio fusion internally)
+            gen_outputs = model.generate(
                 text=batch["questions"],
                 audio=batch["audio"],
-                device=device
-            )
-            
-            # Generate
-            gen_outputs = model.generate(
-                **inputs,
                 **generation_kwargs
             )
-            
+
+            if not isinstance(gen_outputs, torch.Tensor):
+                gen_outputs = torch.as_tensor(gen_outputs)
+
             decoded_preds = model.base_vl.tokenizer.batch_decode(gen_outputs, skip_special_tokens=True)
             
             batch_answers = batch.get("answers")
             
             for i, pred in enumerate(decoded_preds):
                 sample_id = str(len(predictions))
-                
-                pred_norm = _normalize_audio_caption(pred)
+
+                stripped_pred = _strip_prompt_prefix(pred)
+                pred_norm = _normalize_audio_caption(stripped_pred)
                 predictions[sample_id] = [pred_norm]
-                
+
                 if batch_answers:
                     refs = batch_answers[i]
-                    if isinstance(refs, str): refs = [refs]
+                    if isinstance(refs, str):
+                        refs = [refs]
                     refs_norm = [_normalize_audio_caption(r) for r in refs]
                     references[sample_id] = refs_norm
                 else:
                     refs_norm = ["<No Reference>"]
-                    pass
 
-                # Log every 50 samples
                 if int(sample_id) % 50 == 0:
+                    preview = stripped_pred.strip() or pred.strip()
+                    preview = preview[:200] if preview else "<empty>"
                     print(f"\n[Sample {sample_id}]")
-                    print(f"  Pred: {pred_norm}")
+                    print(f"  Pred: {preview}")
                     print(f"  Ref:  {refs_norm[0]}")
 
     return predictions, references
