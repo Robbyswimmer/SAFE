@@ -281,10 +281,12 @@ def main():
              model_config["llm_hidden_size"] = 4096
 
     print(f"Initializing model with LLM: {model_config['llm_model_name']} (hidden_size={model_config['llm_hidden_size']})")
+    print(f"Model Config num_audio_tokens: {model_config.get('num_audio_tokens')}")
     model = SAFEModel(
         llm_model_name=model_config['llm_model_name'],
         audio_encoder_type=model_config['audio_encoder_type'],
-        llm_hidden_size=model_config['llm_hidden_size']
+        llm_hidden_size=model_config['llm_hidden_size'],
+        num_audio_tokens=model_config['num_audio_tokens']
     )
     
     print("Loading weights...")
