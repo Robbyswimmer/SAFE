@@ -191,7 +191,8 @@ def main():
     # Default config (Match FULL_CONFIG from model_configs.py)
     model_config = {
         "llm_model_name": args.llm_model_name or "llava-hf/llava-1.5-13b-hf", 
-        "audio_encoder_type": "clap"
+        "audio_encoder_type": "clap",
+        "llm_hidden_size": 5120 # Default for LLaVA-13B
     }
     
     if config_path.exists():
@@ -203,21 +204,34 @@ def main():
                  variant = loaded_config["variant"]
                  if variant == "t5-base":
                      model_config["llm_model_name"] = "t5-base"
+                     model_config["llm_hidden_size"] = 768
                  elif variant == "flan-t5-base":
                      model_config["llm_model_name"] = "google/flan-t5-base"
+                     model_config["llm_hidden_size"] = 768
                  else:
                      model_config["llm_model_name"] = variant
             
             # Allow config to override if not explicitly set by arg
             if not args.llm_model_name and "llm_model_name" in loaded_config:
                 model_config["llm_model_name"] = loaded_config["llm_model_name"]
+            
+            if "llm_hidden_size" in loaded_config:
+                model_config["llm_hidden_size"] = loaded_config["llm_hidden_size"]
     else:
         print(f"WARNING: Config not found at {config_path}. Using default: {model_config['llm_model_name']}")
+        # Adjust hidden size if user overrode model name via CLI but no config file
+        if "t5-base" in model_config["llm_model_name"]:
+            model_config["llm_hidden_size"] = 768
+        elif "t5-large" in model_config["llm_model_name"]:
+            model_config["llm_hidden_size"] = 1024
+        elif "llava" in model_config["llm_model_name"] and "7b" in model_config["llm_model_name"]:
+             model_config["llm_hidden_size"] = 4096
 
-    print(f"Initializing model with LLM: {model_config['llm_model_name']}")
+    print(f"Initializing model with LLM: {model_config['llm_model_name']} (hidden_size={model_config['llm_hidden_size']})")
     model = SAFEModel(
         llm_model_name=model_config['llm_model_name'],
-        audio_encoder_type=model_config['audio_encoder_type']
+        audio_encoder_type=model_config['audio_encoder_type'],
+        llm_hidden_size=model_config['llm_hidden_size']
     )
     
     print("Loading weights...")
