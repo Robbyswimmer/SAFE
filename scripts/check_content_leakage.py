@@ -105,6 +105,11 @@ def load_captions_and_filenames(file_path):
                 import re
                 val = re.sub(r'\.(wav|flac|mp3)$', '', val, flags=re.IGNORECASE)
                 val = val.strip()
+                
+                # Handle 'Y' prefix (common in AudioSet/WavCaps)
+                if len(val) == 12 and val.startswith('Y'):
+                    val = val[1:]
+                    
                 if len(val) == 11:
                     ytid = val
                 elif len(samples) < 5: # Debug print for first few failures
@@ -117,6 +122,16 @@ def load_captions_and_filenames(file_path):
                 val = val.strip()
                 if len(val) == 11: # Basic YTID check
                     ytid = val
+
+        # Fallback: Use filename as ID if it looks like one
+        if not ytid and fname:
+            fname_clean = fname.strip()
+            # Remove 'Y' prefix if present in filename too
+            if len(fname_clean) == 12 and fname_clean.startswith('Y'):
+                fname_clean = fname_clean[1:]
+            
+            if len(fname_clean) == 11:
+                ytid = fname_clean
 
         if ytid:
             ytids.add(ytid.strip())
