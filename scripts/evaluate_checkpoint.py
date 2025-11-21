@@ -14,7 +14,67 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from safe.models.safe_model import SAFEModel
 from safe.data.datasets import AudioCapsDataset
-from safe.training.stage_a import _normalize_audio_caption
+
+def _normalize_audio_caption(text) -> str:
+    if text is None:
+        return ""
+
+    if isinstance(text, (list, tuple)):
+        text = " ".join(str(t) for t in text if t)
+    elif isinstance(text, dict):
+        value = text.get("answer") or text.get("text")
+        text = value if value is not None else ""
+
+    import re
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKC", str(text))
+    normalized = normalized.replace("\u2019", "'")  # Normalise curly apostrophes
+    normalized = normalized.lower()
+
+    # Collapse possessives before stripping punctuation so "dog's" -> "dogs"
+    normalized = re.sub(r"'s\b", "s", normalized)
+
+    # Remove residual apostrophes and punctuation (keep alphanumerics + whitespace)
+    normalized = re.sub(r"'", " ", normalized)
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+
+    tokens = [tok for tok in normalized.split() if tok]
+    if not tokens:
+        return ""
+
+    number_map = {
+        "zero": "0",
+        "one": "1",
+        "two": "2",
+        "three": "3",
+        "four": "4",
+        "five": "5",
+        "six": "6",
+        "seven": "7",
+        "eight": "8",
+        "nine": "9",
+        "ten": "10",
+        "eleven": "11",
+        "twelve": "12",
+        "thirteen": "13",
+        "fourteen": "14",
+        "fifteen": "15",
+        "sixteen": "16",
+        "seventeen": "17",
+        "eighteen": "18",
+        "nineteen": "19",
+        "twenty": "20",
+    }
+
+    cleaned_tokens = []
+    for tok in tokens:
+        cleaned_tokens.append(number_map.get(tok, tok))
+
+    if not cleaned_tokens:
+        return ""
+
+    return " ".join(cleaned_tokens)
 
 def load_checkpoint(run_id, checkpoint_name=None, experiments_dir="experiments/full_training"):
     """Find and load the specified checkpoint."""
