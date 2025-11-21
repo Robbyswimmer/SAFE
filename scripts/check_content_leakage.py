@@ -83,22 +83,19 @@ def load_captions_and_filenames(file_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Check for content leakage between Train and Val")
-    parser.add_argument('--data_dir', type=str, required=True, help="Path to audiocaps data directory")
+    parser.add_argument('--train_file', type=str, required=True, help="Path to training metadata file")
+    parser.add_argument('--val_file', type=str, required=True, help="Path to validation metadata file")
     args = parser.parse_args()
     
-    data_dir = Path(args.data_dir)
+    train_file = Path(args.train_file)
+    val_file = Path(args.val_file)
     
-    # Define files to check
-    train_file = data_dir / "audiocaps_train.json" # Or whatever the user's train file is
-    val_file = data_dir / "audiocaps_val.json"     # The fixed val file
-    
-    # Fallback for train file names
     if not train_file.exists():
-        candidates = ["train.json", "AudioCaps_train.json", "train.jsonl"]
-        for c in candidates:
-            if (data_dir / c).exists():
-                train_file = data_dir / c
-                break
+        print(f"Error: Train file not found: {train_file}")
+        return
+    if not val_file.exists():
+        print(f"Error: Val file not found: {val_file}")
+        return
     
     print(f"Checking Train: {train_file}")
     print(f"Checking Val:   {val_file}")
