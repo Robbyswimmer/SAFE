@@ -27,7 +27,7 @@ conda activate "${CONDA_ENV}"
 
 # Default arguments
 RUN_ID=${1:-""}
-SPLIT=${2:-"test"}
+SPLIT=${2:-"val"}
 
 if [[ -z "$RUN_ID" ]]; then
     echo "Usage: sbatch scripts/run_eval.sh <RUN_ID> [SPLIT]"

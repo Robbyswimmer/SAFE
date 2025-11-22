@@ -470,7 +470,14 @@ def main():
     
     # 3. Load Data
     print(f"Loading {args.split} dataset from {args.data_root}...")
-    dataset = AudioCapsDataset(data_path=args.data_root, split=args.split)
+    split_aliases = {
+        "train": "train",
+        "val": "val",
+        "validation": "val",
+        "test": "test"
+    }
+    normalized_split = split_aliases.get(args.split.lower(), args.split)
+    dataset = AudioCapsDataset(data_path=args.data_root, split=normalized_split)
     
     def smart_collate(batch):
         audio_data = []
