@@ -1316,7 +1316,15 @@ class SAFEModel(nn.Module):
             if self.training and audio_tokens is not None and hasattr(self.audio_projector, 'last_norm_ratio'):
                 with torch.no_grad():
                     audio_norm = audio_tokens.norm(dim=-1).mean()
-                    text_norm = inputs_embeds.norm(dim=-1).mean()
+
+                    # Only compute text norm over non-padding tokens
+                    if attention_mask is not None:
+                        # attention_mask: 1 for real tokens, 0 for padding
+                        text_norms = inputs_embeds.norm(dim=-1)  # (batch, seq_len)
+                        text_norm = (text_norms * attention_mask).sum() / attention_mask.sum().clamp(min=1)
+                    else:
+                        text_norm = inputs_embeds.norm(dim=-1).mean()
+
                     ratio = (text_norm / (audio_norm + 1e-6)).clamp(0.1, 10.0)
 
                     # Log norms for debugging (first few batches)
