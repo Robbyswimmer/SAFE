@@ -57,13 +57,10 @@ class AudioProjector(nn.Module):
         # Output normalization
         self.output_norm = nn.LayerNorm(llm_hidden_size, eps=1e-6)
 
-        # Learnable scale to match LLM embedding magnitude
-        # Initialize to 1.0 since LayerNorm already produces ~10-15 magnitude
-        self.output_scale = nn.Parameter(torch.tensor(1.0))
-
-        # EMA-based dynamic scaling to match text embeddings
-        self.ema_momentum = 0.9
-        self.register_buffer("last_norm_ratio", torch.tensor(1.0))
+        # Fixed scale (not trainable)
+        # LayerNorm output (~8-11) matches LLaMA hidden state magnitudes
+        # DO NOT match to raw text embeddings (norm ~0.8) - that's wrong layer
+        self.register_buffer("output_scale", torch.tensor(1.0))
 
         # Debug logging
         self.debug_logging = False
@@ -208,13 +205,10 @@ class AdaptiveAudioProjector(nn.Module):
         # Output normalization
         self.output_norm = nn.LayerNorm(llm_hidden_size, eps=1e-6)
 
-        # Learnable scale to match LLM embedding magnitude
-        # Initialize to 1.0 since LayerNorm already produces ~10-15 magnitude
-        self.output_scale = nn.Parameter(torch.tensor(1.0))
-
-        # EMA-based dynamic scaling to match text embeddings
-        self.ema_momentum = 0.9
-        self.register_buffer("last_norm_ratio", torch.tensor(1.0))
+        # Fixed scale (not trainable)
+        # LayerNorm output (~8-11) matches LLaMA hidden state magnitudes
+        # DO NOT match to raw text embeddings (norm ~0.8) - that's wrong layer
+        self.register_buffer("output_scale", torch.tensor(1.0))
 
         # Debug logging
         self.debug_logging = False

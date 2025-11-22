@@ -1312,44 +1312,26 @@ class SAFEModel(nn.Module):
             # Ensure inputs_embeds matches base dtype
             inputs_embeds = inputs_embeds.to(base_dtype)
 
-            # Apply EMA calibration to audio tokens using text embeddings
-            if self.training and audio_tokens is not None and hasattr(self.audio_projector, 'last_norm_ratio'):
-                with torch.no_grad():
-                    audio_norm = audio_tokens.norm(dim=-1).mean()
+            # Log norms for monitoring (NO EMA UPDATES - letting gradients handle scale)
+            # Raw text embeddings (norm ~0.8-1.0) are NOT what audio should match.
+            # Audio norms of 8-11 are correct for LLaMA hidden state magnitudes.
+            if self.training and audio_tokens is not None:
+                if not hasattr(self, '_norm_log_count'):
+                    self._norm_log_count = 0
+                if self._norm_log_count < 5:
+                    with torch.no_grad():
+                        audio_norm = audio_tokens.norm(dim=-1).mean()
 
-                    # Only compute text norm over non-padding tokens
-                    if attention_mask is not None:
-                        # attention_mask: 1 for real tokens, 0 for padding
-                        text_norms = inputs_embeds.norm(dim=-1)  # (batch, seq_len)
-                        text_norm = (text_norms * attention_mask).sum() / attention_mask.sum().clamp(min=1)
-                    else:
-                        text_norm = inputs_embeds.norm(dim=-1).mean()
+                        # Compute text norm over non-padding tokens for reference only
+                        if attention_mask is not None:
+                            text_norms = inputs_embeds.norm(dim=-1)
+                            text_norm = (text_norms * attention_mask).sum() / attention_mask.sum().clamp(min=1)
+                        else:
+                            text_norm = inputs_embeds.norm(dim=-1).mean()
 
-                    ratio = (text_norm / (audio_norm + 1e-6)).clamp(0.1, 10.0)
-
-                    # Log norms for debugging (first few batches)
-                    if not hasattr(self, '_norm_log_count'):
-                        self._norm_log_count = 0
-                    if self._norm_log_count < 5:
-                        # Additional debugging: show min/max/mean of text embeddings
-                        text_sample = inputs_embeds[0, :10]  # First 10 tokens of first sample
-                        text_norms_sample = text_sample.norm(dim=-1)
-                        print(f"[NormCalib] audio_norm={audio_norm:.2f}, text_norm={text_norm:.2f}, ratio={ratio:.3f}, scale={self.audio_projector.output_scale.item():.3f}", flush=True)
-                        print(f"[NormDebug] text_embed sample norms (first 10): {text_norms_sample.cpu().numpy()}", flush=True)
-                        print(f"[NormDebug] text_embed dtype={inputs_embeds.dtype}, min={inputs_embeds.min():.3f}, max={inputs_embeds.max():.3f}, mean={inputs_embeds.mean():.3f}", flush=True)
-                        print(f"[NormDebug] audio_tokens dtype={audio_tokens.dtype}, min={audio_tokens.min():.3f}, max={audio_tokens.max():.3f}", flush=True)
-                        print(f"[NormDebug] attention_mask sum={attention_mask.sum().item() if attention_mask is not None else 'None'}, total={attention_mask.numel() if attention_mask is not None else 'None'}", flush=True)
+                        print(f"[NormMonitor] audio_norm={audio_norm:.2f}, text_embed_norm={text_norm:.2f} (raw embeddings, NOT target), scale={self.audio_projector.output_scale.item():.3f}", flush=True)
+                        print(f"[NormMonitor] audio_tokens dtype={audio_tokens.dtype}, range=[{audio_tokens.min():.3f}, {audio_tokens.max():.3f}]", flush=True)
                         self._norm_log_count += 1
-
-                    # EMA update of scale
-                    old_scale = self.audio_projector.output_scale.item()
-                    new_scale = old_scale * self.audio_projector.ema_momentum + \
-                                ratio.item() * (1 - self.audio_projector.ema_momentum)
-                    self.audio_projector.output_scale.data.copy_(torch.tensor(new_scale))
-                    self.audio_projector.last_norm_ratio.copy_(ratio)
-
-                    # Re-scale audio tokens with updated scale
-                    audio_tokens = audio_tokens * (new_scale / old_scale)
 
             supervised_mask = None
             if labels is not None:
