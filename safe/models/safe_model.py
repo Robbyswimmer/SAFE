@@ -333,7 +333,8 @@ class SAFEModel(nn.Module):
     def encode_audio(
         self,
         audio: Union[torch.Tensor, List[str], List],
-        num_tokens: Optional[int] = None
+        num_tokens: Optional[int] = None,
+        input_ids: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, Optional[List[str]]]:
         """
         Encode audio into token representations.
@@ -341,6 +342,7 @@ class SAFEModel(nn.Module):
         Args:
             audio: Audio input - waveform tensor for encoding
             num_tokens: Optional override for number of tokens
+            input_ids: Optional input IDs for text embedding calibration
 
         Returns:
             Tuple of (audio_tokens, transcripts)
@@ -396,11 +398,20 @@ class SAFEModel(nn.Module):
                 audio_features = audio_features.unsqueeze(0)
         
 
+        # Extract text embeddings for calibration
+        text_embeds_for_calib = None
+        if self.training and input_ids is not None:
+            try:
+                with torch.no_grad():
+                    text_embeds_for_calib = self.base_vl.llm.get_input_embeddings()(input_ids)
+            except Exception:
+                pass  # Silently skip if extraction fails
+
         # Apply projector with target dtype for LM compatibility
         if self.projector_type == "adaptive":
-            audio_tokens = self.audio_projector(audio_features, num_tokens=num_tokens, out_dtype=target_dtype)
+            audio_tokens = self.audio_projector(audio_features, num_tokens=num_tokens, out_dtype=target_dtype, text_embeds_for_calib=text_embeds_for_calib)
         else:
-            audio_tokens = self.audio_projector(audio_features, out_dtype=target_dtype)
+            audio_tokens = self.audio_projector(audio_features, out_dtype=target_dtype, text_embeds_for_calib=text_embeds_for_calib)
 
         # Stage 3: Final dtype/device conversion with validation
         # Ensure tokens are finite before final conversion
@@ -639,7 +650,12 @@ class SAFEModel(nn.Module):
                 audio_to_encode = list(audio_list)
 
         if audio_to_encode is not None:
-            audio_tokens, transcripts = self.encode_audio(audio_to_encode, num_audio_tokens)
+            # Pass input_ids for text embedding calibration
+            audio_tokens, transcripts = self.encode_audio(
+                audio_to_encode,
+                num_audio_tokens,
+                input_ids=inputs.get("input_ids")
+            )
 
             raw_levels_by_batch: Optional[List[Optional[float]]] = None
             if isinstance(audio, torch.Tensor) and audio.dim() >= 2:

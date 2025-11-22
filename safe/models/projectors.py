@@ -61,6 +61,10 @@ class AudioProjector(nn.Module):
         # Initialize to 1.0 since LayerNorm already produces ~10-15 magnitude
         self.output_scale = nn.Parameter(torch.tensor(1.0))
 
+        # EMA-based dynamic scaling to match text embeddings
+        self.ema_momentum = 0.9
+        self.register_buffer("last_norm_ratio", torch.tensor(1.0))
+
         # Debug logging
         self.debug_logging = False
         self._projector_log_limit = 5
@@ -93,14 +97,20 @@ class AudioProjector(nn.Module):
         self._projector_log_limit = int(max(0, log_limit))
         self._projector_logs_emitted = 0
 
-    def forward(self, audio_features: torch.Tensor, out_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    def forward(
+        self,
+        audio_features: torch.Tensor,
+        out_dtype: Optional[torch.dtype] = None,
+        text_embeds_for_calib: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """
         Project audio features to LLM token space.
-        
+
         Args:
             audio_features: (batch_size, audio_embed_dim) audio embeddings
             out_dtype: Target dtype for output tokens (to match LM weights)
-            
+            text_embeds_for_calib: (batch_size, seq_len, hidden_size) text embeddings for norm calibration
+
         Returns:
             audio_tokens: (batch_size, num_audio_tokens, llm_hidden_size)
         """
@@ -132,15 +142,30 @@ class AudioProjector(nn.Module):
         # This naturally aligns with LLM embedding distribution without saturation
         audio_tokens = self.output_norm(audio_tokens)
 
+        # Dynamic scaling: match audio embedding magnitude to text embeddings
+        if self.training and text_embeds_for_calib is not None:
+            with torch.no_grad():
+                audio_norm = audio_tokens.norm(dim=-1).mean()
+                text_norm = text_embeds_for_calib.norm(dim=-1).mean()
+                ratio = (text_norm / (audio_norm + 1e-6)).clamp(0.1, 10.0)
+
+                # EMA update of scale
+                new_scale = self.output_scale * self.ema_momentum + ratio * (1 - self.ema_momentum)
+                self.output_scale.data.copy_(new_scale)
+                self.last_norm_ratio.copy_(ratio)
+
         # Apply learnable scale to match LLM embedding magnitude
-        # Model learns optimal scale during training (initialized to 5.0)
         audio_tokens = audio_tokens * self.output_scale
 
         # Log embedding norms for debugging
         if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
             with torch.no_grad():
-                token_norms = torch.norm(audio_tokens, dim=-1).mean().item()
-                print(f"[AudioProjector] Token norms (mean L2): {token_norms:.3f}, Scale: {self.output_scale.item():.3f}", flush=True)
+                audio_norm = audio_tokens.norm(dim=-1).mean().item()
+                if text_embeds_for_calib is not None:
+                    text_norm = text_embeds_for_calib.norm(dim=-1).mean().item()
+                    print(f"[AudioProjector] audio_norm={audio_norm:.2f}, text_norm={text_norm:.2f}, ratio={text_norm/audio_norm:.3f}, scale={self.output_scale.item():.3f}", flush=True)
+                else:
+                    print(f"[AudioProjector] audio_norm={audio_norm:.2f}, scale={self.output_scale.item():.3f} (no text calib)", flush=True)
                 self._projector_logs_emitted += 1
 
         # Cast to requested/output dtype (the LM/base dtype)
@@ -201,6 +226,10 @@ class AdaptiveAudioProjector(nn.Module):
         # Learnable scale to match LLM embedding magnitude
         # Initialize to 1.0 since LayerNorm already produces ~10-15 magnitude
         self.output_scale = nn.Parameter(torch.tensor(1.0))
+
+        # EMA-based dynamic scaling to match text embeddings
+        self.ema_momentum = 0.9
+        self.register_buffer("last_norm_ratio", torch.tensor(1.0))
 
         # Debug logging
         self.debug_logging = False
