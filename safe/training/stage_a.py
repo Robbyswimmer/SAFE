@@ -123,7 +123,8 @@ class StageATrainer:
             "max_vl_eval_samples": 0,
             # Modality-specific generation tuning
             "vl_repetition_penalty": 1.0,
-            "audio_repetition_penalty": 1.1,
+            "audio_repetition_penalty": 1.2,  # Phase 1.5: Increased to prevent comma loops
+            "no_repeat_ngram_size": 3,  # Phase 1.5: Hard block on repetitive n-grams
             # Only suppress EOS early in training for audio batches (not VL)
             "suppress_eos_for_audio_early_steps": True,
             "audio_contrastive_weight": 0.0,
@@ -3430,8 +3431,7 @@ class StageATrainer:
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
             repetition_penalty=repetition_penalty,
-            # Removed no_repeat_ngram_size - was blocking fluent generation
-            # Removed encoder_repetition_penalty - was making it worse
+            no_repeat_ngram_size=int(self.config.get("no_repeat_ngram_size", 3)),  # Phase 1.5: Block repetitive n-grams
             output_scores=False,
             return_dict_in_generate=False
         )
@@ -3952,7 +3952,8 @@ class StageATrainer:
             num_beams=1,
             pad_token_id=tok.pad_token_id,
             eos_token_id=getattr(tok, "eos_token_id", None),
-            repetition_penalty=float(self.config.get("audio_repetition_penalty", 1.1)),
+            repetition_penalty=float(self.config.get("audio_repetition_penalty", 1.2)),
+            no_repeat_ngram_size=int(self.config.get("no_repeat_ngram_size", 3)),  # Phase 1.5: Block repetitive n-grams
             output_scores=False,
             return_dict_in_generate=False,
         )

@@ -49,8 +49,8 @@ NUM_WORKERS=8
 SEED=42
 MODEL_CONFIG="phase1"  # Use new Phase 1 config
 
-# Phase 1 Learning Rates (AGGRESSIVE - 5x higher than baseline)
-LR_PROJECTOR=1e-3      # Was 2e-4
+# Phase 1.5 Learning Rates (Reduced projector LR to prevent saturation)
+LR_PROJECTOR=5e-4      # Phase 1.5: Reduced from 1e-3 to prevent OOD embeddings
 LR_ADAPTER=5e-4        # Was 1e-4
 
 # Gradient Accumulation (target effective BS = 128)

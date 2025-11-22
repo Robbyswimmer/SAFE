@@ -114,18 +114,18 @@ class AudioProjector(nn.Module):
         # Project through MLP with soft bounding
         projected = self.projector(normalized_input)  # (batch_size, llm_hidden_size * num_audio_tokens)
 
-        # Apply tanh and scaling to match LLaVA embedding magnitude (~5-15)
-        # Phase 1 fix: Changed from 2.0 to 10.0 to make audio visible to LLM
-        projected = torch.tanh(projected) * 10.0  # Match typical LLM embedding magnitude
+        # Phase 1.5 fix: Remove tanh*10.0 saturation, use LayerNorm instead
+        # The projector already has tanh in the Sequential, adding clean normalization here
 
         # Reshape to token format
         audio_tokens = projected.view(
-            batch_size, 
-            self.num_audio_tokens, 
+            batch_size,
+            self.num_audio_tokens,
             self.llm_hidden_size
         )
-        
-        # Apply output normalization per token
+
+        # Apply output normalization per token (centers around 0, variance 1)
+        # This naturally aligns with LLM embedding distribution without saturation
         audio_tokens = self.output_norm(audio_tokens)
         
         
@@ -276,17 +276,17 @@ class AdaptiveAudioProjector(nn.Module):
         generator = self.token_generators[str(most_common_tokens)]
         projected = generator(features)  # (batch_size, llm_hidden_size * k)
 
-        # Apply scaling to match LLaVA embedding magnitude
-        # Phase 1 fix: Changed from 2.0 to 10.0 to make audio visible to LLM
-        projected = projected * 10.0  # Match typical LLM embedding magnitude (tanh already applied in generator)
+        # Phase 1.5 fix: Remove *10.0 saturation, rely on LayerNorm instead
+        # Generator already has tanh, LayerNorm will align with LLM embedding distribution
 
         audio_tokens = projected.view(
             batch_size,
             most_common_tokens,
             self.llm_hidden_size
         )
-        
-        # Apply output normalization per token
+
+        # Apply output normalization per token (centers around 0, variance 1)
+        # This naturally aligns with LLM embedding distribution without saturation
         audio_tokens = self.output_norm(audio_tokens)
         
         
