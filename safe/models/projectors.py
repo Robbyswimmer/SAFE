@@ -58,8 +58,8 @@ class AudioProjector(nn.Module):
         self.output_norm = nn.LayerNorm(llm_hidden_size, eps=1e-6)
 
         # Learnable scale to match LLM embedding magnitude
-        # Initialize to 5.0 based on typical LLaVA embedding range
-        self.output_scale = nn.Parameter(torch.tensor(5.0))
+        # Initialize to 1.0 since LayerNorm already produces ~10-15 magnitude
+        self.output_scale = nn.Parameter(torch.tensor(1.0))
 
         # Debug logging
         self.debug_logging = False
@@ -199,8 +199,8 @@ class AdaptiveAudioProjector(nn.Module):
         self.output_norm = nn.LayerNorm(llm_hidden_size, eps=1e-6)
 
         # Learnable scale to match LLM embedding magnitude
-        # Initialize to 5.0 based on typical LLaVA embedding range
-        self.output_scale = nn.Parameter(torch.tensor(5.0))
+        # Initialize to 1.0 since LayerNorm already produces ~10-15 magnitude
+        self.output_scale = nn.Parameter(torch.tensor(1.0))
 
         # Debug logging
         self.debug_logging = False
