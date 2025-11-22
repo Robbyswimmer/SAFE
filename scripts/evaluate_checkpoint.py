@@ -100,14 +100,21 @@ def _strip_prompt_prefix(text: str) -> str:
 def load_checkpoint(run_id, checkpoint_name=None, experiments_dir="experiments/full_training"):
     """Find and load the specified checkpoint."""
     runs_dir = Path(experiments_dir) / "runs" / run_id
-    
+
     if not runs_dir.exists():
-        # Try searching for the run ID in subdirectories if exact match fails
-        matches = list(Path(experiments_dir).rglob(run_id))
-        if matches:
-            runs_dir = matches[0]
+        # Try phase1 directory if not found in full_training
+        phase1_runs_dir = Path("experiments/phase1") / "runs" / run_id
+        if phase1_runs_dir.exists():
+            runs_dir = phase1_runs_dir
         else:
-            raise FileNotFoundError(f"Run directory not found for ID: {run_id}")
+            # Try searching for the run ID in subdirectories if exact match fails
+            matches = list(Path(experiments_dir).rglob(run_id))
+            if not matches:
+                matches = list(Path("experiments/phase1").rglob(run_id))
+            if matches:
+                runs_dir = matches[0]
+            else:
+                raise FileNotFoundError(f"Run directory not found for ID: {run_id} in experiments/full_training or experiments/phase1")
             
     # Find timestamp directory (usually just one)
     timestamp_dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
