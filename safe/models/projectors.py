@@ -53,10 +53,14 @@ class AudioProjector(nn.Module):
             nn.Linear(bottleneck_dim, llm_hidden_size * num_audio_tokens),
             nn.Tanh()  # Soft bounding to prevent saturation
         )
-        
+
         # Output normalization
         self.output_norm = nn.LayerNorm(llm_hidden_size, eps=1e-6)
-        
+
+        # Learnable scale to match LLM embedding magnitude
+        # Initialize to 5.0 based on typical LLaVA embedding range
+        self.output_scale = nn.Parameter(torch.tensor(5.0))
+
         # Debug logging
         self.debug_logging = False
         self._projector_log_limit = 5
@@ -127,12 +131,16 @@ class AudioProjector(nn.Module):
         # Apply output normalization per token (centers around 0, variance 1)
         # This naturally aligns with LLM embedding distribution without saturation
         audio_tokens = self.output_norm(audio_tokens)
-        
-        
+
+        # Apply learnable scale to match LLM embedding magnitude
+        # Model learns optimal scale during training (initialized to 5.0)
+        audio_tokens = audio_tokens * self.output_scale
+
+
         # Cast to requested/output dtype (the LM/base dtype)
         if out_dtype is not None:
             audio_tokens = audio_tokens.to(out_dtype)
-        
+
         return audio_tokens
 
 
@@ -183,12 +191,16 @@ class AdaptiveAudioProjector(nn.Module):
         
         # Output normalization
         self.output_norm = nn.LayerNorm(llm_hidden_size, eps=1e-6)
-        
+
+        # Learnable scale to match LLM embedding magnitude
+        # Initialize to 5.0 based on typical LLaVA embedding range
+        self.output_scale = nn.Parameter(torch.tensor(5.0))
+
         # Debug logging
         self.debug_logging = False
         self._projector_log_limit = 5
         self._projector_logs_emitted = 0
-        
+
         self._init_weights()
     
     def _init_weights(self):
@@ -288,12 +300,16 @@ class AdaptiveAudioProjector(nn.Module):
         # Apply output normalization per token (centers around 0, variance 1)
         # This naturally aligns with LLM embedding distribution without saturation
         audio_tokens = self.output_norm(audio_tokens)
-        
-        
+
+        # Apply learnable scale to match LLM embedding magnitude
+        # Model learns optimal scale during training (initialized to 5.0)
+        audio_tokens = audio_tokens * self.output_scale
+
+
         # Cast to requested/output dtype (the LM/base dtype)
         if out_dtype is not None:
             audio_tokens = audio_tokens.to(out_dtype)
-        
+
         return audio_tokens
 
 
