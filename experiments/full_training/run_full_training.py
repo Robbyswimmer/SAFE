@@ -7,6 +7,15 @@ import sys
 sys.stdout.flush()
 sys.stderr.flush()
 
+# Add project root to Python path
+print("[run_full_training.py] Adding project root to Python path...", flush=True)
+from pathlib import Path
+project_root = Path(__file__).parent.parent.parent.resolve()
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+print(f"[run_full_training.py] Project root: {project_root}", flush=True)
+sys.stdout.flush()
+
 print("[run_full_training.py] Importing standard library modules...", flush=True)
 sys.stdout.flush()
 import argparse
@@ -16,7 +25,6 @@ import random
 import math
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 print("[run_full_training.py] Importing numpy...", flush=True)
@@ -30,7 +38,7 @@ from torch.utils.data import Dataset
 
 print("[run_full_training.py] Importing configs...", flush=True)
 sys.stdout.flush()
-from configs.model_configs import DEMO_CONFIG, FULL_CONFIG, MULTIMODAL_CONFIG
+from configs.model_configs import DEMO_CONFIG, FULL_CONFIG, MULTIMODAL_CONFIG, PHASE1_CONFIG
 from configs.retention_variants import get_variant_config, RETENTION_VARIANTS
 
 print("[run_full_training.py] Importing SAFE datasets...", flush=True)
@@ -642,6 +650,7 @@ def run_experiment(args: argparse.Namespace) -> None:
         "demo": DEMO_CONFIG,
         "full": FULL_CONFIG,
         "multimodal": MULTIMODAL_CONFIG,
+        "phase1": PHASE1_CONFIG,
     }
     if args.model_config not in model_configs:
         raise ValueError(f"Unknown model config '{args.model_config}'. Options: {list(model_configs)}")
