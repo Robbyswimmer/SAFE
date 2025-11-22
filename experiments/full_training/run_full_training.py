@@ -817,7 +817,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--generation-max-new-tokens", type=int, default=32, help="Generation token budget")
     parser.add_argument("--audio-generation-max-new-tokens", type=int, default=20, help="Generation token budget for audio-only tasks")
     parser.add_argument("--output-root", type=str, default="experiments/full_training/runs", help="Run output directory")
-    parser.add_argument("--model-config", choices=["demo", "full", "multimodal"], default="full", help="Model config preset")
+    parser.add_argument("--model-config", choices=["demo", "full", "multimodal", "phase1"], default="full", help="Model config preset")
     parser.add_argument("--disable-train-shuffle", action="store_true", help="Disable shuffling for training dataloader")
     parser.add_argument("--disable-val-shuffle", action="store_true", help="Disable shuffling when mixing validation datasets")
     parser.add_argument("--disable-eval-audio-gate", action="store_true", help="Evaluate without audio gating")
