@@ -39,9 +39,12 @@ echo "Starting Evaluation for Run ID: $RUN_ID on Split: $SPLIT"
 echo "Date: $(date)"
 echo "Node: $(hostname)"
 
+DATA_ROOT=${DATA_ROOT:-"$PWD/experiments/full_training/data"}
+
 python -u scripts/evaluate_checkpoint.py \
     --run_id "$RUN_ID" \
     --split "$SPLIT" \
+    --data_root "$DATA_ROOT" \
     --device cuda
 
 echo "Evaluation complete."
