@@ -1331,7 +1331,14 @@ class SAFEModel(nn.Module):
                     if not hasattr(self, '_norm_log_count'):
                         self._norm_log_count = 0
                     if self._norm_log_count < 5:
+                        # Additional debugging: show min/max/mean of text embeddings
+                        text_sample = inputs_embeds[0, :10]  # First 10 tokens of first sample
+                        text_norms_sample = text_sample.norm(dim=-1)
                         print(f"[NormCalib] audio_norm={audio_norm:.2f}, text_norm={text_norm:.2f}, ratio={ratio:.3f}, scale={self.audio_projector.output_scale.item():.3f}", flush=True)
+                        print(f"[NormDebug] text_embed sample norms (first 10): {text_norms_sample.cpu().numpy()}", flush=True)
+                        print(f"[NormDebug] text_embed dtype={inputs_embeds.dtype}, min={inputs_embeds.min():.3f}, max={inputs_embeds.max():.3f}, mean={inputs_embeds.mean():.3f}", flush=True)
+                        print(f"[NormDebug] audio_tokens dtype={audio_tokens.dtype}, min={audio_tokens.min():.3f}, max={audio_tokens.max():.3f}", flush=True)
+                        print(f"[NormDebug] attention_mask sum={attention_mask.sum().item() if attention_mask is not None else 'None'}, total={attention_mask.numel() if attention_mask is not None else 'None'}", flush=True)
                         self._norm_log_count += 1
 
                     # EMA update of scale
