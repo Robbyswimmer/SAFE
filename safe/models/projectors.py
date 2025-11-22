@@ -136,6 +136,12 @@ class AudioProjector(nn.Module):
         # Model learns optimal scale during training (initialized to 5.0)
         audio_tokens = audio_tokens * self.output_scale
 
+        # Log embedding norms for debugging
+        if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
+            with torch.no_grad():
+                token_norms = torch.norm(audio_tokens, dim=-1).mean().item()
+                print(f"[AudioProjector] Token norms (mean L2): {token_norms:.3f}, Scale: {self.output_scale.item():.3f}", flush=True)
+                self._projector_logs_emitted += 1
 
         # Cast to requested/output dtype (the LM/base dtype)
         if out_dtype is not None:
@@ -305,6 +311,12 @@ class AdaptiveAudioProjector(nn.Module):
         # Model learns optimal scale during training (initialized to 5.0)
         audio_tokens = audio_tokens * self.output_scale
 
+        # Log embedding norms for debugging
+        if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
+            with torch.no_grad():
+                token_norms = torch.norm(audio_tokens, dim=-1).mean().item()
+                print(f"[AdaptiveAudioProjector] Token norms (mean L2): {token_norms:.3f}, Scale: {self.output_scale.item():.3f}", flush=True)
+                self._projector_logs_emitted += 1
 
         # Cast to requested/output dtype (the LM/base dtype)
         if out_dtype is not None:

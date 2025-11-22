@@ -112,6 +112,10 @@ class SAFEModel(nn.Module):
             )
         else:
             raise ValueError(f"Unsupported projector type: {projector_type}")
+
+        # Enable debug logging for projector norms
+        self.audio_projector.debug_logging = True
+
         print(f"[SAFE] ✓ Audio projector initialized", flush=True)
         sys.stdout.flush()
         
