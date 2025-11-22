@@ -116,11 +116,11 @@ FULL_CONFIG = {
 MULTIMODAL_CONFIG = {
     "name": "multimodal",
     "description": "Full configuration with both CLAP and Whisper audio encoders",
-    
+
     # Base VL Model - Same as full for multimodal
     "llm_model_name": "llava-hf/llava-1.5-13b-hf",
     "vision_model_name": "openai/clip-vit-large-patch14",
-    
+
     # Audio configuration - both CLAP and Whisper
     "audio_encoder_type": "multimodal",
     "audio_encoder_config": {
@@ -138,12 +138,12 @@ MULTIMODAL_CONFIG = {
             "max_length": 30.0
         }
     },
-    
+
     # Model dimensions
     "llm_hidden_size": 5120,  # LLaVA 13B hidden size
     "audio_embed_dim": 512 + 768,  # CLAP + Whisper combined
     "vision_embed_dim": 1024,
-    
+
     # Projector configuration
     "projector_type": "adaptive",  # Adaptive projector for variable tokens
     "num_audio_tokens": 12,  # More tokens for multimodal audio
@@ -152,7 +152,7 @@ MULTIMODAL_CONFIG = {
         "min_audio_tokens": 4,
         "dropout": 0.1
     },
-    
+
     # Fusion configuration
     "fusion_type": "multilayer",
     "fusion_layer_indices": [15, 25, 35],  # Multiple fusion layers for LLaVA 13B
@@ -167,22 +167,80 @@ MULTIMODAL_CONFIG = {
             }
         }
     },
-    
+
     # Training configuration
     "freeze_base_vl": True,
     "freeze_audio_encoder": True,
-    
+
     # Memory and compute
     "expected_vram_gb": 40,  # Multimodal with LLaVA 13B requires even more memory
     "recommended_batch_size": 1,
     "gradient_accumulation_steps": 16
 }
 
+# Phase 1: Signal Verification Configuration
+# This config tests if the frozen LLM can learn to attend to audio by removing
+# all capacity bottlenecks identified in the architectural review.
+PHASE1_CONFIG = {
+    "name": "phase1",
+    "description": "Phase 1: Signal verification - prove frozen LLM can listen to audio",
+
+    # Base VL Model - Same as full
+    "llm_model_name": "llava-hf/llava-1.5-13b-hf",
+    "vision_model_name": "openai/clip-vit-large-patch14",
+
+    # Audio configuration - Same as full
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0
+    },
+
+    # Model dimensions
+    "llm_hidden_size": 5120,
+    "audio_embed_dim": 512,
+    "vision_embed_dim": 1024,
+
+    # Projector configuration - INCREASED TOKENS
+    "projector_type": "standard",
+    "num_audio_tokens": 32,  # CHANGED from 16 - more granular representation for 10s audio
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024  # Keep for Phase 1, remove in Phase 2
+    },
+
+    # Fusion configuration - MULTI-LAYER + HIGHER RANK
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [8, 16, 24, 32],  # CHANGED: Better spacing for 40-layer LLaVA
+    "lora_rank": 64,  # CRITICAL CHANGE from 8 - removes cross-modal compression bottleneck
+    "fusion_config": {
+        "num_attention_heads": 40,
+        "attention_dropout": 0.1,
+        "modalities": {
+            "audio": {
+                "layer_indices": [8, 16, 24, 32],  # Match fusion_layer_indices
+                "num_tokens": 32  # Match num_audio_tokens
+            }
+        }
+    },
+
+    # Training configuration
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+
+    # Memory and compute (increased due to more tokens/rank)
+    "expected_vram_gb": 40,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 16  # Target effective batch size of 128
+}
+
 # Available configurations
 CONFIGS = {
     "demo": DEMO_CONFIG,
     "full": FULL_CONFIG,
-    "multimodal": MULTIMODAL_CONFIG
+    "multimodal": MULTIMODAL_CONFIG,
+    "phase1": PHASE1_CONFIG
 }
 
 def get_config(config_name: str):

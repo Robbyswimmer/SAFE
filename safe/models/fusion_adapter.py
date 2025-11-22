@@ -49,10 +49,12 @@ class CrossAttentionBlock(nn.Module):
         
         # Attention dropout
         self.attention_dropout = nn.Dropout(attention_dropout)
-        
+
         # Residual scaling for gentle fusion start (trainable with clamp)
-        self.residual_scale = nn.Parameter(torch.tensor(0.05), requires_grad=True)
-        self.register_buffer("residual_scale_max", torch.tensor(0.3), persistent=False)
+        # Phase 1 fix: Changed from 0.05 to 0.3 to force immediate gradient flow
+        # Max changed from 0.3 to 1.0 to allow stronger audio influence
+        self.residual_scale = nn.Parameter(torch.tensor(0.3), requires_grad=True)
+        self.register_buffer("residual_scale_max", torch.tensor(1.0), persistent=False)
         
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         """Transpose tensor for multi-head attention computation."""

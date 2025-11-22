@@ -114,8 +114,9 @@ class AudioProjector(nn.Module):
         # Project through MLP with soft bounding
         projected = self.projector(normalized_input)  # (batch_size, llm_hidden_size * num_audio_tokens)
 
-        # Apply tanh and much softer scaling to start nearly invisible
-        projected = torch.tanh(projected) * 2.0  # Much gentler than previous 0.1 scale factor
+        # Apply tanh and scaling to match LLaVA embedding magnitude (~5-15)
+        # Phase 1 fix: Changed from 2.0 to 10.0 to make audio visible to LLM
+        projected = torch.tanh(projected) * 10.0  # Match typical LLM embedding magnitude
 
         # Reshape to token format
         audio_tokens = projected.view(
@@ -275,8 +276,9 @@ class AdaptiveAudioProjector(nn.Module):
         generator = self.token_generators[str(most_common_tokens)]
         projected = generator(features)  # (batch_size, llm_hidden_size * k)
 
-        # Apply softer scaling to start nearly invisible
-        projected = projected * 2.0  # Much gentler scaling (tanh already applied in generator)
+        # Apply scaling to match LLaVA embedding magnitude
+        # Phase 1 fix: Changed from 2.0 to 10.0 to make audio visible to LLM
+        projected = projected * 10.0  # Match typical LLM embedding magnitude (tanh already applied in generator)
 
         audio_tokens = projected.view(
             batch_size,

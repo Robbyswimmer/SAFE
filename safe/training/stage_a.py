@@ -899,11 +899,13 @@ class StageATrainer:
         )
 
         # Drive fusion gate warmup using micro-step aware schedule
-        if hasattr(self.safe_model, "set_gate_warmup"):
-            warmup_steps = int(self.config.get("gate_warmup_steps", self.warmup_steps))
-            warmup_steps = max(1, warmup_steps)
-            self._gate_warm_counter += 1
-            self.safe_model.set_gate_warmup(self._gate_warm_counter, warmup_steps)
+        # PHASE 1: Disabled gate warmup - fusion adapter already starts at 0.3 (was 0.05)
+        # This forces immediate gradient flow instead of gradual warmup over 2000 steps
+        # if hasattr(self.safe_model, "set_gate_warmup"):
+        #     warmup_steps = int(self.config.get("gate_warmup_steps", self.warmup_steps))
+        #     warmup_steps = max(1, warmup_steps)
+        #     self._gate_warm_counter += 1
+        #     self.safe_model.set_gate_warmup(self._gate_warm_counter, warmup_steps)
 
         audio_token_tensor = inputs.get("audio_tokens")
 
