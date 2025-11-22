@@ -212,14 +212,14 @@ PHASE1_CONFIG = {
 
     # Fusion configuration - MULTI-LAYER + HIGHER RANK
     "fusion_type": "multilayer",
-    "fusion_layer_indices": [8, 16, 24, 32],  # CHANGED: Better spacing for 40-layer LLaVA
+    "fusion_layer_indices": [4, 8, 12, 16, 20, 24, 28, 32, 36],  # Phase 1.5: Dense injection every 4 layers
     "lora_rank": 64,  # CRITICAL CHANGE from 8 - removes cross-modal compression bottleneck
     "fusion_config": {
         "num_attention_heads": 40,
         "attention_dropout": 0.1,
         "modalities": {
             "audio": {
-                "layer_indices": [8, 16, 24, 32],  # Match fusion_layer_indices
+                "layer_indices": [4, 8, 12, 16, 20, 24, 28, 32, 36],  # Match fusion_layer_indices
                 "num_tokens": 32  # Match num_audio_tokens
             }
         }
