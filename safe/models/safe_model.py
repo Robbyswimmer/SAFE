@@ -650,11 +650,11 @@ class SAFEModel(nn.Module):
                 audio_to_encode = list(audio_list)
 
         if audio_to_encode is not None:
-            # Pass input_ids for text embedding calibration
+            # Note: text embedding calibration happens later in forward pass
             audio_tokens, transcripts = self.encode_audio(
                 audio_to_encode,
                 num_audio_tokens,
-                input_ids=inputs.get("input_ids")
+                input_ids=None  # Will be passed during forward() where input_ids available
             )
 
             raw_levels_by_batch: Optional[List[Optional[float]]] = None
@@ -1311,6 +1311,30 @@ class SAFEModel(nn.Module):
 
             # Ensure inputs_embeds matches base dtype
             inputs_embeds = inputs_embeds.to(base_dtype)
+
+            # Apply EMA calibration to audio tokens using text embeddings
+            if self.training and audio_tokens is not None and hasattr(self.audio_projector, 'last_norm_ratio'):
+                with torch.no_grad():
+                    audio_norm = audio_tokens.norm(dim=-1).mean()
+                    text_norm = inputs_embeds.norm(dim=-1).mean()
+                    ratio = (text_norm / (audio_norm + 1e-6)).clamp(0.1, 10.0)
+
+                    # Log norms for debugging (first few batches)
+                    if not hasattr(self, '_norm_log_count'):
+                        self._norm_log_count = 0
+                    if self._norm_log_count < 5:
+                        print(f"[NormCalib] audio_norm={audio_norm:.2f}, text_norm={text_norm:.2f}, ratio={ratio:.3f}, scale={self.audio_projector.output_scale.item():.3f}", flush=True)
+                        self._norm_log_count += 1
+
+                    # EMA update of scale
+                    old_scale = self.audio_projector.output_scale.item()
+                    new_scale = old_scale * self.audio_projector.ema_momentum + \
+                                ratio.item() * (1 - self.audio_projector.ema_momentum)
+                    self.audio_projector.output_scale.data.copy_(torch.tensor(new_scale))
+                    self.audio_projector.last_norm_ratio.copy_(ratio)
+
+                    # Re-scale audio tokens with updated scale
+                    audio_tokens = audio_tokens * (new_scale / old_scale)
 
             supervised_mask = None
             if labels is not None:
