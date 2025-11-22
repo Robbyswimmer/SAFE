@@ -478,7 +478,31 @@ def main():
     }
     normalized_split = split_aliases.get(args.split.lower(), args.split)
     dataset = AudioCapsDataset(data_path=args.data_root, split=normalized_split)
-    
+
+    if normalized_split.startswith("val"):
+        probe_count = min(len(dataset), 16)
+        if probe_count == 0:
+            raise SystemExit(
+                "Validation split contains no samples. Ensure the Stage-A data pack is available at"
+                f" {args.data_root}/audiocaps/."
+            )
+
+        ref_tot = 0
+        for idx in range(probe_count):
+            answers = dataset[idx].get("answers")
+            if isinstance(answers, (list, tuple)):
+                ref_tot += len([ans for ans in answers if str(ans).strip()])
+            elif answers:
+                ref_tot += 1
+
+        avg_refs = ref_tot / float(probe_count)
+        if avg_refs < 2.0:
+            raise SystemExit(
+                "Detected a validation dataset with fewer than 2 references per sample. "
+                "This usually means the Hugging Face export (single caption) is being used. "
+                "Please point --data_root to the original Stage-A data pack (5-reference AudioCaps)."
+            )
+
     def smart_collate(batch):
         audio_data = []
         for x in batch:
