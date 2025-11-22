@@ -163,6 +163,12 @@ args=(
 [[ "$DISABLE_VAL_SHUFFLE" != "0" ]] && args+=(--disable-val-shuffle)
 [[ "$DISABLE_BERTSCORE" != "0" ]] && args+=(--disable-bertscore)
 [[ "$SAVE_AUDIO_CSV" != "0" ]] && args+=(--save-audio-csv)
+[[ "$USE_WAVCAPS" != "0" ]] && args+=(--use-wavcaps)
+
+# Add WavCaps ratio if WavCaps is enabled
+if [[ "$USE_WAVCAPS" != "0" && -n "$WAVCAPS_RATIO" ]]; then
+    args+=(--wavcaps-ratio "$WAVCAPS_RATIO")
+fi
 
 # Run training
 python -u experiments/full_training/run_full_training.py "${args[@]}"
