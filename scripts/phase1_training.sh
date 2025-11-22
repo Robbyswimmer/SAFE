@@ -131,7 +131,7 @@ args=(
     --model-config "$MODEL_CONFIG"
     --variant no_retention
     --data-root "$DATA_ROOT"
-    --output-dir "$OUTPUT_ROOT"
+    --output-root "$OUTPUT_ROOT"
     --seed "$SEED"
     --train-split "$TRAIN_SPLIT"
     --val-audio-split "$VAL_AUDIO_SPLIT"
