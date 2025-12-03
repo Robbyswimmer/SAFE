@@ -103,6 +103,8 @@ class TrainingConfig:
     scst_reward_metric: str = "cider"
     scst_patience_epochs: int = 2
     scst_improvement_threshold: float = 1e-4
+    save_strategy: str = "steps"
+    save_total_limit: Optional[int] = None
 
 
 class CombinedAudioDataset(Dataset):
@@ -418,6 +420,8 @@ def build_stage_a_config(cfg: TrainingConfig) -> Dict[str, object]:
         "variant": cfg.variant,
         "eval_steps": 5_000,
         "save_steps": 5_000,
+        "save_strategy": cfg.save_strategy,
+        "save_total_limit": cfg.save_total_limit,
         "logging_steps": 100,
         "eval_logging_steps": max(1, cfg.eval_logging_steps),
         "progress_log_timeout": max(0, cfg.progress_log_timeout),
@@ -737,6 +741,8 @@ def run_experiment(args: argparse.Namespace) -> None:
         scst_reward_metric=args.scst_reward_metric,
         scst_patience_epochs=args.scst_patience_epochs,
         scst_improvement_threshold=args.scst_improvement_threshold,
+        save_strategy=args.save_strategy,
+        save_total_limit=args.save_total_limit,
     )
 
     variant_config = configure_variant(args.variant, base_config)
@@ -842,6 +848,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--scst-patience-epochs", type=int, default=2, help="Epochs without improvement before SCST")
     parser.add_argument("--scst-improvement-threshold", type=float, default=1e-4, help="Minimum improvement to reset SCST patience")
+    parser.add_argument("--save-strategy", choices=["epoch", "steps"], default="steps", help="Checkpoint save strategy")
+    parser.add_argument("--save-total-limit", type=int, default=None, help="Maximum number of checkpoints to keep")
 
     return parser.parse_args()
 

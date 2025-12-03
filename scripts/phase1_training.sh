@@ -45,7 +45,7 @@ VAL_VQA_SPLIT=${VAL_VQA_SPLIT:-val}
 NUM_EPOCHS=20  # Short run - if it doesn't learn by epoch 5, it won't
 TRAIN_BS=4     # Reduce due to 32 tokens (from 8)
 VAL_BS=8       # Reduce due to 32 tokens (from 16)
-NUM_WORKERS=8
+NUM_WORKERS=4  # Reduced from 8 to prevent DataLoader worker OOM after long training
 SEED=42
 MODEL_CONFIG="phase1"  # Use new Phase 1 config
 
@@ -66,6 +66,10 @@ MAX_VQA_VAL_SAMPLES=4096
 # PHASE 1 CRITICAL: Disable all retention mechanisms
 # Only run no_retention variant to isolate connectivity testing
 VARIANT_ORDER="no_retention"
+
+# Checkpoint settings
+SAVE_STRATEGY="epoch"  # Save at end of each epoch instead of every 5000 steps
+SAVE_TOTAL_LIMIT=3     # Keep only last 3 checkpoints to save disk space
 
 # Other settings
 EVAL_LOGGING_STEPS=10
@@ -154,6 +158,8 @@ args=(
     --train-eval-batches "$TRAIN_EVAL_BATCHES"
     --generation-max-new-tokens "$GEN_MAX_NEW_TOKENS"
     --progress-log-timeout "$PROGRESS_LOG_TIMEOUT"
+    --save-strategy "$SAVE_STRATEGY"
+    --save-total-limit "$SAVE_TOTAL_LIMIT"
 )
 
 # Add flags

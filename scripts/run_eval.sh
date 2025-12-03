@@ -28,6 +28,9 @@ conda activate "${CONDA_ENV}"
 # Default arguments
 RUN_ID=${1:-""}
 SPLIT=${2:-"val"}
+# Model configuration overrides (match training config for the run)
+MODEL_CONFIG=${MODEL_CONFIG:-full}
+NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-16}
 
 if [[ -z "$RUN_ID" ]]; then
     echo "Usage: sbatch scripts/run_eval.sh <RUN_ID> [SPLIT]"
@@ -45,6 +48,8 @@ python -u scripts/evaluate_checkpoint.py \
     --run_id "$RUN_ID" \
     --split "$SPLIT" \
     --data_root "$DATA_ROOT" \
-    --device cuda
+    --device cuda \
+    --model_config "$MODEL_CONFIG" \
+    --num_audio_tokens "$NUM_AUDIO_TOKENS"
 
 echo "Evaluation complete."

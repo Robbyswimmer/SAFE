@@ -610,4 +610,6 @@ def create_safe_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=_collate_multimodal_batch,
+        persistent_workers=True if num_workers > 0 else False,  # Prevent worker respawning to avoid memory leaks
+        pin_memory=True,  # Faster GPU transfer
     )
