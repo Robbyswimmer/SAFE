@@ -52,11 +52,13 @@ class StageATrainer:
         train_dataloader: DataLoader,
         val_dataloader: DataLoader,
         config: Dict = None,
-        curriculum_config: Union[str, Path, Dict, CurriculumConfig] = None
+        curriculum_config: Union[str, Path, Dict, CurriculumConfig] = None,
+        audio_test_dataloader: Optional[DataLoader] = None,
     ):
         self.safe_model = safe_model
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
+        self.audio_test_dataloader = audio_test_dataloader
 
         # Log dataset sizes
         train_size = len(train_dataloader.dataset) if hasattr(train_dataloader.dataset, '__len__') else 'unknown'
@@ -4506,6 +4508,24 @@ class StageATrainer:
                 epoch_metrics['audio_accuracy'],
                 epoch_metrics['total_loss'],
             )
+
+            # Optional AudioCaps test-set evaluation at each epoch end
+            if self.audio_test_dataloader is not None:
+                print(f"\n[StageATrainer] Running AudioCaps-test evaluation at end of epoch {epoch+1}...", flush=True)
+                test_max_batches = self.config.get("max_audio_eval_batches", None)
+                audio_test_metrics = self.evaluate(
+                    max_batches=test_max_batches,
+                    dataloader=self.audio_test_dataloader,
+                    description="AudioCaps-test",
+                )
+                # Log key test metrics
+                at_acc = audio_test_metrics.get("audio_accuracy", 0.0)
+                at_cider = audio_test_metrics.get("audio_cider", 0.0)
+                print(
+                    f"[StageATrainer] Epoch {epoch+1} AudioCaps-test: "
+                    f"audio_accuracy={at_acc:.4f} CIDEr={at_cider:.1f}",
+                    flush=True,
+                )
 
             current_acc = epoch_metrics.get('audio_accuracy', 0.0)
             improvement = current_acc - self._best_audio_accuracy

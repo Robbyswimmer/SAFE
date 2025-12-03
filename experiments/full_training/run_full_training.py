@@ -783,6 +783,7 @@ def run_experiment(args: argparse.Namespace) -> None:
         val_dataloader=val_loader,
         config=stage_a_config,
         curriculum_config=None,
+        audio_test_dataloader=audio_test_loader,
     )
 
     final_metrics = trainer.train()
