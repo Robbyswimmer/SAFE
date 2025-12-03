@@ -13,7 +13,8 @@ from pycocoevalcap.spice.spice import Spice
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from safe.models.safe_model import SAFEModel
-from safe.data.datasets import AudioCapsDataset
+from safe.data.datasets import AudioCapsDataset, create_safe_dataloader
+from safe.training.stage_a import StageATrainer
 from configs.model_configs import get_config as get_model_config
 
 def _normalize_audio_caption(text) -> str:
@@ -427,9 +428,9 @@ def main():
     print("Loading weights...")
     checkpoint_obj = torch.load(checkpoint_path, map_location="cpu")
     # Extract model weights while keeping training config/metrics for generation settings
-    if "state_dict" in checkpoint_obj:
+    if isinstance(checkpoint_obj, dict) and "state_dict" in checkpoint_obj:
         state_dict = checkpoint_obj["state_dict"]
-    elif "model_state_dict" in checkpoint_obj:
+    elif isinstance(checkpoint_obj, dict) and "model_state_dict" in checkpoint_obj:
         state_dict = checkpoint_obj["model_state_dict"]
     else:
         state_dict = checkpoint_obj
@@ -475,11 +476,11 @@ def main():
         relevant_missing = [k for k in missing_keys if "audio_projector" in k or "fusion_adapter" in k]
         if relevant_missing:
             print(f"CRITICAL: Missing relevant keys: {relevant_missing}")
-            
-    model.to(args.device)
     
-    # 3. Optionally load training-time config to mirror generation settings
+    # 3. Optionally load training-time config (used for Stage A-style evaluation)
     train_config = checkpoint_obj.get("config") if isinstance(checkpoint_obj, dict) else None
+    if train_config is None:
+        train_config = {}
     
     # 4. Load Data
     print(f"Loading {args.split} dataset from {args.data_root}...")
@@ -516,59 +517,40 @@ def main():
                 "Please point --data_root to the original Stage-A data pack (5-reference AudioCaps)."
             )
 
-    def smart_collate(batch):
-        audio_data = []
-        for x in batch:
-            audio_entry = x.get("audio")
-            if isinstance(audio_entry, tuple):
-                # Unpack (waveform, sr) -> waveform
-                audio_data.append(audio_entry[0])
-            else:
-                audio_data.append(audio_entry)
-                
-        return {
-            "questions": [x.get("question", "describe the audio") for x in batch],
-            "audio": audio_data,
-            "answers": [x.get("answers") for x in batch]
-        }
-
-    dataloader = DataLoader(
-        dataset, 
-        batch_size=args.batch_size, 
-        collate_fn=smart_collate,
-        num_workers=4
+    # Build dataloaders using the same SAFE collate as Stage A
+    train_loader = create_safe_dataloader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=4,
     )
-    
-    # Debug: Check first batch
-    first_batch = next(iter(dataloader))
-    print(f"[Debug] First batch answers: {first_batch['answers'][:2]}")
-    
-    # 5. Evaluate
-    # Try to mirror Stage A generation settings when available
-    gen_kwargs = {
-        "max_new_tokens": 40,
-        "num_beams": 4,
-        "length_penalty": 1.0,
-        "repetition_penalty": 1.2,
-    }
-    if train_config:
-        try:
-            audio_max_new = int(train_config.get("audio_generation_max_new_tokens",
-                                                 train_config.get("generation_max_new_tokens", 40)) or 40)
-            gen_kwargs["max_new_tokens"] = max(1, audio_max_new)
-            gen_kwargs["repetition_penalty"] = float(train_config.get("audio_repetition_penalty", 1.2))
-            # Prevent trivial loops seen in early evals
-            no_repeat = int(train_config.get("no_repeat_ngram_size", 3) or 0)
-            if no_repeat > 0:
-                gen_kwargs["no_repeat_ngram_size"] = no_repeat
-        except Exception as e:
-            print(f"Warning: Failed to read generation config from checkpoint: {e}")
-    
-    preds, refs = evaluate(model, dataloader, args.device, gen_kwargs)
-    
-    # 6. Metrics
-    metrics = compute_metrics(preds, refs)
-    
+    val_loader = create_safe_dataloader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=4,
+    )
+
+    # Ensure output directory is set for StageATrainer (even though we only eval)
+    if not isinstance(train_config, dict):
+        train_config = {}
+    train_config.setdefault("output_dir", str(run_dir))
+
+    # Instantiate StageATrainer to reuse its evaluation/generation logic
+    trainer = StageATrainer(
+        safe_model=model,
+        train_dataloader=train_loader,
+        val_dataloader=val_loader,
+        config=train_config,
+        curriculum_config=None,
+    )
+
+    max_eval_batches = train_config.get("max_eval_batches", None)
+    metrics = trainer.evaluate(
+        max_batches=max_eval_batches,
+        description=f"AudioCaps-{normalized_split}",
+    )
+
     print("\n" + "="*40)
     print(f"RESULTS for {args.run_id} on {args.split}")
     print("="*40)
