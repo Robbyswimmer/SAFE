@@ -183,6 +183,9 @@ config/secrets.json
 .env.local
 .env.production
 
+# MSR Fellowship files
+MSR Fellowship/
+
 # Large files
 *.tar
 *.tar.gz

@@ -111,6 +111,21 @@ class CLAPAudioEncoder(nn.Module):
 
         if isinstance(audio, str):
             audio_data, input_sr = librosa.load(audio, sr=self.sample_rate)
+        elif isinstance(audio, list) and len(audio) >= 1:
+            # Handle list payloads similarly to tuples (first element is waveform)
+            candidate = audio[0]
+            if isinstance(candidate, torch.Tensor):
+                audio_data = candidate.detach().cpu().numpy()
+            elif isinstance(candidate, np.ndarray):
+                audio_data = candidate
+            else:
+                raise ValueError(f"Unsupported audio list payload: {type(candidate)}")
+            # Optional second element as sample rate if present
+            if len(audio) > 1:
+                try:
+                    input_sr = int(audio[1])
+                except Exception:
+                    input_sr = self.sample_rate
         elif isinstance(audio, tuple) and len(audio) >= 1:
             candidate = audio[0]
             if isinstance(candidate, torch.Tensor):
