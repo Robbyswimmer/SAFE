@@ -50,7 +50,8 @@ VAL_VQA_SPLIT=${VAL_VQA_SPLIT:-val}
 NUM_EPOCHS=${NUM_EPOCHS:-10}
 TRAIN_BS=${TRAIN_BS:-4}
 VAL_BS=${VAL_BS:-8}
-NUM_WORKERS=${NUM_WORKERS:-4}
+# Use fewer DataLoader workers to reduce RAM footprint
+NUM_WORKERS=${NUM_WORKERS:-2}
 SEED=${SEED:-42}
 MODEL_CONFIG="phase1"  # Use Phase-1 architecture
 
@@ -79,6 +80,8 @@ DISABLE_VAL_SHUFFLE=${DISABLE_VAL_SHUFFLE:-1}
 USE_WAVCAPS=${USE_WAVCAPS:-0}
 WAVCAPS_RATIO=${WAVCAPS_RATIO:-0.5}
 SAVE_AUDIO_CSV=${SAVE_AUDIO_CSV:-0}
+EVAL_AUDIO_TEST=${EVAL_AUDIO_TEST:-1}
+MAX_AUDIO_TEST_SAMPLES=${MAX_AUDIO_TEST_SAMPLES:-600}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_ROOT"
@@ -135,6 +138,7 @@ args=(
 [[ "$DISABLE_BERTSCORE" != "0" ]] && args+=(--disable-bertscore)
 [[ "$SAVE_AUDIO_CSV" != "0" ]] && args+=(--save-audio-csv)
 [[ "$USE_WAVCAPS" != "0" ]] && args+=(--use-wavcaps --wavcaps-ratio "$WAVCAPS_RATIO")
+[[ "$EVAL_AUDIO_TEST" != "0" ]] && args+=(--eval-audio-test --max-audio-test-samples "$MAX_AUDIO_TEST_SAMPLES")
 
 python -u experiments/full_training/run_full_training.py "${args[@]}"
 
@@ -146,4 +150,3 @@ echo "Phase 1-Core Complete: $(date)"
 echo "=========================================="
 echo "Exit code: $EXIT_CODE"
 echo ""
-

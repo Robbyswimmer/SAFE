@@ -650,6 +650,35 @@ def run_experiment(args: argparse.Namespace) -> None:
     val_size = len(val_dataset) if hasattr(val_dataset, '__len__') else 'unknown'
     print(f"📊 Dataset sizes - Train: {train_size} samples, Val: {val_size} samples", flush=True)
 
+    # Optional AudioCaps test split (audio-only) for post-hoc evaluation
+    audio_test_dataset: Optional[Dataset] = None
+    audio_test_loader: Optional[DataLoader] = None
+    if getattr(args, "eval_audio_test", False):
+        try:
+            audiocaps_test = AudioCapsDataset(data_path=data_root, split="test")
+            test_limit = args.max_audio_test_samples if args.max_audio_test_samples > 0 else None
+            if test_limit is not None and len(audiocaps_test) > test_limit:
+                indices = list(range(test_limit))
+                audio_test_dataset = DatasetSubset(audiocaps_test, indices)
+                print(
+                    f"Loaded AudioCaps test: {len(audio_test_dataset)} samples (subset of {test_limit})",
+                    flush=True,
+                )
+            else:
+                audio_test_dataset = audiocaps_test
+                print(f"Loaded AudioCaps test: {len(audio_test_dataset)} samples", flush=True)
+
+            audio_test_loader = create_safe_dataloader(
+                audio_test_dataset,
+                batch_size=args.val_batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+            )
+        except Exception as exc:
+            print(f"Warning: Failed to load AudioCaps test split for audio eval ({exc}).", flush=True)
+            audio_test_dataset = None
+            audio_test_loader = None
+
     model_configs = {
         "demo": DEMO_CONFIG,
         "full": FULL_CONFIG,
@@ -777,6 +806,18 @@ def run_experiment(args: argparse.Namespace) -> None:
     if train_metrics is not None:
         metrics_payload["training"] = train_metrics
 
+    # Optional post-hoc AudioCaps test evaluation
+    if getattr(args, "eval_audio_test", False) and audio_test_loader is not None:
+        print("\n[run_experiment] Running post-hoc AudioCaps test evaluation...", flush=True)
+        sys.stdout.flush()
+        test_max_batches = args.max_audio_eval_batches if args.max_audio_eval_batches > 0 else None
+        audio_test_metrics = trainer.evaluate(
+            max_batches=test_max_batches,
+            dataloader=audio_test_loader,
+            description="AudioCaps-test",
+        )
+        metrics_payload["audio_test"] = audio_test_metrics
+
     with open(metrics_path, "w", encoding="utf-8") as fh:
         json.dump(metrics_payload, fh, indent=2)
 
@@ -850,6 +891,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scst-improvement-threshold", type=float, default=1e-4, help="Minimum improvement to reset SCST patience")
     parser.add_argument("--save-strategy", choices=["epoch", "steps"], default="steps", help="Checkpoint save strategy")
     parser.add_argument("--save-total-limit", type=int, default=None, help="Maximum number of checkpoints to keep")
+    parser.add_argument(
+        "--eval-audio-test",
+        action="store_true",
+        help="Run AudioCaps test split evaluation after training",
+    )
+    parser.add_argument(
+        "--max-audio-test-samples",
+        type=int,
+        default=0,
+        help="Limit AudioCaps test samples for eval (<=0 = use all)",
+    )
 
     return parser.parse_args()
 
