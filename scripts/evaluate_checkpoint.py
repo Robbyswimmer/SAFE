@@ -425,12 +425,15 @@ def main():
     model = SAFEModel(**safe_model_kwargs)
     
     print("Loading weights...")
-    state_dict = torch.load(checkpoint_path, map_location="cpu")
-    if "state_dict" in state_dict:
-        state_dict = state_dict["state_dict"]
-    elif "model_state_dict" in state_dict:
-        state_dict = state_dict["model_state_dict"]
-        
+    checkpoint_obj = torch.load(checkpoint_path, map_location="cpu")
+    # Extract model weights while keeping training config/metrics for generation settings
+    if "state_dict" in checkpoint_obj:
+        state_dict = checkpoint_obj["state_dict"]
+    elif "model_state_dict" in checkpoint_obj:
+        state_dict = checkpoint_obj["model_state_dict"]
+    else:
+        state_dict = checkpoint_obj
+
     # Handle prefix 'safe_model.' if present (from Lightning)
     new_state_dict = {}
     for k, v in state_dict.items():
@@ -475,7 +478,10 @@ def main():
             
     model.to(args.device)
     
-    # 3. Load Data
+    # 3. Optionally load training-time config to mirror generation settings
+    train_config = checkpoint_obj.get("config") if isinstance(checkpoint_obj, dict) else None
+    
+    # 4. Load Data
     print(f"Loading {args.split} dataset from {args.data_root}...")
     split_aliases = {
         "train": "train",
@@ -537,17 +543,30 @@ def main():
     first_batch = next(iter(dataloader))
     print(f"[Debug] First batch answers: {first_batch['answers'][:2]}")
     
-    # 4. Evaluate
+    # 5. Evaluate
+    # Try to mirror Stage A generation settings when available
     gen_kwargs = {
         "max_new_tokens": 40,
         "num_beams": 4,
         "length_penalty": 1.0,
-        "repetition_penalty": 1.2
+        "repetition_penalty": 1.2,
     }
+    if train_config:
+        try:
+            audio_max_new = int(train_config.get("audio_generation_max_new_tokens",
+                                                 train_config.get("generation_max_new_tokens", 40)) or 40)
+            gen_kwargs["max_new_tokens"] = max(1, audio_max_new)
+            gen_kwargs["repetition_penalty"] = float(train_config.get("audio_repetition_penalty", 1.2))
+            # Prevent trivial loops seen in early evals
+            no_repeat = int(train_config.get("no_repeat_ngram_size", 3) or 0)
+            if no_repeat > 0:
+                gen_kwargs["no_repeat_ngram_size"] = no_repeat
+        except Exception as e:
+            print(f"Warning: Failed to read generation config from checkpoint: {e}")
     
     preds, refs = evaluate(model, dataloader, args.device, gen_kwargs)
     
-    # 5. Metrics
+    # 6. Metrics
     metrics = compute_metrics(preds, refs)
     
     print("\n" + "="*40)

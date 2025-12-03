@@ -3,7 +3,7 @@
 #SBATCH --job-name="SAFE-Phase1"
 #SBATCH --output=logs/phase1_%j.txt
 #SBATCH --error=logs/phase1_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --time=72:00:00
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1

@@ -28,9 +28,13 @@ conda activate "${CONDA_ENV}"
 # Default arguments
 RUN_ID=${1:-""}
 SPLIT=${2:-"val"}
-# Model configuration overrides (match training config for the run)
-MODEL_CONFIG=${MODEL_CONFIG:-full}
-NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-16}
+# Model configuration overrides.
+# Default to Phase 1 (32 tokens, rank 64) since many recent runs
+# including 20251121_* were trained with this config.
+# Override via environment if you need a different preset, e.g.:
+#   MODEL_CONFIG=full NUM_AUDIO_TOKENS=16 sbatch scripts/run_eval.sh 232xxx val
+MODEL_CONFIG=${MODEL_CONFIG:-phase1}
+NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-32}
 
 if [[ -z "$RUN_ID" ]]; then
     echo "Usage: sbatch scripts/run_eval.sh <RUN_ID> [SPLIT]"
