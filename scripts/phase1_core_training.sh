@@ -10,7 +10,7 @@
 #SBATCH --output=logs/phase1_core_%j.txt
 #SBATCH --error=logs/phase1_core_%j.err
 #SBATCH --time=72:00:00
-#SBATCH --mem=128G
+#SBATCH --mem=48G
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
 #SBATCH --mail-type=FAIL,END
