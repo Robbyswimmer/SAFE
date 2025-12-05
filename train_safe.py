@@ -1174,8 +1174,8 @@ def main():
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "fp16": args.fp16,
         "eval_frequency": args.eval_frequency,
-        # Default to a small eval cap if not specified to keep metrics fast
-        "max_eval_batches": args.max_eval_batches if args.max_eval_batches is not None else 10,
+        # Default eval cap if not specified to keep metrics manageable
+        "max_eval_batches": args.max_eval_batches if args.max_eval_batches is not None else 50,
         "max_new_tokens": args.max_new_tokens,
         "num_beams": args.num_beams,
         "early_stopping_patience": args.early_stopping_patience,
