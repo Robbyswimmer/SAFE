@@ -235,6 +235,27 @@ def evaluate(
     """
     model.eval()
 
+    # CRITICAL: Configure generation parameters to prevent hanging
+    tokenizer = model.base_vl.tokenizer
+
+    # Ensure pad_token exists
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is not None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        else:
+            tokenizer.pad_token_id = 0
+
+    # Set generation config on the LLM to prevent conflicts
+    if hasattr(model.base_vl.llm, 'config'):
+        model.base_vl.llm.config.pad_token_id = tokenizer.pad_token_id
+        model.base_vl.llm.config.eos_token_id = tokenizer.eos_token_id
+
+    if hasattr(model.base_vl.llm, 'generation_config'):
+        model.base_vl.llm.generation_config.pad_token_id = tokenizer.pad_token_id
+        model.base_vl.llm.generation_config.eos_token_id = tokenizer.eos_token_id
+        # Override max_length to respect max_new_tokens limit
+        model.base_vl.llm.generation_config.max_length = None
+
     total_loss = 0.0
     num_batches = 0
 
@@ -309,6 +330,8 @@ def evaluate(
             repetition_penalty=1.2,
             no_repeat_ngram_size=3,
             do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
         )
 
         # Decode predictions
