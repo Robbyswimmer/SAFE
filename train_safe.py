@@ -274,6 +274,25 @@ def evaluate(
         answers = batch["answers"]
         audio = batch["audio"]
 
+        # CRITICAL FIX: Filter out samples with missing audio files
+        # When audio files are missing, the model creates zero-filled audio_tokens
+        # which causes generation to hang. Skip these samples entirely.
+        valid_indices = [i for i, a in enumerate(audio) if a is not None]
+
+        if not valid_indices:
+            # Skip batch entirely if all audio is missing
+            if batch_idx < 5:  # Only log first few skipped batches
+                print(f"  ⚠️  Skipping batch {batch_idx} - all audio files missing", flush=True)
+            continue
+
+        if len(valid_indices) < len(audio):
+            # Partial batch - filter to only valid samples
+            if batch_idx < 5:
+                print(f"  ⚠️  Filtering batch {batch_idx} - {len(audio) - len(valid_indices)}/{len(audio)} audio files missing", flush=True)
+            questions = [questions[i] for i in valid_indices]
+            answers = [answers[i] for i in valid_indices]
+            audio = [audio[i] for i in valid_indices]
+
         # Prepare inputs (ensure correct device)
         inputs = model.prepare_multimodal_inputs(
             text=questions,
