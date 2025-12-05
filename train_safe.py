@@ -688,8 +688,28 @@ def evaluate(
     print(f"[Metrics] Caption metrics computed.", flush=True)
     print(f"✓ Evaluation complete ({format_time(elapsed)})", flush=True)
     print(f"  Loss: {avg_loss:.4f}", flush=True)
-    print(f"  CIDEr: {metrics['cider']:.2f}", flush=True)
-    print(f"  BLEU-4: {metrics['bleu4']:.4f}", flush=True)
+    # Print all key caption metrics in a consistent order
+    metric_keys = [
+        "bleu1",
+        "bleu2",
+        "bleu3",
+        "bleu4",
+        "meteor",
+        "rouge_l",
+        "cider",
+        "spice",
+        "spider",
+        "bertscore_f1",
+    ]
+    for key in metric_keys:
+        if key in metrics:
+            value = metrics[key]
+            if key in ["cider", "spice", "spider"]:
+                print(f"  {key.upper()}: {value:.2f}", flush=True)
+            elif key == "bertscore_f1":
+                print(f"  BERTSCORE_F1: {value:.4f}", flush=True)
+            else:
+                print(f"  {key.upper()}: {value:.4f}", flush=True)
 
     # Log sample predictions
     print(f"\n📝 Sample predictions:", flush=True)

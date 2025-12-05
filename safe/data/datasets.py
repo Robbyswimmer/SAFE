@@ -257,18 +257,18 @@ class _BaseQADataset(Dataset):
         audio_file = next((candidate for candidate in candidate_paths if candidate and candidate.exists()), None)
 
         if audio_file is None:
-            # Only log first few missing files to avoid spam
+            # Only log a very small number of missing files to avoid noisy logs
             if not hasattr(self, '_missing_audio_count'):
                 self._missing_audio_count = 0
 
-            if self._missing_audio_count < 5:
+            if self._missing_audio_count < 2:
                 missing_label = raw_audio_path or sound_name or "<unknown>"
                 print(f"[AudioLoad] ❌ File not found: {missing_label}", flush=True)
                 print(f"[AudioLoad]    Tried {len(candidate_paths)} paths:", flush=True)
                 for cp in candidate_paths[:3]:
                     print(f"[AudioLoad]      - {cp}", flush=True)
                 self._missing_audio_count += 1
-            elif self._missing_audio_count == 5:
+            elif self._missing_audio_count == 2:
                 print(f"[AudioLoad] ⚠️  Additional missing audio files will not be logged", flush=True)
                 self._missing_audio_count += 1
 
@@ -280,16 +280,16 @@ class _BaseQADataset(Dataset):
             # torchaudio.load() supports WAV, FLAC, MP3, OGG, etc.
             waveform, sample_rate = torchaudio.load(str(audio_file))
 
-            # Log first few successful loads
-            if not hasattr(self, '_load_success_count'):
-                self._load_success_count = 0
-
-            if self._load_success_count < 3:
-                print(f"[AudioLoad] ✓ Loaded: {audio_file.name} (sr={sample_rate}, shape={waveform.shape})", flush=True)
-                self._load_success_count += 1
-            elif self._load_success_count == 3:
-                print(f"[AudioLoad] ✓ Audio loading working correctly (suppressing further success logs)", flush=True)
-                self._load_success_count += 1
+            # Optional debug logging of successful loads – disabled by default for clean logs
+            if getattr(self, "_debug_audio_loading", False):
+                if not hasattr(self, '_load_success_count'):
+                    self._load_success_count = 0
+                if self._load_success_count < 3:
+                    print(f"[AudioLoad] ✓ Loaded: {audio_file.name} (sr={sample_rate}, shape={waveform.shape})", flush=True)
+                    self._load_success_count += 1
+                elif self._load_success_count == 3:
+                    print(f"[AudioLoad] ✓ Audio loading working correctly (suppressing further success logs)", flush=True)
+                    self._load_success_count += 1
 
             # Convert stereo to mono
             if waveform.dim() == 2 and waveform.size(0) > 1:
@@ -420,13 +420,6 @@ class AudioCapsDataset(_BaseQADataset):
                 entry.get("answer") or        # Singular form (what full_training data uses)
                 entry.get("caption")          # AudioCaps single caption field
             )
-
-        # Debug: Log first few samples to verify answer loading
-        if idx < 3:
-            print(f"[AudioCapsDebug] Sample {idx}:", flush=True)
-            print(f"  Entry keys: {list(entry.keys())}", flush=True)
-            print(f"  'answer' field: {entry.get('answer')}", flush=True)
-            print(f"  Final answers value: {answers}", flush=True)
 
         sample = {
             "sample_id": entry.get("id") or entry.get("ytid") or entry.get("sound_name"),
