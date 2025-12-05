@@ -204,7 +204,7 @@ PHASE1_CONFIG = {
 
     # Projector configuration - INCREASED TOKENS
     "projector_type": "standard",
-    "num_audio_tokens": 16,  # Reduced from 32 - still ample capacity for 10s audio
+    "num_audio_tokens": 16,  # Phase 1: 16 audio tokens for 10s audio
     "projector_config": {
         "dropout": 0.1,
         "bottleneck_dim": 1024  # Keep for Phase 1, remove in Phase 2
@@ -212,17 +212,21 @@ PHASE1_CONFIG = {
 
     # Fusion configuration - MULTI-LAYER + HIGHER RANK
     "fusion_type": "multilayer",
-    "fusion_layer_indices": [4, 8, 12, 16, 20, 24, 28, 32, 36],  # Phase 1.5: Dense injection every 4 layers
+    # Phase 1 default: inject at 3 layers (early/mid/late within first half)
+    "fusion_layer_indices": [4, 8, 12],
     "lora_rank": 64,  # CRITICAL CHANGE from 8 - removes cross-modal compression bottleneck
     "fusion_config": {
         "num_attention_heads": 40,
         "attention_dropout": 0.1,
         "modalities": {
             "audio": {
-                "layer_indices": [4, 8, 12, 16, 20, 24, 28, 32, 36],  # Match fusion_layer_indices
-                "num_tokens": 16  # Match num_audio_tokens
+                # Match fusion_layer_indices and num_audio_tokens
+                "layer_indices": [4, 8, 12],
+                "num_tokens": 16
             }
-        }
+        },
+        # Default fusion injection point for Phase 1: inject BEFORE FFN
+        "injection_point": "pre_ffn",
     },
 
     # Training configuration
