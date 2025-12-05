@@ -138,6 +138,68 @@ def _normalize_audio_caption(text: Any) -> str:
     return " ".join(cleaned_tokens)
 
 
+def _extract_answer_from_generation(generated_text: str) -> str:
+    """
+    Extract answer text from a chat-style generation.
+
+    Mirrors StageATrainer._extract_answer(..., mode=\"audio\"):
+    - Prefer content after an \"ASSISTANT:\" marker.
+    - Strip assistant-style prefixes.
+    - Keep full caption (no sentence truncation).
+    """
+    if not generated_text:
+        return ""
+
+    import re
+
+    answer = str(generated_text).strip()
+    answer = re.sub(r"[\\r\\n]+", " ", answer)
+    answer = re.sub(r"\\s+", " ", answer).strip()
+    if not answer:
+        return ""
+
+    lower_answer = answer.lower()
+
+    # Extract text after ASSISTANT: marker if present
+    assistant_match = re.search(r"(?:assistant|ssistant)\\s*[:\\-]\\s*(.+)", lower_answer, re.IGNORECASE)
+    if assistant_match:
+        match_in_original = re.search(r"(?:assistant|ssistant)\\s*[:\\-]\\s*(.+)", answer, re.IGNORECASE)
+        if match_in_original:
+            answer = match_in_original.group(1).strip()
+            lower_answer = answer.lower()
+
+    # Remove obvious assistant-style prefixes
+    prefix_patterns = [
+        r"^assistant\\s*[:\\-]\\s*",
+        r"^ssistant\\s*[:\\-]\\s*",
+        r"^ans(?:wer)?\\s*[:\\-]\\s*",
+        r"^ant\\s*[:\\-]\\s*",
+        r"^response\\s*[:\\-]\\s*",
+        r"^reply\\s*[:\\-]\\s*",
+    ]
+    for pattern in prefix_patterns:
+        if re.match(pattern, lower_answer):
+            answer = re.sub(pattern, "", answer, count=1, flags=re.IGNORECASE).strip()
+            lower_answer = answer.lower()
+            break
+
+    # Generic \"prefix: value\" handling
+    if \":\" in answer:
+        prefix, remainder = answer.split(\":\", 1)
+        prefix_clean = prefix.strip().lower()
+        if (
+            prefix_clean
+            and len(prefix_clean.split()) <= 3
+            and all(ch.isalpha() for ch in prefix_clean.replace(\" \", \"\"))
+        ):
+            answer = remainder.strip()
+            lower_answer = answer.lower()
+
+    # Remove leading bullets / numbering
+    answer = re.sub(r\"^(?:[\\-\\*\\u2022]+|\\d+\\.)\\s*\", \"\", answer)
+
+    return answer.strip()
+
 # ============================================================================
 # SECTION 2: METRICS
 # ============================================================================
@@ -411,6 +473,7 @@ def evaluate(
     num_beams: int = 1,
     compute_bertscore: bool = False,
     light_metrics: bool = False,
+    suppress_eos_for_audio: bool = True,
 ) -> Dict[str, float]:
     """
     Evaluate model on audio captioning task
@@ -428,6 +491,13 @@ def evaluate(
         Dict with metrics (loss, cider, bleu4, etc.)
     """
     model.eval()
+
+    # Ensure audio fusion is fully enabled during evaluation
+    if hasattr(model, "set_gate"):
+        try:
+            model.set_gate(1.0)
+        except Exception:
+            pass
 
     # CRITICAL: Configure generation parameters to prevent hanging
     tokenizer = model.base_vl.tokenizer
@@ -467,6 +537,7 @@ def evaluate(
         questions = batch["questions"]
         answers = batch["answers"]
         audio = batch["audio"]
+        has_audio_flags = batch.get("has_audio", None)
 
         # CRITICAL FIX: Filter out samples with missing audio files
         # When audio files are missing, the model creates zero-filled audio_tokens
@@ -532,19 +603,37 @@ def evaluate(
         if gen_audio_tokens is not None:
             gen_audio_tokens = gen_audio_tokens.to(device)
 
+        # Build generation kwargs and optionally suppress EOS for audio batches
+        generation_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "min_new_tokens": 1,
+            "num_beams": num_beams,
+            "repetition_penalty": 1.2,
+            "no_repeat_ngram_size": 3,
+            "do_sample": False,
+            "pad_token_id": tokenizer.pad_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+        }
+        if suppress_eos_for_audio and has_audio_flags is not None:
+            if torch.is_tensor(has_audio_flags):
+                has_audio_any = bool(has_audio_flags.any().item())
+            else:
+                has_audio_any = any(bool(x) for x in has_audio_flags)
+            if has_audio_any and tokenizer.eos_token_id is not None:
+                suppress_tokens = [tokenizer.eos_token_id]
+                if (
+                    tokenizer.pad_token_id is not None
+                    and tokenizer.pad_token_id != tokenizer.eos_token_id
+                ):
+                    suppress_tokens.append(tokenizer.pad_token_id)
+                generation_kwargs["suppress_tokens"] = suppress_tokens
+
         # Generate captions
         generated_ids = model.generate(
             input_ids=gen_input_ids,
             attention_mask=gen_attention_mask,
             audio_tokens=gen_audio_tokens,
-            max_new_tokens=max_new_tokens,
-            min_new_tokens=1,  # CRITICAL: Force at least 1 token to prevent empty generation
-            num_beams=num_beams,
-            repetition_penalty=1.2,
-            no_repeat_ngram_size=3,
-            do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
+            **generation_kwargs,
         )
 
         # Decode predictions
@@ -555,13 +644,13 @@ def evaluate(
             clean_up_tokenization_spaces=True
         )
 
-        # Clean predictions (remove question prompt)
+        # Clean predictions (remove question prompt and extract answer content)
         for i, pred in enumerate(batch_predictions):
-            # Remove the question from the prediction
             question = questions[i]
             if question and question in pred:
                 pred = pred.replace(question, "").strip()
-            all_predictions.append(pred)
+            pred_answer = _extract_answer_from_generation(pred)
+            all_predictions.append(pred_answer if pred_answer else pred.strip())
 
         # Collect references
         for answer in answers:
@@ -870,6 +959,7 @@ def train(
         # BERTScore stays off here to keep this quick.
         compute_bertscore=False,
         light_metrics=False,
+        suppress_eos_for_audio=True,
     )
     print(f"[InitEval] CIDEr={init_metrics.get('cider', 0.0):.2f} BLEU-4={init_metrics.get('bleu4', 0.0):.4f}", flush=True)
 
@@ -905,6 +995,7 @@ def train(
                 # Full caption metrics during validation; BERTScore still off.
                 compute_bertscore=False,
                 light_metrics=False,
+                suppress_eos_for_audio=True,
             )
 
             # Update history
@@ -1201,6 +1292,7 @@ def main():
             num_beams=args.num_beams,
             compute_bertscore=True,   # Full metrics in eval-only mode
             light_metrics=False,
+            suppress_eos_for_audio=False,
         )
 
         # Save results
