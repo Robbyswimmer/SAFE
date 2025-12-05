@@ -159,7 +159,8 @@ def compute_rouge(predictions: List[str], references: List[List[str]]) -> float:
 def compute_caption_metrics(
     predictions: List[str],
     references: List[List[str]],
-    compute_bertscore: bool = False
+    compute_bertscore: bool = False,
+    light_metrics: bool = False,
 ) -> Dict[str, float]:
     """
     Compute all caption metrics
@@ -181,9 +182,13 @@ def compute_caption_metrics(
     bleu_scores = compute_bleu(predictions, references)
     metrics.update(bleu_scores)
 
-    # METEOR and ROUGE
-    metrics["meteor"] = compute_meteor(predictions, references)
-    metrics["rouge_l"] = compute_rouge(predictions, references)
+    # METEOR and ROUGE (can be slow; optionally skipped for light eval)
+    if not light_metrics:
+        metrics["meteor"] = compute_meteor(predictions, references)
+        metrics["rouge_l"] = compute_rouge(predictions, references)
+    else:
+        metrics["meteor"] = 0.0
+        metrics["rouge_l"] = 0.0
 
     # BERTScore (optional, slow)
     if compute_bertscore:
@@ -217,6 +222,7 @@ def evaluate(
     max_new_tokens: int = 20,
     num_beams: int = 1,
     compute_bertscore: bool = False,
+    light_metrics: bool = False,
 ) -> Dict[str, float]:
     """
     Evaluate model on audio captioning task
@@ -385,12 +391,14 @@ def evaluate(
     elapsed = time.time() - start_time
 
     # Compute metrics
+    print(f"[Metrics] Computing caption metrics on {len(all_predictions)} predictions...", flush=True)
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
 
     caption_metrics = compute_caption_metrics(
         all_predictions,
         all_references,
-        compute_bertscore=compute_bertscore
+        compute_bertscore=compute_bertscore,
+        light_metrics=light_metrics,
     )
 
     metrics = {
@@ -400,6 +408,7 @@ def evaluate(
         "eval_time": elapsed,
     }
 
+    print(f"[Metrics] Caption metrics computed.", flush=True)
     print(f"✓ Evaluation complete ({format_time(elapsed)})", flush=True)
     print(f"  Loss: {avg_loss:.4f}", flush=True)
     print(f"  CIDEr: {metrics['cider']:.2f}", flush=True)
@@ -670,6 +679,7 @@ def train(
         max_new_tokens=config.get("max_new_tokens", 20),
         num_beams=config.get("num_beams", 1),
         compute_bertscore=False,
+        light_metrics=True,
     )
     print(f"[InitEval] CIDEr={init_metrics.get('cider', 0.0):.2f} BLEU-4={init_metrics.get('bleu4', 0.0):.4f}", flush=True)
 
@@ -703,6 +713,7 @@ def train(
                 max_new_tokens=config.get("max_new_tokens", 20),
                 num_beams=config.get("num_beams", 1),
                 compute_bertscore=False,
+                light_metrics=True,
             )
 
             # Update history
@@ -997,7 +1008,8 @@ def main():
             max_batches=args.max_eval_batches,
             max_new_tokens=args.max_new_tokens,
             num_beams=args.num_beams,
-            compute_bertscore=True,  # Compute BERTScore in eval-only mode
+            compute_bertscore=True,   # Full metrics in eval-only mode
+            light_metrics=False,
         )
 
         # Save results
