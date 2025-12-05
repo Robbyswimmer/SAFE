@@ -204,7 +204,7 @@ PHASE1_CONFIG = {
 
     # Projector configuration - INCREASED TOKENS
     "projector_type": "standard",
-    "num_audio_tokens": 32,  # CHANGED from 16 - more granular representation for 10s audio
+    "num_audio_tokens": 16,  # Reduced from 32 - still ample capacity for 10s audio
     "projector_config": {
         "dropout": 0.1,
         "bottleneck_dim": 1024  # Keep for Phase 1, remove in Phase 2
@@ -220,7 +220,7 @@ PHASE1_CONFIG = {
         "modalities": {
             "audio": {
                 "layer_indices": [4, 8, 12, 16, 20, 24, 28, 32, 36],  # Match fusion_layer_indices
-                "num_tokens": 32  # Match num_audio_tokens
+                "num_tokens": 16  # Match num_audio_tokens
             }
         }
     },
