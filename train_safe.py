@@ -836,9 +836,13 @@ def main():
     print(f"\nLoading model config: {args.model_config}")
     model_config = get_config(args.model_config)
 
+    # Filter out metadata fields that aren't constructor arguments
+    metadata_fields = {"name", "description", "expected_vram_gb", "recommended_batch_size"}
+    constructor_config = {k: v for k, v in model_config.items() if k not in metadata_fields}
+
     # Initialize model
     print(f"\nInitializing SAFE model...")
-    model = SAFEModel(**model_config)
+    model = SAFEModel(**constructor_config)
     model = model.to(device)
 
     # Count parameters
