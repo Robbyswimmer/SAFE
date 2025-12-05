@@ -43,9 +43,9 @@ OUTPUT_DIR=${OUTPUT_DIR:-"./checkpoints/phase1_clean"}
 NUM_EPOCHS=${NUM_EPOCHS:-20}
 BATCH_SIZE=${BATCH_SIZE:-4}
 GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-32}
-LR_PROJECTOR=${LR_PROJECTOR:-1e-3}
-LR_ADAPTER=${LR_ADAPTER:-5e-4}
-WARMUP_STEPS=${WARMUP_STEPS:-500}
+LR_PROJECTOR=${LR_PROJECTOR:-2e-4}
+LR_ADAPTER=${LR_ADAPTER:-1e-4}
+WARMUP_STEPS=${WARMUP_STEPS:-1000}
 EVAL_FREQUENCY=${EVAL_FREQUENCY:-1}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-20}
 NUM_BEAMS=${NUM_BEAMS:-1}
@@ -53,6 +53,10 @@ FP16=${FP16:-"--fp16"}
 SEED=${SEED:-42}
 USE_WAVCAPS=${USE_WAVCAPS:-0}
 WAVCAPS_RATIO=${WAVCAPS_RATIO:-0.8}
+AUDIO_CONTRASTIVE_WEIGHT=${AUDIO_CONTRASTIVE_WEIGHT:-0.0}
+AUDIO_CONTRASTIVE_TEMPERATURE=${AUDIO_CONTRASTIVE_TEMPERATURE:-0.07}
+AUDIO_CONTRASTIVE_MAX_LENGTH=${AUDIO_CONTRASTIVE_MAX_LENGTH:-48}
+GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-0}
 
 # Create output directory
 mkdir -p "${OUTPUT_DIR}"
@@ -82,6 +86,8 @@ echo "Warmup steps: ${WARMUP_STEPS}"
 echo "Mixed precision: ${FP16}"
 echo "Seed: ${SEED}"
 echo "Use WavCaps: ${USE_WAVCAPS} (ratio=${WAVCAPS_RATIO})"
+echo "Audio contrastive weight: ${AUDIO_CONTRASTIVE_WEIGHT}"
+echo "Gate warmup steps: ${GATE_WARMUP_STEPS}"
 echo "========================================"
 echo ""
 
@@ -102,6 +108,10 @@ python train_safe.py \
     --seed "${SEED}" \
     $( [[ "${USE_WAVCAPS}" != "0" ]] && echo --use-wavcaps ) \
     --wavcaps-ratio "${WAVCAPS_RATIO}" \
+    --audio-contrastive-weight "${AUDIO_CONTRASTIVE_WEIGHT}" \
+    --audio-contrastive-temperature "${AUDIO_CONTRASTIVE_TEMPERATURE}" \
+    --audio-contrastive-max-length "${AUDIO_CONTRASTIVE_MAX_LENGTH}" \
+    --gate-warmup-steps "${GATE_WARMUP_STEPS}" \
     ${FP16}
 
 echo ""

@@ -138,6 +138,41 @@ def _normalize_audio_caption(text: Any) -> str:
     return " ".join(cleaned_tokens)
 
 
+def _embed_texts_for_contrastive(
+    model: SAFEModel,
+    texts: List[str],
+    device: torch.device,
+    max_length: int = 48,
+) -> torch.Tensor:
+    """
+    Embed texts using the base LLM embedding layer, pooled over tokens.
+    Mirrors StageATrainer._embed_texts behavior.
+    """
+    tokenizer = model.base_vl.tokenizer
+    embedding_layer = model.base_vl.llm.get_input_embeddings()
+    hidden_size = embedding_layer.weight.size(1)
+
+    if not texts:
+        return torch.empty(0, hidden_size, device=device)
+
+    encoded = tokenizer(
+        texts,
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt",
+    )
+    input_ids = encoded["input_ids"].to(device)
+    attention_mask = encoded["attention_mask"].to(device)
+
+    with torch.no_grad():
+        text_embeds = embedding_layer(input_ids)
+
+    mask = attention_mask.unsqueeze(-1)
+    pooled = (text_embeds * mask).sum(dim=1).float()
+    denom = mask.sum(dim=1).clamp_min(1.0)
+    return pooled / denom
+
 class MixedAudioCaptionDataset(Dataset):
     """
     Simple wrapper to mix AudioCaps and WavCaps with a given ratio.
@@ -857,7 +892,6 @@ def train_epoch(
                     audio_tokens=audio_tokens,
                 )
                 loss = outputs["loss"]
-                loss = loss / gradient_accumulation_steps
         else:
             outputs = model(
                 input_ids=input_ids,
@@ -866,7 +900,53 @@ def train_epoch(
                 audio_tokens=audio_tokens,
             )
             loss = outputs["loss"]
-            loss = loss / gradient_accumulation_steps
+
+        # Optional audio-text contrastive loss (InfoNCE-style) on this batch
+        contrastive_weight = float(config.get("audio_contrastive_weight", 0.0) or 0.0)
+        contrastive_temp = float(config.get("audio_contrastive_temperature", 0.07) or 0.07)
+        if contrastive_weight > 0.0 and audio_tokens is not None:
+            try:
+                # Pool audio tokens to a single vector per sample
+                # audio_tokens: (B, T, H) -> (B, H)
+                audio_vecs = audio_tokens.mean(dim=1)
+
+                # Resolve textual answers for each sample using SAFEModel helper
+                resolved_answers: List[str] = []
+                for ans in answers:
+                    if hasattr(model, "_select_training_answer"):
+                        text = model._select_training_answer(ans)
+                    else:
+                        text = ans if isinstance(ans, str) else (ans[0] if isinstance(ans, list) and ans else "")
+                    resolved_answers.append(str(text or "").strip())
+
+                # Filter out empty pairs
+                paired_indices = [i for i, t in enumerate(resolved_answers) if t]
+                if paired_indices:
+                    audio_vecs = audio_vecs[paired_indices]
+                    text_list = [resolved_answers[i] for i in paired_indices]
+
+                    if audio_vecs.size(0) > 1:
+                        text_vecs = _embed_texts_for_contrastive(
+                            model,
+                            text_list,
+                            device=device,
+                            max_length=int(config.get("audio_contrastive_max_length", 48) or 48),
+                        )
+                        if text_vecs.numel() > 0:
+                            # Normalize
+                            audio_norm = torch.nn.functional.normalize(audio_vecs, dim=-1)
+                            text_norm = torch.nn.functional.normalize(text_vecs, dim=-1)
+                            # Similarity matrix: (B, B)
+                            sim = audio_norm @ text_norm.t() / max(contrastive_temp, 1e-5)
+                            targets = torch.arange(sim.size(0), device=device)
+                            contrastive_loss = torch.nn.functional.cross_entropy(sim, targets)
+                            loss = loss + contrastive_weight * contrastive_loss
+            except Exception:
+                # Fail-safe: ignore contrastive errors to keep training running
+                pass
+
+        # Normalize by gradient accumulation steps
+        loss = loss / gradient_accumulation_steps
 
         # Backward pass
         if use_amp:
@@ -949,9 +1029,9 @@ def train(
     Returns:
         Training history dict
     """
-    # Setup optimizer with different learning rates
-    lr_projector = config.get("learning_rate_projector", 1e-3)
-    lr_adapter = config.get("learning_rate_adapter", 5e-4)
+    # Setup optimizer with different learning rates (Stage-A style defaults)
+    lr_projector = config.get("learning_rate_projector", 2e-4)
+    lr_adapter = config.get("learning_rate_adapter", 1e-4)
     weight_decay = config.get("weight_decay", 0.01)
 
     # Group parameters by component
@@ -982,7 +1062,7 @@ def train(
 
     # Learning rate scheduler
     num_epochs = config.get("num_epochs", 20)
-    warmup_steps = config.get("warmup_steps", 500)
+    warmup_steps = config.get("warmup_steps", 1000)
     total_steps = len(train_loader) * num_epochs
 
     # Cosine schedule with warmup
@@ -1010,6 +1090,9 @@ def train(
     best_cider = 0.0
     patience = config.get("early_stopping_patience", 5)
     patience_counter = 0
+
+    # Global step approximation for scheduling (e.g., gate warmup)
+    global_step = 0
 
     print(f"\n{'='*80}")
     print(f"Starting training for {num_epochs} epochs")
@@ -1048,6 +1131,12 @@ def train(
         train_metrics = train_epoch(
             model, train_loader, optimizer, scheduler, device, epoch, config, scaler
         )
+
+        # Gate warmup: ramp SAFE gate from 0 → 1 over a configured number of steps
+        gate_warmup_steps = int(config.get("gate_warmup_steps", 0) or 0)
+        if gate_warmup_steps > 0 and hasattr(model, "set_gate_warmup"):
+            global_step += len(train_loader)
+            model.set_gate_warmup(global_step, warmup_steps=gate_warmup_steps)
 
         print(f"\n✓ Training complete:")
         print(f"  Loss: {train_metrics['loss']:.4f}")
@@ -1218,18 +1307,29 @@ def main():
                         help="Number of dataloader workers")
 
     # Optimization
-    parser.add_argument("--learning-rate-projector", type=float, default=1e-3,
+    # Match Stage-A defaults: 2e-4 / 1e-4
+    parser.add_argument("--learning-rate-projector", type=float, default=2e-4,
                         help="Learning rate for audio projector")
-    parser.add_argument("--learning-rate-adapter", type=float, default=5e-4,
+    parser.add_argument("--learning-rate-adapter", type=float, default=1e-4,
                         help="Learning rate for fusion adapter")
     parser.add_argument("--weight-decay", type=float, default=0.01,
                         help="Weight decay")
-    parser.add_argument("--warmup-steps", type=int, default=500,
+    parser.add_argument("--warmup-steps", type=int, default=1000,
                         help="Warmup steps for learning rate")
     parser.add_argument("--max-grad-norm", type=float, default=1.0,
                         help="Max gradient norm for clipping")
     parser.add_argument("--fp16", action="store_true",
                         help="Use mixed precision training")
+
+    # Optional audio contrastive loss (Stage-A style)
+    parser.add_argument("--audio-contrastive-weight", type=float, default=0.0,
+                        help="Weight for optional audio-text contrastive loss (0.0 = disabled)")
+    parser.add_argument("--audio-contrastive-temperature", type=float, default=0.07,
+                        help="Temperature for audio-text contrastive loss")
+    parser.add_argument("--audio-contrastive-max-length", type=int, default=48,
+                        help="Max caption length (tokens) for contrastive text embeddings")
+    parser.add_argument("--gate-warmup-steps", type=int, default=0,
+                        help="If >0, ramp SAFE gate 0→1 over this many optimizer steps")
 
     # Evaluation
     parser.add_argument("--eval-frequency", type=int, default=1,
@@ -1375,6 +1475,10 @@ def main():
         "max_new_tokens": args.max_new_tokens,
         "num_beams": args.num_beams,
         "early_stopping_patience": args.early_stopping_patience,
+        "audio_contrastive_weight": args.audio_contrastive_weight,
+        "audio_contrastive_temperature": args.audio_contrastive_temperature,
+        "audio_contrastive_max_length": args.audio_contrastive_max_length,
+        "gate_warmup_steps": args.gate_warmup_steps,
     }
 
     # Evaluation only mode
