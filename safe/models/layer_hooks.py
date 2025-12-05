@@ -10,7 +10,7 @@ def _is_module_list(obj: Any) -> bool:
 
 
 class FusionHook:
-    """Forward hook that injects modality fusion at a specific decoder layer."""
+    """Forward hook that injects modality fusion at a specific decoder layer output."""
 
     def __init__(
         self,
@@ -83,6 +83,52 @@ class FusionHook:
         return new_hidden
 
 
+class PreFFNFusionHook:
+    """
+    Forward pre-hook that injects modality fusion at the input to a layer's
+    feed-forward (MLP) block. This allows fusion *before* the FFN, i.e.,
+    after self-attention + first Add&Norm.
+    """
+
+    def __init__(
+        self,
+        layer_idx: int,
+        fusion_adapter: MultiLayerFusionAdapter,
+        modality_tokens: Dict[str, torch.Tensor],
+        modality_masks: Optional[Dict[str, torch.Tensor]] = None,
+        gate: Any = 1.0,
+        supervised_mask: Optional[torch.Tensor] = None,
+    ) -> None:
+        self.layer_idx = layer_idx
+        self.fusion_adapter = fusion_adapter
+        self.modality_tokens = modality_tokens
+        self.modality_masks = modality_masks or {}
+        self.gate = gate
+        self.supervised_mask = supervised_mask
+
+    def __call__(self, module: nn.Module, inputs: tuple) -> tuple:
+        if not inputs:
+            return inputs
+
+        hidden_states = inputs[0]
+        if not torch.is_tensor(hidden_states):
+            return inputs
+
+        fused = self.fusion_adapter.apply_fusion_at_layer(
+            layer_idx=self.layer_idx,
+            hidden_states=hidden_states,
+            modality_tokens=self.modality_tokens,
+            modality_masks=self.modality_masks,
+            gate=self.gate,
+            supervised_mask=self.supervised_mask,
+        )
+
+        # Replace the first positional arg (hidden states) with fused version
+        if len(inputs) == 1:
+            return (fused,)
+        return (fused, *inputs[1:])
+
+
 class LayerHookManager:
     """Manages registration and cleanup of decoder layer fusion hooks."""
 
@@ -91,9 +137,11 @@ class LayerHookManager:
         model: nn.Module,
         fusion_adapter: MultiLayerFusionAdapter,
         fusion_layers: Union[Dict[str, List[int]], List[int]],
+        injection_point: str = "post_layer",
     ) -> None:
         self.model = model
         self.fusion_adapter = fusion_adapter
+        self.injection_point = injection_point
         self.fusion_layers = self._normalize_layer_mapping(fusion_layers)
         self.layer_modules = self._discover_layer_modules(model)
         self.layer_to_modalities = self._invert_layer_mapping(self.fusion_layers)
@@ -107,22 +155,40 @@ class LayerHookManager:
         supervised_mask: Optional[torch.Tensor] = None,
     ) -> None:
         self.remove_hooks()
-        for idx, module in self.layer_modules.items():
+        # Inject either at the layer output (post_layer) or before FFN (pre_ffn)
+        for idx, layer_module in self.layer_modules.items():
             modalities = self.layer_to_modalities.get(idx, [])
             if not modalities:
                 continue
 
-            hook = FusionHook(
-                layer_idx=idx,
-                fusion_adapter=self.fusion_adapter,
-                modalities=modalities,
-                modality_tokens=modality_tokens,
-                modality_masks=modality_masks,
-                gate=gate,
-                supervised_mask=supervised_mask,
-            )
-            handle = module.register_forward_hook(hook)
-            self._handles.append(handle)
+            if self.injection_point == "pre_ffn":
+                # Try to locate the FFN/MLP submodule within the decoder layer
+                ffn_module = getattr(layer_module, "mlp", None)
+                if ffn_module is None:
+                    # If we can't find an FFN, skip this layer for pre-FFN injection
+                    continue
+                hook = PreFFNFusionHook(
+                    layer_idx=idx,
+                    fusion_adapter=self.fusion_adapter,
+                    modality_tokens=modality_tokens,
+                    modality_masks=modality_masks,
+                    gate=gate,
+                    supervised_mask=supervised_mask,
+                )
+                handle = ffn_module.register_forward_pre_hook(hook)
+                self._handles.append(handle)
+            else:
+                hook = FusionHook(
+                    layer_idx=idx,
+                    fusion_adapter=self.fusion_adapter,
+                    modalities=modalities,
+                    modality_tokens=modality_tokens,
+                    modality_masks=modality_masks,
+                    gate=gate,
+                    supervised_mask=supervised_mask,
+                )
+                handle = layer_module.register_forward_hook(hook)
+                self._handles.append(handle)
 
     def remove_hooks(self) -> None:
         if not self._handles:

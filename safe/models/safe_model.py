@@ -126,21 +126,33 @@ class SAFEModel(nn.Module):
         if fusion_type == "lora":
             self.fusion_adapter = LoRAFusionAdapter(
                 hidden_size=llm_hidden_size,
+                num_attention_heads=fusion_config.get("num_attention_heads", 8),
                 lora_rank=lora_rank,
-                **fusion_config
+                lora_alpha=fusion_config.get("lora_alpha", 16.0),
+                lora_dropout=fusion_config.get("lora_dropout", 0.0),
+                attention_dropout=fusion_config.get("attention_dropout", 0.1),
+                target_modules=fusion_config.get("target_modules", None),
             )
         elif fusion_type == "multilayer":
             self.fusion_adapter = MultiLayerFusionAdapter(
                 hidden_size=llm_hidden_size,
                 fusion_layer_indices=fusion_layer_indices,
                 lora_rank=lora_rank,
-                **fusion_config
+                num_attention_heads=fusion_config.get("num_attention_heads", 8),
+                lora_alpha=fusion_config.get("lora_alpha", 16.0),
+                lora_dropout=fusion_config.get("lora_dropout", 0.1),
+                attention_dropout=fusion_config.get("attention_dropout", 0.1),
+                modalities=fusion_config.get("modalities", None),
             )
         elif fusion_type == "gated":
             self.fusion_adapter = GatedFusionAdapter(
                 hidden_size=llm_hidden_size,
+                num_attention_heads=fusion_config.get("num_attention_heads", 8),
                 lora_rank=lora_rank,
-                **fusion_config
+                lora_alpha=fusion_config.get("lora_alpha", 16.0),
+                lora_dropout=fusion_config.get("lora_dropout", 0.1),
+                attention_dropout=fusion_config.get("attention_dropout", 0.1),
+                target_modules=fusion_config.get("target_modules", None),
             )
         else:
             raise ValueError(f"Unsupported fusion type: {fusion_type}")
@@ -148,6 +160,10 @@ class SAFEModel(nn.Module):
         sys.stdout.flush()
 
         self.enable_midlayer_fusion = (fusion_type == "multilayer")
+
+        # Fusion injection point: "post_layer" (layer output, default) or
+        # "pre_ffn" (before FFN within each decoder layer).
+        self.fusion_injection_point = fusion_config.get("injection_point", "post_layer")
 
         # Special tokens for audio
         self.audio_start_token = "<audio>"
@@ -1395,6 +1411,7 @@ class SAFEModel(nn.Module):
                     model=language_model,
                     fusion_adapter=self.fusion_adapter,
                     fusion_layers=fusion_layers,
+                    injection_point=self.fusion_injection_point,
                 )
                 hook_manager.register_hooks(
                     modality_tokens=modality_tokens,
@@ -1733,6 +1750,7 @@ class SAFEModel(nn.Module):
                     model=language_model,
                     fusion_adapter=self.fusion_adapter,
                     fusion_layers=fusion_layers,
+                    injection_point=self.fusion_injection_point,
                 )
                 hook_manager.register_hooks(
                     modality_tokens=modality_tokens,
