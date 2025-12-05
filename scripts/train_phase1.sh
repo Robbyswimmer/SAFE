@@ -38,7 +38,7 @@ which python
 
 # Configuration
 MODEL_CONFIG=${MODEL_CONFIG:-"phase1"}
-DATA_PATH=${DATA_PATH:-"./data"}
+DATA_PATH=${DATA_PATH:-"$PWD/experiments/full_training/data"}
 OUTPUT_DIR=${OUTPUT_DIR:-"./checkpoints/phase1_clean"}
 NUM_EPOCHS=${NUM_EPOCHS:-20}
 BATCH_SIZE=${BATCH_SIZE:-4}
@@ -55,6 +55,13 @@ SEED=${SEED:-42}
 # Create output directory
 mkdir -p "${OUTPUT_DIR}"
 mkdir -p logs
+
+# Verify data path exists
+if [[ ! -d "${DATA_PATH}" ]]; then
+  echo "ERROR: Data path not found: ${DATA_PATH}" >&2
+  echo "Please set DATA_PATH environment variable to your data directory" >&2
+  exit 1
+fi
 
 # Log configuration
 echo "========================================"
