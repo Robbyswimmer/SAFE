@@ -256,7 +256,8 @@ class LoRAFusionAdapter(nn.Module):
         lora_alpha: float = 16.0,
         lora_dropout: float = 0.0,  # Disabled for stable gradient flow during bring-up
         attention_dropout: float = 0.1,
-        target_modules: list = None
+        target_modules: list = None,
+        use_tokenwise_gate: bool = False,
     ):
         super().__init__()
         
@@ -267,6 +268,7 @@ class LoRAFusionAdapter(nn.Module):
         self.last_attention_summary: Optional[dict] = None
         self._attention_log_limit = 5
         self._attention_logs_emitted = 0
+        self.use_tokenwise_gate = bool(use_tokenwise_gate)
         
         # Base cross-attention block
         self.cross_attention = CrossAttentionBlock(
@@ -290,6 +292,11 @@ class LoRAFusionAdapter(nn.Module):
 
         # Apply LoRA to cross-attention
         self.cross_attention = get_peft_model(self.cross_attention, self.lora_config)
+
+        # Token-wise gating head (optional)
+        if self.use_tokenwise_gate:
+            # Gate takes [hidden; pooled_audio] → scalar gate per token
+            self.token_gate = nn.Linear(hidden_size * 2, 1)
 
     def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
         self.debug_logging = bool(enabled)
@@ -365,14 +372,32 @@ class LoRAFusionAdapter(nn.Module):
                 self._attention_logs_emitted += 1
 
         # Apply gating on residual update
-        if isinstance(gate, torch.Tensor):
-            gate_tensor = gate.to(device=hidden_states.device, dtype=hidden_states.dtype)
-            while gate_tensor.dim() < delta_states.dim():
-                gate_tensor = gate_tensor.unsqueeze(-1)
-            output = hidden_states + gate_tensor * delta_states
+        if self.use_tokenwise_gate:
+            # Token-wise gate: g ∈ [0,1]^{B×L×1}, based on hidden + pooled audio
+            batch_size, seq_len, _ = hidden_states.size()
+            pooled_audio = audio_tokens.mean(dim=1, keepdim=True).expand(-1, seq_len, -1)
+            gate_input = torch.cat([hidden_states, pooled_audio], dim=-1)  # (B, L, 2H)
+            g = torch.sigmoid(self.token_gate(gate_input))  # (B, L, 1)
+
+            # Combine with scalar gate if provided
+            if isinstance(gate, torch.Tensor):
+                gate_tensor = gate.to(device=hidden_states.device, dtype=hidden_states.dtype)
+                while gate_tensor.dim() < g.dim():
+                    gate_tensor = gate_tensor.unsqueeze(-1)
+                g = g * gate_tensor
+            else:
+                g = g * float(gate)
+
+            output = hidden_states + g * delta_states
         else:
-            gate_value = float(gate)
-            output = hidden_states + gate_value * delta_states
+            if isinstance(gate, torch.Tensor):
+                gate_tensor = gate.to(device=hidden_states.device, dtype=hidden_states.dtype)
+                while gate_tensor.dim() < delta_states.dim():
+                    gate_tensor = gate_tensor.unsqueeze(-1)
+                output = hidden_states + gate_tensor * delta_states
+            else:
+                gate_value = float(gate)
+                output = hidden_states + gate_value * delta_states
 
         # Cast back to the original dtype expected by the LM stack
         output = output.to(orig_dtype)
@@ -397,12 +422,14 @@ class MultiLayerFusionAdapter(nn.Module):
         lora_dropout: float = 0.1,
         attention_dropout: float = 0.1,
         modalities: Optional[Dict[str, Any]] = None,
+        use_tokenwise_gate: bool = False,
         **unused_kwargs,
     ):
         super().__init__()
 
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.use_tokenwise_gate = bool(use_tokenwise_gate)
         self.extra_config = dict(unused_kwargs)
 
         layer_mapping_source = modalities if modalities is not None else fusion_layer_indices
@@ -422,6 +449,7 @@ class MultiLayerFusionAdapter(nn.Module):
                     lora_alpha=lora_alpha,
                     lora_dropout=lora_dropout,
                     attention_dropout=attention_dropout,
+                    use_tokenwise_gate=self.use_tokenwise_gate,
                 )
 
     def forward(

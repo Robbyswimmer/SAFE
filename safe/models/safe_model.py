@@ -143,6 +143,7 @@ class SAFEModel(nn.Module):
                 lora_dropout=fusion_config.get("lora_dropout", 0.1),
                 attention_dropout=fusion_config.get("attention_dropout", 0.1),
                 modalities=fusion_config.get("modalities", None),
+                use_tokenwise_gate=fusion_config.get("use_tokenwise_gate", False),
             )
         elif fusion_type == "gated":
             self.fusion_adapter = GatedFusionAdapter(

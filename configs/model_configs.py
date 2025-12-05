@@ -227,6 +227,8 @@ PHASE1_CONFIG = {
         },
         # Default fusion injection point for Phase 1: inject BEFORE FFN
         "injection_point": "pre_ffn",
+        # Enable token-wise gating of audio residuals in Phase 1 experiments
+        "use_tokenwise_gate": True,
     },
 
     # Training configuration
