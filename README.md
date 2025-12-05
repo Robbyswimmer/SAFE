@@ -1,146 +1,154 @@
-# SAFE: Selectively Augmenting Frozen Encoders
-## Adding Audio to VL Models with Zero Regression & Efficiency Gains
+# SAFE: Safe Audio Fusion Extension
+
+Adding audio capabilities to frozen vision-language models.
 
 ---
 
-**SAFE** is a research framework for safely adding audio capabilities to production Vision-Language (VL) models without compromising existing performance. The framework addresses the critical challenge of capability expansion in deployed multimodal systems where regression risks are unacceptable.
+## Overview
 
-## Research Problem
+SAFE adds audio understanding to pre-trained VL models (LLaVA) by training lightweight adapters while keeping the base model frozen.
 
-Production VL models (BLIP-2, LLaVA) lack audio understanding, but traditional approaches to adding new modalities require full model retraining, creating significant regression risks for deployed systems. SAFE provides a principled solution through architectural innovations and training methodologies designed for safe capability expansion.
+**Core idea**: Cross-attention fusion between audio tokens and LLM hidden states, trained on audio captioning.
 
-## Key Innovations
-
-- **Zero Regression Architecture**: Gated bypass mechanism with architectural properties designed to preserve base VL performance
-- **Efficiency-Aware Design**: Learned policy for selective audio processing with substantial computational savings *[Stage B - Planned]*
-- **Safety-First Training**: Multi-stage curriculum with retention constraints and validation protocols
-- **Modular Implementation**: Clean separation enabling easy integration with existing VL architectures
-
-## Architecture Overview
+## Architecture
 
 ```
-Input: Text + Vision + Audio
-         ↓
-    ┌─────────────────┐
-    │   Base VL Model │  ← Frozen (CLIP + LLM)
-    │   (LLaVA-style) │
-    └─────────────────┘
-         ↓
-    ┌─────────────────┐
-    │ Audio Encoder   │  ← Frozen (CLAP/Whisper)
-    │ (CLAP/Whisper)  │
-    └─────────────────┘
-         ↓
-    ┌─────────────────┐
-    │ Audio Projector │  ← Trainable (2-layer MLP)
-    │ (k audio tokens)│
-    └─────────────────┘
-         ↓
-    ┌─────────────────┐
-    │ LoRA Fusion     │  ← Trainable (Cross-attention)
-    │ Adapter         │
-    └─────────────────┘
-         ↓
-    ┌─────────────────┐
-    │ RL Controller   │  ← Learns when to use audio
-    │ Policy π_θ      │
-    └─────────────────┘
+Audio (waveform) → CLAP Encoder (frozen) → Audio Projector (trainable)
+                                                      ↓
+Text + Vision → LLaVA 13B (frozen) ←── Cross-Attention Fusion (trainable)
+                                                      ↓
+                                              Audio Captions
 ```
 
-## Training Methodology
+**Trainable components** (~380M parameters):
+- Audio projector (CLAP embeddings → LLM tokens)
+- LoRA fusion adapter (cross-attention at multiple LLM layers)
 
-SAFE employs a principled 3-stage training curriculum designed to ensure safe capability expansion:
+**Frozen components** (~13B parameters):
+- LLaVA 13B base model
+- CLAP audio encoder
 
-### Stage A: Foundation Training
-- **Objective**: Establish audio-text-vision alignment while preserving base VL capabilities
-- **Approach**: Balanced training on audio-dependent and VL-only tasks with retention constraints
-- **Safety Measures**: KL distillation and Fisher regularization to prevent performance degradation
+## Current Status
 
-```python
-from safe.training.stage_a import StageATrainer
+**Phase 1: Signal Verification** (In Progress)
 
-trainer = StageATrainer(
-    safe_model=model,
-    train_dataloader=train_loader,
-    val_dataloader=val_loader,
-    config={
-        "learning_rate_projector": 1e-4,
-        "learning_rate_adapter": 5e-5,
-        "retention_tolerance": 0.005  # 0.5% VL degradation limit
-    }
-)
-trainer.train()
+Training audio captioning on AudioCaps dataset.
+
+**Goal**: Verify frozen LLM can learn to attend to audio
+**Target**: CIDEr > 30 (baseline: 18)
+**Config**: 32 audio tokens, LoRA rank 64, multi-layer fusion
+
+## Quick Start
+
+### Training
+
+```bash
+# Run Phase 1 training
+sbatch scripts/train_phase1.sh
+
+# Or locally
+python train_safe.py \
+    --model-config phase1 \
+    --data-path ./data \
+    --output-dir ./checkpoints/phase1 \
+    --num-epochs 20 \
+    --batch-size 4 \
+    --gradient-accumulation-steps 32 \
+    --fp16
 ```
 
-### Stage B: Efficiency Optimization
-- **Objective**: Learn selective audio processing for computational efficiency
-- **Method**: Policy learning with multi-objective optimization
-- **Focus**: Balance between performance gains and computational cost
+### Evaluation
 
-### Stage C: Deployment Preparation
-- **Objective**: Optimize for production deployment
-- **Method**: Policy distillation and lightweight gating mechanisms
-- **Goal**: Maintain research capabilities in efficient deployment-ready form
-
-## Research Objectives
-
-| Dimension | Goal | Rationale |
-|-----------|------|----------|
-| **Safety** | Zero regression on base VL tasks | Preserve production model reliability |
-| **Capability** | Audio understanding integration | Enable multimodal reasoning with audio |
-| **Efficiency** | Selective processing optimization | Reduce computational overhead |
-| **Robustness** | Stable behavior across contexts | Maintain consistent performance |
+```bash
+# Evaluate checkpoint
+python train_safe.py \
+    --model-config phase1 \
+    --data-path ./data \
+    --output-dir ./eval \
+    --resume ./checkpoints/phase1/checkpoint_best.pt \
+    --eval-only
+```
 
 ## Project Structure
 
 ```
 safe/
 ├── models/
-│   ├── base_vl.py          # LLaVA-style base VL model
-│   ├── audio_encoders.py   # CLAP/Whisper audio encoders
-│   ├── projectors.py       # Audio-to-LLM token projectors
-│   ├── fusion_adapter.py   # LoRA cross-attention fusion
-│   └── safe_model.py       # Main SAFE model
+│   ├── safe_model.py       # Main SAFE model
+│   ├── audio_encoders.py   # CLAP/Whisper encoders
+│   ├── projectors.py       # Audio projectors
+│   └── fusion_adapter.py   # Cross-attention fusion
 ├── data/
-│   └── datasets.py         # Multi-modal dataset handling
-├── rl/
-│   ├── state_features.py   # State feature extraction
-│   └── policy.py           # RL policy networks
-├── training/
-│   ├── losses.py           # Loss functions
-│   └── stage_a.py          # Stage A trainer
-└── README.md
+│   └── datasets.py         # AudioCaps, WavCaps, AudioSetCaps
+└── training/
+    ├── losses.py           # Loss functions
+    └── stage_a.py          # Training utilities
+
+train_safe.py               # Main training script (937 lines)
+scripts/train_phase1.sh     # SLURM launcher
 ```
 
-## Research Context
+## Documentation
 
-This work addresses the fundamental challenge of safely expanding capabilities in production multimodal AI systems. The SAFE framework represents a novel approach to modality augmentation that prioritizes safety and efficiency alongside capability enhancement.
+- **[QUICK_START.md](QUICK_START.md)** - Run training in 1 command
+- **[TRAINING_GUIDE.md](TRAINING_GUIDE.md)** - Complete CLI reference
+- **[SUMMARY.md](SUMMARY.md)** - Project status and research questions
+- **[architecture.md](architecture.md)** - Detailed architecture spec
 
-**Research Focus Areas:**
-- Safe capability expansion for deployed AI systems
-- Efficient multimodal fusion architectures
-- Retention-aware training methodologies
-- Production-ready multimodal AI frameworks
+## Requirements
 
-## Experimental Framework
+```bash
+# Core dependencies
+torch>=2.0.0
+transformers>=4.35.0
+datasets>=2.14.0
 
-The SAFE framework is designed for comprehensive evaluation across:
+# Evaluation metrics
+pycocoevalcap
+bert-score (optional)
 
-- **Audio-Visual Tasks**: Benchmarks requiring integrated audio-visual reasoning
-- **Vision-Language Retention**: Standard VL benchmarks to validate zero regression
-- **Efficiency Metrics**: Computational cost and selective processing evaluation
-- **Robustness Testing**: Performance consistency across diverse input conditions
+# Audio processing
+torchaudio
+librosa
+```
 
-## Implementation Status
+## Training Configuration
 
-This repository contains the research implementation of the SAFE framework, including:
-- Core architectural components
-- Training pipeline implementation
-- Experimental validation tools
-- Comprehensive testing framework
+Phase 1 defaults (optimized for single GPU):
 
-The codebase is designed for research reproducibility and extensibility.
+```python
+{
+    "model": "phase1",              # LLaVA 13B + CLAP
+    "num_audio_tokens": 32,         # Audio sequence length
+    "lora_rank": 64,                # Cross-attention rank
+    "batch_size": 4,
+    "gradient_accumulation": 32,    # Effective batch size: 128
+    "lr_projector": 1e-3,           # 5x higher than baseline
+    "lr_adapter": 5e-4,             # 5x higher than baseline
+    "mixed_precision": True,        # FP16 training
+    "epochs": 20
+}
+```
+
+**Expected**: 12-18 hours, ~22GB VRAM, CIDEr 32-35 after 20 epochs
+
+## Metrics
+
+**Audio Captioning**: CIDEr, BLEU-1/2/3/4, METEOR, ROUGE-L
+
+**Evaluation**: Beam search generation on AudioCaps validation set
+
+## Citation
+
+```bibtex
+@software{safe2025,
+  title={SAFE: Safe Audio Fusion Extension for Vision-Language Models},
+  author={Moseley, Robby},
+  year={2025},
+  url={https://github.com/yourusername/SAFE}
+}
+```
 
 ---
 
-*Research framework for safe multimodal AI capability expansion*
+**Status**: Experimental - Phase 1 training in progress
