@@ -19,6 +19,23 @@
 
 set -euo pipefail
 
+# Environment setup - activate conda environment
+CONDA_ENV=${CONDA_ENV:-"safe-env"}
+
+if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+  source "$HOME/miniconda3/etc/profile.d/conda.sh"
+else
+  module load anaconda &>/dev/null || true
+  source "$HOME/.bashrc"
+fi
+
+echo "Activating conda environment '${CONDA_ENV}'"
+conda activate "${CONDA_ENV}"
+
+# Verify environment
+python --version
+which python
+
 # Configuration
 MODEL_CONFIG=${MODEL_CONFIG:-"phase1"}
 DATA_PATH=${DATA_PATH:-"./data"}
