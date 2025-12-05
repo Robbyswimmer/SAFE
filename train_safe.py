@@ -28,11 +28,11 @@ import torch
 import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 # SAFE imports
 from configs.model_configs import get_config
-from safe.data.datasets import AudioCapsDataset, create_safe_dataloader
+from safe.data.datasets import AudioCapsDataset, WavCapsDataset, create_safe_dataloader
 from safe.models.safe_model import SAFEModel
 
 
@@ -136,6 +136,62 @@ def _normalize_audio_caption(text: Any) -> str:
         return ""
 
     return " ".join(cleaned_tokens)
+
+
+class MixedAudioCaptionDataset(Dataset):
+    """
+    Simple wrapper to mix AudioCaps and WavCaps with a given ratio.
+
+    - Always uses all AudioCaps samples.
+    - Uses wavcaps_ratio * len(WavCaps) samples (clipped to [0, len]).
+    - Shuffles combined index map with a fixed seed.
+    """
+
+    def __init__(
+        self,
+        audiocaps_dataset: Dataset,
+        wavcaps_dataset: Optional[Dataset] = None,
+        wavcaps_ratio: float = 0.8,
+        shuffle: bool = True,
+        seed: int = 42,
+    ) -> None:
+        if audiocaps_dataset is None and wavcaps_dataset is None:
+            raise ValueError("MixedAudioCaptionDataset requires at least one dataset")
+
+        self.datasets: List[Tuple[str, Dataset]] = []
+        if audiocaps_dataset is not None:
+            self.datasets.append(("audiocaps", audiocaps_dataset))
+        if wavcaps_dataset is not None:
+            self.datasets.append(("wavcaps", wavcaps_dataset))
+
+        self.index_map: List[Tuple[str, int]] = []
+
+        if wavcaps_dataset is None:
+            # Only AudioCaps
+            self.index_map = [("audiocaps", idx) for idx in range(len(audiocaps_dataset))]
+        else:
+            a_count = len(audiocaps_dataset)
+            w_count = len(wavcaps_dataset)
+            ratio = max(0.0, min(1.0, float(wavcaps_ratio)))
+            w_samples = int(w_count * ratio)
+
+            # Use all AudioCaps + sampled WavCaps prefix
+            self.index_map.extend([("audiocaps", idx) for idx in range(a_count)])
+            self.index_map.extend([("wavcaps", idx) for idx in range(w_samples)])
+
+        if shuffle:
+            rng = random.Random(seed)
+            rng.shuffle(self.index_map)
+
+    def __len__(self) -> int:
+        return len(self.index_map)
+
+    def __getitem__(self, idx: int):
+        dataset_name, local_idx = self.index_map[idx]
+        for name, dataset in self.datasets:
+            if name == dataset_name:
+                return dataset[local_idx]
+        raise IndexError(f"Invalid index: {idx}")
 
 
 def _extract_answer_from_generation(generated_text: str) -> str:
@@ -1140,6 +1196,12 @@ def main():
                         help="Training split name")
     parser.add_argument("--val-split", type=str, default="val",
                         help="Validation split name")
+    parser.add_argument("--use-wavcaps", action="store_true",
+                        help="Include WavCaps in training mix")
+    parser.add_argument("--wavcaps-ratio", type=float, default=0.8,
+                        help="Fraction of WavCaps train samples to include (0.0-1.0)")
+    parser.add_argument("--wavcaps-split", type=str, default="train",
+                        help="WavCaps split to use for training")
 
     # Training
     parser.add_argument("--output-dir", type=str, required=True,
@@ -1253,11 +1315,34 @@ def main():
 
     # Load datasets
     print(f"\n📂 Loading datasets from: {args.data_path}")
-    train_dataset = AudioCapsDataset(args.data_path, split=args.train_split)
+    audiocaps_train = AudioCapsDataset(args.data_path, split=args.train_split)
     val_dataset = AudioCapsDataset(args.data_path, split=args.val_split)
 
-    print(f"  Train: {len(train_dataset)} samples")
-    print(f"  Val: {len(val_dataset)} samples")
+    wavcaps_train = None
+    if args.use_wavcaps:
+        try:
+            wavcaps_train = WavCapsDataset(args.data_path, split=args.wavcaps_split)
+            print(f"  WavCaps train: {len(wavcaps_train)} samples (split='{args.wavcaps_split}')")
+            print(f"  WavCaps ratio: {args.wavcaps_ratio:.2f}")
+        except Exception as e:
+            print(f"⚠️  Failed to load WavCaps dataset: {e}. Continuing with AudioCaps only.", flush=True)
+            wavcaps_train = None
+
+    if wavcaps_train is not None:
+        train_dataset = MixedAudioCaptionDataset(
+            audiocaps_dataset=audiocaps_train,
+            wavcaps_dataset=wavcaps_train,
+            wavcaps_ratio=args.wavcaps_ratio,
+            shuffle=True,
+            seed=args.seed,
+        )
+        print(f"  AudioCaps train: {len(audiocaps_train)} samples")
+        print(f"  Mixed train samples: {len(train_dataset)} (AudioCaps + WavCaps subset)")
+    else:
+        train_dataset = audiocaps_train
+        print(f"  Train (AudioCaps only): {len(train_dataset)} samples")
+
+    print(f"  Val (AudioCaps): {len(val_dataset)} samples")
 
     # Create dataloaders
     train_loader = create_safe_dataloader(

@@ -51,6 +51,8 @@ MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-20}
 NUM_BEAMS=${NUM_BEAMS:-1}
 FP16=${FP16:-"--fp16"}
 SEED=${SEED:-42}
+USE_WAVCAPS=${USE_WAVCAPS:-0}
+WAVCAPS_RATIO=${WAVCAPS_RATIO:-0.8}
 
 # Create output directory
 mkdir -p "${OUTPUT_DIR}"
@@ -79,6 +81,7 @@ echo "LR adapter: ${LR_ADAPTER}"
 echo "Warmup steps: ${WARMUP_STEPS}"
 echo "Mixed precision: ${FP16}"
 echo "Seed: ${SEED}"
+echo "Use WavCaps: ${USE_WAVCAPS} (ratio=${WAVCAPS_RATIO})"
 echo "========================================"
 echo ""
 
@@ -97,6 +100,8 @@ python train_safe.py \
     --max-new-tokens "${MAX_NEW_TOKENS}" \
     --num-beams "${NUM_BEAMS}" \
     --seed "${SEED}" \
+    $( [[ "${USE_WAVCAPS}" != "0" ]] && echo --use-wavcaps ) \
+    --wavcaps-ratio "${WAVCAPS_RATIO}" \
     ${FP16}
 
 echo ""

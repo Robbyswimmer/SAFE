@@ -82,21 +82,6 @@ def _collate_multimodal_batch(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]
         if any(v is not None for v in values):
             collated[key + "s"] = values
 
-    # Log first few batches to verify collation
-    if not hasattr(_collate_multimodal_batch, '_batch_count'):
-        _collate_multimodal_batch._batch_count = 0
-
-    if _collate_multimodal_batch._batch_count < 2:
-        audio_count = sum(has_audio)
-        image_count = sum(1 for img in images if img is not None)
-        ref_counts = [len(ans) if isinstance(ans, list) else 1 for ans in answers]
-        avg_refs = sum(ref_counts) / len(ref_counts) if ref_counts else 0
-        print(f"[Collate] Batch {_collate_multimodal_batch._batch_count}: size={len(batch)}, audio={audio_count}/{len(batch)}, images={image_count}/{len(batch)}, avg_refs={avg_refs:.1f}", flush=True)
-        _collate_multimodal_batch._batch_count += 1
-    elif _collate_multimodal_batch._batch_count == 2:
-        print(f"[Collate] ✓ Collation working (suppressing further logs)", flush=True)
-        _collate_multimodal_batch._batch_count += 1
-
     return collated
 
 
@@ -257,21 +242,14 @@ class _BaseQADataset(Dataset):
         audio_file = next((candidate for candidate in candidate_paths if candidate and candidate.exists()), None)
 
         if audio_file is None:
-            # Only log a very small number of missing files to avoid noisy logs
-            if not hasattr(self, '_missing_audio_count'):
-                self._missing_audio_count = 0
-
-            if self._missing_audio_count < 2:
-                missing_label = raw_audio_path or sound_name or "<unknown>"
-                print(f"[AudioLoad] ❌ File not found: {missing_label}", flush=True)
-                print(f"[AudioLoad]    Tried {len(candidate_paths)} paths:", flush=True)
-                for cp in candidate_paths[:3]:
-                    print(f"[AudioLoad]      - {cp}", flush=True)
-                self._missing_audio_count += 1
-            elif self._missing_audio_count == 2:
-                print(f"[AudioLoad] ⚠️  Additional missing audio files will not be logged", flush=True)
-                self._missing_audio_count += 1
-
+            # Single, concise warning per dataset instance to avoid log spam
+            if not hasattr(self, "_missing_audio_warned"):
+                print(
+                    "[AudioLoad] ⚠️ Some audio files are missing; "
+                    "those samples will be skipped during training/evaluation.",
+                    flush=True,
+                )
+                self._missing_audio_warned = True
             return None
 
         try:
@@ -280,15 +258,16 @@ class _BaseQADataset(Dataset):
             # torchaudio.load() supports WAV, FLAC, MP3, OGG, etc.
             waveform, sample_rate = torchaudio.load(str(audio_file))
 
-            # Optional debug logging of successful loads – disabled by default for clean logs
+            # Optional debug logging of successful loads – disabled by default
             if getattr(self, "_debug_audio_loading", False):
-                if not hasattr(self, '_load_success_count'):
+                if not hasattr(self, "_load_success_count"):
                     self._load_success_count = 0
                 if self._load_success_count < 3:
-                    print(f"[AudioLoad] ✓ Loaded: {audio_file.name} (sr={sample_rate}, shape={waveform.shape})", flush=True)
-                    self._load_success_count += 1
-                elif self._load_success_count == 3:
-                    print(f"[AudioLoad] ✓ Audio loading working correctly (suppressing further success logs)", flush=True)
+                    print(
+                        f"[AudioLoad] ✓ Loaded: {audio_file.name} "
+                        f"(sr={sample_rate}, shape={waveform.shape})",
+                        flush=True,
+                    )
                     self._load_success_count += 1
 
             # Convert stereo to mono
