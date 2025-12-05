@@ -142,8 +142,8 @@ def _extract_answer_from_generation(generated_text: str) -> str:
     """
     Extract answer text from a chat-style generation.
 
-    Mirrors StageATrainer._extract_answer(..., mode=\"audio\"):
-    - Prefer content after an \"ASSISTANT:\" marker.
+    Mirrors StageATrainer._extract_answer(..., mode="audio"):
+    - Prefer content after an "ASSISTANT:" marker.
     - Strip assistant-style prefixes.
     - Keep full caption (no sentence truncation).
     """
@@ -153,29 +153,29 @@ def _extract_answer_from_generation(generated_text: str) -> str:
     import re
 
     answer = str(generated_text).strip()
-    answer = re.sub(r"[\\r\\n]+", " ", answer)
-    answer = re.sub(r"\\s+", " ", answer).strip()
+    answer = re.sub(r"[\r\n]+", " ", answer)
+    answer = re.sub(r"\s+", " ", answer).strip()
     if not answer:
         return ""
 
     lower_answer = answer.lower()
 
     # Extract text after ASSISTANT: marker if present
-    assistant_match = re.search(r"(?:assistant|ssistant)\\s*[:\\-]\\s*(.+)", lower_answer, re.IGNORECASE)
+    assistant_match = re.search(r"(?:assistant|ssistant)\s*[:\-]\s*(.+)", lower_answer, re.IGNORECASE)
     if assistant_match:
-        match_in_original = re.search(r"(?:assistant|ssistant)\\s*[:\\-]\\s*(.+)", answer, re.IGNORECASE)
+        match_in_original = re.search(r"(?:assistant|ssistant)\s*[:\-]\s*(.+)", answer, re.IGNORECASE)
         if match_in_original:
             answer = match_in_original.group(1).strip()
             lower_answer = answer.lower()
 
     # Remove obvious assistant-style prefixes
     prefix_patterns = [
-        r"^assistant\\s*[:\\-]\\s*",
-        r"^ssistant\\s*[:\\-]\\s*",
-        r"^ans(?:wer)?\\s*[:\\-]\\s*",
-        r"^ant\\s*[:\\-]\\s*",
-        r"^response\\s*[:\\-]\\s*",
-        r"^reply\\s*[:\\-]\\s*",
+        r"^assistant\s*[:\-]\s*",
+        r"^ssistant\s*[:\-]\s*",
+        r"^ans(?:wer)?\s*[:\-]\s*",
+        r"^ant\s*[:\-]\s*",
+        r"^response\s*[:\-]\s*",
+        r"^reply\s*[:\-]\s*",
     ]
     for pattern in prefix_patterns:
         if re.match(pattern, lower_answer):
@@ -183,20 +183,20 @@ def _extract_answer_from_generation(generated_text: str) -> str:
             lower_answer = answer.lower()
             break
 
-    # Generic \"prefix: value\" handling
-    if \":\" in answer:
-        prefix, remainder = answer.split(\":\", 1)
+    # Generic "prefix: value" handling
+    if ":" in answer:
+        prefix, remainder = answer.split(":", 1)
         prefix_clean = prefix.strip().lower()
         if (
             prefix_clean
             and len(prefix_clean.split()) <= 3
-            and all(ch.isalpha() for ch in prefix_clean.replace(\" \", \"\"))
+            and all(ch.isalpha() for ch in prefix_clean.replace(" ", ""))
         ):
             answer = remainder.strip()
             lower_answer = answer.lower()
 
     # Remove leading bullets / numbering
-    answer = re.sub(r\"^(?:[\\-\\*\\u2022]+|\\d+\\.)\\s*\", \"\", answer)
+    answer = re.sub(r"^(?:[\-\*\u2022]+|\d+\.)\s*", "", answer)
 
     return answer.strip()
 
