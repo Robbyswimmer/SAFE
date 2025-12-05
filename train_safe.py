@@ -614,6 +614,22 @@ def train(
     print(f"  Mixed precision: {config.get('fp16', False)}")
     print(f"{'='*80}\n")
 
+    # Optional initial evaluation before training (sanity check)
+    initial_max_eval = config.get("max_eval_batches", None)
+    if initial_max_eval is not None and initial_max_eval <= 0:
+        initial_max_eval = None
+    print(f"[InitEval] Running initial evaluation on validation set (max_batches={initial_max_eval})", flush=True)
+    init_metrics = evaluate(
+        model,
+        val_loader,
+        device,
+        max_batches=initial_max_eval,
+        max_new_tokens=config.get("max_new_tokens", 20),
+        num_beams=config.get("num_beams", 1),
+        compute_bertscore=False,
+    )
+    print(f"[InitEval] CIDEr={init_metrics.get('cider', 0.0):.2f} BLEU-4={init_metrics.get('bleu4', 0.0):.4f}", flush=True)
+
     for epoch in range(1, num_epochs + 1):
         print(f"\n{'='*80}")
         print(f"Epoch {epoch}/{num_epochs}")
@@ -913,7 +929,7 @@ def main():
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "fp16": args.fp16,
         "eval_frequency": args.eval_frequency,
-        "max_eval_batches": args.max_eval_batches,
+        "max_eval_batches": args.max_eval_batches if args.max_eval_batches is not None else 50,
         "max_new_tokens": args.max_new_tokens,
         "num_beams": args.num_beams,
         "early_stopping_patience": args.early_stopping_patience,
