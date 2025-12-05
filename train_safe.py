@@ -304,6 +304,7 @@ def evaluate(
             attention_mask=gen_attention_mask,
             audio_tokens=gen_audio_tokens,
             max_new_tokens=max_new_tokens,
+            min_new_tokens=1,  # CRITICAL: Force at least 1 token to prevent empty generation
             num_beams=num_beams,
             repetition_penalty=1.2,
             no_repeat_ngram_size=3,
@@ -929,7 +930,8 @@ def main():
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "fp16": args.fp16,
         "eval_frequency": args.eval_frequency,
-        "max_eval_batches": args.max_eval_batches if args.max_eval_batches is not None else 50,
+        # Default to a small eval cap if not specified to keep metrics fast
+        "max_eval_batches": args.max_eval_batches if args.max_eval_batches is not None else 10,
         "max_new_tokens": args.max_new_tokens,
         "num_beams": args.num_beams,
         "early_stopping_patience": args.early_stopping_patience,
