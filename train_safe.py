@@ -253,12 +253,13 @@ def evaluate(
         answers = batch["answers"]
         audio = batch["audio"]
 
-        # Prepare inputs
+        # Prepare inputs (ensure correct device)
         inputs = model.prepare_multimodal_inputs(
             text=questions,
             audio=audio,
             answers=answers,
-            training_mode=True  # For loss computation
+            device=device,
+            training_mode=True,  # For loss computation
         )
 
         # Move inputs to device
@@ -282,12 +283,13 @@ def evaluate(
             total_loss += loss.item()
             num_batches += 1
 
-        # Generate predictions
+        # Generate predictions (reuse same device)
         generation_inputs = model.prepare_multimodal_inputs(
             text=questions,
             audio=audio,
             answers=None,  # No answers for generation
-            training_mode=False
+            device=device,
+            training_mode=False,
         )
 
         gen_input_ids = generation_inputs["input_ids"].to(device)
@@ -399,7 +401,11 @@ def train_epoch(
     Returns:
         Dict with training metrics
     """
-    model.train()
+    # Ensure audio components are in training mode while keeping base VL frozen
+    if hasattr(model, "enable_audio_training"):
+        model.enable_audio_training()
+    else:
+        model.train()
 
     total_loss = 0.0
     num_batches = 0
@@ -836,12 +842,34 @@ def main():
     print(f"\nLoading model config: {args.model_config}")
     model_config = get_config(args.model_config)
 
-    # Filter out metadata fields that aren't constructor arguments
-    metadata_fields = {"name", "description", "expected_vram_gb", "recommended_batch_size"}
-    constructor_config = {k: v for k, v in model_config.items() if k not in metadata_fields}
+    # Whitelist of valid SAFEModel constructor arguments
+    safe_model_keys = {
+        "llm_model_name",
+        "vision_model_name",
+        "audio_encoder_type",
+        "audio_encoder_config",
+        "projector_type",
+        "num_audio_tokens",
+        "projector_config",
+        "fusion_type",
+        "fusion_layer_indices",
+        "lora_rank",
+        "fusion_config",
+        "freeze_base_vl",
+        "freeze_audio_encoder",
+        "llm_hidden_size",
+        "audio_embed_dim",
+    }
+
+    # Filter config to only include valid constructor arguments
+    constructor_config = {k: v for k, v in model_config.items() if k in safe_model_keys}
 
     # Initialize model
     print(f"\nInitializing SAFE model...")
+    print(f"  LLM: {constructor_config.get('llm_model_name', 'N/A')}")
+    print(f"  Vision: {constructor_config.get('vision_model_name', 'N/A')}")
+    print(f"  Audio: {constructor_config.get('audio_encoder_type', 'N/A')}")
+
     model = SAFEModel(**constructor_config)
     model = model.to(device)
 
