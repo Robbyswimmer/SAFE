@@ -68,6 +68,76 @@ def count_parameters(model: nn.Module) -> Tuple[int, int]:
     return total, trainable
 
 
+# Global cache for HuggingFace evaluate metrics (to avoid re-loading)
+_EVALUATE_METRIC_CACHE: Dict[Tuple[str, Tuple[Tuple[str, Any], ...]], Any] = {}
+
+
+def _normalize_audio_caption(text: Any) -> str:
+    """
+    Normalization logic copied from StageATrainer._normalize_audio_caption
+    so that metrics match the main training pipeline.
+    """
+    if text is None:
+        return ""
+
+    if isinstance(text, (list, tuple)):
+        text = " ".join(str(t) for t in text if t)
+    elif isinstance(text, dict):
+        value = text.get("answer") or text.get("text")
+        text = value if value is not None else ""
+
+    import re
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKC", str(text))
+    normalized = normalized.replace("\u2019", "'")  # Normalize curly apostrophes
+    normalized = normalized.lower()
+
+    # Collapse possessives before stripping punctuation so "dog's" -> "dogs"
+    normalized = re.sub(r"'s\b", "s", normalized)
+
+    # Remove residual apostrophes and punctuation (keep alphanumerics + whitespace)
+    normalized = re.sub(r"'", " ", normalized)
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+
+    tokens = [tok for tok in normalized.split() if tok]
+    if not tokens:
+        return ""
+
+    number_map = {
+        "zero": "0",
+        "one": "1",
+        "two": "2",
+        "three": "3",
+        "four": "4",
+        "five": "5",
+        "six": "6",
+        "seven": "7",
+        "eight": "8",
+        "nine": "9",
+        "ten": "10",
+        "eleven": "11",
+        "twelve": "12",
+        "thirteen": "13",
+        "fourteen": "14",
+        "fifteen": "15",
+        "sixteen": "16",
+        "seventeen": "17",
+        "eighteen": "18",
+        "nineteen": "19",
+        "twenty": "20",
+    }
+
+    cleaned_tokens: List[str] = []
+    for tok in tokens:
+        cleaned_tokens.append(number_map.get(tok, tok))
+
+    if not cleaned_tokens:
+        return ""
+
+    return " ".join(cleaned_tokens)
+
+
 # ============================================================================
 # SECTION 2: METRICS
 # ============================================================================
@@ -163,48 +233,166 @@ def compute_caption_metrics(
     light_metrics: bool = False,
 ) -> Dict[str, float]:
     """
-    Compute all caption metrics
-
-    Args:
-        predictions: List of predicted captions
-        references: List of reference caption lists
-        compute_bertscore: Whether to compute BERTScore (slow)
-
-    Returns:
-        Dict with all metrics
+    Compute caption metrics, mirroring StageATrainer's metric stack as closely
+    as possible while keeping training-time evaluation lightweight when
+    `light_metrics=True`.
     """
-    metrics = {}
+    # Default structure so callers can always rely on these keys
+    metrics: Dict[str, float] = {
+        "cider": 0.0,
+        "spice": 0.0,
+        "spider": 0.0,
+        "bleu1": 0.0,
+        "bleu2": 0.0,
+        "bleu3": 0.0,
+        "bleu4": 0.0,
+        "meteor": 0.0,
+        "rouge_l": 0.0,
+        "bertscore_f1": 0.0,
+    }
 
-    # CIDEr (most important for audio captioning)
-    metrics["cider"] = compute_cider(predictions, references)
+    if not predictions or not references:
+        return metrics
 
-    # BLEU scores
-    bleu_scores = compute_bleu(predictions, references)
-    metrics.update(bleu_scores)
+    # Normalize and filter empty pairs (match StageATrainer behaviour)
+    paired: List[Tuple[str, List[str]]] = []
+    for pred, refs in zip(predictions, references):
+        pred_clean = _normalize_audio_caption(str(pred).strip())
+        refs_clean = [
+            _normalize_audio_caption(str(ref).strip())
+            for ref in refs
+            if str(ref).strip()
+        ]
+        pred_clean = pred_clean.strip()
+        refs_clean = [r for r in refs_clean if r.strip()]
+        if pred_clean and refs_clean:
+            paired.append((pred_clean, refs_clean))
 
-    # METEOR and ROUGE (can be slow; optionally skipped for light eval)
-    if not light_metrics:
-        metrics["meteor"] = compute_meteor(predictions, references)
-        metrics["rouge_l"] = compute_rouge(predictions, references)
-    else:
-        metrics["meteor"] = 0.0
-        metrics["rouge_l"] = 0.0
+    if not paired:
+        return metrics
 
-    # BERTScore (optional, slow)
-    if compute_bertscore:
-        try:
-            from bert_score import score as bert_score_fn
-            _, _, F1 = bert_score_fn(
-                predictions,
-                [refs[0] for refs in references],  # Use first reference
-                lang="en",
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                batch_size=32
+    preds_list, refs_list = zip(*paired)
+    preds_list = list(preds_list)
+    refs_list = [list(r) for r in refs_list]
+
+    # Reference statistics (useful sanity check; mirrors StageATrainer logs)
+    ref_counts = [len(r) for r in refs_list]
+    if ref_counts:
+        avg_refs = sum(ref_counts) / len(ref_counts)
+        min_refs = min(ref_counts)
+        max_refs = max(ref_counts)
+        print(
+            f"[RefValidation] References per sample: avg={avg_refs:.1f}, "
+            f"min={min_refs}, max={max_refs}, total_samples={len(refs_list)}",
+            flush=True,
+        )
+        if avg_refs < 2.0:
+            print(
+                f"⚠️  WARNING: Low reference count (avg={avg_refs:.1f}). "
+                f"AudioCaps-style CIDEr expects ~5 refs/sample.",
+                flush=True,
             )
-            metrics["bertscore_f1"] = float(F1.mean())
-        except Exception as e:
-            print(f"⚠️  BERTScore computation failed: {e}")
-            metrics["bertscore_f1"] = 0.0
+
+    # HuggingFace evaluate metrics (BLEU/METEOR/ROUGE and optional BERTScore)
+    try:
+        import evaluate
+
+        def _metric(name: str, **load_kwargs):
+            key = (name, tuple(sorted(load_kwargs.items())))
+            if key not in _EVALUATE_METRIC_CACHE:
+                _EVALUATE_METRIC_CACHE[key] = evaluate.load(name, **load_kwargs)
+            return _EVALUATE_METRIC_CACHE[key]
+
+        # BLEU
+        try:
+            bleu_metric = _metric("bleu")
+            bleu_result = bleu_metric.compute(predictions=preds_list, references=refs_list)
+            if bleu_result:
+                precisions = bleu_result.get("precisions", [])
+                for n in range(min(4, len(precisions))):
+                    metrics[f"bleu{n + 1}"] = float(precisions[n])
+        except Exception as exc:
+            print(f"⚠️  BLEU metric failed: {exc}", flush=True)
+
+        if not light_metrics:
+            # METEOR
+            try:
+                meteor_metric = _metric("meteor")
+                meteor_result = meteor_metric.compute(predictions=preds_list, references=refs_list)
+                if meteor_result and "meteor" in meteor_result:
+                    metrics["meteor"] = float(meteor_result["meteor"])
+            except Exception as exc:
+                print(f"⚠️  METEOR metric failed: {exc}", flush=True)
+
+            # ROUGE-L (best over references per sample)
+            try:
+                rouge_metric = _metric("rouge")
+                rouge_scores: List[float] = []
+                for pred, refs in zip(preds_list, refs_list):
+                    best = 0.0
+                    for ref in refs:
+                        try:
+                            result = rouge_metric.compute(predictions=[pred], references=[ref])
+                            best = max(best, float(result.get("rougeL", 0.0)))
+                        except Exception as rouge_exc:
+                            print(f"⚠️  ROUGE-L metric failed on sample: {rouge_exc}", flush=True)
+                    rouge_scores.append(best)
+                if rouge_scores:
+                    metrics["rouge_l"] = float(sum(rouge_scores) / len(rouge_scores))
+            except Exception as exc:
+                print(f"⚠️  ROUGE-L metric failed: {exc}", flush=True)
+
+        # Optional BERTScore via evaluate (only in heavy eval mode)
+        if compute_bertscore and not light_metrics:
+            try:
+                bert_metric = _metric("bertscore")
+                bert_result = bert_metric.compute(
+                    predictions=preds_list,
+                    references=[r[0] for r in refs_list],
+                    lang="en",
+                )
+                if "f1" in bert_result:
+                    f1_scores = bert_result["f1"]
+                    if isinstance(f1_scores, (list, tuple)) and len(f1_scores) > 0:
+                        metrics["bertscore_f1"] = float(sum(f1_scores) / len(f1_scores))
+            except Exception as exc:
+                print(f"⚠️  BERTScore metric failed: {exc}", flush=True)
+
+    except Exception as exc:
+        # If evaluate is unavailable, we still compute CIDEr/SPICE below
+        print(
+            f"⚠️  evaluate library unavailable for BLEU/METEOR/ROUGE/BERTScore: {exc}",
+            flush=True,
+        )
+
+    # CIDEr + SPICE (pycocoevalcap) – match StageATrainer behaviour
+    try:
+        from pycocoevalcap.cider.cider import Cider
+        from pycocoevalcap.spice.spice import Spice
+
+        gts = {str(i): refs for i, refs in enumerate(refs_list)}
+        res = {str(i): [pred] for i, pred in enumerate(preds_list)}
+
+        try:
+            cider_scorer = Cider()
+            cider_score, _ = cider_scorer.compute_score(gts, res)
+            metrics["cider"] = float(cider_score) * 100.0
+        except Exception as exc:
+            print(f"⚠️  CIDEr metric failed: {exc}", flush=True)
+
+        if not light_metrics:
+            try:
+                spice_scorer = Spice()
+                spice_score, _ = spice_scorer.compute_score(gts, res)
+                metrics["spice"] = float(spice_score) * 100.0
+            except Exception as exc:
+                print(f"⚠️  SPICE metric failed: {exc}", flush=True)
+
+        if metrics["cider"] > 0.0 and metrics["spice"] > 0.0:
+            metrics["spider"] = (metrics["cider"] + metrics["spice"]) / 2.0
+
+    except ImportError as exc:
+        print(f"⚠️  pycocoevalcap unavailable for CIDEr/SPICE: {exc}", flush=True)
 
     return metrics
 
@@ -678,8 +866,10 @@ def train(
         max_batches=initial_max_eval,
         max_new_tokens=config.get("max_new_tokens", 20),
         num_beams=config.get("num_beams", 1),
+        # Full caption metrics by default (BLEU, METEOR, ROUGE, CIDEr, SPICE).
+        # BERTScore stays off here to keep this quick.
         compute_bertscore=False,
-        light_metrics=True,
+        light_metrics=False,
     )
     print(f"[InitEval] CIDEr={init_metrics.get('cider', 0.0):.2f} BLEU-4={init_metrics.get('bleu4', 0.0):.4f}", flush=True)
 
@@ -712,8 +902,9 @@ def train(
                 max_batches=config.get("max_eval_batches"),
                 max_new_tokens=config.get("max_new_tokens", 20),
                 num_beams=config.get("num_beams", 1),
+                # Full caption metrics during validation; BERTScore still off.
                 compute_bertscore=False,
-                light_metrics=True,
+                light_metrics=False,
             )
 
             # Update history
