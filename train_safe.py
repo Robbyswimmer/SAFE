@@ -467,33 +467,32 @@ def compute_caption_metrics(
         except Exception as exc:
             print(f"⚠️  BLEU metric failed: {exc}", flush=True)
 
-        if not light_metrics:
-            # METEOR
-            try:
-                meteor_metric = _metric("meteor")
-                meteor_result = meteor_metric.compute(predictions=preds_list, references=refs_list)
-                if meteor_result and "meteor" in meteor_result:
-                    metrics["meteor"] = float(meteor_result["meteor"])
-            except Exception as exc:
-                print(f"⚠️  METEOR metric failed: {exc}", flush=True)
+        # METEOR (always computed if available)
+        try:
+            meteor_metric = _metric("meteor")
+            meteor_result = meteor_metric.compute(predictions=preds_list, references=refs_list)
+            if meteor_result and "meteor" in meteor_result:
+                metrics["meteor"] = float(meteor_result["meteor"])
+        except Exception as exc:
+            print(f"⚠️  METEOR metric failed: {exc}", flush=True)
 
-            # ROUGE-L (best over references per sample)
-            try:
-                rouge_metric = _metric("rouge")
-                rouge_scores: List[float] = []
-                for pred, refs in zip(preds_list, refs_list):
-                    best = 0.0
-                    for ref in refs:
-                        try:
-                            result = rouge_metric.compute(predictions=[pred], references=[ref])
-                            best = max(best, float(result.get("rougeL", 0.0)))
-                        except Exception as rouge_exc:
-                            print(f"⚠️  ROUGE-L metric failed on sample: {rouge_exc}", flush=True)
-                    rouge_scores.append(best)
-                if rouge_scores:
-                    metrics["rouge_l"] = float(sum(rouge_scores) / len(rouge_scores))
-            except Exception as exc:
-                print(f"⚠️  ROUGE-L metric failed: {exc}", flush=True)
+        # ROUGE-L (best over references per sample, always computed if available)
+        try:
+            rouge_metric = _metric("rouge")
+            rouge_scores: List[float] = []
+            for pred, refs in zip(preds_list, refs_list):
+                best = 0.0
+                for ref in refs:
+                    try:
+                        result = rouge_metric.compute(predictions=[pred], references=[ref])
+                        best = max(best, float(result.get("rougeL", 0.0)))
+                    except Exception as rouge_exc:
+                        print(f"⚠️  ROUGE-L metric failed on sample: {rouge_exc}", flush=True)
+                rouge_scores.append(best)
+            if rouge_scores:
+                metrics["rouge_l"] = float(sum(rouge_scores) / len(rouge_scores))
+        except Exception as exc:
+            print(f"⚠️  ROUGE-L metric failed: {exc}", flush=True)
 
         # Optional BERTScore via evaluate (only in heavy eval mode)
         if compute_bertscore and not light_metrics:
@@ -533,6 +532,7 @@ def compute_caption_metrics(
         except Exception as exc:
             print(f"⚠️  CIDEr metric failed: {exc}", flush=True)
 
+        # SPICE is heavy (Java CoreNLP); only compute when light_metrics=False
         if not light_metrics:
             try:
                 spice_scorer = Spice()
@@ -1114,10 +1114,9 @@ def train(
         max_batches=initial_max_eval,
         max_new_tokens=config.get("max_new_tokens", 20),
         num_beams=config.get("num_beams", 1),
-        # Full caption metrics by default (BLEU, METEOR, ROUGE, CIDEr, SPICE).
-        # BERTScore stays off here to keep this quick.
+        # Training-time eval: use light metrics (BLEU, METEOR, ROUGE, CIDEr), skip SPICE/BERTScore
         compute_bertscore=False,
-        light_metrics=False,
+        light_metrics=True,
         suppress_eos_for_audio=True,
     )
     print(f"[InitEval] CIDEr={init_metrics.get('cider', 0.0):.2f} BLEU-4={init_metrics.get('bleu4', 0.0):.4f}", flush=True)
@@ -1157,9 +1156,9 @@ def train(
                 max_batches=config.get("max_eval_batches"),
                 max_new_tokens=config.get("max_new_tokens", 20),
                 num_beams=config.get("num_beams", 1),
-                # Full caption metrics during validation; BERTScore still off.
+                # Training-time eval: light metrics (no SPICE/BERTScore).
                 compute_bertscore=False,
-                light_metrics=False,
+                light_metrics=True,
                 suppress_eos_for_audio=True,
             )
 
