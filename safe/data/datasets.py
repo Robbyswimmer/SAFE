@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import mmap
+import os
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -20,6 +22,111 @@ __all__ = [
     "WavCapsDataset",
     "AudioSetCapsDataset",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Memory-efficient JSONL reader using line offsets
+# ---------------------------------------------------------------------------
+
+class LazyJSONLReader:
+    """
+    Memory-efficient JSONL reader that stores only line offsets, not full data.
+
+    Instead of loading all JSON objects into memory (~500 bytes each × 400K = 200MB),
+    we store only byte offsets (~8 bytes each × 400K = 3.2MB) and read on demand.
+
+    This reduces memory by ~60x for large datasets like WavCaps.
+    """
+
+    def __init__(self, filepath: Path):
+        self.filepath = filepath
+        self.offsets: List[int] = []
+        self._build_index()
+        # Keep file handle open for fast random access
+        self._file = open(filepath, 'r', encoding='utf-8')
+
+    def _build_index(self):
+        """Build index of byte offsets for each line."""
+        self.offsets = []
+        with open(self.filepath, 'rb') as f:
+            offset = 0
+            for line in f:
+                if line.strip():  # Skip empty lines
+                    self.offsets.append(offset)
+                offset += len(line)
+
+    def __len__(self):
+        return len(self.offsets)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """Read and parse a single line on demand."""
+        self._file.seek(self.offsets[idx])
+        line = self._file.readline()
+        return json.loads(line)
+
+    def __del__(self):
+        if hasattr(self, '_file') and self._file:
+            self._file.close()
+
+    def __getstate__(self):
+        """Support pickling for multiprocessing (close file handle)."""
+        state = self.__dict__.copy()
+        state['_file'] = None
+        return state
+
+    def __setstate__(self, state):
+        """Restore state and reopen file."""
+        self.__dict__.update(state)
+        self._file = open(self.filepath, 'r', encoding='utf-8')
+
+
+class CombinedLazyJSONLReader:
+    """
+    Memory-efficient reader for multiple JSONL files combined.
+
+    Maps global indices to (file_index, local_index) for random access.
+    """
+
+    def __init__(self, filepaths: List[Path]):
+        self.readers: List[LazyJSONLReader] = []
+        self.cumulative_lengths: List[int] = [0]
+
+        for filepath in filepaths:
+            reader = LazyJSONLReader(filepath)
+            self.readers.append(reader)
+            self.cumulative_lengths.append(self.cumulative_lengths[-1] + len(reader))
+
+    def __len__(self):
+        return self.cumulative_lengths[-1]
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """Map global index to appropriate file and local index."""
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index {idx} out of range [0, {len(self)})")
+
+        # Binary search for the right file
+        for i, cum_len in enumerate(self.cumulative_lengths[1:], 1):
+            if idx < cum_len:
+                local_idx = idx - self.cumulative_lengths[i - 1]
+                return self.readers[i - 1][local_idx]
+
+        raise IndexError(f"Index {idx} out of range")
+
+    def __getstate__(self):
+        """Support pickling."""
+        state = self.__dict__.copy()
+        state['readers'] = [r.__getstate__() for r in self.readers]
+        return state
+
+    def __setstate__(self, state):
+        """Restore state."""
+        reader_states = state.pop('readers')
+        self.__dict__.update(state)
+        self.readers = []
+        for rs in reader_states:
+            reader = LazyJSONLReader.__new__(LazyJSONLReader)
+            reader.__setstate__(rs)
+            self.readers.append(reader)
 
 
 # ---------------------------------------------------------------------------
@@ -140,13 +247,16 @@ class _BaseQADataset(Dataset):
                 f"Looked for: {', '.join(str(p) for p in candidates)}"
             )
 
-        self.examples: List[Dict[str, Any]] = []
+        self._data_file = data_file
+        self._use_lazy_loading = False
+        self.examples: Any = []  # Can be List[Dict] or LazyJSONLReader
+
         if data_file.suffix == ".jsonl":
-            with open(data_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        self.examples.append(json.loads(line))
+            # Use lazy loading for JSONL files to save memory
+            # This reduces memory from ~200MB to ~3MB for large datasets
+            self._use_lazy_loading = True
+            self.examples = LazyJSONLReader(data_file)
+            print(f"[Dataset] Loaded {len(self.examples)} samples from {data_file.name} (lazy mode)", flush=True)
         else:
             with open(data_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -155,8 +265,9 @@ class _BaseQADataset(Dataset):
                 if not isinstance(data, list):
                     raise ValueError(f"Unexpected format for {data_file}")
                 self.examples = data
+            print(f"[Dataset] Loaded {len(self.examples)} samples from {data_file.name} (eager mode)", flush=True)
 
-        if not self.examples:
+        if len(self.examples) == 0:
             raise ValueError(f"No examples found in {data_file}")
 
     # ------------------------------------------------------------------
@@ -513,7 +624,8 @@ class AudioSetCapsDataset(_BaseQADataset):
             "youtube8m": f"youtube8m_audiosetcaps_{split}.jsonl",
         }
 
-        self.examples: List[Dict[str, Any]] = []
+        # Collect valid source files for lazy loading
+        valid_files: List[Path] = []
         loaded_sources = []
 
         for source in self.sources:
@@ -526,23 +638,23 @@ class AudioSetCapsDataset(_BaseQADataset):
                 print(f"[AudioSetCaps] Warning: {jsonl_file} not found, skipping {source}", flush=True)
                 continue
 
-            # Load JSONL
-            source_examples = []
-            with open(jsonl_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        source_examples.append(json.loads(line))
-
-            print(f"[AudioSetCaps] Loaded {len(source_examples):,} samples from {source}", flush=True)
-            self.examples.extend(source_examples)
+            valid_files.append(jsonl_file)
             loaded_sources.append(source)
 
-        if not self.examples:
+        if not valid_files:
             raise ValueError(
                 f"No examples found for AudioSetCaps. Looked for sources: {self.sources}\n"
                 f"In directory: {dataset_dir}"
             )
+
+        # Use combined lazy reader for memory efficiency
+        self.examples: Any = CombinedLazyJSONLReader(valid_files)
+
+        for source, filepath in zip(loaded_sources, valid_files):
+            # Count lines without loading (for logging)
+            with open(filepath, 'rb') as f:
+                line_count = sum(1 for line in f if line.strip())
+            print(f"[AudioSetCaps] Indexed {line_count:,} samples from {source} (lazy mode)", flush=True)
 
         print(f"[AudioSetCaps] Total samples: {len(self.examples):,} from {len(loaded_sources)} source(s)", flush=True)
         self.split = split

@@ -180,6 +180,9 @@ class MixedAudioCaptionDataset(Dataset):
     - Always uses all AudioCaps samples.
     - Uses wavcaps_ratio * len(WavCaps) samples (clipped to [0, len]).
     - Shuffles combined index map with a fixed seed.
+
+    Memory-optimized: Uses numpy arrays instead of Python lists for index mapping.
+    This reduces memory from ~40MB to ~4MB for 500K samples.
     """
 
     def __init__(
@@ -193,40 +196,50 @@ class MixedAudioCaptionDataset(Dataset):
         if audiocaps_dataset is None and wavcaps_dataset is None:
             raise ValueError("MixedAudioCaptionDataset requires at least one dataset")
 
-        self.datasets: List[Tuple[str, Dataset]] = []
-        if audiocaps_dataset is not None:
-            self.datasets.append(("audiocaps", audiocaps_dataset))
-        if wavcaps_dataset is not None:
-            self.datasets.append(("wavcaps", wavcaps_dataset))
-
-        self.index_map: List[Tuple[str, int]] = []
+        self.audiocaps_dataset = audiocaps_dataset
+        self.wavcaps_dataset = wavcaps_dataset
 
         if wavcaps_dataset is None:
-            # Only AudioCaps
-            self.index_map = [("audiocaps", idx) for idx in range(len(audiocaps_dataset))]
+            # Only AudioCaps - use simple range
+            a_count = len(audiocaps_dataset)
+            self._dataset_ids = np.zeros(a_count, dtype=np.uint8)  # 0 = audiocaps
+            self._local_indices = np.arange(a_count, dtype=np.int32)
         else:
             a_count = len(audiocaps_dataset)
             w_count = len(wavcaps_dataset)
             ratio = max(0.0, min(1.0, float(wavcaps_ratio)))
             w_samples = int(w_count * ratio)
+            total = a_count + w_samples
 
-            # Use all AudioCaps + sampled WavCaps prefix
-            self.index_map.extend([("audiocaps", idx) for idx in range(a_count)])
-            self.index_map.extend([("wavcaps", idx) for idx in range(w_samples)])
+            # Use numpy arrays for memory efficiency
+            # dataset_ids: 0 = audiocaps, 1 = wavcaps (1 byte per sample vs ~50 bytes for string)
+            # local_indices: int32 (4 bytes per sample vs 28 bytes for Python int)
+            self._dataset_ids = np.concatenate([
+                np.zeros(a_count, dtype=np.uint8),
+                np.ones(w_samples, dtype=np.uint8),
+            ])
+            self._local_indices = np.concatenate([
+                np.arange(a_count, dtype=np.int32),
+                np.arange(w_samples, dtype=np.int32),
+            ])
 
         if shuffle:
-            rng = random.Random(seed)
-            rng.shuffle(self.index_map)
+            rng = np.random.Generator(np.random.PCG64(seed))
+            perm = rng.permutation(len(self._dataset_ids))
+            self._dataset_ids = self._dataset_ids[perm]
+            self._local_indices = self._local_indices[perm]
 
     def __len__(self) -> int:
-        return len(self.index_map)
+        return len(self._dataset_ids)
 
     def __getitem__(self, idx: int):
-        dataset_name, local_idx = self.index_map[idx]
-        for name, dataset in self.datasets:
-            if name == dataset_name:
-                return dataset[local_idx]
-        raise IndexError(f"Invalid index: {idx}")
+        dataset_id = self._dataset_ids[idx]
+        local_idx = int(self._local_indices[idx])
+
+        if dataset_id == 0:
+            return self.audiocaps_dataset[local_idx]
+        else:
+            return self.wavcaps_dataset[local_idx]
 
 
 def _extract_answer_from_generation(generated_text: str) -> str:

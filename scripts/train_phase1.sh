@@ -60,7 +60,7 @@ GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-0}
 
 # Memory optimization - enable by default for 48GB GPUs with large datasets
 GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-1}
-NUM_WORKERS=${NUM_WORKERS:-2}  # Reduced from 4 to save ~2GB memory
+NUM_WORKERS=${NUM_WORKERS:-2}  # Lazy loading allows workers without duplicating data
 MAX_EVAL_BATCHES=${MAX_EVAL_BATCHES:-100}  # Limit eval batches to prevent memory buildup
 
 # Create output directory
