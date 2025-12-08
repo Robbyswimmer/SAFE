@@ -58,6 +58,11 @@ AUDIO_CONTRASTIVE_TEMPERATURE=${AUDIO_CONTRASTIVE_TEMPERATURE:-0.07}
 AUDIO_CONTRASTIVE_MAX_LENGTH=${AUDIO_CONTRASTIVE_MAX_LENGTH:-48}
 GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-0}
 
+# Memory optimization - enable by default for 48GB GPUs with large datasets
+GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-1}
+NUM_WORKERS=${NUM_WORKERS:-2}  # Reduced from 4 to save ~2GB memory
+MAX_EVAL_BATCHES=${MAX_EVAL_BATCHES:-100}  # Limit eval batches to prevent memory buildup
+
 # Create output directory
 mkdir -p "${OUTPUT_DIR}"
 mkdir -p logs
@@ -88,6 +93,9 @@ echo "Seed: ${SEED}"
 echo "Use WavCaps: ${USE_WAVCAPS} (ratio=${WAVCAPS_RATIO})"
 echo "Audio contrastive weight: ${AUDIO_CONTRASTIVE_WEIGHT}"
 echo "Gate warmup steps: ${GATE_WARMUP_STEPS}"
+echo "Gradient checkpointing: ${GRADIENT_CHECKPOINTING}"
+echo "Num workers: ${NUM_WORKERS}"
+echo "Max eval batches: ${MAX_EVAL_BATCHES}"
 echo "========================================"
 echo ""
 
@@ -112,6 +120,9 @@ python train_safe.py \
     --audio-contrastive-temperature "${AUDIO_CONTRASTIVE_TEMPERATURE}" \
     --audio-contrastive-max-length "${AUDIO_CONTRASTIVE_MAX_LENGTH}" \
     --gate-warmup-steps "${GATE_WARMUP_STEPS}" \
+    --num-workers "${NUM_WORKERS}" \
+    --max-eval-batches "${MAX_EVAL_BATCHES}" \
+    $( [[ "${GRADIENT_CHECKPOINTING}" != "0" ]] && echo --gradient-checkpointing ) \
     ${FP16}
 
 echo ""

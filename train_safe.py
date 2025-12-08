@@ -808,6 +808,12 @@ def evaluate(
         print(f"  [{i+1}] Pred: {all_predictions[i]}", flush=True)
         print(f"      Refs: {all_references[i]}", flush=True)
 
+    # Explicit memory cleanup to prevent OOM during long training runs
+    del all_predictions, all_references
+    torch.cuda.empty_cache()
+    import gc
+    gc.collect()
+
     return metrics
 
 
@@ -1003,6 +1009,11 @@ def train_epoch(
         "train_time": elapsed,
         "samples_per_sec": num_samples / elapsed,
     }
+
+    # Memory cleanup after training epoch to prevent OOM during long runs
+    torch.cuda.empty_cache()
+    import gc
+    gc.collect()
 
     return metrics
 
@@ -1348,6 +1359,10 @@ def main():
     parser.add_argument("--early-stopping-patience", type=int, default=5,
                         help="Early stopping patience (epochs)")
 
+    # Memory optimization
+    parser.add_argument("--gradient-checkpointing", action="store_true",
+                        help="Enable gradient checkpointing to save memory (trades compute for memory)")
+
     # Misc
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
@@ -1405,6 +1420,15 @@ def main():
 
     model = SAFEModel(**constructor_config)
     model = model.to(device)
+
+    # Enable gradient checkpointing if requested (saves ~10-15GB memory)
+    if args.gradient_checkpointing:
+        print(f"  Enabling gradient checkpointing for memory optimization...")
+        if hasattr(model.base_vl, 'llm') and hasattr(model.base_vl.llm, 'gradient_checkpointing_enable'):
+            model.base_vl.llm.gradient_checkpointing_enable()
+            print(f"  ✓ Gradient checkpointing enabled on LLM")
+        else:
+            print(f"  ⚠️  LLM does not support gradient checkpointing")
 
     # Count parameters
     total_params, trainable_params = count_parameters(model)
