@@ -7,7 +7,7 @@ import mmap
 import os
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -39,11 +39,10 @@ class LazyJSONLReader:
     """
 
     def __init__(self, filepath: Path):
-        self.filepath = filepath
+        self.filepath = Path(filepath)
         self.offsets: List[int] = []
         self._build_index()
-        # Keep file handle open for fast random access
-        self._file = open(filepath, 'r', encoding='utf-8')
+        self._file = None  # Opened lazily
 
     def _build_index(self):
         """Build index of byte offsets for each line."""
@@ -55,29 +54,42 @@ class LazyJSONLReader:
                     self.offsets.append(offset)
                 offset += len(line)
 
+    def _ensure_file_open(self):
+        """Ensure file handle is open (lazy initialization for multiprocessing)."""
+        if self._file is None or self._file.closed:
+            self._file = open(self.filepath, 'r', encoding='utf-8')
+
     def __len__(self):
         return len(self.offsets)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """Read and parse a single line on demand."""
+        if idx < 0 or idx >= len(self.offsets):
+            raise IndexError(f"Index {idx} out of range [0, {len(self.offsets)})")
+
+        self._ensure_file_open()
         self._file.seek(self.offsets[idx])
         line = self._file.readline()
+
+        if not line.strip():
+            raise ValueError(f"Empty line at index {idx}, offset {self.offsets[idx]}")
+
         return json.loads(line)
 
     def __del__(self):
-        if hasattr(self, '_file') and self._file:
+        if hasattr(self, '_file') and self._file and not self._file.closed:
             self._file.close()
 
     def __getstate__(self):
         """Support pickling for multiprocessing (close file handle)."""
         state = self.__dict__.copy()
-        state['_file'] = None
+        state['_file'] = None  # Don't pickle file handle
         return state
 
     def __setstate__(self, state):
-        """Restore state and reopen file."""
+        """Restore state - file will be reopened lazily on first access."""
         self.__dict__.update(state)
-        self._file = open(self.filepath, 'r', encoding='utf-8')
+        self._file = None  # Will be reopened by _ensure_file_open()
 
 
 class CombinedLazyJSONLReader:
@@ -88,13 +100,21 @@ class CombinedLazyJSONLReader:
     """
 
     def __init__(self, filepaths: List[Path]):
-        self.readers: List[LazyJSONLReader] = []
+        # Store filepaths and offsets, but create readers lazily
+        self.filepaths: List[Path] = [Path(p) for p in filepaths]
         self.cumulative_lengths: List[int] = [0]
+        self._readers: Optional[List[LazyJSONLReader]] = None
 
-        for filepath in filepaths:
+        # Build index without keeping readers in memory yet
+        for filepath in self.filepaths:
             reader = LazyJSONLReader(filepath)
-            self.readers.append(reader)
             self.cumulative_lengths.append(self.cumulative_lengths[-1] + len(reader))
+            # Don't store reader yet - will be created lazily
+
+    def _ensure_readers(self):
+        """Lazily create readers (needed after unpickling in worker processes)."""
+        if self._readers is None:
+            self._readers = [LazyJSONLReader(fp) for fp in self.filepaths]
 
     def __len__(self):
         return self.cumulative_lengths[-1]
@@ -104,29 +124,26 @@ class CombinedLazyJSONLReader:
         if idx < 0 or idx >= len(self):
             raise IndexError(f"Index {idx} out of range [0, {len(self)})")
 
-        # Binary search for the right file
+        self._ensure_readers()
+
+        # Find the right file
         for i, cum_len in enumerate(self.cumulative_lengths[1:], 1):
             if idx < cum_len:
                 local_idx = idx - self.cumulative_lengths[i - 1]
-                return self.readers[i - 1][local_idx]
+                return self._readers[i - 1][local_idx]
 
         raise IndexError(f"Index {idx} out of range")
 
     def __getstate__(self):
-        """Support pickling."""
+        """Support pickling - don't pickle readers, just paths and lengths."""
         state = self.__dict__.copy()
-        state['readers'] = [r.__getstate__() for r in self.readers]
+        state['_readers'] = None  # Will be recreated lazily
         return state
 
     def __setstate__(self, state):
-        """Restore state."""
-        reader_states = state.pop('readers')
+        """Restore state - readers will be created lazily on first access."""
         self.__dict__.update(state)
-        self.readers = []
-        for rs in reader_states:
-            reader = LazyJSONLReader.__new__(LazyJSONLReader)
-            reader.__setstate__(rs)
-            self.readers.append(reader)
+        self._readers = None
 
 
 # ---------------------------------------------------------------------------
