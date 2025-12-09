@@ -964,6 +964,12 @@ def train_epoch(
                 # Fail-safe: ignore contrastive errors to keep training running
                 pass
 
+        # If loss has no gradient path (e.g., SAFE gate effectively off),
+        # skip this batch to avoid autograd errors.
+        if not isinstance(loss, torch.Tensor) or not loss.requires_grad:
+            # Optionally log once, but keep silent in normal operation
+            continue
+
         # Normalize by gradient accumulation steps
         loss = loss / gradient_accumulation_steps
 

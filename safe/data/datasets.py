@@ -701,16 +701,30 @@ def create_safe_dataloader(
     dataset: Dataset,
     batch_size: int = 4,
     shuffle: bool = True,
-    num_workers: int = 0,
+    num_workers: int = 2,
+    *,
+    persistent_workers: bool | None = None,
+    prefetch_factor: int | None = None,
+    pin_memory: bool | None = None,
 ) -> DataLoader:
     """Create a DataLoader with SAFE's multimodal collate function.
 
     Defaults are chosen to be conservative on memory:
-    - num_workers=0 avoids per-worker Python overhead.
-    - persistent_workers=False to avoid keeping extra processes alive.
+    - num_workers=2 by default; set to 0 on very memory-constrained systems.
+    - persistent_workers=False unless explicitly requested.
     - prefetch_factor=1 to avoid buffering many batches in RAM.
-    - pin_memory=False to avoid extra pinned CPU buffers unless explicitly requested.
+    - pin_memory=False unless explicitly requested.
+
+    Callers (e.g., training scripts) can still override these via the keyword
+    arguments when needed.
     """
+
+    # Conservative memory defaults unless explicitly overridden.
+    resolved_persistent_workers = False if persistent_workers is None else persistent_workers
+    resolved_prefetch_factor = (
+        1 if prefetch_factor is None and num_workers > 0 else prefetch_factor
+    )
+    resolved_pin_memory = False if pin_memory is None else pin_memory
 
     return DataLoader(
         dataset,
@@ -718,7 +732,7 @@ def create_safe_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=_collate_multimodal_batch,
-        persistent_workers=False,
-        pin_memory=False,
-        prefetch_factor=1 if num_workers > 0 else None,
+        persistent_workers=resolved_persistent_workers if num_workers > 0 else False,
+        pin_memory=resolved_pin_memory,
+        prefetch_factor=resolved_prefetch_factor if num_workers > 0 else None,
     )
