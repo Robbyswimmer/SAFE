@@ -701,13 +701,15 @@ def create_safe_dataloader(
     dataset: Dataset,
     batch_size: int = 4,
     shuffle: bool = True,
-    num_workers: int = 2,  # Reduced from 4 to save memory (each worker has ~1GB overhead)
+    num_workers: int = 0,
 ) -> DataLoader:
     """Create a DataLoader with SAFE's multimodal collate function.
 
-    Note: num_workers is set to 2 by default to balance speed and memory usage.
-    Each worker process has ~1GB Python overhead, so reducing from 4 to 2 saves ~2GB.
-    For memory-constrained systems, set num_workers=0 for in-process loading.
+    Defaults are chosen to be conservative on memory:
+    - num_workers=0 avoids per-worker Python overhead.
+    - persistent_workers=False to avoid keeping extra processes alive.
+    - prefetch_factor=1 to avoid buffering many batches in RAM.
+    - pin_memory=False to avoid extra pinned CPU buffers unless explicitly requested.
     """
 
     return DataLoader(
@@ -716,7 +718,7 @@ def create_safe_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=_collate_multimodal_batch,
-        persistent_workers=True if num_workers > 0 else False,  # Prevent worker respawning to avoid memory leaks
-        pin_memory=True,  # Faster GPU transfer
-        prefetch_factor=2 if num_workers > 0 else None,  # Limit prefetch to reduce memory
+        persistent_workers=False,
+        pin_memory=False,
+        prefetch_factor=1 if num_workers > 0 else None,
     )

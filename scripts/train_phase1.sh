@@ -41,8 +41,8 @@ MODEL_CONFIG=${MODEL_CONFIG:-"phase1"}
 DATA_PATH=${DATA_PATH:-"$PWD/experiments/full_training/data"}
 OUTPUT_DIR=${OUTPUT_DIR:-"./checkpoints/phase1_clean"}
 NUM_EPOCHS=${NUM_EPOCHS:-20}
-BATCH_SIZE=${BATCH_SIZE:-4}
-GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-32}
+BATCH_SIZE=${BATCH_SIZE:-2}                 # Smaller microbatches reduce peak VRAM/CPU usage
+GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-64}  # Maintain effective batch size via accumulation
 LR_PROJECTOR=${LR_PROJECTOR:-2e-4}
 LR_ADAPTER=${LR_ADAPTER:-1e-4}
 WARMUP_STEPS=${WARMUP_STEPS:-1000}
@@ -60,8 +60,8 @@ GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-0}
 
 # Memory optimization - enable by default for 48GB GPUs with large datasets
 GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-1}
-NUM_WORKERS=${NUM_WORKERS:-2}  # Lazy loading allows workers without duplicating data
-MAX_EVAL_BATCHES=${MAX_EVAL_BATCHES:-100}  # Limit eval batches to prevent memory buildup
+NUM_WORKERS=${NUM_WORKERS:-0}              # Disable workers to avoid per-worker RAM overhead
+MAX_EVAL_BATCHES=${MAX_EVAL_BATCHES:-10}   # Keep eval lightweight to avoid memory buildup
 
 # Create output directory
 mkdir -p "${OUTPUT_DIR}"
