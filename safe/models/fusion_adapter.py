@@ -431,6 +431,8 @@ class MultiLayerFusionAdapter(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.use_tokenwise_gate = bool(use_tokenwise_gate)
+        # Last recorded attention summary from any inner fusion adapter
+        self.last_attention_summary: Optional[dict] = None
         self.extra_config = dict(unused_kwargs)
 
         layer_mapping_source = modalities if modalities is not None else fusion_layer_indices
@@ -526,6 +528,10 @@ class MultiLayerFusionAdapter(nn.Module):
                 gate=modality_gate,
                 supervised_mask=supervised_mask,
             )
+
+            # Capture latest attention diagnostics for external inspection
+            if hasattr(adapter, "last_attention_summary"):
+                self.last_attention_summary = adapter.last_attention_summary
 
         return output
 

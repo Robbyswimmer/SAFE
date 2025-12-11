@@ -1010,12 +1010,40 @@ def train_epoch(
             samples_per_sec = num_samples / elapsed
             lr = scheduler.get_last_lr()[0]
 
-            print(
+            # Optional diagnostics for audio fusion strength
+            audio_token_norm = None
+            if audio_tokens is not None:
+                try:
+                    with torch.no_grad():
+                        audio_token_norm = float(audio_tokens.norm(dim=-1).mean().item())
+                except Exception:
+                    audio_token_norm = None
+
+            attn_mean = None
+            attn_max = None
+            try:
+                if hasattr(model, "get_last_attention_summary"):
+                    summary = model.get_last_attention_summary()
+                    if isinstance(summary, dict):
+                        attn_mean = summary.get("overall_mean", None)
+                        attn_max = summary.get("overall_max", None)
+            except Exception:
+                attn_mean = attn_max = None
+
+            log_msg = (
                 f"[Epoch {epoch}] Batch {batch_idx}/{len(dataloader)} | "
                 f"Loss: {avg_loss:.4f} | LR: {lr:.2e} | "
-                f"Speed: {samples_per_sec:.1f} samples/s",
-                flush=True
+                f"Speed: {samples_per_sec:.1f} samples/s"
             )
+            extras = []
+            if audio_token_norm is not None:
+                extras.append(f"audio_norm={audio_token_norm:.2f}")
+            if attn_mean is not None and attn_max is not None:
+                extras.append(f"attn_mean={attn_mean:.4f} attn_max={attn_max:.4f}")
+            if extras:
+                log_msg = f"{log_msg} | " + " ".join(extras)
+
+            print(log_msg, flush=True)
             last_log_time = current_time
 
     # Final statistics
@@ -1336,10 +1364,10 @@ def main():
                         help="Number of dataloader workers")
 
     # Optimization
-    # Match Stage-A defaults: 2e-4 / 1e-4
-    parser.add_argument("--learning-rate-projector", type=float, default=2e-4,
+    # Match Phase 1 defaults from README: 1e-3 / 5e-4
+    parser.add_argument("--learning-rate-projector", type=float, default=1e-3,
                         help="Learning rate for audio projector")
-    parser.add_argument("--learning-rate-adapter", type=float, default=1e-4,
+    parser.add_argument("--learning-rate-adapter", type=float, default=5e-4,
                         help="Learning rate for fusion adapter")
     parser.add_argument("--weight-decay", type=float, default=0.01,
                         help="Weight decay")
