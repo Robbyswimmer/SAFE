@@ -1854,12 +1854,13 @@ class SAFEModel(nn.Module):
                             model=language_model,
                             fusion_adapter=self.fusion_adapter,
                             fusion_layers=fusion_layers,
+                            injection_point=self.fusion_injection_point,
                         )
-	                        hook_manager.register_hooks(
-	                            modality_tokens=modality_tokens,
-	                            modality_masks=modality_masks,
-	                            gate={"audio": effective_gate},
-	                        )
+                        hook_manager.register_hooks(
+                            modality_tokens=modality_tokens,
+                            modality_masks=modality_masks,
+                            gate={"audio": effective_gate},
+                        )
                         try:
                             return self.base_vl.llm.generate(**retry_inputs)
                         finally:

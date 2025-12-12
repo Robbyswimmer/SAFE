@@ -679,6 +679,9 @@ def evaluate(
         audio_tokens = inputs.get("audio_tokens")
         if audio_tokens is not None:
             audio_tokens = audio_tokens.to(device)
+        audio_attention_mask = inputs.get("audio_attention_mask")
+        if audio_attention_mask is not None:
+            audio_attention_mask = audio_attention_mask.to(device)
 
         # Compute loss
         outputs = model(
@@ -686,6 +689,7 @@ def evaluate(
             attention_mask=attention_mask,
             labels=labels,
             audio_tokens=audio_tokens,
+            audio_attention_mask=audio_attention_mask,
         )
 
         loss = outputs.get("loss")
@@ -707,6 +711,9 @@ def evaluate(
         gen_audio_tokens = generation_inputs.get("audio_tokens")
         if gen_audio_tokens is not None:
             gen_audio_tokens = gen_audio_tokens.to(device)
+        gen_audio_attention_mask = generation_inputs.get("audio_attention_mask")
+        if gen_audio_attention_mask is not None:
+            gen_audio_attention_mask = gen_audio_attention_mask.to(device)
 
         # Build generation kwargs and optionally suppress EOS for audio batches
         generation_kwargs = {
@@ -738,6 +745,7 @@ def evaluate(
             input_ids=gen_input_ids,
             attention_mask=gen_attention_mask,
             audio_tokens=gen_audio_tokens,
+            audio_attention_mask=gen_audio_attention_mask,
             **generation_kwargs,
         )
 
@@ -901,6 +909,9 @@ def train_epoch(
         audio_tokens = inputs.get("audio_tokens")
         if audio_tokens is not None:
             audio_tokens = audio_tokens.to(device)
+        audio_attention_mask = inputs.get("audio_attention_mask")
+        if audio_attention_mask is not None:
+            audio_attention_mask = audio_attention_mask.to(device)
 
         # Forward pass with optional mixed precision
         if use_amp:
@@ -910,6 +921,7 @@ def train_epoch(
                     attention_mask=attention_mask,
                     labels=labels,
                     audio_tokens=audio_tokens,
+                    audio_attention_mask=audio_attention_mask,
                 )
                 loss = outputs["loss"]
         else:
@@ -918,6 +930,7 @@ def train_epoch(
                 attention_mask=attention_mask,
                 labels=labels,
                 audio_tokens=audio_tokens,
+                audio_attention_mask=audio_attention_mask,
             )
             loss = outputs["loss"]
 
