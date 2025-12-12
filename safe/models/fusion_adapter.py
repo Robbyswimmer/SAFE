@@ -293,6 +293,19 @@ class LoRAFusionAdapter(nn.Module):
         # Apply LoRA to cross-attention
         self.cross_attention = get_peft_model(self.cross_attention, self.lora_config)
 
+        # NOTE: CrossAttentionBlock is newly initialized (not a pretrained module).
+        # PEFT/LoRA defaults to freezing the base module parameters, which would
+        # leave a random fixed cross-attention map and only train low‑rank deltas.
+        # For SAFE we want the full cross‑attention weights to learn, *in addition*
+        # to any LoRA residuals.
+        base_model = getattr(self.cross_attention, "base_model", None)
+        if base_model is not None:
+            for param in base_model.parameters():
+                param.requires_grad = True
+        else:
+            for param in self.cross_attention.parameters():
+                param.requires_grad = True
+
         # Token-wise gating head (optional)
         if self.use_tokenwise_gate:
             # Gate takes [hidden; pooled_audio] → scalar gate per token

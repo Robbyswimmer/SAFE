@@ -1329,6 +1329,38 @@ class SAFEModel(nn.Module):
             # Ensure inputs_embeds matches base dtype
             inputs_embeds = inputs_embeds.to(base_dtype)
 
+            # If audio_attention_mask marks a sample as silent, we must ensure
+            # audio fusion is a true bypass for that sample. We do this by
+            # zeroing the fusion gate for silent rows (all audio tokens masked).
+            effective_gate = gate
+            gate_scalar = (
+                float(gate.max().item())
+                if torch.is_tensor(gate)
+                else float(gate)
+            )
+            if (
+                audio_attention_mask is not None
+                and torch.is_tensor(audio_attention_mask)
+                and audio_attention_mask.dim() == 2
+            ):
+                mask_on_device = audio_attention_mask.to(device=inputs_embeds.device)
+                silent_mask = mask_on_device.sum(dim=1) <= 0
+                if silent_mask.any():
+                    if torch.is_tensor(effective_gate):
+                        g = effective_gate.to(device=inputs_embeds.device, dtype=torch.float32)
+                        if g.dim() == 0:
+                            g = g.expand(mask_on_device.size(0))
+                    else:
+                        g = torch.full(
+                            (mask_on_device.size(0),),
+                            float(effective_gate),
+                            device=inputs_embeds.device,
+                            dtype=torch.float32,
+                        )
+                    g[silent_mask] = 0.0
+                    effective_gate = g
+                    gate_scalar = float(g.max().item())
+
             # Log norms for monitoring (NO EMA UPDATES - letting gradients handle scale)
             # Raw text embeddings (norm ~0.8-1.0) are NOT what audio should match.
             # Audio norms of 8-11 are correct for LLaMA hidden state magnitudes.
@@ -1366,7 +1398,7 @@ class SAFEModel(nn.Module):
 
             use_midlayer_hooks = (
                 audio_tokens is not None
-                and gate > 0.0
+                and gate_scalar > 0.0
                 and self.enable_midlayer_fusion
                 and hasattr(self.fusion_adapter, "apply_fusion_at_layer")
             )
@@ -1417,7 +1449,7 @@ class SAFEModel(nn.Module):
                 hook_manager.register_hooks(
                     modality_tokens=modality_tokens,
                     modality_masks=modality_masks,
-                    gate={"audio": gate},
+                    gate={"audio": effective_gate},
                     supervised_mask=supervised_mask,
                 )
                 try:
@@ -1428,14 +1460,14 @@ class SAFEModel(nn.Module):
             def run_without_hooks(run_inputs: Dict[str, torch.Tensor]) -> Any:
                 if (
                     audio_tokens is not None
-                    and gate > 0.0
+                    and gate_scalar > 0.0
                     and not self.enable_midlayer_fusion
                 ):
                     fused_embeds = self.fusion_adapter(
                         hidden_states=run_inputs["inputs_embeds"],
                         audio_tokens=audio_tokens,
                         attention_mask=audio_attention_mask,
-                        gate=gate,
+                        gate=effective_gate,
                         supervised_mask=supervised_mask,
                     )
                     updated_inputs = dict(run_inputs)
@@ -1698,6 +1730,37 @@ class SAFEModel(nn.Module):
             base_dtype = next(self.base_vl.llm.parameters()).dtype
             embeds = self.get_input_embeddings(token_source).to(base_dtype)
 
+            # Mirror forward(): if audio is silent for a sample, force its fusion
+            # gate to zero so generation is a true bypass.
+            effective_gate = gate
+            gate_scalar = (
+                float(gate.max().item())
+                if torch.is_tensor(gate)
+                else float(gate)
+            )
+            if (
+                audio_attention_mask is not None
+                and torch.is_tensor(audio_attention_mask)
+                and audio_attention_mask.dim() == 2
+            ):
+                mask_on_device = audio_attention_mask.to(device=embeds.device)
+                silent_mask = mask_on_device.sum(dim=1) <= 0
+                if silent_mask.any():
+                    if torch.is_tensor(effective_gate):
+                        g = effective_gate.to(device=embeds.device, dtype=torch.float32)
+                        if g.dim() == 0:
+                            g = g.expand(mask_on_device.size(0))
+                    else:
+                        g = torch.full(
+                            (mask_on_device.size(0),),
+                            float(effective_gate),
+                            device=embeds.device,
+                            dtype=torch.float32,
+                        )
+                    g[silent_mask] = 0.0
+                    effective_gate = g
+                    gate_scalar = float(g.max().item())
+
             if sanitized_ids is not None:
                 base_inputs["input_ids"] = sanitized_ids
             else:
@@ -1711,7 +1774,7 @@ class SAFEModel(nn.Module):
 
             use_midlayer_hooks = (
                 audio_tokens is not None
-                and gate > 0.0
+                and gate_scalar > 0.0
                 and self.enable_midlayer_fusion
                 and hasattr(self.fusion_adapter, "apply_fusion_at_layer")
             )
@@ -1756,19 +1819,19 @@ class SAFEModel(nn.Module):
                 hook_manager.register_hooks(
                     modality_tokens=modality_tokens,
                     modality_masks=modality_masks,
-                    gate={"audio": gate},
+                    gate={"audio": effective_gate},
                 )
                 try:
                     return self.base_vl.llm.generate(**base_inputs)
                 finally:
                     hook_manager.remove_hooks()
 
-            if audio_tokens is not None and gate > 0.0 and not self.enable_midlayer_fusion:
+            if audio_tokens is not None and gate_scalar > 0.0 and not self.enable_midlayer_fusion:
                 fused_embeds = self.fusion_adapter(
                     hidden_states=embeds,
                     audio_tokens=audio_tokens,
                     attention_mask=audio_attention_mask,
-                    gate=gate,
+                    gate=effective_gate,
                 )
                 base_inputs["inputs_embeds"] = fused_embeds
 
@@ -1792,11 +1855,11 @@ class SAFEModel(nn.Module):
                             fusion_adapter=self.fusion_adapter,
                             fusion_layers=fusion_layers,
                         )
-                        hook_manager.register_hooks(
-                            modality_tokens=modality_tokens,
-                            modality_masks=modality_masks,
-                            gate={"audio": gate},
-                        )
+	                        hook_manager.register_hooks(
+	                            modality_tokens=modality_tokens,
+	                            modality_masks=modality_masks,
+	                            gate={"audio": effective_gate},
+	                        )
                         try:
                             return self.base_vl.llm.generate(**retry_inputs)
                         finally:
