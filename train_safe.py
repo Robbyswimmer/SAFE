@@ -17,6 +17,7 @@ Removed:
 """
 
 import argparse
+import gc
 import json
 import random
 import time
@@ -1015,6 +1016,11 @@ def train_epoch(
         total_loss += loss.item() * gradient_accumulation_steps
         num_batches += 1
         num_samples += len(questions)
+
+        # Periodic memory cleanup to prevent OOM with large datasets
+        if batch_idx > 0 and batch_idx % 100 == 0:
+            torch.cuda.empty_cache()
+            gc.collect()
 
         # Periodic logging
         current_time = time.time()
