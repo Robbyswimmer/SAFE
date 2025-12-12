@@ -979,6 +979,20 @@ def train_epoch(
         else:
             loss.backward()
 
+        # Gradient health check (first 3 epochs, every 50 batches)
+        # Detects learning failures early by monitoring audio component gradients
+        if epoch <= 3 and batch_idx % 50 == 0:
+            proj_grad_norm = 0.0
+            fuse_grad_norm = 0.0
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    grad_norm = param.grad.norm().item()
+                    if "audio_projector" in name:
+                        proj_grad_norm += grad_norm
+                    if "fusion_adapter" in name:
+                        fuse_grad_norm += grad_norm
+            print(f"[GradCheck] epoch={epoch} batch={batch_idx} proj={proj_grad_norm:.6f} fuse={fuse_grad_norm:.6f}", flush=True)
+
         # Gradient accumulation
         if (batch_idx + 1) % gradient_accumulation_steps == 0:
             # Gradient clipping

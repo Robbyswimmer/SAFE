@@ -46,21 +46,20 @@ class AudioProjector(nn.Module):
 
         # 2-layer MLP with bottleneck for parameter efficiency
         # Architecture: audio_embed_dim → bottleneck_dim → llm_hidden_size * num_audio_tokens
+        # NOTE: No Tanh - LayerNorm provides sufficient normalization without gradient compression
         self.projector = nn.Sequential(
             nn.Linear(audio_embed_dim, bottleneck_dim),
             self.activation,
             nn.Dropout(dropout),
             nn.Linear(bottleneck_dim, llm_hidden_size * num_audio_tokens),
-            nn.Tanh()  # Soft bounding to prevent saturation
         )
 
         # Output normalization
         self.output_norm = nn.LayerNorm(llm_hidden_size, eps=1e-6)
 
-        # Fixed scale (not trainable)
-        # LayerNorm output (~8-11) matches LLaMA hidden state magnitudes
-        # DO NOT match to raw text embeddings (norm ~0.8) - that's wrong layer
-        self.register_buffer("output_scale", torch.tensor(1.0))
+        # Trainable scale to match LLM hidden state magnitudes
+        # Init to ~8 since LLaMA hidden states typically have norm in 8-11 range
+        self.output_scale = nn.Parameter(torch.tensor(8.0))
 
         # Debug logging
         self.debug_logging = False
@@ -78,13 +77,14 @@ class AudioProjector(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
         
-        # Force last linear of projector to tiny init to allow gradient flow
+        # Use Xavier init on final layer for proper gradient flow
+        # (Tiny-init at 1e-5 was killing audio signal strength)
         last = None
         for m in self.projector.modules():
             if isinstance(m, nn.Linear):
                 last = m
         if last is not None:
-            nn.init.normal_(last.weight, mean=0.0, std=1e-5)  # Safer tiny init
+            nn.init.xavier_uniform_(last.weight)
             if last.bias is not None:
                 nn.init.zeros_(last.bias)
     
@@ -194,21 +194,18 @@ class AdaptiveAudioProjector(nn.Module):
             nn.Linear(64, max_audio_tokens - min_audio_tokens + 1)  # Predict offset from min
         )
         
-        # Token generators for each possible count with soft bounding
+        # Token generators for each possible count
+        # NOTE: No Tanh - LayerNorm provides sufficient normalization
         self.token_generators = nn.ModuleDict()
         for k in range(min_audio_tokens, max_audio_tokens + 1):
-            self.token_generators[str(k)] = nn.Sequential(
-                nn.Linear(llm_hidden_size, llm_hidden_size * k),
-                nn.Tanh()  # Soft bounding to prevent saturation
-            )
+            self.token_generators[str(k)] = nn.Linear(llm_hidden_size, llm_hidden_size * k)
         
         # Output normalization
         self.output_norm = nn.LayerNorm(llm_hidden_size, eps=1e-6)
 
-        # Fixed scale (not trainable)
-        # LayerNorm output (~8-11) matches LLaMA hidden state magnitudes
-        # DO NOT match to raw text embeddings (norm ~0.8) - that's wrong layer
-        self.register_buffer("output_scale", torch.tensor(1.0))
+        # Trainable scale to match LLM hidden state magnitudes
+        # Init to ~8 since LLaMA hidden states typically have norm in 8-11 range
+        self.output_scale = nn.Parameter(torch.tensor(8.0))
 
         # Debug logging
         self.debug_logging = False
@@ -225,14 +222,18 @@ class AdaptiveAudioProjector(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
         
-        # Tiny-init each generator's final linear to allow gradient flow
+        # Use Xavier init on generator layers for proper gradient flow
         for generator in self.token_generators.values():
-            for m in generator.modules():
-                if isinstance(m, nn.Linear):
-                    # This is the final layer (since generator is Sequential with one Linear)
-                    nn.init.normal_(m.weight, mean=0.0, std=1e-5)  # Safer tiny init
-                    if m.bias is not None:
-                        nn.init.zeros_(m.bias)
+            if isinstance(generator, nn.Linear):
+                nn.init.xavier_uniform_(generator.weight)
+                if generator.bias is not None:
+                    nn.init.zeros_(generator.bias)
+            else:
+                for m in generator.modules():
+                    if isinstance(m, nn.Linear):
+                        nn.init.xavier_uniform_(m.weight)
+                        if m.bias is not None:
+                            nn.init.zeros_(m.bias)
     
     def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
         """Enable or disable projector debug logging."""

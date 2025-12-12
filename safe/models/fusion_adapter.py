@@ -51,11 +51,10 @@ class CrossAttentionBlock(nn.Module):
         self.attention_dropout = nn.Dropout(attention_dropout)
 
         # Residual scaling for fusion (trainable with clamp)
-        # Aggressive experiment: allow up to 10x audio residual strength for
-        # quick sensitivity testing. This should be treated as an ablation, not
-        # a default configuration.
-        self.residual_scale = nn.Parameter(torch.tensor(10.0), requires_grad=True)
-        self.register_buffer("residual_scale_max", torch.tensor(10.0), persistent=False)
+        # Start conservative to avoid noisy audio injection from untrained attention
+        # Model will learn to increase scale as audio representations improve
+        self.residual_scale = nn.Parameter(torch.tensor(0.1), requires_grad=True)
+        self.register_buffer("residual_scale_max", torch.tensor(5.0), persistent=False)
         
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         """Transpose tensor for multi-head attention computation."""
