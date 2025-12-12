@@ -139,8 +139,13 @@ class AudioProjector(nn.Module):
         # This naturally aligns with LLM embedding distribution without saturation
         audio_tokens = self.output_norm(audio_tokens)
 
-        # Apply learnable scale to match LLM embedding magnitude
-        # Note: EMA calibration happens in SAFE model forward pass
+        # Normalize to unit L2 norm per token, then scale to target magnitude
+        # This ensures audio tokens match LLM hidden state magnitudes (~8-12)
+        token_norms = audio_tokens.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+        audio_tokens = audio_tokens / token_norms  # Unit norm per token
+        audio_tokens = audio_tokens * 10.0  # Scale to ~10 (LLM hidden state magnitude)
+
+        # Apply learnable scale for fine-tuning magnitude
         audio_tokens = audio_tokens * self.output_scale
 
         # Log embedding norms for debugging
