@@ -833,7 +833,6 @@ def evaluate(
     # Explicit memory cleanup to prevent OOM during long training runs
     del all_predictions, all_references
     torch.cuda.empty_cache()
-    import gc
     gc.collect()
 
     return metrics
@@ -1092,7 +1091,6 @@ def train_epoch(
 
     # Memory cleanup after training epoch to prevent OOM during long runs
     torch.cuda.empty_cache()
-    import gc
     gc.collect()
 
     return metrics
