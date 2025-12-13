@@ -504,8 +504,17 @@ class SAFEModel(nn.Module):
 
         for i, raw_answer in enumerate(answer_list):
             answer_text = self._select_training_answer(raw_answer)
-            prompt_len = int(attention_mask[i].sum().item())
-            prompt_tokens = input_ids[i, :prompt_len]
+            # NOTE: BaseVLModel configures decoder-only tokenizers to use left padding.
+            # Use attention_mask to select the true prompt tokens (works for both
+            # left- and right-padded batches) instead of slicing from position 0.
+            
+            # CRITICAL FIX: Handle left-padding correctly
+            # Previous code assumed right-padding (taking :prompt_len), which grabbed padding tokens
+            # when inputs were left-padded (standard for LLaVA/generation).
+            # Now we use the mask to extract exactly the valid tokens.
+            valid_indices = attention_mask[i].bool()
+            prompt_tokens = input_ids[i][valid_indices]
+            prompt_len = int(prompt_tokens.size(0))
 
             answer_tokens = tokenizer.encode(
                 answer_text,
