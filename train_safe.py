@@ -1438,6 +1438,8 @@ def main():
                         help="Fraction of WavCaps train samples to include (0.0-1.0)")
     parser.add_argument("--wavcaps-split", type=str, default="train",
                         help="WavCaps split to use for training")
+    parser.add_argument("--max-train-samples", type=int, default=None,
+                        help="Limit number of training samples for smoke testing")
 
     # Training
     parser.add_argument("--output-dir", type=str, required=True,
@@ -1576,6 +1578,11 @@ def main():
     # Load datasets
     print(f"\n📂 Loading datasets from: {args.data_path}")
     audiocaps_train = AudioCapsDataset(args.data_path, split=args.train_split)
+    if args.max_train_samples is not None:
+        print(f"  ⚠️  Limiting training samples to {args.max_train_samples} for smoke testing")
+        indices = list(range(min(len(audiocaps_train), args.max_train_samples)))
+        audiocaps_train = torch.utils.data.Subset(audiocaps_train, indices)
+    
     val_dataset = AudioCapsDataset(args.data_path, split=args.val_split)
 
     wavcaps_train = None
