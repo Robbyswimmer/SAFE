@@ -1106,6 +1106,7 @@ def train_epoch(
         "loss": avg_loss,
         "num_samples": num_samples,
         "train_time": elapsed,
+        "time": elapsed,  # Alias for compatibility
         "samples_per_sec": num_samples / elapsed,
     }
 
