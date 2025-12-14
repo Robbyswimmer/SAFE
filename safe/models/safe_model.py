@@ -576,10 +576,12 @@ class SAFEModel(nn.Module):
 
         for i, (seq, mask, label) in enumerate(zip(new_input_ids, new_attention, new_labels)):
             length = seq.size(0)
-            start = max_length - length
-            padded_ids[i, start:] = seq
-            padded_attention[i, start:] = mask
-            padded_labels[i, start:] = label
+            # Switch to RIGHT padding for training
+            # This is safer for causal LMs during training as it avoids position ID shifting issues
+            # and ensures the active tokens are always at the start.
+            padded_ids[i, :length] = seq
+            padded_attention[i, :length] = mask
+            padded_labels[i, :length] = label
 
         inputs["input_ids"] = padded_ids
         inputs["attention_mask"] = padded_attention

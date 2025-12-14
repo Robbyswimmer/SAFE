@@ -893,6 +893,26 @@ def train_epoch(
         answers = batch["answers"]
         audio = batch["audio"]
 
+        # Skip samples with missing audio. These contribute loss that the frozen
+        # base model cannot explain, but also produce no gradient for audio
+        # adapters when their gate is forced off (silent/missing audio).
+        if isinstance(audio, list):
+            valid_indices = [i for i, a in enumerate(audio) if a is not None]
+            if not valid_indices:
+                if batch_idx < 5:
+                    print(f"  ⚠️  Skipping batch {batch_idx} - all audio files missing", flush=True)
+                continue
+            if len(valid_indices) < len(audio):
+                if batch_idx < 5:
+                    print(
+                        f"  ⚠️  Filtering batch {batch_idx} - "
+                        f"{len(audio) - len(valid_indices)}/{len(audio)} audio files missing",
+                        flush=True,
+                    )
+                questions = [questions[i] for i in valid_indices]
+                answers = [answers[i] for i in valid_indices]
+                audio = [audio[i] for i in valid_indices]
+
         # Prepare inputs
         inputs = model.prepare_multimodal_inputs(
             text=questions,
@@ -1228,6 +1248,45 @@ def train(
 
         print(f"\n✓ Training complete:")
         print(f"  Loss: {train_metrics['loss']:.4f}")
+        print(f"  Time: {train_metrics['time']:.1f}h")
+        print(f"  Speed: {train_metrics['samples_per_sec']:.1f} samples/sec")
+
+        # ==============================================================================
+        # Training Accuracy Check (Eval on subset of training data)
+        # ==============================================================================
+        print(f"\n{'='*80}")
+        print(f"Checking Training Accuracy (Subset)")
+        print(f"{'='*80}\n")
+        
+        # Create a subset loader for training data
+        # We use the same collate_fn and batch size as validation for consistency
+        train_subset_indices = list(range(min(len(train_loader.dataset), 200))) # Check first 200 samples
+        train_subset = torch.utils.data.Subset(train_loader.dataset, train_subset_indices)
+        train_subset_loader = torch.utils.data.DataLoader(
+            train_subset,
+            batch_size=val_loader.batch_size,
+            shuffle=False,
+            num_workers=val_loader.num_workers,
+            collate_fn=val_loader.collate_fn,
+            pin_memory=True
+        )
+
+        train_eval_metrics = evaluate(
+            model,
+            train_subset_loader,
+            device,
+            max_batches=None, # Run on full subset
+            max_new_tokens=config.get("max_new_tokens", 20),
+            num_beams=config.get("num_beams", 1),
+            compute_bertscore=False,
+            light_metrics=True,
+            suppress_eos_for_audio=True,
+        )
+        print(f"[TrainSubset] CIDEr={train_eval_metrics.get('cider', 0.0):.2f} BLEU-4={train_eval_metrics.get('bleu4', 0.0):.4f} Loss={train_eval_metrics.get('loss', 0.0):.4f}", flush=True)
+
+        # ==============================================================================
+        # Validation
+        # ==============================================================================
         print(f"  Time: {format_time(train_metrics['train_time'])}")
         print(f"  Speed: {train_metrics['samples_per_sec']:.1f} samples/sec")
 
