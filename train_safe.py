@@ -857,6 +857,8 @@ def evaluate(
 
     print(f"Running evaluation (max_batches={max_batches})...", flush=True)
     start_time = time.time()
+    skipped_batches = 0
+    last_skip_log_time = start_time
 
     for batch_idx, batch in enumerate(dataloader):
         if max_batches is not None and batch_idx >= max_batches:
@@ -878,14 +880,18 @@ def evaluate(
         ]
 
         if not valid_indices:
-            if batch_idx < 5:
-                missing_audio = sum(1 for a in audio if a is None)
-                missing_caps = sum(1 for ans in answers if not _is_valid_caption_reference(ans))
+            skipped_batches += 1
+            missing_audio = sum(1 for a in audio if a is None)
+            missing_caps = sum(1 for ans in answers if not _is_valid_caption_reference(ans))
+            now = time.time()
+            if batch_idx < 5 or (now - last_skip_log_time) > 60:
                 print(
                     f"  ⚠️  Skipping batch {batch_idx} - "
-                    f"missing_audio={missing_audio}/{len(audio)} missing_captions={missing_caps}/{len(answers)}",
+                    f"missing_audio={missing_audio}/{len(audio)} missing_captions={missing_caps}/{len(answers)} "
+                    f"(skipped_batches={skipped_batches})",
                     flush=True,
                 )
+                last_skip_log_time = now
             continue
 
         if len(valid_indices) < len(audio):
@@ -1143,6 +1149,12 @@ def train_epoch(
     step_micro_batches = 0
     last_proj_grad_norm: Optional[float] = None
     last_fuse_grad_norm: Optional[float] = None
+    skipped_batches = 0
+    skipped_samples = 0
+    filtered_samples = 0
+    missing_audio_samples = 0
+    missing_caption_samples = 0
+    last_skip_log_time = start_time
 
     for batch_idx, batch in enumerate(dataloader):
         # Move batch to device
@@ -1158,19 +1170,31 @@ def train_epoch(
                 if a is not None and _is_valid_caption_reference(ans)
             ]
             if not valid_indices:
-                if batch_idx < 5:
-                    missing_audio = sum(1 for a in audio if a is None)
-                    missing_caps = sum(1 for ans in answers if not _is_valid_caption_reference(ans))
+                skipped_batches += 1
+                skipped_samples += len(audio)
+                missing_audio = sum(1 for a in audio if a is None)
+                missing_caps = sum(1 for ans in answers if not _is_valid_caption_reference(ans))
+                missing_audio_samples += missing_audio
+                missing_caption_samples += missing_caps
+
+                now = time.time()
+                if batch_idx < 5 or (now - last_skip_log_time) > 60:
                     print(
                         f"  ⚠️  Skipping batch {batch_idx} - "
-                        f"missing_audio={missing_audio}/{len(audio)} missing_captions={missing_caps}/{len(answers)}",
+                        f"missing_audio={missing_audio}/{len(audio)} missing_captions={missing_caps}/{len(answers)} "
+                        f"(skipped_batches={skipped_batches})",
                         flush=True,
                     )
+                    last_skip_log_time = now
                 continue
             if len(valid_indices) < len(audio):
+                filtered_samples += len(audio) - len(valid_indices)
+                missing_audio = sum(1 for a in audio if a is None)
+                missing_caps = sum(1 for ans in answers if not _is_valid_caption_reference(ans))
+                missing_audio_samples += missing_audio
+                missing_caption_samples += missing_caps
+
                 if batch_idx < 5:
-                    missing_audio = sum(1 for a in audio if a is None)
-                    missing_caps = sum(1 for ans in answers if not _is_valid_caption_reference(ans))
                     print(
                         f"  ⚠️  Filtering batch {batch_idx} - "
                         f"kept={len(valid_indices)}/{len(audio)} "
@@ -1441,6 +1465,13 @@ def train_epoch(
             last_log_time = current_time
 
     # Final statistics
+    if num_batches == 0:
+        raise RuntimeError(
+            f"No valid training batches were processed in epoch {epoch}. "
+            f"Skipped_batches={skipped_batches}, dropped_samples={skipped_samples + filtered_samples}. "
+            "This usually means your dataset has missing/empty captions and/or missing audio paths."
+        )
+
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     elapsed = time.time() - start_time
 
@@ -1449,6 +1480,10 @@ def train_epoch(
         "num_samples": num_samples,
         "train_time": elapsed,
         "samples_per_sec": num_samples / elapsed,
+        "skipped_batches": skipped_batches,
+        "dropped_samples": skipped_samples + filtered_samples,
+        "missing_audio_samples": missing_audio_samples,
+        "missing_caption_samples": missing_caption_samples,
     }
 
     # Memory cleanup after training epoch to prevent OOM during long runs

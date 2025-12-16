@@ -57,11 +57,52 @@ AUDIO_CONTRASTIVE_WEIGHT=${AUDIO_CONTRASTIVE_WEIGHT:-0.0}
 AUDIO_CONTRASTIVE_TEMPERATURE=${AUDIO_CONTRASTIVE_TEMPERATURE:-0.07}
 AUDIO_CONTRASTIVE_MAX_LENGTH=${AUDIO_CONTRASTIVE_MAX_LENGTH:-48}
 GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-0}
+MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
+EXTRA_ARGS=${EXTRA_ARGS:-""}
 
 # Memory optimization - enable by default for 48GB GPUs with large datasets
 GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-1}
 NUM_WORKERS=${NUM_WORKERS:-0}              # Disable workers to avoid per-worker RAM overhead
 MAX_EVAL_BATCHES=${MAX_EVAL_BATCHES:-10}   # Keep eval lightweight to avoid memory buildup
+
+# Weights & Biases logging (optional)
+USE_WANDB=${USE_WANDB:-0}
+WANDB_PROJECT=${WANDB_PROJECT:-""}
+WANDB_ENTITY=${WANDB_ENTITY:-""}
+WANDB_NAME=${WANDB_NAME:-""}
+WANDB_GROUP=${WANDB_GROUP:-""}
+WANDB_TAGS=${WANDB_TAGS:-""}
+WANDB_MODE=${WANDB_MODE:-""}
+WANDB_DIR=${WANDB_DIR:-""}
+WANDB_NOTES=${WANDB_NOTES:-""}
+WANDB_LOG_CODE=${WANDB_LOG_CODE:-0}
+WANDB_LOG_CHECKPOINTS=${WANDB_LOG_CHECKPOINTS:-0}
+WANDB_SAMPLE_COUNT=${WANDB_SAMPLE_COUNT:-3}
+WANDB_WATCH=${WANDB_WATCH:-"false"}
+WANDB_WATCH_LOG_FREQ=${WANDB_WATCH_LOG_FREQ:-500}
+
+WANDB_ARGS=()
+if [[ "${USE_WANDB}" != "0" ]]; then
+  WANDB_ARGS+=(--wandb)
+  [[ -n "${WANDB_PROJECT}" ]] && WANDB_ARGS+=(--wandb-project "${WANDB_PROJECT}")
+  [[ -n "${WANDB_ENTITY}" ]] && WANDB_ARGS+=(--wandb-entity "${WANDB_ENTITY}")
+  [[ -n "${WANDB_NAME}" ]] && WANDB_ARGS+=(--wandb-name "${WANDB_NAME}")
+  [[ -n "${WANDB_GROUP}" ]] && WANDB_ARGS+=(--wandb-group "${WANDB_GROUP}")
+  [[ -n "${WANDB_TAGS}" ]] && WANDB_ARGS+=(--wandb-tags "${WANDB_TAGS}")
+  [[ -n "${WANDB_MODE}" ]] && WANDB_ARGS+=(--wandb-mode "${WANDB_MODE}")
+  [[ -n "${WANDB_DIR}" ]] && WANDB_ARGS+=(--wandb-dir "${WANDB_DIR}")
+  [[ -n "${WANDB_NOTES}" ]] && WANDB_ARGS+=(--wandb-notes "${WANDB_NOTES}")
+  [[ "${WANDB_LOG_CODE}" != "0" ]] && WANDB_ARGS+=(--wandb-log-code)
+  [[ "${WANDB_LOG_CHECKPOINTS}" != "0" ]] && WANDB_ARGS+=(--wandb-log-checkpoints)
+  [[ -n "${WANDB_SAMPLE_COUNT}" ]] && WANDB_ARGS+=(--wandb-sample-count "${WANDB_SAMPLE_COUNT}")
+  [[ -n "${WANDB_WATCH}" ]] && WANDB_ARGS+=(--wandb-watch "${WANDB_WATCH}")
+  [[ -n "${WANDB_WATCH_LOG_FREQ}" ]] && WANDB_ARGS+=(--wandb-watch-log-freq "${WANDB_WATCH_LOG_FREQ}")
+fi
+
+MAX_TRAIN_ARGS=()
+if [[ -n "${MAX_TRAIN_SAMPLES}" ]]; then
+  MAX_TRAIN_ARGS+=(--max-train-samples "${MAX_TRAIN_SAMPLES}")
+fi
 
 # Create output directory
 mkdir -p "${OUTPUT_DIR}"
@@ -96,6 +137,18 @@ echo "Gate warmup steps: ${GATE_WARMUP_STEPS}"
 echo "Gradient checkpointing: ${GRADIENT_CHECKPOINTING}"
 echo "Num workers: ${NUM_WORKERS}"
 echo "Max eval batches: ${MAX_EVAL_BATCHES}"
+if [[ -n "${MAX_TRAIN_SAMPLES}" ]]; then
+  echo "Max train samples: ${MAX_TRAIN_SAMPLES}"
+fi
+echo "W&B enabled: ${USE_WANDB}"
+if [[ "${USE_WANDB}" != "0" ]]; then
+  echo "W&B mode: ${WANDB_MODE:-(auto)}"
+  echo "W&B project: ${WANDB_PROJECT:-(default)}"
+  echo "W&B dir: ${WANDB_DIR:-(default)}"
+fi
+if [[ -n "${EXTRA_ARGS}" ]]; then
+  echo "Extra args: ${EXTRA_ARGS}"
+fi
 echo "========================================"
 echo ""
 
@@ -123,7 +176,10 @@ python train_safe.py \
     --num-workers "${NUM_WORKERS}" \
     --max-eval-batches "${MAX_EVAL_BATCHES}" \
     $( [[ "${GRADIENT_CHECKPOINTING}" != "0" ]] && echo --gradient-checkpointing ) \
-    ${FP16}
+    ${FP16} \
+    "${MAX_TRAIN_ARGS[@]}" \
+    "${WANDB_ARGS[@]}" \
+    ${EXTRA_ARGS}
 
 echo ""
 echo "========================================"

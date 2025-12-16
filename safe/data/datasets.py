@@ -540,11 +540,22 @@ class AudioCapsDataset(_BaseQADataset):
             if idx == 2:
                 self._debug_logged = True
 
+        # Avoid expensive audio decoding for samples that have no usable captions.
+        has_captions = True
+        if answers is None:
+            has_captions = False
+        elif isinstance(answers, str):
+            has_captions = bool(answers.strip())
+        elif isinstance(answers, (list, tuple)):
+            has_captions = any(str(a).strip() for a in answers)
+        else:
+            has_captions = bool(str(answers).strip())
+
         sample = {
             "sample_id": entry.get("id") or entry.get("ytid") or entry.get("sound_name"),
             "question": question,
             "answers": answers,
-            "audio": self._load_audio(entry),
+            "audio": self._load_audio(entry) if has_captions else None,
             "images": self._load_image(entry),
             "difficulty": entry.get("difficulty"),
         }
