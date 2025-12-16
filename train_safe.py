@@ -17,12 +17,8 @@ Removed:
 """
 
 import argparse
-import gc
 import json
-import os
-import platform
 import random
-import socket
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -33,12 +29,6 @@ import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-
-# Optional: Weights & Biases
-try:
-    import wandb  # type: ignore
-except Exception:  # pragma: no cover
-    wandb = None
 
 # SAFE imports
 from configs.model_configs import get_config
@@ -78,184 +68,31 @@ def count_parameters(model: nn.Module) -> Tuple[int, int]:
     return total, trainable
 
 
-# ----------------------------------------------------------------------------
-# Weights & Biases helpers (cluster-friendly)
-# ----------------------------------------------------------------------------
-
-def _env_int(name: str) -> Optional[int]:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
-def _get_rank() -> int:
-    # Common environment variables across torchrun/SLURM
-    for key in ("RANK", "SLURM_PROCID", "LOCAL_RANK"):
-        value = _env_int(key)
-        if value is not None:
-            return value
-    return 0
-
-
-def _is_main_process() -> bool:
-    return _get_rank() == 0
-
-
-def _jsonify(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, dict):
-        return {str(k): _jsonify(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonify(v) for v in value]
-    return value
-
-
-def _wandb_log(wandb_run: Any, data: Dict[str, Any], *, step: Optional[int] = None):
-    if wandb_run is None:
-        return
-    try:
-        if step is None:
-            wandb_run.log(data)
-        else:
-            wandb_run.log(data, step=step)
-    except Exception:
-        pass
-
-
-def _wandb_log_artifact(
-    wandb_run: Any,
-    *,
-    artifact_name: str,
-    artifact_type: str,
-    files: List[Path],
-    aliases: Optional[List[str]] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-):
-    if wandb_run is None or wandb is None:
-        return
-    try:
-        artifact = wandb.Artifact(
-            name=artifact_name,
-            type=artifact_type,
-            metadata=_jsonify(metadata or {}),
-        )
-        for file_path in files:
-            artifact.add_file(str(file_path))
-        wandb_run.log_artifact(artifact, aliases=aliases or [])
-    except Exception:
-        pass
-
-
-def _maybe_init_wandb(
-    args: argparse.Namespace,
-    *,
-    train_config: Dict[str, Any],
-    model_config: Dict[str, Any],
-    output_dir: Path,
-    model: Optional[nn.Module] = None,
-    total_params: Optional[int] = None,
-    trainable_params: Optional[int] = None,
-    train_size: Optional[int] = None,
-    val_size: Optional[int] = None,
-) -> Any:
-    if not getattr(args, "wandb", False):
-        return None
-    if not _is_main_process():
-        return None
-    if wandb is None:
-        print("⚠️  wandb failed to import; continuing without W&B logging.", flush=True)
-        return None
-
-    # Avoid W&B forking issues on clusters / dataloader workers.
-    try:
-        settings = wandb.Settings(start_method="thread")
-    except Exception:
-        settings = None
-
-    wandb_mode = args.wandb_mode or os.environ.get("WANDB_MODE")
-    if wandb_mode is None:
-        # Default to offline if no key is provided (prevents interactive login prompts on clusters).
-        wandb_mode = "online" if os.environ.get("WANDB_API_KEY") else "offline"
-
-    wandb_dir = args.wandb_dir or os.environ.get("WANDB_DIR") or str(output_dir / "wandb")
-    tags = []
-    if getattr(args, "wandb_tags", None):
-        tags = [t.strip() for t in args.wandb_tags.split(",") if t.strip()]
-
-    slurm_job_id = os.environ.get("SLURM_JOB_ID")
-    run_name = args.wandb_name or (f"{output_dir.name}-{slurm_job_id}" if slurm_job_id else output_dir.name)
-    run_group = args.wandb_group or slurm_job_id
-
-    wandb_config = {
-        "args": _jsonify(vars(args)),
-        "train_config": _jsonify(train_config),
-        "model_config": _jsonify(model_config),
-        "data": _jsonify({"train_size": train_size, "val_size": val_size}),
-        "params": _jsonify({"total": total_params, "trainable": trainable_params}),
-        "system": _jsonify(
-            {
-                "hostname": socket.gethostname(),
-                "platform": platform.platform(),
-                "python": platform.python_version(),
-                "torch": torch.__version__,
-                "cuda_available": torch.cuda.is_available(),
-                "cuda_version": torch.version.cuda,
-                "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-                "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-                "slurm_job_id": slurm_job_id,
-            }
-        ),
-    }
-
-    init_kwargs = dict(
-        project=args.wandb_project or os.environ.get("WANDB_PROJECT") or "SAFE",
-        entity=args.wandb_entity or os.environ.get("WANDB_ENTITY"),
-        name=run_name,
-        group=run_group,
-        tags=tags if tags else None,
-        dir=wandb_dir,
-        mode=wandb_mode,
-        config=wandb_config,
-        save_code=bool(getattr(args, "wandb_log_code", False)),
-        notes=getattr(args, "wandb_notes", None),
-    )
-    if settings is not None:
-        init_kwargs["settings"] = settings
-
-    try:
-        wandb_run = wandb.init(**init_kwargs)
-    except Exception as exc:
-        print(f"⚠️  wandb.init failed ({exc}); continuing without W&B logging.", flush=True)
-        return None
-
-    # Make charts use our optimizer step when provided.
-    try:
-        wandb.define_metric("train/optimizer_step")
-        for prefix in ("train/*", "val/*", "train_subset/*", "eval/*"):
-            wandb.define_metric(prefix, step_metric="train/optimizer_step")
-    except Exception:
-        pass
-
-    # Optional heavy logging (gradients/parameters histograms)
-    watch_mode = getattr(args, "wandb_watch", "false")
-    if model is not None and watch_mode and watch_mode.lower() != "false":
-        try:
-            wandb_run.watch(
-                model,
-                log=watch_mode,
-                log_freq=int(getattr(args, "wandb_watch_log_freq", 500)),
-            )
-        except Exception:
-            pass
-
-    return wandb_run
+def _is_valid_caption_reference(answer: Any) -> bool:
+    """
+    Return True if `answer` looks like a usable caption reference.
+    
+    PERMISSIVE VERSION: Only rejects truly invalid values (None, empty, "none"/"nan"/"null").
+    Accepts any other value regardless of structure.
+    """
+    if answer is None:
+        return False
+    
+    # Empty string/list/dict
+    if isinstance(answer, str):
+        candidate = answer.strip().lower()
+        return bool(candidate) and candidate not in {"none", "nan", "null"}
+    
+    if isinstance(answer, (list, tuple)):
+        # Accept any non-empty list
+        return len(answer) > 0
+    
+    if isinstance(answer, dict):
+        # Accept any non-empty dict
+        return len(answer) > 0
+    
+    # Anything else - accept it (numpy arrays, numbers, etc.)
+    return True
 
 
 # Global cache for HuggingFace evaluate metrics (to avoid re-loading)
@@ -326,37 +163,6 @@ def _normalize_audio_caption(text: Any) -> str:
         return ""
 
     return " ".join(cleaned_tokens)
-
-
-def _is_valid_caption_reference(answer: Any) -> bool:
-    """
-    Return True if `answer` looks like a usable caption reference.
-
-    We treat None/empty strings/empty lists and common sentinel strings like
-    "None"/"nan"/"null" as invalid.
-    """
-    if answer is None:
-        return False
-
-    if isinstance(answer, str):
-        candidate = answer.strip().lower()
-        return bool(candidate) and candidate not in {"none", "nan", "null"}
-
-    if isinstance(answer, dict):
-        candidate = answer.get("answer") or answer.get("text") or answer.get("caption") or answer.get("captions")
-        return _is_valid_caption_reference(candidate)
-
-    if isinstance(answer, (list, tuple)):
-        if not answer:
-            return False
-        for item in answer:
-            if _is_valid_caption_reference(item):
-                return True
-        return False
-
-    # Fallback: stringification (covers numpy scalars, etc.)
-    candidate = str(answer).strip().lower()
-    return bool(candidate) and candidate not in {"none", "nan", "null"}
 
 
 def _embed_texts_for_contrastive(
@@ -799,8 +605,6 @@ def evaluate(
     compute_bertscore: bool = False,
     light_metrics: bool = False,
     suppress_eos_for_audio: bool = True,
-    sample_output: Optional[List[Dict[str, Any]]] = None,
-    sample_limit: int = 0,
 ) -> Dict[str, float]:
     """
     Evaluate model on audio captioning task
@@ -866,38 +670,21 @@ def evaluate(
         audio = batch["audio"]
         has_audio_flags = batch.get("has_audio", None)
 
-        # Filter out samples with missing audio OR missing caption references.
-        # - Missing audio can cause generation to hang (zero-filled audio tokens).
-        # - Missing captions produce meaningless loss/metrics and can hide training failure.
-        valid_indices = [
-            i
-            for i, (a, ans) in enumerate(zip(audio, answers))
-            if a is not None and _is_valid_caption_reference(ans)
-        ]
+        # CRITICAL FIX: Filter out samples with missing audio files
+        # When audio files are missing, the model creates zero-filled audio_tokens
+        # which causes generation to hang. Skip these samples entirely.
+        valid_indices = [i for i, a in enumerate(audio) if a is not None]
 
         if not valid_indices:
-            # Skip batch entirely if nothing is usable
+            # Skip batch entirely if all audio is missing
             if batch_idx < 5:  # Only log first few skipped batches
-                missing_audio = sum(1 for a in audio if a is None)
-                missing_caps = sum(1 for ans in answers if not _is_valid_caption_reference(ans))
-                print(
-                    f"  ⚠️  Skipping batch {batch_idx} - "
-                    f"missing_audio={missing_audio}/{len(audio)} missing_captions={missing_caps}/{len(answers)}",
-                    flush=True,
-                )
+                print(f"  ⚠️  Skipping batch {batch_idx} - all audio files missing", flush=True)
             continue
 
         if len(valid_indices) < len(audio):
             # Partial batch - filter to only valid samples
             if batch_idx < 5:
-                missing_audio = sum(1 for a in audio if a is None)
-                missing_caps = sum(1 for ans in answers if not _is_valid_caption_reference(ans))
-                print(
-                    f"  ⚠️  Filtering batch {batch_idx} - "
-                    f"kept={len(valid_indices)}/{len(audio)} "
-                    f"missing_audio={missing_audio} missing_captions={missing_caps}",
-                    flush=True,
-                )
+                print(f"  ⚠️  Filtering batch {batch_idx} - {len(audio) - len(valid_indices)}/{len(audio)} audio files missing", flush=True)
             questions = [questions[i] for i in valid_indices]
             answers = [answers[i] for i in valid_indices]
             audio = [audio[i] for i in valid_indices]
@@ -918,9 +705,6 @@ def evaluate(
         audio_tokens = inputs.get("audio_tokens")
         if audio_tokens is not None:
             audio_tokens = audio_tokens.to(device)
-        audio_attention_mask = inputs.get("audio_attention_mask")
-        if audio_attention_mask is not None:
-            audio_attention_mask = audio_attention_mask.to(device)
 
         # Compute loss
         outputs = model(
@@ -928,7 +712,6 @@ def evaluate(
             attention_mask=attention_mask,
             labels=labels,
             audio_tokens=audio_tokens,
-            audio_attention_mask=audio_attention_mask,
         )
 
         loss = outputs.get("loss")
@@ -950,9 +733,6 @@ def evaluate(
         gen_audio_tokens = generation_inputs.get("audio_tokens")
         if gen_audio_tokens is not None:
             gen_audio_tokens = gen_audio_tokens.to(device)
-        gen_audio_attention_mask = generation_inputs.get("audio_attention_mask")
-        if gen_audio_attention_mask is not None:
-            gen_audio_attention_mask = gen_audio_attention_mask.to(device)
 
         # Build generation kwargs and optionally suppress EOS for audio batches
         generation_kwargs = {
@@ -984,7 +764,6 @@ def evaluate(
             input_ids=gen_input_ids,
             attention_mask=gen_attention_mask,
             audio_tokens=gen_audio_tokens,
-            audio_attention_mask=gen_audio_attention_mask,
             **generation_kwargs,
         )
 
@@ -996,16 +775,16 @@ def evaluate(
             clean_up_tokenization_spaces=True
         )
 
-        # Clean predictions (remove question prompt and extract answer content) + collect references
+        # Clean predictions (remove question prompt and extract answer content)
         for i, pred in enumerate(batch_predictions):
             question = questions[i]
             if question and question in pred:
                 pred = pred.replace(question, "").strip()
             pred_answer = _extract_answer_from_generation(pred)
-            cleaned_pred = pred_answer if pred_answer else pred.strip()
-            all_predictions.append(cleaned_pred)
+            all_predictions.append(pred_answer if pred_answer else pred.strip())
 
-            answer = answers[i]
+        # Collect references
+        for answer in answers:
             if isinstance(answer, str):
                 refs = [answer]
             elif isinstance(answer, list):
@@ -1013,15 +792,6 @@ def evaluate(
             else:
                 refs = [str(answer)]
             all_references.append(refs)
-
-            if sample_output is not None and sample_limit > 0 and len(sample_output) < sample_limit:
-                sample_output.append(
-                    {
-                        "question": str(question),
-                        "prediction": str(cleaned_pred),
-                        "references": [str(r) for r in refs],
-                    }
-                )
 
         if (batch_idx + 1) % 10 == 0:
             print(f"  Evaluated {batch_idx + 1} batches...", flush=True)
@@ -1081,6 +851,7 @@ def evaluate(
     # Explicit memory cleanup to prevent OOM during long training runs
     del all_predictions, all_references
     torch.cuda.empty_cache()
+    import gc
     gc.collect()
 
     return metrics
@@ -1099,9 +870,7 @@ def train_epoch(
     epoch: int,
     config: Dict[str, Any],
     scaler: Optional[GradScaler] = None,
-    wandb_run: Any = None,
-    optimizer_step: int = 0,
-) -> Tuple[Dict[str, float], int]:
+) -> Dict[str, float]:
     """
     Train for one epoch
 
@@ -1136,53 +905,12 @@ def train_epoch(
 
     start_time = time.time()
     last_log_time = start_time
-    step_start_time = start_time
-
-    step_loss_sum = 0.0
-    step_samples = 0
-    step_micro_batches = 0
-    last_proj_grad_norm: Optional[float] = None
-    last_fuse_grad_norm: Optional[float] = None
 
     for batch_idx, batch in enumerate(dataloader):
         # Move batch to device
         questions = batch["questions"]
         answers = batch["answers"]
         audio = batch["audio"]
-
-        # Skip samples with missing audio OR missing captions.
-        # - Missing audio can create silent tokens and stall learning.
-        # - Missing captions trains the model to emit EOS (no supervision),
-        #   which looks like "learning" in loss but yields no caption ability.
-        if isinstance(audio, list):
-            valid_indices = [
-                i
-                for i, (a, ans) in enumerate(zip(audio, answers))
-                if a is not None and _is_valid_caption_reference(ans)
-            ]
-            if not valid_indices:
-                if batch_idx < 5:
-                    missing_audio = sum(1 for a in audio if a is None)
-                    missing_caps = sum(1 for ans in answers if not _is_valid_caption_reference(ans))
-                    print(
-                        f"  ⚠️  Skipping batch {batch_idx} - "
-                        f"missing_audio={missing_audio}/{len(audio)} missing_captions={missing_caps}/{len(answers)}",
-                        flush=True,
-                    )
-                continue
-            if len(valid_indices) < len(audio):
-                if batch_idx < 5:
-                    missing_audio = sum(1 for a in audio if a is None)
-                    missing_caps = sum(1 for ans in answers if not _is_valid_caption_reference(ans))
-                    print(
-                        f"  ⚠️  Filtering batch {batch_idx} - "
-                        f"kept={len(valid_indices)}/{len(audio)} "
-                        f"missing_audio={missing_audio} missing_captions={missing_caps}",
-                        flush=True,
-                    )
-                questions = [questions[i] for i in valid_indices]
-                answers = [answers[i] for i in valid_indices]
-                audio = [audio[i] for i in valid_indices]
 
         # Prepare inputs
         inputs = model.prepare_multimodal_inputs(
@@ -1199,9 +927,6 @@ def train_epoch(
         audio_tokens = inputs.get("audio_tokens")
         if audio_tokens is not None:
             audio_tokens = audio_tokens.to(device)
-        audio_attention_mask = inputs.get("audio_attention_mask")
-        if audio_attention_mask is not None:
-            audio_attention_mask = audio_attention_mask.to(device)
 
         # Forward pass with optional mixed precision
         if use_amp:
@@ -1211,7 +936,6 @@ def train_epoch(
                     attention_mask=attention_mask,
                     labels=labels,
                     audio_tokens=audio_tokens,
-                    audio_attention_mask=audio_attention_mask,
                 )
                 loss = outputs["loss"]
         else:
@@ -1220,7 +944,6 @@ def train_epoch(
                 attention_mask=attention_mask,
                 labels=labels,
                 audio_tokens=audio_tokens,
-                audio_attention_mask=audio_attention_mask,
             )
             loss = outputs["loss"]
 
@@ -1283,16 +1006,6 @@ def train_epoch(
         else:
             loss.backward()
 
-        # Accumulate per-optimizer-step stats for W&B
-        with torch.no_grad():
-            try:
-                loss_unscaled_value = float(loss.detach().item() * gradient_accumulation_steps)
-            except Exception:
-                loss_unscaled_value = 0.0
-        step_loss_sum += loss_unscaled_value
-        step_samples += len(questions)
-        step_micro_batches += 1
-
         # Gradient health check (first 3 epochs, every 50 batches)
         # Detects learning failures early by monitoring audio component gradients
         if epoch <= 3 and batch_idx % 50 == 0:
@@ -1306,8 +1019,6 @@ def train_epoch(
                     if "fusion_adapter" in name:
                         fuse_grad_norm += grad_norm
             print(f"[GradCheck] epoch={epoch} batch={batch_idx} proj={proj_grad_norm:.6f} fuse={fuse_grad_norm:.6f}", flush=True)
-            last_proj_grad_norm = float(proj_grad_norm)
-            last_fuse_grad_norm = float(fuse_grad_norm)
 
         # Gradient accumulation
         if (batch_idx + 1) % gradient_accumulation_steps == 0:
@@ -1315,7 +1026,7 @@ def train_epoch(
             if use_amp:
                 scaler.unscale_(optimizer)
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
 
             # Optimizer step
             if use_amp:
@@ -1327,82 +1038,10 @@ def train_epoch(
             scheduler.step()
             optimizer.zero_grad()
 
-            optimizer_step += 1
-
-            # W&B logging at optimizer-step granularity
-            if wandb_run is not None:
-                step_time = max(time.time() - step_start_time, 1e-6)
-                lrs = scheduler.get_last_lr()
-                log_dict: Dict[str, Any] = {
-                    "train/optimizer_step": optimizer_step,
-                    "epoch": epoch,
-                    "train/batch_idx": batch_idx,
-                    "train/micro_batches": step_micro_batches,
-                    "train/loss_step": (step_loss_sum / max(step_micro_batches, 1)),
-                    "train/samples_per_sec_step": step_samples / step_time,
-                    "train/grad_norm": float(grad_norm) if grad_norm is not None else None,
-                }
-                for group_idx, (group, lr) in enumerate(zip(optimizer.param_groups, lrs)):
-                    group_name = str(group.get("name") or f"group{group_idx}")
-                    log_dict[f"train/lr/{group_name}"] = float(lr)
-
-                if use_amp and scaler is not None:
-                    try:
-                        log_dict["train/amp_scale"] = float(scaler.get_scale())
-                    except Exception:
-                        pass
-
-                if last_proj_grad_norm is not None:
-                    log_dict["train/gradcheck/audio_projector_sum_norm"] = last_proj_grad_norm
-                if last_fuse_grad_norm is not None:
-                    log_dict["train/gradcheck/fusion_adapter_sum_norm"] = last_fuse_grad_norm
-
-                # Optional diagnostics for audio fusion strength
-                if audio_tokens is not None:
-                    try:
-                        with torch.no_grad():
-                            log_dict["train/audio_token_norm"] = float(audio_tokens.norm(dim=-1).mean().item())
-                    except Exception:
-                        pass
-
-                try:
-                    if hasattr(model, "get_last_attention_summary"):
-                        summary = model.get_last_attention_summary()
-                        if isinstance(summary, dict):
-                            if summary.get("overall_mean", None) is not None:
-                                log_dict["train/attn_mean"] = float(summary["overall_mean"])
-                            if summary.get("overall_max", None) is not None:
-                                log_dict["train/attn_max"] = float(summary["overall_max"])
-                except Exception:
-                    pass
-
-                if torch.cuda.is_available():
-                    try:
-                        log_dict["train/gpu_mem_allocated_mb"] = float(torch.cuda.memory_allocated() / (1024**2))
-                        log_dict["train/gpu_mem_reserved_mb"] = float(torch.cuda.memory_reserved() / (1024**2))
-                        log_dict["train/gpu_max_mem_allocated_mb"] = float(
-                            torch.cuda.max_memory_allocated() / (1024**2)
-                        )
-                    except Exception:
-                        pass
-
-                _wandb_log(wandb_run, log_dict, step=optimizer_step)
-
-            # Reset step accumulators
-            step_start_time = time.time()
-            step_loss_sum = 0.0
-            step_samples = 0
-            step_micro_batches = 0
-
         # Logging
         total_loss += loss.item() * gradient_accumulation_steps
         num_batches += 1
         num_samples += len(questions)
-
-        # Periodic memory cleanup to prevent OOM with large datasets
-        if batch_idx > 0 and batch_idx % 100 == 0:
-            torch.cuda.empty_cache()
-            gc.collect()
 
         # Periodic logging
         current_time = time.time()
@@ -1456,15 +1095,15 @@ def train_epoch(
         "loss": avg_loss,
         "num_samples": num_samples,
         "train_time": elapsed,
-        "time": elapsed,  # Alias for compatibility
         "samples_per_sec": num_samples / elapsed,
     }
 
     # Memory cleanup after training epoch to prevent OOM during long runs
     torch.cuda.empty_cache()
+    import gc
     gc.collect()
 
-    return metrics, optimizer_step
+    return metrics
 
 
 def train(
@@ -1474,9 +1113,6 @@ def train(
     config: Dict[str, Any],
     output_dir: Path,
     device: torch.device,
-    wandb_run: Any = None,
-    wandb_log_checkpoints: bool = False,
-    wandb_sample_count: int = 0,
 ) -> Dict[str, Any]:
     """
     Main training loop
@@ -1556,19 +1192,6 @@ def train(
 
     # Global step approximation for scheduling (e.g., gate warmup)
     global_step = 0
-    optimizer_step = 0
-
-    if wandb_run is not None:
-        _wandb_log(
-            wandb_run,
-            {
-                "train/optimizer_step": optimizer_step,
-                "epoch": 0,
-                "train/lr/projector": float(lr_projector),
-                "train/lr/adapter": float(lr_adapter),
-            },
-            step=optimizer_step,
-        )
 
     print(f"\n{'='*80}")
     print(f"Starting training for {num_epochs} epochs")
@@ -1583,7 +1206,6 @@ def train(
     if initial_max_eval is not None and initial_max_eval <= 0:
         initial_max_eval = None
     print(f"[InitEval] Running initial evaluation on validation set (max_batches={initial_max_eval})", flush=True)
-    init_samples: Optional[List[Dict[str, Any]]] = [] if (wandb_run is not None and wandb_sample_count > 0) else None
     init_metrics = evaluate(
         model,
         val_loader,
@@ -1595,22 +1217,8 @@ def train(
         compute_bertscore=False,
         light_metrics=True,
         suppress_eos_for_audio=True,
-        sample_output=init_samples,
-        sample_limit=wandb_sample_count,
     )
     print(f"[InitEval] CIDEr={init_metrics.get('cider', 0.0):.2f} BLEU-4={init_metrics.get('bleu4', 0.0):.4f}", flush=True)
-    if wandb_run is not None:
-        init_log = {"train/optimizer_step": optimizer_step, "epoch": 0}
-        init_log.update({f"val/{k}": v for k, v in init_metrics.items() if isinstance(v, (int, float))})
-        _wandb_log(wandb_run, init_log, step=optimizer_step)
-        if init_samples and wandb is not None:
-            try:
-                table = wandb.Table(columns=["question", "prediction", "references"])
-                for row in init_samples:
-                    table.add_data(row["question"], row["prediction"], "\n".join(row["references"]))
-                _wandb_log(wandb_run, {"train/optimizer_step": optimizer_step, "val/samples": table}, step=optimizer_step)
-            except Exception:
-                pass
 
     for epoch in range(1, num_epochs + 1):
         print(f"\n{'='*80}")
@@ -1618,22 +1226,9 @@ def train(
         print(f"{'='*80}\n")
 
         # Train
-        train_metrics, optimizer_step = train_epoch(
-            model,
-            train_loader,
-            optimizer,
-            scheduler,
-            device,
-            epoch,
-            config,
-            scaler,
-            wandb_run=wandb_run,
-            optimizer_step=optimizer_step,
+        train_metrics = train_epoch(
+            model, train_loader, optimizer, scheduler, device, epoch, config, scaler
         )
-        if wandb_run is not None:
-            train_log = {"train/optimizer_step": optimizer_step, "epoch": epoch}
-            train_log.update({f"train/epoch_{k}": v for k, v in train_metrics.items() if isinstance(v, (int, float))})
-            _wandb_log(wandb_run, train_log, step=optimizer_step)
 
         # Gate warmup: ramp SAFE gate from 0 → 1 over a configured number of steps
         gate_warmup_steps = int(config.get("gate_warmup_steps", 0) or 0)
@@ -1646,59 +1241,407 @@ def train(
         print(f"  Time: {format_time(train_metrics['train_time'])}")
         print(f"  Speed: {train_metrics['samples_per_sec']:.1f} samples/sec")
 
-        # ==============================================================================
-        # Training Accuracy Check (Eval on subset of training data)
-        # ==============================================================================
+        # Evaluate
+        eval_frequency = config.get("eval_frequency", 1)
+        if epoch % eval_frequency == 0:
+            print(f"\n{'='*80}")
+            print(f"Running validation...")
+            print(f"{'='*80}\n")
+
+            val_metrics = evaluate(
+                model,
+                val_loader,
+                device,
+                max_batches=config.get("max_eval_batches"),
+                max_new_tokens=config.get("max_new_tokens", 20),
+                num_beams=config.get("num_beams", 1),
+                # Training-time eval: light metrics (no SPICE/BERTScore).
+                compute_bertscore=False,
+                light_metrics=True,
+                suppress_eos_for_audio=True,
+            )
+
+            # Update history
+            history["train_loss"].append(train_metrics["loss"])
+            history["val_loss"].append(val_metrics["loss"])
+            history["val_cider"].append(val_metrics["cider"])
+            history["val_bleu4"].append(val_metrics["bleu4"])
+            history["epochs"].append(epoch)
+
+            # Save checkpoint
+            is_best = val_metrics["cider"] > best_cider
+            if is_best:
+                best_cider = val_metrics["cider"]
+                patience_counter = 0
+                print(f"\n🎉 New best CIDEr: {best_cider:.2f}")
+            else:
+                patience_counter += 1
+
+            save_checkpoint(
+                model,
+                optimizer,
+                scheduler,
+                {**train_metrics, **val_metrics, "epoch": epoch},
+                output_dir,
+                is_best=is_best,
+            )
+
+            # Save history
+            with open(output_dir / "history.json", "w") as f:
+                json.dump(history, f, indent=2)
+
+            # Early stopping
+            if patience_counter >= patience:
+                print(f"\n⚠️  Early stopping triggered (patience={patience})")
+                break
+
+    print(f"\n{'='*80}")
+    print(f"Training complete!")
+    print(f"  Best CIDEr: {best_cider:.2f}")
+    print(f"  Checkpoints saved to: {output_dir}")
+    print(f"{'='*80}\n")
+
+    return history
+
+
+# ============================================================================
+# SECTION 5: CHECKPOINT MANAGEMENT
+# ============================================================================
+
+def save_checkpoint(
+    model: SAFEModel,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    metrics: Dict[str, float],
+    output_dir: Path,
+    is_best: bool = False,
+):
+    """Save model checkpoint"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "metrics": metrics,
+    }
+
+    # Save last checkpoint
+    checkpoint_path = output_dir / "checkpoint_last.pt"
+    torch.save(checkpoint, checkpoint_path)
+    print(f"💾 Saved checkpoint: {checkpoint_path}")
+
+    # Save best checkpoint
+    if is_best:
+        best_path = output_dir / "checkpoint_best.pt"
+        torch.save(checkpoint, best_path)
+        print(f"💾 Saved BEST checkpoint: {best_path}")
+
+
+def load_checkpoint(
+    model: SAFEModel,
+    optimizer: Optional[torch.optim.Optimizer],
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
+    checkpoint_path: Path,
+    device: torch.device,
+) -> Dict[str, float]:
+    """Load model checkpoint"""
+    print(f"📂 Loading checkpoint: {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    if optimizer is not None and "optimizer_state_dict" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    if scheduler is not None and "scheduler_state_dict" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+    metrics = checkpoint.get("metrics", {})
+    print(f"✓ Checkpoint loaded (epoch={metrics.get('epoch', 'unknown')})")
+
+    return metrics
+
+
+# ============================================================================
+# SECTION 6: MAIN
+# ============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="Train SAFE model on audio captioning")
+
+    # Model configuration
+    parser.add_argument("--model-config", type=str, default="phase1",
+                        choices=["demo", "full", "multimodal", "phase1"],
+                        help="Model configuration name")
+
+    # Data
+    parser.add_argument("--data-path", type=str, required=True,
+                        help="Path to data directory")
+    parser.add_argument("--train-split", type=str, default="train",
+                        help="Training split name")
+    parser.add_argument("--val-split", type=str, default="val",
+                        help="Validation split name")
+    parser.add_argument("--use-wavcaps", action="store_true",
+                        help="Include WavCaps in training mix")
+    parser.add_argument("--wavcaps-ratio", type=float, default=0.8,
+                        help="Fraction of WavCaps train samples to include (0.0-1.0)")
+    parser.add_argument("--wavcaps-split", type=str, default="train",
+                        help="WavCaps split to use for training")
+
+    # Training
+    parser.add_argument("--output-dir", type=str, required=True,
+                        help="Output directory for checkpoints")
+    parser.add_argument("--num-epochs", type=int, default=20,
+                        help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=4,
+                        help="Training batch size")
+    parser.add_argument("--val-batch-size", type=int, default=8,
+                        help="Validation batch size")
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=32,
+                        help="Gradient accumulation steps")
+    parser.add_argument("--num-workers", type=int, default=4,
+                        help="Number of dataloader workers")
+
+    # Optimization
+    # Match Phase 1 defaults from README: 1e-3 / 5e-4
+    parser.add_argument("--learning-rate-projector", type=float, default=1e-3,
+                        help="Learning rate for audio projector")
+    parser.add_argument("--learning-rate-adapter", type=float, default=5e-4,
+                        help="Learning rate for fusion adapter")
+    parser.add_argument("--weight-decay", type=float, default=0.01,
+                        help="Weight decay")
+    parser.add_argument("--warmup-steps", type=int, default=1000,
+                        help="Warmup steps for learning rate")
+    parser.add_argument("--max-grad-norm", type=float, default=1.0,
+                        help="Max gradient norm for clipping")
+    parser.add_argument("--fp16", action="store_true",
+                        help="Use mixed precision training")
+
+    # Optional audio contrastive loss (Stage-A style)
+    parser.add_argument("--audio-contrastive-weight", type=float, default=0.0,
+                        help="Weight for optional audio-text contrastive loss (0.0 = disabled)")
+    parser.add_argument("--audio-contrastive-temperature", type=float, default=0.07,
+                        help="Temperature for audio-text contrastive loss")
+    parser.add_argument("--audio-contrastive-max-length", type=int, default=48,
+                        help="Max caption length (tokens) for contrastive text embeddings")
+    parser.add_argument("--gate-warmup-steps", type=int, default=0,
+                        help="If >0, ramp SAFE gate 0→1 over this many optimizer steps")
+
+    # Evaluation
+    parser.add_argument("--eval-frequency", type=int, default=1,
+                        help="Evaluate every N epochs")
+    parser.add_argument("--max-eval-batches", type=int, default=None,
+                        help="Max batches for validation (None = all)")
+    parser.add_argument("--max-new-tokens", type=int, default=20,
+                        help="Max new tokens for generation")
+    parser.add_argument("--num-beams", type=int, default=1,
+                        help="Beam search size")
+
+    # Checkpointing
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Resume from checkpoint path")
+    parser.add_argument("--eval-only", action="store_true",
+                        help="Run evaluation only (requires --resume)")
+    parser.add_argument("--early-stopping-patience", type=int, default=5,
+                        help="Early stopping patience (epochs)")
+
+    # Memory optimization
+    parser.add_argument("--gradient-checkpointing", action="store_true",
+                        help="Enable gradient checkpointing to save memory (trades compute for memory)")
+
+    # Misc
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed")
+    parser.add_argument("--device", type=str, default="cuda",
+                        help="Device (cuda/cpu)")
+
+    args = parser.parse_args()
+
+    # Set seed
+    set_seed(args.seed)
+
+    # Device
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Create output directory
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save args
+    with open(output_dir / "args.json", "w") as f:
+        json.dump(vars(args), f, indent=2)
+
+    # Load model config
+    print(f"\nLoading model config: {args.model_config}")
+    model_config = get_config(args.model_config)
+
+    # Whitelist of valid SAFEModel constructor arguments
+    safe_model_keys = {
+        "llm_model_name",
+        "vision_model_name",
+        "audio_encoder_type",
+        "audio_encoder_config",
+        "projector_type",
+        "num_audio_tokens",
+        "projector_config",
+        "fusion_type",
+        "fusion_layer_indices",
+        "lora_rank",
+        "fusion_config",
+        "freeze_base_vl",
+        "freeze_audio_encoder",
+        "llm_hidden_size",
+        "audio_embed_dim",
+    }
+
+    # Filter config to only include valid constructor arguments
+    constructor_config = {k: v for k, v in model_config.items() if k in safe_model_keys}
+
+    # Initialize model
+    print(f"\nInitializing SAFE model...")
+    print(f"  LLM: {constructor_config.get('llm_model_name', 'N/A')}")
+    print(f"  Vision: {constructor_config.get('vision_model_name', 'N/A')}")
+    print(f"  Audio: {constructor_config.get('audio_encoder_type', 'N/A')}")
+
+    model = SAFEModel(**constructor_config)
+    model = model.to(device)
+
+    # Enable gradient checkpointing if requested (saves ~10-15GB memory)
+    if args.gradient_checkpointing:
+        print(f"  Enabling gradient checkpointing for memory optimization...")
+        if hasattr(model.base_vl, 'llm') and hasattr(model.base_vl.llm, 'gradient_checkpointing_enable'):
+            model.base_vl.llm.gradient_checkpointing_enable()
+            print(f"  ✓ Gradient checkpointing enabled on LLM")
+        else:
+            print(f"  ⚠️  LLM does not support gradient checkpointing")
+
+    # Count parameters
+    total_params, trainable_params = count_parameters(model)
+    print(f"\n📊 Model parameters:")
+    print(f"  Total: {total_params:,}")
+    print(f"  Trainable: {trainable_params:,} ({100*trainable_params/total_params:.2f}%)")
+
+    # Load datasets
+    print(f"\n📂 Loading datasets from: {args.data_path}")
+    audiocaps_train = AudioCapsDataset(args.data_path, split=args.train_split)
+    val_dataset = AudioCapsDataset(args.data_path, split=args.val_split)
+
+    wavcaps_train = None
+    if args.use_wavcaps:
+        try:
+            wavcaps_train = WavCapsDataset(args.data_path, split=args.wavcaps_split)
+            print(f"  WavCaps train: {len(wavcaps_train)} samples (split='{args.wavcaps_split}')")
+            print(f"  WavCaps ratio: {args.wavcaps_ratio:.2f}")
+        except Exception as e:
+            print(f"⚠️  Failed to load WavCaps dataset: {e}. Continuing with AudioCaps only.", flush=True)
+            wavcaps_train = None
+
+    if wavcaps_train is not None:
+        train_dataset = MixedAudioCaptionDataset(
+            audiocaps_dataset=audiocaps_train,
+            wavcaps_dataset=wavcaps_train,
+            wavcaps_ratio=args.wavcaps_ratio,
+            shuffle=True,
+            seed=args.seed,
+        )
+        print(f"  AudioCaps train: {len(audiocaps_train)} samples")
+        print(f"  Mixed train samples: {len(train_dataset)} (AudioCaps + WavCaps subset)")
+    else:
+        train_dataset = audiocaps_train
+        print(f"  Train (AudioCaps only): {len(train_dataset)} samples")
+
+    print(f"  Val (AudioCaps): {len(val_dataset)} samples")
+
+    # Create dataloaders
+    train_loader = create_safe_dataloader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+    )
+
+    val_loader = create_safe_dataloader(
+        val_dataset,
+        batch_size=args.val_batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+    )
+
+    # Training config
+    config = {
+        "num_epochs": args.num_epochs,
+        "learning_rate_projector": args.learning_rate_projector,
+        "learning_rate_adapter": args.learning_rate_adapter,
+        "weight_decay": args.weight_decay,
+        "warmup_steps": args.warmup_steps,
+        "max_grad_norm": args.max_grad_norm,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "fp16": args.fp16,
+        "eval_frequency": args.eval_frequency,
+        # Default eval cap if not specified to keep metrics manageable
+        "max_eval_batches": args.max_eval_batches if args.max_eval_batches is not None else 50,
+        "max_new_tokens": args.max_new_tokens,
+        "num_beams": args.num_beams,
+        "early_stopping_patience": args.early_stopping_patience,
+        "audio_contrastive_weight": args.audio_contrastive_weight,
+        "audio_contrastive_temperature": args.audio_contrastive_temperature,
+        "audio_contrastive_max_length": args.audio_contrastive_max_length,
+        "gate_warmup_steps": args.gate_warmup_steps,
+    }
+
+    # Evaluation only mode
+    if args.eval_only:
+        if args.resume is None:
+            raise ValueError("--eval-only requires --resume")
+
+        load_checkpoint(model, None, None, Path(args.resume), device)
+
         print(f"\n{'='*80}")
-        print(f"Checking Training Accuracy (Subset)")
+        print(f"Running evaluation only")
         print(f"{'='*80}\n")
-        
-        # Create a subset loader for training data
-        # We use the same collate_fn and batch size as validation for consistency
-        train_subset_indices = list(range(min(len(train_loader.dataset), 200))) # Check first 200 samples
-        train_subset = torch.utils.data.Subset(train_loader.dataset, train_subset_indices)
-        train_subset_loader = torch.utils.data.DataLoader(
-            train_subset,
-            batch_size=val_loader.batch_size,
-            shuffle=False,
-            num_workers=val_loader.num_workers,
-            collate_fn=val_loader.collate_fn,
-            pin_memory=True
+
+        metrics = evaluate(
+            model,
+            val_loader,
+            device,
+            max_batches=args.max_eval_batches,
+            max_new_tokens=args.max_new_tokens,
+            num_beams=args.num_beams,
+            compute_bertscore=True,   # Full metrics in eval-only mode
+            light_metrics=False,
+            suppress_eos_for_audio=False,
         )
 
-        train_subset_samples: Optional[List[Dict[str, Any]]] = (
-            [] if (wandb_run is not None and wandb_sample_count > 0) else None
-        )
-        train_eval_metrics = evaluate(
-            model,
-            train_subset_loader,
-            device,
-            max_batches=None, # Run on full subset
-            max_new_tokens=config.get("max_new_tokens", 20),
-            num_beams=config.get("num_beams", 1),
-            compute_bertscore=False,
-            light_metrics=True,
-            suppress_eos_for_audio=True,
-            sample_output=train_subset_samples,
-            sample_limit=wandb_sample_count,
-        )
-        print(f"[TrainSubset] CIDEr={train_eval_metrics.get('cider', 0.0):.2f} BLEU-4={train_eval_metrics.get('bleu4', 0.0):.4f} Loss={train_eval_metrics.get('loss', 0.0):.4f}", flush=True)
-        if wandb_run is not None:
-            subset_log = {"train/optimizer_step": optimizer_step, "epoch": epoch}
-            subset_log.update(
-                {f"train_subset/{k}": v for k, v in train_eval_metrics.items() if isinstance(v, (int, float))}
-            )
-            _wandb_log(wandb_run, subset_log, step=optimizer_step)
-            if train_subset_samples and wandb is not None:
-                try:
-                    table = wandb.Table(columns=["question", "prediction", "references"])
-                    for row in train_subset_samples:
-                        table.add_data(row["question"], row["prediction"], "\n".join(row["references"]))
-                    _wandb_log(
-                        wandb_run,
-                        {"train/optimizer_step": optimizer_step, "train_subset/samples": table},
-                        step=optimizer_step,
-                    )
+        # Save results
+        results_path = output_dir / "eval_results.json"
+        with open(results_path, "w") as f:
+            json.dump(metrics, f, indent=2)
+
+        print(f"\n💾 Results saved to: {results_path}")
+        return
+
+    # Resume from checkpoint if specified
+    if args.resume:
+        load_checkpoint(model, None, None, Path(args.resume), device)
+
+    # Train
+    train(
+        model,
+        train_loader,
+        val_loader,
+        config,
+        output_dir,
+        device,
+    )
+
+    print(f"\n✅ Training complete! Results saved to: {output_dir}")
+
+
+if __name__ == "__main__":
+    main()
                 except Exception:
                     pass
 

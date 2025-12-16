@@ -57,7 +57,6 @@ AUDIO_CONTRASTIVE_WEIGHT=${AUDIO_CONTRASTIVE_WEIGHT:-0.0}
 AUDIO_CONTRASTIVE_TEMPERATURE=${AUDIO_CONTRASTIVE_TEMPERATURE:-0.07}
 AUDIO_CONTRASTIVE_MAX_LENGTH=${AUDIO_CONTRASTIVE_MAX_LENGTH:-48}
 GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-0}
-MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}  # Set to e.g. 300 for smoke testing
 
 # Memory optimization - enable by default for 48GB GPUs with large datasets
 GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-1}
@@ -124,7 +123,6 @@ python train_safe.py \
     --num-workers "${NUM_WORKERS}" \
     --max-eval-batches "${MAX_EVAL_BATCHES}" \
     $( [[ "${GRADIENT_CHECKPOINTING}" != "0" ]] && echo --gradient-checkpointing ) \
-    $( [[ -n "${MAX_TRAIN_SAMPLES}" ]] && echo --max-train-samples "${MAX_TRAIN_SAMPLES}" ) \
     ${FP16}
 
 echo ""

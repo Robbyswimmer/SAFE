@@ -504,10 +504,6 @@ class MultiLayerFusionAdapter(nn.Module):
         gate: Union[float, Dict[str, float]] = 1.0,
         supervised_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # DEBUG: Check gate value periodically
-        if self.training and layer_idx == self.fusion_layer_indices[0] and torch.rand(1).item() < 0.001:
-             print(f"[FusionGate] layer={layer_idx} gate={gate}", flush=True)
-
         modalities = self.layer_modalities.get(layer_idx, [])
         if not modalities:
             return hidden_states

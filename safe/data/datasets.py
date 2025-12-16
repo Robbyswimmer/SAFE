@@ -528,6 +528,18 @@ class AudioCapsDataset(_BaseQADataset):
                 entry.get("caption")          # AudioCaps single caption field
             )
 
+        # Debug: log first sample to diagnose missing captions issue
+        if idx < 3 and not hasattr(self, '_debug_logged'):
+            print(f"[AudioCapsDataset Debug] Sample {idx}:", flush=True)
+            print(f"  Entry keys: {list(entry.keys())}", flush=True)
+            print(f"  'captions' field: {entry.get('captions')}", flush=True)
+            print(f"  'answers' field: {entry.get('answers')}", flush=True)
+            print(f"  'answer' field: {entry.get('answer')}", flush=True)
+            print(f"  'caption' field: {entry.get('caption')}", flush=True)
+            print(f"  Final answers: {answers}", flush=True)
+            if idx == 2:
+                self._debug_logged = True
+
         sample = {
             "sample_id": entry.get("id") or entry.get("ytid") or entry.get("sound_name"),
             "question": question,

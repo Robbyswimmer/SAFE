@@ -507,13 +507,8 @@ class SAFEModel(nn.Module):
             # NOTE: BaseVLModel configures decoder-only tokenizers to use left padding.
             # Use attention_mask to select the true prompt tokens (works for both
             # left- and right-padded batches) instead of slicing from position 0.
-            
-            # CRITICAL FIX: Handle left-padding correctly
-            # Previous code assumed right-padding (taking :prompt_len), which grabbed padding tokens
-            # when inputs were left-padded (standard for LLaVA/generation).
-            # Now we use the mask to extract exactly the valid tokens.
-            valid_indices = attention_mask[i].bool()
-            prompt_tokens = input_ids[i][valid_indices]
+            prompt_mask = attention_mask[i].to(dtype=torch.bool)
+            prompt_tokens = input_ids[i, prompt_mask]
             prompt_len = int(prompt_tokens.size(0))
 
             answer_tokens = tokenizer.encode(
@@ -576,12 +571,10 @@ class SAFEModel(nn.Module):
 
         for i, (seq, mask, label) in enumerate(zip(new_input_ids, new_attention, new_labels)):
             length = seq.size(0)
-            # Switch to RIGHT padding for training
-            # This is safer for causal LMs during training as it avoids position ID shifting issues
-            # and ensures the active tokens are always at the start.
-            padded_ids[i, :length] = seq
-            padded_attention[i, :length] = mask
-            padded_labels[i, :length] = label
+            start = max_length - length
+            padded_ids[i, start:] = seq
+            padded_attention[i, start:] = mask
+            padded_labels[i, start:] = label
 
         inputs["input_ids"] = padded_ids
         inputs["attention_mask"] = padded_attention
