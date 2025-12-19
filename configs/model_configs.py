@@ -212,8 +212,8 @@ PHASE1_CONFIG = {
 
     # Fusion configuration - MULTI-LAYER + HIGHER RANK
     "fusion_type": "multilayer",
-    # Phase 1 experiment: inject at many layers to maximize audio influence
-    "fusion_layer_indices": [4, 8, 12, 16, 20, 24, 28, 32, 36],
+    # Phase 1: 3-layer injection at 30%/60%/90% depth for concentrated gradients
+    "fusion_layer_indices": [12, 24, 36],
     "lora_rank": 64,  # CRITICAL CHANGE from 8 - removes cross-modal compression bottleneck
     "fusion_config": {
         "num_attention_heads": 40,
@@ -221,7 +221,7 @@ PHASE1_CONFIG = {
         "modalities": {
             "audio": {
                 # Match fusion_layer_indices and num_audio_tokens
-                "layer_indices": [4, 8, 12, 16, 20, 24, 28, 32, 36],
+                "layer_indices": [12, 24, 36],
                 "num_tokens": 16
             }
         },

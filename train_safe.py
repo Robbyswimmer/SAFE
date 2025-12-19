@@ -1554,14 +1554,17 @@ def train(
     num_epochs = config.get("num_epochs", 20)
     warmup_steps = config.get("warmup_steps", 1000)
     total_steps = len(train_loader) * num_epochs
+    min_lr_ratio = config.get("min_lr_ratio", 0.1)  # Floor at 10% of base LR
 
-    # Cosine schedule with warmup
+    # Cosine schedule with warmup and minimum LR floor
     def lr_lambda(step):
         if step < warmup_steps:
             return step / warmup_steps
         else:
             progress = (step - warmup_steps) / (total_steps - warmup_steps)
-            return 0.5 * (1 + np.cos(np.pi * progress))
+            # Cosine decay to min_lr_ratio instead of 0
+            cosine_decay = 0.5 * (1 + np.cos(np.pi * progress))
+            return min_lr_ratio + (1 - min_lr_ratio) * cosine_decay
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -1883,8 +1886,10 @@ def main():
                         help="Learning rate for fusion adapter")
     parser.add_argument("--weight-decay", type=float, default=0.01,
                         help="Weight decay")
-    parser.add_argument("--warmup-steps", type=int, default=1000,
+    parser.add_argument("--warmup-steps", type=int, default=2000,
                         help="Warmup steps for learning rate")
+    parser.add_argument("--min-lr-ratio", type=float, default=0.1,
+                        help="Minimum LR as ratio of base LR (prevents plateau, default 0.1 = 10%%)")
     parser.add_argument("--max-grad-norm", type=float, default=1.0,
                         help="Max gradient norm for clipping")
     parser.add_argument("--fp16", action="store_true",
@@ -2085,6 +2090,7 @@ def main():
         "learning_rate_adapter": args.learning_rate_adapter,
         "weight_decay": args.weight_decay,
         "warmup_steps": args.warmup_steps,
+        "min_lr_ratio": args.min_lr_ratio,
         "max_grad_norm": args.max_grad_norm,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "fp16": args.fp16,

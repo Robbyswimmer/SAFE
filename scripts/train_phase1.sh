@@ -46,11 +46,12 @@ OUTPUT_DIR=${OUTPUT_DIR:-"./checkpoints/phase1_clean"}
 NUM_EPOCHS=${NUM_EPOCHS:-20}
 BATCH_SIZE=${BATCH_SIZE:-2}                 # Smaller microbatches reduce peak VRAM/CPU usage
 GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-64}  # Maintain effective batch size via accumulation
-LR_PROJECTOR=${LR_PROJECTOR:-2e-4}
-LR_ADAPTER=${LR_ADAPTER:-1e-4}
-WARMUP_STEPS=${WARMUP_STEPS:-1000}
+LR_PROJECTOR=${LR_PROJECTOR:-1e-3}
+LR_ADAPTER=${LR_ADAPTER:-5e-4}
+WARMUP_STEPS=${WARMUP_STEPS:-2000}
+MIN_LR_RATIO=${MIN_LR_RATIO:-0.1}         # LR floor at 10% of base (prevents plateau)
 EVAL_FREQUENCY=${EVAL_FREQUENCY:-1}
-MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-20}
+MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-40}
 NUM_BEAMS=${NUM_BEAMS:-1}
 FP16=${FP16:-"--fp16"}
 SEED=${SEED:-42}
@@ -166,6 +167,7 @@ python train_safe.py \
     --learning-rate-projector "${LR_PROJECTOR}" \
     --learning-rate-adapter "${LR_ADAPTER}" \
     --warmup-steps "${WARMUP_STEPS}" \
+    --min-lr-ratio "${MIN_LR_RATIO}" \
     --eval-frequency "${EVAL_FREQUENCY}" \
     --max-new-tokens "${MAX_NEW_TOKENS}" \
     --num-beams "${NUM_BEAMS}" \
