@@ -19,6 +19,9 @@
 
 set -euo pipefail
 
+# Memory optimization - prevent CUDA OOM from fragmentation during long training runs
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 # Environment setup - activate conda environment
 CONDA_ENV=${CONDA_ENV:-"safe-env"}
 
