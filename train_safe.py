@@ -692,23 +692,28 @@ def compute_caption_metrics(
                 _EVALUATE_METRIC_CACHE[key] = evaluate.load(name, **load_kwargs)
             return _EVALUATE_METRIC_CACHE[key]
 
-        # BLEU
+        # BLEU - use pycocoevalcap for consistency with CIDEr (standard for captioning)
         try:
-            bleu_metric = _metric("bleu")
-            bleu_result = bleu_metric.compute(predictions=preds_list, references=refs_list)
-            if bleu_result:
-                precisions = bleu_result.get("precisions", [])
-                for n in range(min(4, len(precisions))):
-                    metrics[f"bleu{n + 1}"] = float(precisions[n])
+            from pycocoevalcap.bleu.bleu import Bleu
+            gts_bleu = {str(i): refs for i, refs in enumerate(refs_list)}
+            res_bleu = {str(i): [pred] for i, pred in enumerate(preds_list)}
+            bleu_scorer = Bleu(4)
+            bleu_scores, _ = bleu_scorer.compute_score(gts_bleu, res_bleu)
+            metrics["bleu1"] = float(bleu_scores[0])
+            metrics["bleu2"] = float(bleu_scores[1])
+            metrics["bleu3"] = float(bleu_scores[2])
+            metrics["bleu4"] = float(bleu_scores[3])
         except Exception as exc:
             print(f"⚠️  BLEU metric failed: {exc}", flush=True)
 
-        # METEOR (always computed if available)
+        # METEOR - use pycocoevalcap for consistency with CIDEr/BLEU (standard for captioning)
         try:
-            meteor_metric = _metric("meteor")
-            meteor_result = meteor_metric.compute(predictions=preds_list, references=refs_list)
-            if meteor_result and "meteor" in meteor_result:
-                metrics["meteor"] = float(meteor_result["meteor"])
+            from pycocoevalcap.meteor.meteor import Meteor
+            gts_meteor = {str(i): refs for i, refs in enumerate(refs_list)}
+            res_meteor = {str(i): [pred] for i, pred in enumerate(preds_list)}
+            meteor_scorer = Meteor()
+            meteor_score, _ = meteor_scorer.compute_score(gts_meteor, res_meteor)
+            metrics["meteor"] = float(meteor_score)
         except Exception as exc:
             print(f"⚠️  METEOR metric failed: {exc}", flush=True)
 
