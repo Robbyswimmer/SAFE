@@ -59,7 +59,7 @@ class AudioProjector(nn.Module):
 
         # Trainable scale to match LLM hidden state magnitudes
         # Init to ~8 since LLaMA hidden states typically have norm in 8-11 range
-        self.output_scale = nn.Parameter(torch.tensor(1.0))
+        self.output_scale = nn.Parameter(torch.tensor(8.0))
 
         # Debug logging
         self.debug_logging = False

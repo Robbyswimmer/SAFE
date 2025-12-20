@@ -202,9 +202,11 @@ PHASE1_CONFIG = {
     "audio_embed_dim": 512,
     "vision_embed_dim": 1024,
 
-    # Projector configuration - INCREASED TOKENS
+    # Projector configuration
     "projector_type": "standard",
-    "num_audio_tokens": 16,  # Phase 1: 16 audio tokens for 10s audio
+    # For pooled audio embeddings (e.g., CLAP), more tokens mostly adds capacity.
+    # Keep smaller for stability/generalization and scale up only if needed.
+    "num_audio_tokens": 8,
     "projector_config": {
         "dropout": 0.1,
         "bottleneck_dim": 1024  # Keep for Phase 1, remove in Phase 2
@@ -214,7 +216,8 @@ PHASE1_CONFIG = {
     "fusion_type": "multilayer",
     # Phase 1: 3-layer injection at 30%/60%/90% depth for concentrated gradients
     "fusion_layer_indices": [12, 24, 36],
-    "lora_rank": 64,  # CRITICAL CHANGE from 8 - removes cross-modal compression bottleneck
+    # Keep LoRA rank modest; training full cross-attention matrices is too large.
+    "lora_rank": 16,
     "fusion_config": {
         "num_attention_heads": 40,
         "attention_dropout": 0.1,
@@ -222,9 +225,12 @@ PHASE1_CONFIG = {
             "audio": {
                 # Match fusion_layer_indices and num_audio_tokens
                 "layer_indices": [12, 24, 36],
-                "num_tokens": 16
+                "num_tokens": 8
             }
         },
+        # Adapt all projections; base cross-attention weights stay frozen (LoRA-only).
+        "target_modules": ["query", "key", "value", "output_dense"],
+        "train_base_cross_attention": False,
         # Default fusion injection point for Phase 1: inject BEFORE FFN
         "injection_point": "pre_ffn",
         # Enable token-wise gating of audio residuals in Phase 1 experiments

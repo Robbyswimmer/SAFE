@@ -256,7 +256,8 @@ class LoRAFusionAdapter(nn.Module):
         lora_alpha: float = 16.0,
         lora_dropout: float = 0.0,  # Disabled for stable gradient flow during bring-up
         attention_dropout: float = 0.1,
-        target_modules: list = None,
+        target_modules: Optional[List[str]] = None,
+        train_base_cross_attention: bool = False,
         use_tokenwise_gate: bool = False,
     ):
         super().__init__()
@@ -279,7 +280,9 @@ class LoRAFusionAdapter(nn.Module):
         
         # LoRA configuration
         if target_modules is None:
-            target_modules = ["query", "value"]  # Apply LoRA to Q and V projections
+            # Default: adapt all projections for random-init cross-attention.
+            # (If you only LoRA Q/V but keep K/O frozen random, fusion can be weak.)
+            target_modules = ["query", "key", "value", "output_dense"]
             
         self.lora_config = LoraConfig(
             r=lora_rank,
@@ -293,18 +296,23 @@ class LoRAFusionAdapter(nn.Module):
         # Apply LoRA to cross-attention
         self.cross_attention = get_peft_model(self.cross_attention, self.lora_config)
 
-        # NOTE: CrossAttentionBlock is newly initialized (not a pretrained module).
-        # PEFT/LoRA defaults to freezing the base module parameters, which would
-        # leave a random fixed cross-attention map and only train low‑rank deltas.
-        # For SAFE we want the full cross‑attention weights to learn, *in addition*
-        # to any LoRA residuals.
+        # CrossAttentionBlock is randomly initialized. Training its full 5120×5120
+        # projection matrices is extremely parameter-heavy; by default we train only
+        # LoRA weights + a small residual scale. Enable full training explicitly.
         base_model = getattr(self.cross_attention, "base_model", None)
         if base_model is not None:
             for param in base_model.parameters():
-                param.requires_grad = True
+                param.requires_grad = bool(train_base_cross_attention)
+            # Always allow the fusion residual scale to learn (cheap but important).
+            if hasattr(base_model, "residual_scale"):
+                try:
+                    base_model.residual_scale.requires_grad = True
+                except Exception:
+                    pass
         else:
-            for param in self.cross_attention.parameters():
-                param.requires_grad = True
+            # Fallback: if PEFT wrapper doesn't expose base_model, do not attempt
+            # to unfreeze everything.
+            pass
 
         # Token-wise gating head (optional)
         if self.use_tokenwise_gate:
@@ -453,6 +461,8 @@ class MultiLayerFusionAdapter(nn.Module):
         self.fusion_layer_indices = sorted({idx for indices in self.fusion_layers.values() for idx in indices})
         self.layer_modalities = self._invert_layer_mapping(self.fusion_layers)
         self.fusion_adapters = nn.ModuleDict()
+        target_modules = unused_kwargs.get("target_modules", None)
+        train_base_cross_attention = bool(unused_kwargs.get("train_base_cross_attention", False))
 
         for modality, indices in self.fusion_layers.items():
             for layer_idx in indices:
@@ -464,6 +474,8 @@ class MultiLayerFusionAdapter(nn.Module):
                     lora_alpha=lora_alpha,
                     lora_dropout=lora_dropout,
                     attention_dropout=attention_dropout,
+                    target_modules=target_modules,
+                    train_base_cross_attention=train_base_cross_attention,
                     use_tokenwise_gate=self.use_tokenwise_gate,
                 )
 
@@ -621,7 +633,9 @@ class GatedFusionAdapter(nn.Module):
         num_attention_heads: int = 8,
         lora_rank: int = 8,
         gate_hidden_size: int = 64,
-        gate_init_bias: float = -2.5  # Initialize gate toward OFF
+        gate_init_bias: float = -2.5,  # Initialize gate toward OFF
+        target_modules: Optional[List[str]] = None,
+        train_base_cross_attention: bool = False,
     ):
         super().__init__()
         
@@ -629,7 +643,9 @@ class GatedFusionAdapter(nn.Module):
         self.fusion_adapter = LoRAFusionAdapter(
             hidden_size=hidden_size,
             num_attention_heads=num_attention_heads,
-            lora_rank=lora_rank
+            lora_rank=lora_rank,
+            target_modules=target_modules,
+            train_base_cross_attention=train_base_cross_attention,
         )
         
         # Learnable gate network
