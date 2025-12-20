@@ -402,7 +402,8 @@ class MixedAudioCaptionDataset(Dataset):
 
     - Always uses all AudioCaps samples.
     - Uses wavcaps_ratio * len(WavCaps) samples (clipped to [0, len]).
-    - Shuffles combined index map with a fixed seed.
+    - Optionally re-samples the WavCaps subset each epoch to expose more of a large
+      dataset without making epochs enormous.
 
     Memory-optimized: Uses numpy arrays instead of Python lists for index mapping.
     This reduces memory from ~40MB to ~4MB for 500K samples.
@@ -415,42 +416,64 @@ class MixedAudioCaptionDataset(Dataset):
         wavcaps_ratio: float = 0.8,
         shuffle: bool = True,
         seed: int = 42,
+        resample_wavcaps_each_epoch: bool = False,
     ) -> None:
         if audiocaps_dataset is None and wavcaps_dataset is None:
             raise ValueError("MixedAudioCaptionDataset requires at least one dataset")
 
         self.audiocaps_dataset = audiocaps_dataset
         self.wavcaps_dataset = wavcaps_dataset
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.resample_wavcaps_each_epoch = bool(resample_wavcaps_each_epoch)
 
-        if wavcaps_dataset is None:
+        self._wavcaps_ratio = max(0.0, min(1.0, float(wavcaps_ratio)))
+        self._dataset_ids = np.zeros(0, dtype=np.uint8)
+        self._local_indices = np.zeros(0, dtype=np.int32)
+        self._build_index(epoch=0)
+
+    def _build_index(self, *, epoch: int) -> None:
+        a_count = len(self.audiocaps_dataset) if self.audiocaps_dataset is not None else 0
+        if self.wavcaps_dataset is None:
             # Only AudioCaps - use simple range
-            a_count = len(audiocaps_dataset)
             self._dataset_ids = np.zeros(a_count, dtype=np.uint8)  # 0 = audiocaps
             self._local_indices = np.arange(a_count, dtype=np.int32)
+            return
+
+        w_count = len(self.wavcaps_dataset)
+        w_samples = int(w_count * self._wavcaps_ratio)
+        w_samples = max(0, min(w_samples, w_count))
+
+        rng = np.random.Generator(np.random.PCG64(self.seed + int(epoch)))
+        if w_samples <= 0:
+            wavcaps_indices = np.zeros(0, dtype=np.int32)
+        elif w_samples >= w_count:
+            wavcaps_indices = np.arange(w_count, dtype=np.int32)
         else:
-            a_count = len(audiocaps_dataset)
-            w_count = len(wavcaps_dataset)
-            ratio = max(0.0, min(1.0, float(wavcaps_ratio)))
-            w_samples = int(w_count * ratio)
-            total = a_count + w_samples
+            wavcaps_indices = rng.choice(w_count, size=w_samples, replace=False).astype(np.int32)
 
-            # Use numpy arrays for memory efficiency
-            # dataset_ids: 0 = audiocaps, 1 = wavcaps (1 byte per sample vs ~50 bytes for string)
-            # local_indices: int32 (4 bytes per sample vs 28 bytes for Python int)
-            self._dataset_ids = np.concatenate([
-                np.zeros(a_count, dtype=np.uint8),
-                np.ones(w_samples, dtype=np.uint8),
-            ])
-            self._local_indices = np.concatenate([
-                np.arange(a_count, dtype=np.int32),
-                np.arange(w_samples, dtype=np.int32),
-            ])
+        dataset_ids = np.concatenate([
+            np.zeros(a_count, dtype=np.uint8),
+            np.ones(w_samples, dtype=np.uint8),
+        ])
+        local_indices = np.concatenate([
+            np.arange(a_count, dtype=np.int32),
+            wavcaps_indices,
+        ])
 
-        if shuffle:
-            rng = np.random.Generator(np.random.PCG64(seed))
-            perm = rng.permutation(len(self._dataset_ids))
-            self._dataset_ids = self._dataset_ids[perm]
-            self._local_indices = self._local_indices[perm]
+        if self.shuffle:
+            perm = rng.permutation(len(dataset_ids))
+            dataset_ids = dataset_ids[perm]
+            local_indices = local_indices[perm]
+
+        self._dataset_ids = dataset_ids
+        self._local_indices = local_indices
+
+    def set_epoch(self, epoch: int) -> None:
+        """Optionally reshuffle/re-sample the WavCaps subset each epoch."""
+        if not self.resample_wavcaps_each_epoch:
+            return
+        self._build_index(epoch=int(epoch))
 
     def __len__(self) -> int:
         return len(self._dataset_ids)
@@ -1102,6 +1125,73 @@ def evaluate(
 # SECTION 4: TRAINING
 # ============================================================================
 
+def _extract_audio_projector_output_scale(model: Any) -> Optional[float]:
+    projector = getattr(model, "audio_projector", None)
+    if projector is None:
+        return None
+    scale = getattr(projector, "output_scale", None)
+    if scale is None:
+        return None
+    try:
+        if torch.is_tensor(scale):
+            return float(scale.detach().cpu().float().item())
+        return float(scale)
+    except Exception:
+        return None
+
+
+def _extract_fusion_residual_scales(model: Any) -> Dict[str, float]:
+    """
+    Return a dict of residual_scale values for fusion cross-attention blocks.
+    Supports MultiLayerFusionAdapter (ModuleDict) and single adapters.
+    """
+    fusion_adapter = getattr(model, "fusion_adapter", None)
+    if fusion_adapter is None:
+        return {}
+
+    # Unwrap gated adapter -> inner LoRAFusionAdapter
+    if hasattr(fusion_adapter, "fusion_adapter") and not hasattr(fusion_adapter, "fusion_adapters"):
+        inner = getattr(fusion_adapter, "fusion_adapter", None)
+        if inner is not None:
+            fusion_adapter = inner
+
+    adapters: List[Tuple[str, Any]] = []
+    if hasattr(fusion_adapter, "fusion_adapters"):
+        try:
+            items = list(getattr(fusion_adapter, "fusion_adapters").items())
+            adapters.extend([(str(k), v) for k, v in items])
+        except Exception:
+            pass
+    else:
+        adapters.append(("fusion", fusion_adapter))
+
+    residuals: Dict[str, float] = {}
+    for key, adapter in adapters:
+        cross_attention = getattr(adapter, "cross_attention", None)
+        if cross_attention is not None:
+            candidate = getattr(cross_attention, "base_model", None) or cross_attention
+        else:
+            candidate = adapter
+
+        residual_param = getattr(candidate, "residual_scale", None)
+        if residual_param is None:
+            continue
+
+        cap = getattr(candidate, "residual_scale_max", None)
+        try:
+            if cap is not None:
+                value = float(torch.clamp(residual_param, 0.0, float(cap)).detach().cpu().float().item())
+            else:
+                value = float(residual_param.detach().cpu().float().item())
+        except Exception:
+            continue
+
+        safe_key = str(key).replace("/", "_").replace(":", "_")
+        residuals[safe_key] = value
+
+    return residuals
+
+
 def train_epoch(
     model: SAFEModel,
     dataloader: DataLoader,
@@ -1391,6 +1481,21 @@ def train_epoch(
                     except Exception:
                         pass
 
+                # Track common "fusion collapse" indicators (scales drifting to ~0).
+                proj_scale = _extract_audio_projector_output_scale(model)
+                if proj_scale is not None:
+                    log_dict["train/audio_projector_output_scale"] = float(proj_scale)
+
+                residual_scales = _extract_fusion_residual_scales(model)
+                if residual_scales:
+                    values = list(residual_scales.values())
+                    log_dict["train/fusion_residual_scale_mean"] = float(sum(values) / len(values))
+                    log_dict["train/fusion_residual_scale_min"] = float(min(values))
+                    log_dict["train/fusion_residual_scale_max"] = float(max(values))
+                    log_dict["train/fusion_residual_scale_count"] = float(len(values))
+                    for k, v in residual_scales.items():
+                        log_dict[f"train/fusion_residual_scale/{k}"] = float(v)
+
                 try:
                     if hasattr(model, "get_last_attention_summary"):
                         summary = model.get_last_attention_summary()
@@ -1442,6 +1547,13 @@ def train_epoch(
                 except Exception:
                     audio_token_norm = None
 
+            proj_scale = _extract_audio_projector_output_scale(model)
+            residual_scale_mean = None
+            residual_scales = _extract_fusion_residual_scales(model)
+            if residual_scales:
+                values = list(residual_scales.values())
+                residual_scale_mean = float(sum(values) / len(values))
+
             attn_mean = None
             attn_max = None
             try:
@@ -1461,6 +1573,10 @@ def train_epoch(
             extras = []
             if audio_token_norm is not None:
                 extras.append(f"audio_norm={audio_token_norm:.2f}")
+            if proj_scale is not None:
+                extras.append(f"proj_scale={proj_scale:.3f}")
+            if residual_scale_mean is not None:
+                extras.append(f"res_scale={residual_scale_mean:.3f}")
             if attn_mean is not None and attn_max is not None:
                 extras.append(f"attn_mean={attn_mean:.4f} attn_max={attn_max:.4f}")
             if extras:
@@ -1468,6 +1584,101 @@ def train_epoch(
 
             print(log_msg, flush=True)
             last_log_time = current_time
+
+    # Flush any remaining accumulated gradients so the last partial micro-batch
+    # group still contributes an optimizer step.
+    if step_micro_batches > 0:
+        if use_amp and scaler is not None:
+            scaler.unscale_(optimizer)
+
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+
+        if use_amp and scaler is not None:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+
+        scheduler.step()
+        optimizer.zero_grad()
+        optimizer_step += 1
+
+        if wandb_run is not None:
+            step_time = max(time.time() - step_start_time, 1e-6)
+            lrs = scheduler.get_last_lr()
+            log_dict: Dict[str, Any] = {
+                "train/optimizer_step": optimizer_step,
+                "epoch": epoch,
+                "train/batch_idx": batch_idx,
+                "train/micro_batches": step_micro_batches,
+                "train/loss_step": (step_loss_sum / max(step_micro_batches, 1)),
+                "train/samples_per_sec_step": step_samples / step_time,
+                "train/grad_norm": float(grad_norm) if grad_norm is not None else None,
+            }
+            for group_idx, (group, lr) in enumerate(zip(optimizer.param_groups, lrs)):
+                group_name = str(group.get("name") or f"group{group_idx}")
+                log_dict[f"train/lr/{group_name}"] = float(lr)
+
+            if use_amp and scaler is not None:
+                try:
+                    log_dict["train/amp_scale"] = float(scaler.get_scale())
+                except Exception:
+                    pass
+
+            if last_proj_grad_norm is not None:
+                log_dict["train/gradcheck/audio_projector_sum_norm"] = last_proj_grad_norm
+            if last_fuse_grad_norm is not None:
+                log_dict["train/gradcheck/fusion_adapter_sum_norm"] = last_fuse_grad_norm
+
+            if audio_tokens is not None:
+                try:
+                    with torch.no_grad():
+                        log_dict["train/audio_token_norm"] = float(audio_tokens.norm(dim=-1).mean().item())
+                except Exception:
+                    pass
+
+            proj_scale = _extract_audio_projector_output_scale(model)
+            if proj_scale is not None:
+                log_dict["train/audio_projector_output_scale"] = float(proj_scale)
+
+            residual_scales = _extract_fusion_residual_scales(model)
+            if residual_scales:
+                values = list(residual_scales.values())
+                log_dict["train/fusion_residual_scale_mean"] = float(sum(values) / len(values))
+                log_dict["train/fusion_residual_scale_min"] = float(min(values))
+                log_dict["train/fusion_residual_scale_max"] = float(max(values))
+                log_dict["train/fusion_residual_scale_count"] = float(len(values))
+                for k, v in residual_scales.items():
+                    log_dict[f"train/fusion_residual_scale/{k}"] = float(v)
+
+            try:
+                if hasattr(model, "get_last_attention_summary"):
+                    summary = model.get_last_attention_summary()
+                    if isinstance(summary, dict):
+                        if summary.get("overall_mean", None) is not None:
+                            log_dict["train/attn_mean"] = float(summary["overall_mean"])
+                        if summary.get("overall_max", None) is not None:
+                            log_dict["train/attn_max"] = float(summary["overall_max"])
+            except Exception:
+                pass
+
+            if torch.cuda.is_available():
+                try:
+                    log_dict["train/gpu_mem_allocated_mb"] = float(torch.cuda.memory_allocated() / (1024**2))
+                    log_dict["train/gpu_mem_reserved_mb"] = float(torch.cuda.memory_reserved() / (1024**2))
+                    log_dict["train/gpu_max_mem_allocated_mb"] = float(
+                        torch.cuda.max_memory_allocated() / (1024**2)
+                    )
+                except Exception:
+                    pass
+
+            _wandb_log(wandb_run, log_dict, step=optimizer_step)
+
+        # Reset step accumulators
+        step_start_time = time.time()
+        step_loss_sum = 0.0
+        step_samples = 0
+        step_micro_batches = 0
 
     # Final statistics
     if num_batches == 0:
@@ -1529,47 +1740,132 @@ def train(
     lr_adapter = config.get("learning_rate_adapter", 1e-4)
     weight_decay = config.get("weight_decay", 0.01)
 
-    # Group parameters by component
-    projector_params = []
-    adapter_params = []
-    other_params = []
+    def _use_weight_decay(param_name: str, param: torch.nn.Parameter) -> bool:
+        """Return True if this parameter should receive weight decay."""
+        # Standard practice: do not decay biases / LayerNorm / scalar scales.
+        if param.ndim <= 1:
+            return False
+        name = param_name.lower()
+        if name.endswith(".bias") or name.endswith("bias"):
+            return False
+        if "layernorm" in name or "layer_norm" in name or ".norm" in name or "norm." in name:
+            return False
+        if name.endswith(("output_scale", "residual_scale")):
+            return False
+        return True
+
+    # Group parameters by component + (decay/no_decay)
+    projector_decay = []
+    projector_no_decay = []
+    adapter_decay = []
+    adapter_no_decay = []
+    other_decay = []
+    other_no_decay = []
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
 
         if "audio_projector" in name:
-            projector_params.append(param)
+            if _use_weight_decay(name, param):
+                projector_decay.append(param)
+            else:
+                projector_no_decay.append(param)
         elif "fusion_adapter" in name or "lora" in name.lower():
-            adapter_params.append(param)
+            if _use_weight_decay(name, param):
+                adapter_decay.append(param)
+            else:
+                adapter_no_decay.append(param)
         else:
-            other_params.append(param)
+            if _use_weight_decay(name, param):
+                other_decay.append(param)
+            else:
+                other_no_decay.append(param)
 
-    param_groups = [
-        {"params": projector_params, "lr": lr_projector, "name": "projector"},
-        {"params": adapter_params, "lr": lr_adapter, "name": "adapter"},
-    ]
+    param_groups = []
+    if projector_decay:
+        param_groups.append(
+            {
+                "params": projector_decay,
+                "lr": lr_projector,
+                "weight_decay": weight_decay,
+                "name": "projector_decay",
+            }
+        )
+    if projector_no_decay:
+        param_groups.append(
+            {
+                "params": projector_no_decay,
+                "lr": lr_projector,
+                "weight_decay": 0.0,
+                "name": "projector_no_decay",
+            }
+        )
+    if adapter_decay:
+        param_groups.append(
+            {
+                "params": adapter_decay,
+                "lr": lr_adapter,
+                "weight_decay": weight_decay,
+                "name": "adapter_decay",
+            }
+        )
+    if adapter_no_decay:
+        param_groups.append(
+            {
+                "params": adapter_no_decay,
+                "lr": lr_adapter,
+                "weight_decay": 0.0,
+                "name": "adapter_no_decay",
+            }
+        )
+    if other_decay:
+        param_groups.append(
+            {
+                "params": other_decay,
+                "lr": lr_adapter,
+                "weight_decay": weight_decay,
+                "name": "other_decay",
+            }
+        )
+    if other_no_decay:
+        param_groups.append(
+            {
+                "params": other_no_decay,
+                "lr": lr_adapter,
+                "weight_decay": 0.0,
+                "name": "other_no_decay",
+            }
+        )
 
-    if other_params:
-        param_groups.append({"params": other_params, "lr": lr_adapter, "name": "other"})
+    if not param_groups:
+        raise RuntimeError("No trainable parameters found to optimize.")
 
-    optimizer = AdamW(param_groups, weight_decay=weight_decay)
+    optimizer = AdamW(param_groups, weight_decay=0.0)
 
     # Learning rate scheduler
-    num_epochs = config.get("num_epochs", 20)
-    warmup_steps = config.get("warmup_steps", 1000)
-    total_steps = len(train_loader) * num_epochs
-    min_lr_ratio = config.get("min_lr_ratio", 0.1)  # Floor at 10% of base LR
+    num_epochs = int(config.get("num_epochs", 20) or 0)
+    warmup_steps = int(config.get("warmup_steps", 1000) or 0)
+    grad_accum = max(1, int(config.get("gradient_accumulation_steps", 1) or 1))
+    steps_per_epoch = (len(train_loader) + grad_accum - 1) // grad_accum
+    total_steps = max(1, steps_per_epoch * max(1, num_epochs))
+    warmup_steps = min(max(0, warmup_steps), total_steps)
+    min_lr_ratio = float(config.get("min_lr_ratio", 0.1) or 0.1)  # Floor at 10% of base LR
 
-    # Cosine schedule with warmup and minimum LR floor
-    def lr_lambda(step):
-        if step < warmup_steps:
-            return step / warmup_steps
-        else:
-            progress = (step - warmup_steps) / (total_steps - warmup_steps)
-            # Cosine decay to min_lr_ratio instead of 0
-            cosine_decay = 0.5 * (1 + np.cos(np.pi * progress))
-            return min_lr_ratio + (1 - min_lr_ratio) * cosine_decay
+    # Cosine schedule with warmup and minimum LR floor.
+    # NOTE: scheduler.step() is called per optimizer step (i.e., per grad-accum update),
+    # so total_steps must be in optimizer-step units, not micro-batch units.
+    def lr_lambda(step: int) -> float:
+        step = int(step)
+        if warmup_steps > 0 and step < warmup_steps:
+            return step / float(warmup_steps)
+
+        denom = max(1, total_steps - warmup_steps)
+        progress = (step - warmup_steps) / float(denom)
+        progress = float(min(1.0, max(0.0, progress)))
+
+        cosine_decay = 0.5 * (1.0 + np.cos(np.pi * progress))
+        return float(min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay)
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -1589,8 +1885,6 @@ def train(
     patience = config.get("early_stopping_patience", 5)
     patience_counter = 0
 
-    # Global step approximation for scheduling (e.g., gate warmup)
-    global_step = 0
     optimizer_step = 0
 
     print(f"\n{'='*80}")
@@ -1605,7 +1899,13 @@ def train(
     initial_max_eval = config.get("max_eval_batches", None)
     if initial_max_eval is not None and initial_max_eval <= 0:
         initial_max_eval = None
-    print(f"[InitEval] Running initial evaluation on validation set (max_batches={initial_max_eval})", flush=True)
+    suppress_eos_steps = int(config.get("suppress_eos_for_audio_early_steps", 0) or 0)
+    suppress_eos_for_audio = bool(suppress_eos_steps > 0 and optimizer_step < suppress_eos_steps)
+    print(
+        f"[InitEval] Running initial evaluation on validation set "
+        f"(max_batches={initial_max_eval}, suppress_eos_for_audio={suppress_eos_for_audio})",
+        flush=True,
+    )
     init_samples: Optional[List[Dict[str, Any]]] = [] if (wandb_run is not None and wandb_sample_count > 0) else None
     init_metrics = evaluate(
         model,
@@ -1617,7 +1917,7 @@ def train(
         # Training-time eval: use light metrics (BLEU, METEOR, ROUGE, CIDEr), skip SPICE/BERTScore
         compute_bertscore=False,
         light_metrics=True,
-        suppress_eos_for_audio=True,
+        suppress_eos_for_audio=suppress_eos_for_audio,
         sample_output=init_samples,
         sample_limit=wandb_sample_count,
     )
@@ -1640,6 +1940,14 @@ def train(
         print(f"Epoch {epoch}/{num_epochs}")
         print(f"{'='*80}\n")
 
+        # Allow datasets to reshuffle/resample between epochs (e.g., WavCaps subset sampling).
+        try:
+            dataset = getattr(train_loader, "dataset", None)
+            if dataset is not None and hasattr(dataset, "set_epoch"):
+                dataset.set_epoch(epoch)
+        except Exception:
+            pass
+
         # Train
         train_metrics, optimizer_step = train_epoch(
             model,
@@ -1658,11 +1966,10 @@ def train(
             train_log.update({f"train/epoch_{k}": v for k, v in train_metrics.items() if isinstance(v, (int, float))})
             _wandb_log(wandb_run, train_log, step=optimizer_step)
 
-        # Gate warmup: ramp SAFE gate from 0 → 1 over a configured number of steps
+        # Gate warmup: ramp SAFE gate from 0 → 1 over a configured number of optimizer steps
         gate_warmup_steps = int(config.get("gate_warmup_steps", 0) or 0)
         if gate_warmup_steps > 0 and hasattr(model, "set_gate_warmup"):
-            global_step += len(train_loader)
-            model.set_gate_warmup(global_step, warmup_steps=gate_warmup_steps)
+            model.set_gate_warmup(optimizer_step, warmup_steps=gate_warmup_steps)
 
         print(f"\n✓ Training complete:")
         print(f"  Loss: {train_metrics['loss']:.4f}")
@@ -1673,10 +1980,15 @@ def train(
         eval_frequency = config.get("eval_frequency", 1)
         if epoch % eval_frequency == 0:
             print(f"\n{'='*80}")
-            print(f"Running validation...")
+            print("Running validation...")
             print(f"{'='*80}\n")
 
-            val_samples: Optional[List[Dict[str, Any]]] = [] if (wandb_run is not None and wandb_sample_count > 0) else None
+            suppress_eos_steps = int(config.get("suppress_eos_for_audio_early_steps", 0) or 0)
+            suppress_eos_for_audio = bool(suppress_eos_steps > 0 and optimizer_step < suppress_eos_steps)
+
+            val_samples: Optional[List[Dict[str, Any]]] = (
+                [] if (wandb_run is not None and wandb_sample_count > 0) else None
+            )
             val_metrics = evaluate(
                 model,
                 val_loader,
@@ -1687,7 +1999,7 @@ def train(
                 # Training-time eval: light metrics (no SPICE/BERTScore).
                 compute_bertscore=False,
                 light_metrics=True,
-                suppress_eos_for_audio=True,
+                suppress_eos_for_audio=suppress_eos_for_audio,
                 sample_output=val_samples,
                 sample_limit=wandb_sample_count,
             )
@@ -1715,6 +2027,7 @@ def train(
                 {**train_metrics, **val_metrics, "epoch": epoch},
                 output_dir,
                 is_best=is_best,
+                save_full_checkpoint=bool(config.get("save_full_checkpoint", False)),
             )
 
             # Save history
@@ -1788,12 +2101,25 @@ def save_checkpoint(
     metrics: Dict[str, float],
     output_dir: Path,
     is_best: bool = False,
+    save_full_checkpoint: bool = False,
 ) -> Dict[str, Path]:
     """Save model checkpoint"""
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    def _trainable_state_dict(module: nn.Module) -> Dict[str, torch.Tensor]:
+        state: Dict[str, torch.Tensor] = {}
+        for name, param in module.named_parameters():
+            if param.requires_grad:
+                state[name] = param.detach().cpu()
+        return state
+
+    # Default to saving only trainable weights (SAFE Stage-A style). This avoids
+    # multi-GB checkpoint writes when the base VL model is frozen.
+    model_state_dict = model.state_dict() if save_full_checkpoint else _trainable_state_dict(model)
+
     checkpoint = {
-        "model_state_dict": model.state_dict(),
+        "format": "full" if save_full_checkpoint else "trainable_only",
+        "model_state_dict": model_state_dict,
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
         "metrics": metrics,
@@ -1825,9 +2151,39 @@ def load_checkpoint(
     """Load model checkpoint"""
     print(f"📂 Loading checkpoint: {checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # Always load checkpoints onto CPU first to avoid GPU memory spikes during deserialization.
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
-    model.load_state_dict(checkpoint["model_state_dict"])
+    # Support both full checkpoints and adapter-only checkpoints.
+    state_dict = checkpoint.get("model_state_dict") if isinstance(checkpoint, dict) else None
+    if state_dict is None and isinstance(checkpoint, dict):
+        state_dict = checkpoint
+
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    if missing_keys:
+        relevant_missing = [
+            key
+            for key in missing_keys
+            if key.startswith(("audio_projector.", "fusion_adapter.", "audio_token_embeddings."))
+        ]
+        if relevant_missing:
+            print(
+                f"⚠️  Missing {len(relevant_missing)} SAFE trainable keys in checkpoint "
+                f"(showing up to 10): {relevant_missing[:10]}",
+                flush=True,
+            )
+    if unexpected_keys:
+        relevant_unexpected = [
+            key
+            for key in unexpected_keys
+            if key.startswith(("audio_projector.", "fusion_adapter.", "audio_token_embeddings."))
+        ]
+        if relevant_unexpected:
+            print(
+                f"⚠️  Unexpected {len(relevant_unexpected)} SAFE keys in checkpoint "
+                f"(showing up to 10): {relevant_unexpected[:10]}",
+                flush=True,
+            )
 
     if optimizer is not None and "optimizer_state_dict" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -1866,6 +2222,11 @@ def main():
                         help="Fraction of WavCaps train samples to include (0.0-1.0)")
     parser.add_argument("--wavcaps-split", type=str, default="train",
                         help="WavCaps split to use for training")
+    parser.add_argument(
+        "--resample-wavcaps-each-epoch",
+        action="store_true",
+        help="Re-sample the WavCaps subset each epoch (useful when wavcaps_ratio < 1.0).",
+    )
     parser.add_argument("--max-train-samples", type=int, default=None,
                         help="Limit number of training samples for smoke testing")
 
@@ -1919,6 +2280,15 @@ def main():
                         help="Max new tokens for generation")
     parser.add_argument("--num-beams", type=int, default=1,
                         help="Beam search size")
+    parser.add_argument(
+        "--suppress-eos-for-audio-early-steps",
+        type=int,
+        default=500,
+        help=(
+            "Suppress EOS/PAD during audio generation for the first N optimizer steps "
+            "(helps avoid empty captions early; 0 disables)."
+        ),
+    )
 
     # Checkpointing
     parser.add_argument("--resume", type=str, default=None,
@@ -1927,6 +2297,14 @@ def main():
                         help="Run evaluation only (requires --resume)")
     parser.add_argument("--early-stopping-patience", type=int, default=5,
                         help="Early stopping patience (epochs)")
+    parser.add_argument(
+        "--save-full-checkpoint",
+        action="store_true",
+        help=(
+            "Save full model weights in checkpoints (very large for LLaVA/BLIP2). "
+            "Default saves only trainable SAFE components."
+        ),
+    )
 
     # Memory optimization
     parser.add_argument("--gradient-checkpointing", action="store_true",
@@ -2064,6 +2442,7 @@ def main():
             wavcaps_ratio=args.wavcaps_ratio,
             shuffle=True,
             seed=args.seed,
+            resample_wavcaps_each_epoch=bool(args.resample_wavcaps_each_epoch),
         )
         print(f"  AudioCaps train: {len(audiocaps_train)} samples")
         print(f"  Mixed train samples: {len(train_dataset)} (AudioCaps + WavCaps subset)")
@@ -2089,6 +2468,12 @@ def main():
     )
 
     # Training config
+    resolved_max_eval_batches = args.max_eval_batches
+    if resolved_max_eval_batches is None:
+        resolved_max_eval_batches = 50  # Keep default eval fast unless explicitly overridden
+    elif int(resolved_max_eval_batches) <= 0:
+        resolved_max_eval_batches = None  # Evaluate full validation set
+
     config = {
         "num_epochs": args.num_epochs,
         "learning_rate_projector": args.learning_rate_projector,
@@ -2100,11 +2485,12 @@ def main():
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "fp16": args.fp16,
         "eval_frequency": args.eval_frequency,
-        # Default eval cap if not specified to keep metrics manageable
-        "max_eval_batches": args.max_eval_batches if args.max_eval_batches is not None else 50,
+        "max_eval_batches": resolved_max_eval_batches,
         "max_new_tokens": args.max_new_tokens,
         "num_beams": args.num_beams,
+        "suppress_eos_for_audio_early_steps": args.suppress_eos_for_audio_early_steps,
         "early_stopping_patience": args.early_stopping_patience,
+        "save_full_checkpoint": args.save_full_checkpoint,
         "audio_contrastive_weight": args.audio_contrastive_weight,
         "audio_contrastive_temperature": args.audio_contrastive_temperature,
         "audio_contrastive_max_length": args.audio_contrastive_max_length,
