@@ -23,6 +23,7 @@ import platform
 import random
 import socket
 import time
+import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -75,6 +76,151 @@ def count_parameters(model: nn.Module) -> Tuple[int, int]:
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total, trainable
+
+
+def summarize_trainable_parameters(model: nn.Module) -> Dict[str, int]:
+    """
+    Return a breakdown of trainable parameters by component and sub-type.
+    Keys are stable prefixes suitable for logging / reporting.
+    """
+    totals: Dict[str, int] = {}
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        n = int(param.numel())
+
+        # Coarse component split
+        if name.startswith("audio_projector."):
+            bucket = "audio_projector"
+        elif name.startswith("fusion_adapter."):
+            bucket = "fusion_adapter"
+        elif name.startswith("audio_token_embeddings."):
+            bucket = "audio_token_embeddings"
+        else:
+            bucket = "other_trainable"
+        totals[bucket] = totals.get(bucket, 0) + n
+
+        # More detailed fusion breakdown (helps explain big parameter drops)
+        if bucket == "fusion_adapter":
+            lower = name.lower()
+            if "lora_" in lower or ".lora_" in lower:
+                sub = "fusion_adapter/lora"
+            elif lower.endswith("residual_scale"):
+                sub = "fusion_adapter/residual_scale"
+            elif "token_gate" in lower:
+                sub = "fusion_adapter/token_gate"
+            else:
+                sub = "fusion_adapter/base_or_other"
+            totals[sub] = totals.get(sub, 0) + n
+
+        # Projector detail (dominant term is usually the output projection)
+        if bucket == "audio_projector":
+            lower = name.lower()
+            if "projector.3" in lower or "projector.2" in lower:
+                # Heuristic: final Linear in nn.Sequential is near the end
+                sub = "audio_projector/final_linear"
+            elif "projector." in lower:
+                sub = "audio_projector/mlp"
+            elif lower.endswith("output_scale"):
+                sub = "audio_projector/output_scale"
+            elif "layernorm" in lower or "layer_norm" in lower or ".norm" in lower:
+                sub = "audio_projector/norms"
+            else:
+                sub = "audio_projector/other"
+            totals[sub] = totals.get(sub, 0) + n
+
+    return totals
+
+
+def _format_param_count(n: int) -> str:
+    return f"{n/1e6:.2f}M"
+
+
+def _sanitize_filename(text: str) -> str:
+    safe = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in str(text))
+    return safe.strip("_")[:80] or "sample"
+
+
+def _export_eval_samples(
+    output_dir: Path,
+    *,
+    split: str,
+    epoch: int,
+    samples: List[Dict[str, Any]],
+    export_audio: bool = False,
+) -> Optional[Path]:
+    """
+    Export qualitative samples for advisor-facing sanity checks.
+    Writes JSON always; optionally writes WAV files for a small sample set.
+    """
+    if not samples:
+        return None
+
+    out_root = Path(output_dir) / "eval_samples" / split / f"epoch_{int(epoch)}"
+    out_root.mkdir(parents=True, exist_ok=True)
+    audio_dir = out_root / "audio"
+    if export_audio:
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
+    exported: List[Dict[str, Any]] = []
+    for idx, row in enumerate(samples):
+        sample_id = row.get("sample_id") or row.get("id") or idx
+        audio_path = row.get("audio_path")
+        subset = row.get("subset")
+        question = row.get("question")
+        prediction = row.get("prediction")
+        references = row.get("references")
+
+        wav_out = None
+        if export_audio:
+            audio = row.get("audio")
+            if (
+                isinstance(audio, tuple)
+                and len(audio) == 2
+                and torch.is_tensor(audio[0])
+                and isinstance(audio[1], (int, float))
+            ):
+                waveform_tensor = audio[0].detach().cpu().float().flatten()
+                sample_rate = int(audio[1])
+                # Clamp to [-1,1] then write 16-bit PCM WAV.
+                waveform_tensor = torch.clamp(waveform_tensor, -1.0, 1.0)
+                pcm16 = (waveform_tensor.numpy() * 32767.0).astype("int16")
+
+                fname = f"{idx:04d}_{_sanitize_filename(sample_id)}.wav"
+                wav_path = audio_dir / fname
+                with wave.open(str(wav_path), "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(pcm16.tobytes())
+                wav_out = str(wav_path)
+
+        exported.append(
+            {
+                "sample_id": sample_id,
+                "subset": subset,
+                "audio_path": audio_path,
+                "exported_wav": wav_out,
+                "question": question,
+                "prediction": prediction,
+                "references": references,
+            }
+        )
+
+    json_path = out_root / "samples.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(exported, f, indent=2, ensure_ascii=False)
+
+    latest = Path(output_dir) / "eval_samples" / split / "samples_latest.json"
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(latest, "w", encoding="utf-8") as f:
+            json.dump(exported, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+    return json_path
 
 
 # ----------------------------------------------------------------------------
@@ -879,6 +1025,8 @@ def evaluate(
 
     total_loss = 0.0
     num_batches = 0
+    token_correct = 0
+    token_total = 0
 
     all_predictions = []
     all_references = []
@@ -897,6 +1045,9 @@ def evaluate(
         answers = batch["answers"]
         audio = batch["audio"]
         has_audio_flags = batch.get("has_audio", None)
+        sample_ids = batch.get("sample_ids", None)
+        audio_paths = batch.get("audio_paths", None)
+        subsets = batch.get("subsets", None)
 
         # Filter out samples with missing audio OR missing caption references.
         # - Missing audio can cause generation to hang (zero-filled audio tokens).
@@ -935,6 +1086,12 @@ def evaluate(
             questions = [questions[i] for i in valid_indices]
             answers = [answers[i] for i in valid_indices]
             audio = [audio[i] for i in valid_indices]
+            if isinstance(sample_ids, list):
+                sample_ids = [sample_ids[i] for i in valid_indices]
+            if isinstance(audio_paths, list):
+                audio_paths = [audio_paths[i] for i in valid_indices]
+            if isinstance(subsets, list):
+                subsets = [subsets[i] for i in valid_indices]
 
         # Prepare inputs (ensure correct device)
         inputs = model.prepare_multimodal_inputs(
@@ -969,6 +1126,18 @@ def evaluate(
         if loss is not None:
             total_loss += loss.item()
             num_batches += 1
+
+        logits = outputs.get("logits")
+        if isinstance(logits, torch.Tensor) and logits.ndim >= 3:
+            try:
+                with torch.no_grad():
+                    preds = logits.argmax(dim=-1)
+                    mask = labels != -100
+                    if mask.any():
+                        token_correct += int((preds[mask] == labels[mask]).sum().item())
+                        token_total += int(mask.sum().item())
+            except Exception:
+                pass
 
         # Generate predictions (reuse same device)
         generation_inputs = model.prepare_multimodal_inputs(
@@ -1049,11 +1218,29 @@ def evaluate(
             all_references.append(refs)
 
             if sample_output is not None and sample_limit > 0 and len(sample_output) < sample_limit:
+                audio_item = None
+                audio_path_item = None
+                subset_item = None
+                sample_id_item = None
+                try:
+                    audio_item = audio[i]
+                except Exception:
+                    audio_item = None
+                if isinstance(audio_paths, list):
+                    audio_path_item = audio_paths[i]
+                if isinstance(subsets, list):
+                    subset_item = subsets[i]
+                if isinstance(sample_ids, list):
+                    sample_id_item = sample_ids[i]
                 sample_output.append(
                     {
+                        "sample_id": sample_id_item,
                         "question": str(question),
                         "prediction": str(cleaned_pred),
                         "references": [str(r) for r in refs],
+                        "audio_path": audio_path_item,
+                        "subset": subset_item,
+                        "audio": audio_item,
                     }
                 )
 
@@ -1079,6 +1266,8 @@ def evaluate(
         "num_samples": len(all_predictions),
         "eval_time": elapsed,
     }
+    if token_total > 0:
+        metrics["token_accuracy"] = float(token_correct / max(token_total, 1))
 
     print(f"[Metrics] Caption metrics computed.", flush=True)
     print(f"✓ Evaluation complete ({format_time(elapsed)})", flush=True)
@@ -1250,6 +1439,8 @@ def train_epoch(
     missing_audio_samples = 0
     missing_caption_samples = 0
     last_skip_log_time = start_time
+    token_correct = 0
+    token_total = 0
 
     for batch_idx, batch in enumerate(dataloader):
         # Move batch to device
@@ -1340,6 +1531,19 @@ def train_epoch(
                 audio_attention_mask=audio_attention_mask,
             )
             loss = outputs["loss"]
+
+        # Token-level training accuracy on supervised positions (captioning analogue of "accuracy")
+        logits = outputs.get("logits") if isinstance(outputs, dict) else None
+        if isinstance(logits, torch.Tensor) and logits.ndim >= 3:
+            try:
+                with torch.no_grad():
+                    preds = logits.argmax(dim=-1)
+                    mask = labels != -100
+                    if mask.any():
+                        token_correct += int((preds[mask] == labels[mask]).sum().item())
+                        token_total += int(mask.sum().item())
+            except Exception:
+                pass
 
         # Optional audio-text contrastive loss (InfoNCE-style) on this batch
         contrastive_weight = float(config.get("audio_contrastive_weight", 0.0) or 0.0)
@@ -1701,6 +1905,8 @@ def train_epoch(
         "missing_audio_samples": missing_audio_samples,
         "missing_caption_samples": missing_caption_samples,
     }
+    if token_total > 0:
+        metrics["token_accuracy"] = float(token_correct / max(token_total, 1))
 
     # Memory cleanup after training epoch to prevent OOM during long runs
     torch.cuda.empty_cache()
@@ -1928,12 +2134,45 @@ def train(
         _wandb_log(wandb_run, init_log, step=optimizer_step)
         if init_samples and wandb is not None:
             try:
-                table = wandb.Table(columns=["question", "prediction", "references"])
+                table = wandb.Table(columns=["sample_id", "audio", "question", "prediction", "references", "audio_path", "subset"])
                 for row in init_samples:
-                    table.add_data(row["question"], row["prediction"], "\n".join(row["references"]))
+                    audio_cell = None
+                    audio_value = row.get("audio")
+                    if isinstance(audio_value, tuple) and len(audio_value) == 2 and torch.is_tensor(audio_value[0]):
+                        try:
+                            audio_cell = wandb.Audio(
+                                audio_value[0].detach().cpu().numpy(),
+                                sample_rate=int(audio_value[1]),
+                            )
+                        except Exception:
+                            audio_cell = None
+                    elif row.get("audio_path"):
+                        try:
+                            audio_cell = wandb.Audio(str(row.get("audio_path")))
+                        except Exception:
+                            audio_cell = None
+
+                    table.add_data(
+                        row.get("sample_id"),
+                        audio_cell,
+                        row.get("question"),
+                        row.get("prediction"),
+                        "\n".join(row.get("references") or []),
+                        row.get("audio_path"),
+                        row.get("subset"),
+                    )
                 _wandb_log(wandb_run, {"train/optimizer_step": optimizer_step, "val/samples": table}, step=optimizer_step)
             except Exception:
                 pass
+
+    if init_samples and bool(config.get("export_eval_samples", False)):
+        _export_eval_samples(
+            output_dir,
+            split="val",
+            epoch=0,
+            samples=init_samples,
+            export_audio=bool(config.get("export_eval_samples_audio", False)),
+        )
 
     for epoch in range(1, num_epochs + 1):
         print(f"\n{'='*80}")
@@ -2003,6 +2242,14 @@ def train(
                 sample_output=val_samples,
                 sample_limit=wandb_sample_count,
             )
+            if val_samples and bool(config.get("export_eval_samples", False)):
+                _export_eval_samples(
+                    output_dir,
+                    split="val",
+                    epoch=epoch,
+                    samples=val_samples,
+                    export_audio=bool(config.get("export_eval_samples_audio", False)),
+                )
 
             # Update history
             history["train_loss"].append(train_metrics["loss"])
@@ -2046,10 +2293,44 @@ def train(
                 _wandb_log(wandb_run, val_log, step=optimizer_step)
                 if val_samples and wandb is not None:
                     try:
-                        table = wandb.Table(columns=["question", "prediction", "references"])
+                        table = wandb.Table(
+                            columns=["sample_id", "audio", "question", "prediction", "references", "audio_path", "subset"]
+                        )
                         for row in val_samples:
-                            table.add_data(row["question"], row["prediction"], "\n".join(row["references"]))
-                        _wandb_log(wandb_run, {"train/optimizer_step": optimizer_step, "val/samples": table}, step=optimizer_step)
+                            audio_cell = None
+                            audio_value = row.get("audio")
+                            if (
+                                isinstance(audio_value, tuple)
+                                and len(audio_value) == 2
+                                and torch.is_tensor(audio_value[0])
+                            ):
+                                try:
+                                    audio_cell = wandb.Audio(
+                                        audio_value[0].detach().cpu().numpy(),
+                                        sample_rate=int(audio_value[1]),
+                                    )
+                                except Exception:
+                                    audio_cell = None
+                            elif row.get("audio_path"):
+                                try:
+                                    audio_cell = wandb.Audio(str(row.get("audio_path")))
+                                except Exception:
+                                    audio_cell = None
+
+                            table.add_data(
+                                row.get("sample_id"),
+                                audio_cell,
+                                row.get("question"),
+                                row.get("prediction"),
+                                "\n".join(row.get("references") or []),
+                                row.get("audio_path"),
+                                row.get("subset"),
+                            )
+                        _wandb_log(
+                            wandb_run,
+                            {"train/optimizer_step": optimizer_step, "val/samples": table},
+                            step=optimizer_step,
+                        )
                     except Exception:
                         pass
                 if (
@@ -2345,8 +2626,18 @@ def main():
                         help="wandb.watch log frequency.")
     parser.add_argument("--wandb-log-checkpoints", action="store_true",
                         help="Log best checkpoints as W&B artifacts.")
-    parser.add_argument("--wandb-sample-count", type=int, default=50,
+    parser.add_argument("--wandb-sample-count", type=int, default=30,
                         help="How many sample predictions to log per evaluation.")
+    parser.add_argument(
+        "--export-eval-samples",
+        action="store_true",
+        help="Export qualitative eval samples to output_dir/eval_samples (JSON, and optional WAV).",
+    )
+    parser.add_argument(
+        "--export-eval-samples-audio",
+        action="store_true",
+        help="When exporting eval samples, also write WAV files (for small sample_count).",
+    )
 
     args = parser.parse_args()
 
@@ -2414,6 +2705,11 @@ def main():
     print(f"\n📊 Model parameters:")
     print(f"  Total: {total_params:,}")
     print(f"  Trainable: {trainable_params:,} ({100*trainable_params/total_params:.2f}%)")
+    breakdown = summarize_trainable_parameters(model)
+    if breakdown:
+        print("  Trainable breakdown:")
+        for key in sorted(breakdown.keys()):
+            print(f"    - {key}: {_format_param_count(breakdown[key])}")
 
     # Load datasets
     print(f"\n📂 Loading datasets from: {args.data_path}")
@@ -2495,6 +2791,8 @@ def main():
         "audio_contrastive_temperature": args.audio_contrastive_temperature,
         "audio_contrastive_max_length": args.audio_contrastive_max_length,
         "gate_warmup_steps": args.gate_warmup_steps,
+        "export_eval_samples": bool(args.export_eval_samples),
+        "export_eval_samples_audio": bool(args.export_eval_samples_audio),
     }
 
     # Optional W&B init (after model + data are available so config is complete)
@@ -2543,15 +2841,54 @@ def main():
         with open(results_path, "w") as f:
             json.dump(metrics, f, indent=2)
 
+        if eval_samples and bool(config.get("export_eval_samples", False)):
+            _export_eval_samples(
+                output_dir,
+                split="eval",
+                epoch=0,
+                samples=eval_samples,
+                export_audio=bool(config.get("export_eval_samples_audio", False)),
+            )
+
         if wandb_run is not None:
             eval_log = {"train/optimizer_step": 0, "epoch": 0}
             eval_log.update({f"eval/{k}": v for k, v in metrics.items() if isinstance(v, (int, float))})
             _wandb_log(wandb_run, eval_log, step=0)
             if eval_samples and wandb is not None:
                 try:
-                    table = wandb.Table(columns=["question", "prediction", "references"])
+                    table = wandb.Table(
+                        columns=["sample_id", "audio", "question", "prediction", "references", "audio_path", "subset"]
+                    )
                     for row in eval_samples:
-                        table.add_data(row["question"], row["prediction"], "\n".join(row["references"]))
+                        audio_cell = None
+                        audio_value = row.get("audio")
+                        if (
+                            isinstance(audio_value, tuple)
+                            and len(audio_value) == 2
+                            and torch.is_tensor(audio_value[0])
+                        ):
+                            try:
+                                audio_cell = wandb.Audio(
+                                    audio_value[0].detach().cpu().numpy(),
+                                    sample_rate=int(audio_value[1]),
+                                )
+                            except Exception:
+                                audio_cell = None
+                        elif row.get("audio_path"):
+                            try:
+                                audio_cell = wandb.Audio(str(row.get("audio_path")))
+                            except Exception:
+                                audio_cell = None
+
+                        table.add_data(
+                            row.get("sample_id"),
+                            audio_cell,
+                            row.get("question"),
+                            row.get("prediction"),
+                            "\n".join(row.get("references") or []),
+                            row.get("audio_path"),
+                            row.get("subset"),
+                        )
                     _wandb_log(wandb_run, {"train/optimizer_step": 0, "eval/samples": table}, step=0)
                 except Exception:
                     pass

@@ -200,7 +200,7 @@ def _collate_multimodal_batch(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]
         "has_audio": torch.tensor(has_audio, dtype=torch.bool),
     }
 
-    optional_keys = ["sample_id", "difficulty", "question_type"]
+    optional_keys = ["sample_id", "audio_path", "subset", "difficulty", "question_type"]
     for key in optional_keys:
         values = [sample.get(key) for sample in batch]
         if any(v is not None for v in values):
@@ -312,15 +312,10 @@ class _BaseQADataset(Dataset):
         return raw_answer
 
     # ------------------------------------------------------------------
-    def _load_audio(self, entry: Dict[str, Any]) -> Any:
+    def _resolve_audio_file(self, entry: Dict[str, Any]) -> Optional[Path]:
         """
-        Load audio from file (supports WAV, FLAC, MP3, OGG, etc.).
-
-        Args:
-            entry: Metadata entry containing 'audio_path' or 'audio' field
-
-        Returns:
-            Tuple of (waveform, sample_rate) or None if loading fails
+        Resolve an entry's audio to an existing local file path without decoding.
+        Mirrors the search logic used in _load_audio.
         """
         raw_audio_path = entry.get("audio") or entry.get("audio_path") or entry.get("file_path")
         split_name = entry.get("split") or self.split
@@ -345,11 +340,9 @@ class _BaseQADataset(Dataset):
         _add_candidate(raw_audio_path)
 
         if sound_name and split_name:
-            # Prefer 10-second clipped audio directory if available
             base_candidate_10s = Path("audio") / f"{split_name}_10s" / sound_name
             _add_candidate(base_candidate_10s)
 
-            # Fallback to regular audio directory
             base_candidate = Path("audio") / str(split_name) / sound_name
             _add_candidate(base_candidate)
 
@@ -367,7 +360,22 @@ class _BaseQADataset(Dataset):
             elif suffix.lower() != ".wav":
                 _add_candidate(Path("audio") / str(split_name) / f"{stem}.wav")
 
-        audio_file = next((candidate for candidate in candidate_paths if candidate and candidate.exists()), None)
+        return next((candidate for candidate in candidate_paths if candidate and candidate.exists()), None)
+
+    # ------------------------------------------------------------------
+    def _load_audio(self, entry: Dict[str, Any]) -> Any:
+        """
+        Load audio from file (supports WAV, FLAC, MP3, OGG, etc.).
+
+        Args:
+            entry: Metadata entry containing 'audio_path' or 'audio' field
+
+        Returns:
+            Tuple of (waveform, sample_rate) or None if loading fails
+        """
+        raw_audio_path = entry.get("audio") or entry.get("audio_path") or entry.get("file_path")
+        sound_name = entry.get("sound_name") or entry.get("ytid") or entry.get("id")
+        audio_file = self._resolve_audio_file(entry)
 
         if audio_file is None:
             # Single, concise warning per dataset instance to avoid log spam
@@ -476,6 +484,7 @@ class _BaseQADataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
         entry = self.examples[idx]
         answer_value = entry.get("answers") or entry.get("answer")
+        resolved_audio = self._resolve_audio_file(entry)
 
         # Debug: Log first sample to verify data loading
         if idx == 0:
@@ -489,6 +498,7 @@ class _BaseQADataset(Dataset):
             "sample_id": entry.get("id") or entry.get("sample_id"),
             "question": entry.get("question") or entry.get("prompt") or "",
             "answers": answer_value,
+            "audio_path": str(resolved_audio) if resolved_audio is not None else (entry.get("audio_path") or entry.get("audio")),
             "audio": self._load_audio(entry),
             "images": self._load_image(entry),
             "difficulty": entry.get("difficulty"),
@@ -516,6 +526,7 @@ class AudioCapsDataset(_BaseQADataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:  # type: ignore[override]
         entry = self.examples[idx]
         question = entry.get("question") or "What is happening in the audio?"
+        resolved_audio = self._resolve_audio_file(entry)
 
         # Try multiple field names for answers (datasets use different conventions)
         captions = entry.get("captions")
@@ -555,6 +566,7 @@ class AudioCapsDataset(_BaseQADataset):
             "sample_id": entry.get("id") or entry.get("ytid") or entry.get("sound_name"),
             "question": question,
             "answers": answers,
+            "audio_path": str(resolved_audio) if resolved_audio is not None else (entry.get("audio_path") or entry.get("audio")),
             "audio": self._load_audio(entry) if has_captions else None,
             "images": self._load_image(entry),
             "difficulty": entry.get("difficulty"),
@@ -606,11 +618,13 @@ class WavCapsDataset(_BaseQADataset):
         # WavCaps uses standardized format from download script
         question = entry.get("question") or "What is happening in the audio?"
         answers = entry.get("answer") or entry.get("answers") or entry.get("caption")
+        resolved_audio = self._resolve_audio_file(entry)
 
         sample = {
             "sample_id": entry.get("id"),
             "question": question,
             "answers": answers,
+            "audio_path": str(resolved_audio) if resolved_audio is not None else (entry.get("audio_path") or entry.get("audio")),
             "audio": self._load_audio(entry),
             "images": None,  # WavCaps is audio-only
             "subset": entry.get("subset"),  # Track which subset (FreeSound, BBC, etc.)
