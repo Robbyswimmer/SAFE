@@ -83,8 +83,8 @@ class TestCollateMultimodalBatch:
         assert len(result["audio"]) == 2
         assert len(result["images"]) == 2
         assert result["has_audio"].shape == (2,)
-        assert result["has_audio"][0] is True
-        assert result["has_audio"][1] is False
+        assert result["has_audio"][0].item() is True
+        assert result["has_audio"][1].item() is False
 
     def test_collation_with_alternative_keys(self):
         """Test collation handles alternative key names."""
@@ -138,7 +138,7 @@ class TestCollateMultimodalBatch:
 
         assert result["questions"][0] == "Q1"
         assert result["answers"][0] is None
-        assert result["has_audio"][0] is False
+        assert result["has_audio"][0].item() is False
 
     def test_has_audio_tensor_dtype(self):
         """Test has_audio is boolean tensor."""
