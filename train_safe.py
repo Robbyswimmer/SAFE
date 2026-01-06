@@ -1489,6 +1489,7 @@ def train_epoch(
     scaler: Optional[GradScaler] = None,
     wandb_run: Any = None,
     optimizer_step: int = 0,
+    world_size: int = 1,
 ) -> Tuple[Dict[str, float], int]:
     """
     Train for one epoch
@@ -1502,6 +1503,7 @@ def train_epoch(
         epoch: Current epoch number
         config: Training configuration
         scaler: GradScaler for mixed precision (optional)
+        world_size: Number of GPUs for accurate throughput calculation
 
     Returns:
         Dict with training metrics
@@ -1760,7 +1762,7 @@ def train_epoch(
                     "train/batch_idx": batch_idx,
                     "train/micro_batches": step_micro_batches,
                     "train/loss_step": (step_loss_sum / max(step_micro_batches, 1)),
-                    "train/samples_per_sec_step": step_samples / step_time,
+                    "train/samples_per_sec_step": (step_samples * world_size) / step_time,
                     "train/grad_norm": float(grad_norm) if grad_norm is not None else None,
                 }
                 for group_idx, (group, lr) in enumerate(zip(optimizer.param_groups, lrs)):
@@ -1777,6 +1779,10 @@ def train_epoch(
                     log_dict["train/gradcheck/audio_projector_sum_norm"] = last_proj_grad_norm
                 if last_fuse_grad_norm is not None:
                     log_dict["train/gradcheck/fusion_adapter_sum_norm"] = last_fuse_grad_norm
+
+                # Token-level accuracy (training accuracy proxy)
+                if token_total > 0:
+                    log_dict["train/token_accuracy"] = float(token_correct / token_total)
 
                 if audio_tokens is not None:
                     try:
@@ -1839,7 +1845,7 @@ def train_epoch(
         if current_time - last_log_time > 60:  # Log every minute
             avg_loss = total_loss / num_batches
             elapsed = current_time - start_time
-            samples_per_sec = num_samples / elapsed
+            samples_per_sec = (num_samples * world_size) / elapsed
             lr = scheduler.get_last_lr()[0]
 
             # Optional diagnostics for audio fusion strength
@@ -1916,7 +1922,7 @@ def train_epoch(
                 "train/batch_idx": batch_idx,
                 "train/micro_batches": step_micro_batches,
                 "train/loss_step": (step_loss_sum / max(step_micro_batches, 1)),
-                "train/samples_per_sec_step": step_samples / step_time,
+                "train/samples_per_sec_step": (step_samples * world_size) / step_time,
                 "train/grad_norm": float(grad_norm) if grad_norm is not None else None,
             }
             for group_idx, (group, lr) in enumerate(zip(optimizer.param_groups, lrs)):
@@ -1995,11 +2001,14 @@ def train_epoch(
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     elapsed = time.time() - start_time
 
+    # Total samples across all GPUs
+    total_samples_all_gpus = num_samples * world_size
+
     metrics = {
         "loss": avg_loss,
-        "num_samples": num_samples,
+        "num_samples": total_samples_all_gpus,
         "train_time": elapsed,
-        "samples_per_sec": num_samples / elapsed,
+        "samples_per_sec": total_samples_all_gpus / elapsed,
         "skipped_batches": skipped_batches,
         "dropped_samples": skipped_samples + filtered_samples,
         "missing_audio_samples": missing_audio_samples,
@@ -2342,6 +2351,7 @@ def train(
             scaler,
             wandb_run=wandb_run,
             optimizer_step=optimizer_step,
+            world_size=dist_info["world_size"],
         )
         if wandb_run is not None:
             train_log = {"train/optimizer_step": optimizer_step, "epoch": epoch}
@@ -2869,15 +2879,20 @@ def main():
 
     # Wrap model with DDP for distributed training
     if dist_info["distributed"]:
-        # Find parameters that require gradients for DDP
+        # DDP configuration for SAFE:
+        # - find_unused_parameters=False for performance (we know our param usage is consistent)
+        # - static_graph=True enables optimizations since our computation graph doesn't change
+        # - gradient_as_bucket_view=True reduces memory copies
         model = DDP(
             model,
             device_ids=[dist_info["local_rank"]],
             output_device=dist_info["local_rank"],
-            find_unused_parameters=True,  # SAFE has some unused params depending on input
+            find_unused_parameters=False,
+            static_graph=True,
+            gradient_as_bucket_view=True,
         )
         if is_main:
-            print(f"  ✓ Model wrapped with DistributedDataParallel")
+            print(f"  ✓ Model wrapped with DistributedDataParallel (static_graph=True)")
 
     # Enable gradient checkpointing if requested (saves ~10-15GB memory)
     # Access the underlying model if wrapped in DDP
