@@ -36,6 +36,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from configs.model_configs import get_config
 from safe.models.safe_model import SAFEModel
 from safe.data.datasets import AudioCapsDataset, create_safe_dataloader, _collate_multimodal_batch
+from train_safe import compute_caption_metrics
 
 
 def format_time(seconds: float) -> str:
@@ -105,97 +106,6 @@ def load_model_from_checkpoint(
     model.eval()
 
     return model
-
-
-def compute_caption_metrics(
-    predictions: List[str],
-    references: List[List[str]],
-) -> Dict[str, float]:
-    """Compute BLEU, METEOR, CIDEr, ROUGE-L metrics."""
-
-    if not predictions:
-        return {"bleu1": 0, "bleu4": 0, "meteor": 0, "rouge_l": 0, "cider": 0}
-
-    # Try pycocoevalcap first (preferred)
-    try:
-        from pycocoevalcap.bleu.bleu import Bleu
-        from pycocoevalcap.meteor.meteor import Meteor
-        from pycocoevalcap.rouge.rouge import Rouge
-        from pycocoevalcap.cider.cider import Cider
-
-        # Format for pycocoevalcap: {id: [caption]}
-        gts = {i: refs for i, refs in enumerate(references)}
-        res = {i: [pred] for i, pred in enumerate(predictions)}
-
-        metrics = {}
-
-        # BLEU
-        bleu_scorer = Bleu(4)
-        bleu_scores, _ = bleu_scorer.compute_score(gts, res)
-        metrics["bleu1"] = bleu_scores[0]
-        metrics["bleu2"] = bleu_scores[1]
-        metrics["bleu3"] = bleu_scores[2]
-        metrics["bleu4"] = bleu_scores[3]
-
-        # METEOR
-        meteor_scorer = Meteor()
-        meteor_score, _ = meteor_scorer.compute_score(gts, res)
-        metrics["meteor"] = meteor_score
-
-        # ROUGE-L
-        rouge_scorer = Rouge()
-        rouge_score, _ = rouge_scorer.compute_score(gts, res)
-        metrics["rouge_l"] = rouge_score
-
-        # CIDEr
-        cider_scorer = Cider()
-        cider_score, _ = cider_scorer.compute_score(gts, res)
-        metrics["cider"] = cider_score
-
-        return metrics
-
-    except ImportError:
-        print("[WARN] pycocoevalcap not available, using nltk fallback")
-
-    # Fallback to nltk
-    try:
-        from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-        from nltk.translate.meteor_score import meteor_score
-
-        smoothing = SmoothingFunction().method1
-
-        bleu1_scores = []
-        bleu4_scores = []
-        meteor_scores = []
-
-        for pred, refs in zip(predictions, references):
-            pred_tokens = pred.lower().split()
-            ref_tokens = [r.lower().split() for r in refs]
-
-            # BLEU
-            bleu1 = sentence_bleu(ref_tokens, pred_tokens, weights=(1, 0, 0, 0), smoothing_function=smoothing)
-            bleu4 = sentence_bleu(ref_tokens, pred_tokens, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=smoothing)
-            bleu1_scores.append(bleu1)
-            bleu4_scores.append(bleu4)
-
-            # METEOR (use first reference)
-            try:
-                m = meteor_score([refs[0].split()], pred.split())
-                meteor_scores.append(m)
-            except:
-                meteor_scores.append(0.0)
-
-        return {
-            "bleu1": sum(bleu1_scores) / len(bleu1_scores) if bleu1_scores else 0,
-            "bleu4": sum(bleu4_scores) / len(bleu4_scores) if bleu4_scores else 0,
-            "meteor": sum(meteor_scores) / len(meteor_scores) if meteor_scores else 0,
-            "rouge_l": 0.0,  # Not computed in fallback
-            "cider": 0.0,    # Not computed in fallback
-        }
-
-    except ImportError:
-        print("[ERROR] Neither pycocoevalcap nor nltk available")
-        return {"bleu1": 0, "bleu4": 0, "meteor": 0, "rouge_l": 0, "cider": 0}
 
 
 def evaluate_on_split(
