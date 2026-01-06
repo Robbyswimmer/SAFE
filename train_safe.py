@@ -559,8 +559,10 @@ def _embed_texts_for_contrastive(
     Embed texts using the base LLM embedding layer, pooled over tokens.
     Mirrors StageATrainer._embed_texts behavior.
     """
-    tokenizer = model.base_vl.tokenizer
-    embedding_layer = model.base_vl.llm.get_input_embeddings()
+    # Handle DDP wrapper - get underlying model for attribute access
+    base_model = model.module if hasattr(model, 'module') else model
+    tokenizer = base_model.base_vl.tokenizer
+    embedding_layer = base_model.base_vl.llm.get_input_embeddings()
     hidden_size = embedding_layer.weight.size(1)
 
     if not texts:
@@ -1037,15 +1039,18 @@ def evaluate(
     """
     model.eval()
 
+    # Handle DDP wrapper - get underlying model for attribute access
+    base_model = model.module if hasattr(model, 'module') else model
+
     # Ensure audio fusion is fully enabled during evaluation
-    if hasattr(model, "set_gate"):
+    if hasattr(base_model, "set_gate"):
         try:
-            model.set_gate(1.0)
+            base_model.set_gate(1.0)
         except Exception:
             pass
 
     # CRITICAL: Configure generation parameters to prevent hanging
-    tokenizer = model.base_vl.tokenizer
+    tokenizer = base_model.base_vl.tokenizer
 
     # Ensure pad_token exists
     if tokenizer.pad_token_id is None:
@@ -1055,15 +1060,15 @@ def evaluate(
             tokenizer.pad_token_id = 0
 
     # Set generation config on the LLM to prevent conflicts
-    if hasattr(model.base_vl.llm, 'config'):
-        model.base_vl.llm.config.pad_token_id = tokenizer.pad_token_id
-        model.base_vl.llm.config.eos_token_id = tokenizer.eos_token_id
+    if hasattr(base_model.base_vl.llm, 'config'):
+        base_model.base_vl.llm.config.pad_token_id = tokenizer.pad_token_id
+        base_model.base_vl.llm.config.eos_token_id = tokenizer.eos_token_id
 
-    if hasattr(model.base_vl.llm, 'generation_config'):
-        model.base_vl.llm.generation_config.pad_token_id = tokenizer.pad_token_id
-        model.base_vl.llm.generation_config.eos_token_id = tokenizer.eos_token_id
+    if hasattr(base_model.base_vl.llm, 'generation_config'):
+        base_model.base_vl.llm.generation_config.pad_token_id = tokenizer.pad_token_id
+        base_model.base_vl.llm.generation_config.eos_token_id = tokenizer.eos_token_id
         # Override max_length to respect max_new_tokens limit
-        model.base_vl.llm.generation_config.max_length = None
+        base_model.base_vl.llm.generation_config.max_length = None
 
     total_loss = 0.0
     num_batches = 0
@@ -1136,7 +1141,7 @@ def evaluate(
                 subsets = [subsets[i] for i in valid_indices]
 
         # Prepare inputs (ensure correct device)
-        inputs = model.prepare_multimodal_inputs(
+        inputs = base_model.prepare_multimodal_inputs(
             text=questions,
             audio=audio,
             answers=answers,
@@ -1182,7 +1187,7 @@ def evaluate(
                 pass
 
         # Generate predictions (reuse same device)
-        generation_inputs = model.prepare_multimodal_inputs(
+        generation_inputs = base_model.prepare_multimodal_inputs(
             text=questions,
             audio=audio,
             answers=None,  # No answers for generation
@@ -1224,8 +1229,8 @@ def evaluate(
                     suppress_tokens.append(tokenizer.pad_token_id)
                 generation_kwargs["suppress_tokens"] = suppress_tokens
 
-        # Generate captions
-        generated_ids = model.generate(
+        # Generate captions (use base_model for generate method)
+        generated_ids = base_model.generate(
             input_ids=gen_input_ids,
             attention_mask=gen_attention_mask,
             audio_tokens=gen_audio_tokens,
@@ -1233,8 +1238,7 @@ def evaluate(
             **generation_kwargs,
         )
 
-        # Decode predictions
-        tokenizer = model.base_vl.tokenizer
+        # Decode predictions (tokenizer already set from base_model above)
         batch_predictions = tokenizer.batch_decode(
             generated_ids,
             skip_special_tokens=True,
@@ -1502,11 +1506,14 @@ def train_epoch(
     Returns:
         Dict with training metrics
     """
+    # Handle DDP wrapper - get underlying model for attribute access
+    base_model = model.module if hasattr(model, 'module') else model
+
     # Ensure audio components are in training mode while keeping base VL frozen
-    if hasattr(model, "enable_audio_training"):
-        model.enable_audio_training()
+    if hasattr(base_model, "enable_audio_training"):
+        base_model.enable_audio_training()
     else:
-        model.train()
+        model.train()  # Use model (not base_model) to ensure DDP hooks work
 
     total_loss = 0.0
     num_batches = 0
@@ -1584,8 +1591,8 @@ def train_epoch(
                 answers = [answers[i] for i in valid_indices]
                 audio = [audio[i] for i in valid_indices]
 
-        # Prepare inputs
-        inputs = model.prepare_multimodal_inputs(
+        # Prepare inputs (use base_model for helper method)
+        inputs = base_model.prepare_multimodal_inputs(
             text=questions,
             audio=audio,
             answers=answers,
@@ -1650,8 +1657,8 @@ def train_epoch(
                 # Resolve textual answers for each sample using SAFEModel helper
                 resolved_answers: List[str] = []
                 for ans in answers:
-                    if hasattr(model, "_select_training_answer"):
-                        text = model._select_training_answer(ans)
+                    if hasattr(base_model, "_select_training_answer"):
+                        text = base_model._select_training_answer(ans)
                     else:
                         text = ans if isinstance(ans, str) else (ans[0] if isinstance(ans, list) and ans else "")
                     resolved_answers.append(str(text or "").strip())
@@ -1779,11 +1786,11 @@ def train_epoch(
                         pass
 
                 # Track common "fusion collapse" indicators (scales drifting to ~0).
-                proj_scale = _extract_audio_projector_output_scale(model)
+                proj_scale = _extract_audio_projector_output_scale(base_model)
                 if proj_scale is not None:
                     log_dict["train/audio_projector_output_scale"] = float(proj_scale)
 
-                residual_scales = _extract_fusion_residual_scales(model)
+                residual_scales = _extract_fusion_residual_scales(base_model)
                 if residual_scales:
                     values = list(residual_scales.values())
                     log_dict["train/fusion_residual_scale_mean"] = float(sum(values) / len(values))
@@ -1794,8 +1801,8 @@ def train_epoch(
                         log_dict[f"train/fusion_residual_scale/{k}"] = float(v)
 
                 try:
-                    if hasattr(model, "get_last_attention_summary"):
-                        summary = model.get_last_attention_summary()
+                    if hasattr(base_model, "get_last_attention_summary"):
+                        summary = base_model.get_last_attention_summary()
                         if isinstance(summary, dict):
                             if summary.get("overall_mean", None) is not None:
                                 log_dict["train/attn_mean"] = float(summary["overall_mean"])
@@ -1844,9 +1851,9 @@ def train_epoch(
                 except Exception:
                     audio_token_norm = None
 
-            proj_scale = _extract_audio_projector_output_scale(model)
+            proj_scale = _extract_audio_projector_output_scale(base_model)
             residual_scale_mean = None
-            residual_scales = _extract_fusion_residual_scales(model)
+            residual_scales = _extract_fusion_residual_scales(base_model)
             if residual_scales:
                 values = list(residual_scales.values())
                 residual_scale_mean = float(sum(values) / len(values))
@@ -1854,8 +1861,8 @@ def train_epoch(
             attn_mean = None
             attn_max = None
             try:
-                if hasattr(model, "get_last_attention_summary"):
-                    summary = model.get_last_attention_summary()
+                if hasattr(base_model, "get_last_attention_summary"):
+                    summary = base_model.get_last_attention_summary()
                     if isinstance(summary, dict):
                         attn_mean = summary.get("overall_mean", None)
                         attn_max = summary.get("overall_max", None)
@@ -1934,11 +1941,11 @@ def train_epoch(
                 except Exception:
                     pass
 
-            proj_scale = _extract_audio_projector_output_scale(model)
+            proj_scale = _extract_audio_projector_output_scale(base_model)
             if proj_scale is not None:
                 log_dict["train/audio_projector_output_scale"] = float(proj_scale)
 
-            residual_scales = _extract_fusion_residual_scales(model)
+            residual_scales = _extract_fusion_residual_scales(base_model)
             if residual_scales:
                 values = list(residual_scales.values())
                 log_dict["train/fusion_residual_scale_mean"] = float(sum(values) / len(values))
@@ -1949,8 +1956,8 @@ def train_epoch(
                     log_dict[f"train/fusion_residual_scale/{k}"] = float(v)
 
             try:
-                if hasattr(model, "get_last_attention_summary"):
-                    summary = model.get_last_attention_summary()
+                if hasattr(base_model, "get_last_attention_summary"):
+                    summary = base_model.get_last_attention_summary()
                     if isinstance(summary, dict):
                         if summary.get("overall_mean", None) is not None:
                             log_dict["train/attn_mean"] = float(summary["overall_mean"])
@@ -2343,8 +2350,8 @@ def train(
 
         # Gate warmup: ramp SAFE gate from 0 → 1 over a configured number of optimizer steps
         gate_warmup_steps = int(config.get("gate_warmup_steps", 0) or 0)
-        if gate_warmup_steps > 0 and hasattr(model, "set_gate_warmup"):
-            model.set_gate_warmup(optimizer_step, warmup_steps=gate_warmup_steps)
+        if gate_warmup_steps > 0 and hasattr(base_model, "set_gate_warmup"):
+            base_model.set_gate_warmup(optimizer_step, warmup_steps=gate_warmup_steps)
 
         print(f"\n✓ Training complete:")
         print(f"  Loss: {train_metrics['loss']:.4f}")
@@ -2897,6 +2904,15 @@ def main():
             print("  Trainable breakdown:")
             for key in sorted(breakdown.keys()):
                 print(f"    - {key}: {_format_param_count(breakdown[key])}")
+
+        # Check for LoRA parameters and warn if missing
+        lora_params = breakdown.get("fusion_adapter/lora", 0)
+        if lora_params > 0:
+            print(f"\n  ✓ LoRA parameters detected: {_format_param_count(lora_params)} (training enabled)")
+        else:
+            print(f"\n  ⚠️  WARNING: No LoRA parameters found in trainable params!")
+            print(f"     This may indicate LoRA weights are frozen (check fusion_adapter.py)")
+            print(f"     Expected ~10-15M LoRA params for cross-attention adapters")
 
     # Load datasets
     if is_main:
