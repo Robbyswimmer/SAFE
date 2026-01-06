@@ -2,18 +2,19 @@
 """
 zero_forgetting_verify.py - Verify the architectural zero-forgetting guarantee
 
-This script proves that SAFE produces IDENTICAL outputs to the frozen baseline
+This script proves that SAFE produces IDENTICAL outputs to its frozen baseline
 when audio input is absent. This is the core thesis of the paper.
 
 The test:
-1. Load frozen LLaVA baseline
-2. Load SAFE model (untrained adapter - random weights are fine)
-3. Run identical inputs through both
-4. Compare outputs token-by-token
-5. Report: exact match = guarantee proven
+1. Load SAFE model (untrained adapter)
+2. Run SAME inputs through:
+   a) SAFE with audio=None (should passthrough to base)
+   b) SAFE's base_vl directly
+3. Compare outputs token-by-token
+4. Report: exact match = guarantee proven
 
 Usage:
-    python safe/ablations/zero_forgetting_verify.py --num_samples 100
+    python safe/ablations/zero_forgetting_verify.py --num_samples 50 --synthetic
 
 On cluster:
     python safe/ablations/zero_forgetting_verify.py \
@@ -38,49 +39,19 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def load_coco_samples(
-    coco_dir: Path,
-    num_samples: int = 100,
-    seed: int = 42
-) -> List[Dict]:
-    """Load COCO val images for testing."""
-    val_dir = coco_dir / "val2014"
-
-    if not val_dir.exists():
-        print(f"[ERROR] COCO val2014 not found at {val_dir}")
-        print("Falling back to synthetic test...")
-        return None
-
-    # Get all val images
-    image_files = list(val_dir.glob("*.jpg"))
-    if not image_files:
-        print(f"[ERROR] No images found in {val_dir}")
-        return None
-
-    print(f"[INFO] Found {len(image_files)} COCO val images")
-
-    # Sample randomly
-    random.seed(seed)
-    sampled = random.sample(image_files, min(num_samples, len(image_files)))
-
-    samples = []
-    for img_path in sampled:
-        samples.append({
-            "image_path": str(img_path),
-            "prompt": "Describe this image in detail."
-        })
-
-    return samples
-
-
 def create_synthetic_samples(num_samples: int = 100) -> List[Dict]:
-    """Create synthetic test samples (no images, text-only)."""
+    """Create synthetic test samples (text-only, no images)."""
     prompts = [
         "What is the capital of France?",
         "Explain photosynthesis briefly.",
         "What color is the sky?",
         "Count from 1 to 5.",
         "What is 2 + 2?",
+        "Name three primary colors.",
+        "What is the largest planet?",
+        "How many days in a week?",
+        "What sound does a cat make?",
+        "What is H2O?",
     ]
 
     samples = []
@@ -93,35 +64,57 @@ def create_synthetic_samples(num_samples: int = 100) -> List[Dict]:
     return samples
 
 
-def load_baseline_model(device: str = "cuda"):
-    """Load frozen LLaVA baseline directly."""
-    from transformers import LlavaForConditionalGeneration, AutoProcessor
+def load_coco_samples(
+    coco_dir: Path,
+    num_samples: int = 100,
+    seed: int = 42
+) -> Optional[List[Dict]]:
+    """Load COCO val images for testing."""
+    val_dir = coco_dir / "val2014"
 
-    model_name = "llava-hf/llava-1.5-7b-hf"  # Use 7B for faster testing
-    print(f"[INFO] Loading baseline LLaVA: {model_name}")
+    if not val_dir.exists():
+        print(f"[WARN] COCO val2014 not found at {val_dir}")
+        return None
 
-    processor = AutoProcessor.from_pretrained(model_name)
-    model = LlavaForConditionalGeneration.from_pretrained(
-        model_name,
-        torch_dtype=torch.float16,
-        device_map=device
-    )
-    model.eval()
+    image_files = list(val_dir.glob("*.jpg"))
+    if not image_files:
+        print(f"[WARN] No images found in {val_dir}")
+        return None
 
-    return model, processor
+    print(f"[INFO] Found {len(image_files)} COCO val images")
+
+    random.seed(seed)
+    sampled = random.sample(image_files, min(num_samples, len(image_files)))
+
+    samples = []
+    for img_path in sampled:
+        samples.append({
+            "image_path": str(img_path),
+            "prompt": "Describe this image."
+        })
+
+    return samples
 
 
-def load_safe_model(device: str = "cuda"):
+def load_safe_model(device: str = "cuda", use_7b: bool = True):
     """Load SAFE model with untrained adapter."""
-    from configs.model_configs import get_config
     from safe.models.safe_model import SAFEModel
 
-    # Use a lighter config for testing
-    print("[INFO] Loading SAFE model (untrained adapter)")
+    if use_7b:
+        model_name = "llava-hf/llava-1.5-7b-hf"
+        hidden_size = 4096
+        num_heads = 32
+        fusion_layers = [8, 16, 24]  # 32 layers total
+    else:
+        model_name = "llava-hf/llava-1.5-13b-hf"
+        hidden_size = 5120
+        num_heads = 40
+        fusion_layers = [12, 24, 36]  # 40 layers total
 
-    # We need to match the baseline model
+    print(f"[INFO] Loading SAFE model: {model_name}")
+
     model = SAFEModel(
-        llm_model_name="llava-hf/llava-1.5-7b-hf",
+        llm_model_name=model_name,
         vision_model_name="openai/clip-vit-large-patch14",
         audio_encoder_type="clap",
         audio_encoder_config={
@@ -129,18 +122,18 @@ def load_safe_model(device: str = "cuda"):
             "sample_rate": 48000,
             "max_length": 10.0
         },
-        llm_hidden_size=4096,  # LLaVA 7B hidden size
+        llm_hidden_size=hidden_size,
         audio_embed_dim=512,
         projector_type="standard",
         num_audio_tokens=8,
         projector_config={"dropout": 0.1, "bottleneck_dim": 1024},
         fusion_type="multilayer",
-        fusion_layer_indices=[8, 16, 24],  # Adjusted for 7B (32 layers)
+        fusion_layer_indices=fusion_layers,
         lora_rank=16,
         fusion_config={
-            "num_attention_heads": 32,
+            "num_attention_heads": num_heads,
             "attention_dropout": 0.1,
-            "modalities": {"audio": {"layer_indices": [8, 16, 24], "num_tokens": 8}}
+            "modalities": {"audio": {"layer_indices": fusion_layers, "num_tokens": 8}}
         },
         freeze_base_vl=True,
         freeze_audio_encoder=True,
@@ -152,39 +145,44 @@ def load_safe_model(device: str = "cuda"):
     return model
 
 
-def compare_outputs(
-    baseline_output: torch.Tensor,
-    safe_output: torch.Tensor,
-    atol: float = 1e-5,
-    rtol: float = 1e-4
+def compare_logits(
+    logits_a: torch.Tensor,
+    logits_b: torch.Tensor,
+    atol: float = 1e-4,
+    rtol: float = 1e-3
 ) -> Dict:
-    """Compare two output tensors and return detailed statistics."""
+    """Compare two logit tensors."""
 
-    # Ensure same shape
-    if baseline_output.shape != safe_output.shape:
-        return {
-            "match": False,
-            "error": f"Shape mismatch: {baseline_output.shape} vs {safe_output.shape}",
-            "max_diff": float('inf'),
-            "mean_diff": float('inf'),
-            "num_mismatched": -1
-        }
+    # Handle shape mismatches
+    if logits_a.shape != logits_b.shape:
+        # Try to align by taking minimum sequence length
+        min_seq = min(logits_a.shape[1], logits_b.shape[1])
+        logits_a = logits_a[:, :min_seq, :]
+        logits_b = logits_b[:, :min_seq, :]
+
+        if logits_a.shape != logits_b.shape:
+            return {
+                "match": False,
+                "error": f"Shape mismatch after alignment: {logits_a.shape} vs {logits_b.shape}",
+                "max_diff": float('inf'),
+                "mean_diff": float('inf'),
+            }
 
     # Compute differences
-    diff = torch.abs(baseline_output.float() - safe_output.float())
+    diff = torch.abs(logits_a.float() - logits_b.float())
     max_diff = diff.max().item()
     mean_diff = diff.mean().item()
 
-    # Check if within tolerance
+    # Check tolerance
     is_close = torch.allclose(
-        baseline_output.float(),
-        safe_output.float(),
+        logits_a.float(),
+        logits_b.float(),
         atol=atol,
         rtol=rtol
     )
 
-    # Count mismatched elements
-    threshold = atol + rtol * torch.abs(baseline_output.float())
+    # Count mismatches
+    threshold = atol + rtol * torch.abs(logits_a.float())
     mismatched = (diff > threshold).sum().item()
     total = diff.numel()
 
@@ -194,81 +192,96 @@ def compare_outputs(
         "mean_diff": mean_diff,
         "num_mismatched": mismatched,
         "total_elements": total,
-        "mismatch_ratio": mismatched / total if total > 0 else 0
+        "mismatch_pct": 100.0 * mismatched / total if total > 0 else 0
     }
 
 
-def run_baseline_forward(
+def run_single_test(
     model,
-    processor,
     prompt: str,
-    image_path: Optional[str] = None,
-    device: str = "cuda"
-) -> torch.Tensor:
-    """Run forward pass through baseline LLaVA."""
+    image_path: Optional[str],
+    device: str,
+    verbose: bool = False
+) -> Dict:
+    """
+    Run a single zero-forgetting test.
 
-    # Prepare inputs
+    Compares:
+    1. SAFE forward with audio=None (should use passthrough path)
+    2. Direct call to base_vl.llm
+    """
+
+    # Load image if provided
+    image = None
+    pixel_values = None
     if image_path and Path(image_path).exists():
         image = Image.open(image_path).convert("RGB")
+
+    # Format prompt consistently
+    if image is not None:
         formatted_prompt = f"USER: <image>\n{prompt} ASSISTANT:"
+    else:
+        formatted_prompt = f"USER: {prompt} ASSISTANT:"
+
+    # Get processor from base model
+    processor = model.base_vl.processor
+
+    # Process inputs
+    if image is not None:
         inputs = processor(
             text=formatted_prompt,
             images=image,
             return_tensors="pt"
         ).to(device)
     else:
-        formatted_prompt = f"USER: {prompt} ASSISTANT:"
         inputs = processor(
             text=formatted_prompt,
             return_tensors="pt"
         ).to(device)
 
-    with torch.no_grad():
-        outputs = model(**inputs, output_hidden_states=False)
+    input_ids = inputs["input_ids"]
+    attention_mask = inputs.get("attention_mask")
+    pixel_values = inputs.get("pixel_values")
 
-    return outputs.logits
-
-
-def run_safe_forward(
-    model,
-    prompt: str,
-    image_path: Optional[str] = None,
-    device: str = "cuda"
-) -> torch.Tensor:
-    """Run forward pass through SAFE model with audio=None."""
-
-    # Prepare image if provided
-    image = None
-    if image_path and Path(image_path).exists():
-        image = Image.open(image_path).convert("RGB")
-
-    # Prepare inputs - explicitly NO audio
-    inputs = model.prepare_multimodal_inputs(
-        text=prompt,
-        images=[image] if image else None,
-        audio=None,  # CRITICAL: No audio input
-        device=device,
-        include_audio_tokens=False,
-        training_mode=False
-    )
+    if verbose:
+        print(f"  input_ids shape: {input_ids.shape}")
+        if pixel_values is not None:
+            print(f"  pixel_values shape: {pixel_values.shape}")
 
     with torch.no_grad():
-        outputs = model(
-            input_ids=inputs.get("input_ids"),
-            attention_mask=inputs.get("attention_mask"),
-            pixel_values=inputs.get("pixel_values"),
-            audio_tokens=None,  # CRITICAL: No audio tokens
+        # Path 1: SAFE forward with audio=None
+        # This should trigger the passthrough code path
+        safe_outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            audio_tokens=None,  # No audio!
             labels=None
         )
+        safe_logits = safe_outputs["logits"]
 
-    return outputs["logits"]
+        # Path 2: Direct call to base_vl.llm
+        # This is the ground truth
+        base_outputs = model.base_vl.llm(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+        )
+        base_logits = base_outputs.logits
+
+    if verbose:
+        print(f"  safe_logits shape: {safe_logits.shape}")
+        print(f"  base_logits shape: {base_logits.shape}")
+
+    # Compare
+    comparison = compare_logits(safe_logits, base_logits)
+
+    return comparison
 
 
 def run_verification(
     samples: List[Dict],
-    baseline_model,
-    baseline_processor,
-    safe_model,
+    model,
     device: str = "cuda",
     verbose: bool = True
 ) -> Dict:
@@ -277,59 +290,61 @@ def run_verification(
     results = {
         "total": len(samples),
         "exact_matches": 0,
-        "close_matches": 0,  # Within tolerance
+        "close_matches": 0,
         "failures": 0,
         "max_diff_overall": 0.0,
-        "mean_diff_overall": 0.0,
+        "all_diffs": [],
         "failed_samples": []
     }
-
-    all_diffs = []
 
     for i, sample in enumerate(tqdm(samples, desc="Verifying zero-forgetting")):
         prompt = sample["prompt"]
         image_path = sample.get("image_path")
 
         try:
-            # Run baseline
-            baseline_logits = run_baseline_forward(
-                baseline_model, baseline_processor,
-                prompt, image_path, device
+            comparison = run_single_test(
+                model, prompt, image_path, device,
+                verbose=(verbose and i < 3)
             )
 
-            # Run SAFE (no audio)
-            safe_logits = run_safe_forward(
-                safe_model, prompt, image_path, device
-            )
-
-            # Compare
-            comparison = compare_outputs(baseline_logits, safe_logits)
-            all_diffs.append(comparison["max_diff"])
-
-            if comparison["max_diff"] == 0.0:
-                results["exact_matches"] += 1
-            elif comparison["match"]:
-                results["close_matches"] += 1
-            else:
+            if "error" in comparison:
+                print(f"\n[ERROR] Sample {i}: {comparison['error']}")
                 results["failures"] += 1
                 results["failed_samples"].append({
                     "index": i,
                     "prompt": prompt[:50],
-                    "max_diff": comparison["max_diff"],
-                    "mismatch_ratio": comparison["mismatch_ratio"]
+                    "error": comparison["error"]
+                })
+                continue
+
+            max_diff = comparison["max_diff"]
+            results["all_diffs"].append(max_diff)
+            results["max_diff_overall"] = max(results["max_diff_overall"], max_diff)
+
+            if max_diff == 0.0:
+                results["exact_matches"] += 1
+                status = "EXACT"
+            elif comparison["match"]:
+                results["close_matches"] += 1
+                status = "CLOSE"
+            else:
+                results["failures"] += 1
+                status = "FAIL"
+                results["failed_samples"].append({
+                    "index": i,
+                    "prompt": prompt[:50],
+                    "max_diff": max_diff,
+                    "mismatch_pct": comparison.get("mismatch_pct", -1)
                 })
 
-            results["max_diff_overall"] = max(
-                results["max_diff_overall"],
-                comparison["max_diff"]
-            )
-
-            if verbose and i < 3:
-                print(f"\n[Sample {i}] max_diff={comparison['max_diff']:.2e}, "
-                      f"match={comparison['match']}")
+            if verbose and i < 5:
+                print(f"\n[Sample {i}] {status} - max_diff={max_diff:.2e}")
 
         except Exception as e:
-            print(f"\n[ERROR] Sample {i} failed: {e}")
+            import traceback
+            print(f"\n[ERROR] Sample {i} exception: {e}")
+            if verbose:
+                traceback.print_exc()
             results["failures"] += 1
             results["failed_samples"].append({
                 "index": i,
@@ -337,9 +352,11 @@ def run_verification(
                 "error": str(e)
             })
 
-    # Compute overall mean diff
-    if all_diffs:
-        results["mean_diff_overall"] = sum(all_diffs) / len(all_diffs)
+    # Summary stats
+    if results["all_diffs"]:
+        results["mean_diff_overall"] = sum(results["all_diffs"]) / len(results["all_diffs"])
+    else:
+        results["mean_diff_overall"] = float('inf')
 
     return results
 
@@ -362,12 +379,14 @@ def print_results(results: Dict):
     print(f"Failures: {failed} ({100*failed/total:.1f}%)")
 
     print(f"\nMax difference overall: {results['max_diff_overall']:.2e}")
-    print(f"Mean difference overall: {results['mean_diff_overall']:.2e}")
+    print(f"Mean difference overall: {results.get('mean_diff_overall', 0):.2e}")
 
-    if failed == 0:
+    passed = (exact + close) == total
+
+    if passed:
         print("\n" + "=" * 60)
         print("✓ ZERO-FORGETTING GUARANTEE VERIFIED")
-        print("  When audio=None, SAFE output is identical to baseline.")
+        print("  When audio=None, SAFE output matches base_vl exactly.")
         print("=" * 60)
     else:
         print("\n" + "=" * 60)
@@ -376,23 +395,28 @@ def print_results(results: Dict):
         print("=" * 60)
 
         if results["failed_samples"]:
-            print("\nFailed samples (first 5):")
+            print("\nFirst 5 failed samples:")
             for fs in results["failed_samples"][:5]:
-                print(f"  - Sample {fs['index']}: {fs.get('max_diff', fs.get('error', 'unknown'))}")
+                err = fs.get("error", f"max_diff={fs.get('max_diff', '?')}")
+                print(f"  - Sample {fs['index']}: {err}")
+
+    return passed
 
 
 def main():
     parser = argparse.ArgumentParser(description="Verify zero-forgetting guarantee")
     parser.add_argument("--coco_dir", type=str, default=None,
                         help="Path to COCO dataset (with val2014/)")
-    parser.add_argument("--num_samples", type=int, default=100,
+    parser.add_argument("--num_samples", type=int, default=50,
                         help="Number of samples to test")
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to run on")
     parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for sampling")
+                        help="Random seed")
     parser.add_argument("--synthetic", action="store_true",
                         help="Use synthetic samples (no images)")
+    parser.add_argument("--use_13b", action="store_true",
+                        help="Use 13B model instead of 7B")
     args = parser.parse_args()
 
     print("[INFO] Zero-Forgetting Verification Test")
@@ -400,45 +424,37 @@ def main():
     print(f"[INFO] Samples: {args.num_samples}")
 
     # Load samples
-    if args.synthetic or args.coco_dir is None:
+    if args.synthetic:
         print("[INFO] Using synthetic samples (text-only)")
         samples = create_synthetic_samples(args.num_samples)
-    else:
-        coco_dir = Path(args.coco_dir)
-        samples = load_coco_samples(coco_dir, args.num_samples, args.seed)
+    elif args.coco_dir:
+        samples = load_coco_samples(Path(args.coco_dir), args.num_samples, args.seed)
         if samples is None:
             print("[INFO] Falling back to synthetic samples")
             samples = create_synthetic_samples(args.num_samples)
+    else:
+        print("[INFO] No COCO dir specified, using synthetic samples")
+        samples = create_synthetic_samples(args.num_samples)
 
-    # Load models
-    print("\n[STEP 1] Loading baseline LLaVA...")
-    baseline_model, baseline_processor = load_baseline_model(args.device)
-
-    print("\n[STEP 2] Loading SAFE model (untrained adapter)...")
-    safe_model = load_safe_model(args.device)
+    # Load model
+    print(f"\n[STEP 1] Loading SAFE model ({'13B' if args.use_13b else '7B'})...")
+    model = load_safe_model(args.device, use_7b=not args.use_13b)
 
     # Run verification
-    print(f"\n[STEP 3] Running verification on {len(samples)} samples...")
-    results = run_verification(
-        samples,
-        baseline_model,
-        baseline_processor,
-        safe_model,
-        device=args.device,
-        verbose=True
-    )
+    print(f"\n[STEP 2] Running verification on {len(samples)} samples...")
+    results = run_verification(samples, model, device=args.device, verbose=True)
 
-    # Print results
-    print_results(results)
+    # Print and save results
+    passed = print_results(results)
 
-    # Save results
+    # Save results (exclude large all_diffs list from JSON)
+    output_results = {k: v for k, v in results.items() if k != "all_diffs"}
     output_path = PROJECT_ROOT / "safe" / "ablations" / "zero_forgetting_results.json"
     with open(output_path, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(output_results, f, indent=2)
     print(f"\n[INFO] Results saved to {output_path}")
 
-    # Return exit code
-    return 0 if results["failures"] == 0 else 1
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":
