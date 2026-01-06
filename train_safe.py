@@ -2135,22 +2135,47 @@ def train(
         if init_samples and wandb is not None:
             try:
                 table = wandb.Table(columns=["sample_id", "audio", "question", "prediction", "references", "audio_path", "subset"])
-                for row in init_samples:
+                audio_success_count = 0
+                audio_fail_count = 0
+                for row_idx, row in enumerate(init_samples):
                     audio_cell = None
                     audio_value = row.get("audio")
+                    audio_path_value = row.get("audio_path")
+
+                    # Debug: log audio data format for first few samples
+                    if row_idx < 3:
+                        print(f"[W&B Audio Debug] Sample {row_idx}:", flush=True)
+                        print(f"  audio type: {type(audio_value)}", flush=True)
+                        if isinstance(audio_value, tuple):
+                            print(f"  audio tuple len: {len(audio_value)}", flush=True)
+                            if len(audio_value) >= 1:
+                                print(f"  audio[0] type: {type(audio_value[0])}, is_tensor: {torch.is_tensor(audio_value[0]) if audio_value[0] is not None else 'N/A'}", flush=True)
+                            if len(audio_value) >= 2:
+                                print(f"  audio[1] (sample_rate): {audio_value[1]}", flush=True)
+                        print(f"  audio_path: {audio_path_value}", flush=True)
+
                     if isinstance(audio_value, tuple) and len(audio_value) == 2 and torch.is_tensor(audio_value[0]):
                         try:
                             audio_cell = wandb.Audio(
                                 audio_value[0].detach().cpu().numpy(),
                                 sample_rate=int(audio_value[1]),
                             )
-                        except Exception:
+                            audio_success_count += 1
+                        except Exception as e:
+                            if row_idx < 3:
+                                print(f"  [W&B Audio] Failed to create from tensor: {e}", flush=True)
                             audio_cell = None
-                    elif row.get("audio_path"):
+                    elif audio_path_value:
                         try:
-                            audio_cell = wandb.Audio(str(row.get("audio_path")))
-                        except Exception:
+                            audio_cell = wandb.Audio(str(audio_path_value))
+                            audio_success_count += 1
+                        except Exception as e:
+                            if row_idx < 3:
+                                print(f"  [W&B Audio] Failed to create from path: {e}", flush=True)
                             audio_cell = None
+
+                    if audio_cell is None:
+                        audio_fail_count += 1
 
                     table.add_data(
                         row.get("sample_id"),
@@ -2161,9 +2186,10 @@ def train(
                         row.get("audio_path"),
                         row.get("subset"),
                     )
+                print(f"[W&B Audio] Created {audio_success_count}/{len(init_samples)} audio cells, {audio_fail_count} failed", flush=True)
                 _wandb_log(wandb_run, {"train/optimizer_step": optimizer_step, "val/samples": table}, step=optimizer_step)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[W&B Audio] Failed to create/log table: {e}", flush=True)
 
     if init_samples and bool(config.get("export_eval_samples", False)):
         _export_eval_samples(
@@ -2296,9 +2322,13 @@ def train(
                         table = wandb.Table(
                             columns=["sample_id", "audio", "question", "prediction", "references", "audio_path", "subset"]
                         )
-                        for row in val_samples:
+                        audio_success_count = 0
+                        audio_fail_count = 0
+                        for row_idx, row in enumerate(val_samples):
                             audio_cell = None
                             audio_value = row.get("audio")
+                            audio_path_value = row.get("audio_path")
+
                             if (
                                 isinstance(audio_value, tuple)
                                 and len(audio_value) == 2
@@ -2309,13 +2339,22 @@ def train(
                                         audio_value[0].detach().cpu().numpy(),
                                         sample_rate=int(audio_value[1]),
                                     )
-                                except Exception:
+                                    audio_success_count += 1
+                                except Exception as e:
+                                    if row_idx < 3:
+                                        print(f"[W&B Audio Epoch] Failed to create from tensor: {e}", flush=True)
                                     audio_cell = None
-                            elif row.get("audio_path"):
+                            elif audio_path_value:
                                 try:
-                                    audio_cell = wandb.Audio(str(row.get("audio_path")))
-                                except Exception:
+                                    audio_cell = wandb.Audio(str(audio_path_value))
+                                    audio_success_count += 1
+                                except Exception as e:
+                                    if row_idx < 3:
+                                        print(f"[W&B Audio Epoch] Failed to create from path: {e}", flush=True)
                                     audio_cell = None
+
+                            if audio_cell is None:
+                                audio_fail_count += 1
 
                             table.add_data(
                                 row.get("sample_id"),
@@ -2326,13 +2365,14 @@ def train(
                                 row.get("audio_path"),
                                 row.get("subset"),
                             )
+                        print(f"[W&B Audio Epoch {epoch}] Created {audio_success_count}/{len(val_samples)} audio cells, {audio_fail_count} failed", flush=True)
                         _wandb_log(
                             wandb_run,
                             {"train/optimizer_step": optimizer_step, "val/samples": table},
                             step=optimizer_step,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[W&B Audio Epoch] Failed to create/log table: {e}", flush=True)
                 if (
                     wandb_log_checkpoints
                     and is_best
