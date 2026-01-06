@@ -35,7 +35,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from configs.model_configs import get_config
 from safe.models.safe_model import SAFEModel
-from safe.data.datasets import AudioCapsDataset, create_safe_dataloader
+from safe.data.datasets import AudioCapsDataset, create_safe_dataloader, _collate_multimodal_batch
 
 
 def format_time(seconds: float) -> str:
@@ -392,7 +392,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=0,
-        collate_fn=dataset.collate_fn,
+        collate_fn=_collate_multimodal_batch,
     )
 
     # Compute max_batches
