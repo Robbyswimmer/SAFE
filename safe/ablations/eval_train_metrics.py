@@ -2,7 +2,8 @@
 """
 eval_train_metrics.py - Evaluate a trained SAFE checkpoint on training data
 
-Uses the same evaluate() function from train_safe.py to ensure identical behavior.
+Uses the same model creation and evaluate() function from train_safe.py to ensure
+identical behavior and proper checkpoint loading.
 
 Usage:
     python safe/ablations/eval_train_metrics.py \
@@ -23,75 +24,45 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from configs.model_configs import get_config
-from safe.models.safe_model import SAFEModel
 from safe.data.datasets import AudioCapsDataset, create_safe_dataloader
-from train_safe import evaluate, format_time
+# Import model creation and checkpoint loading directly from train_safe.py
+# This ensures identical architecture and weight loading behavior
+from train_safe import create_model, load_checkpoint, evaluate, format_time
 
 
 def load_model_from_checkpoint(
     checkpoint_path: Path,
     config_name: str = "phase1",
     device: str = "cuda"
-) -> SAFEModel:
-    """Load SAFE model and restore checkpoint weights."""
+):
+    """Load SAFE model using the same code path as train_safe.py."""
 
     print(f"[INFO] Loading config: {config_name}")
     config = get_config(config_name)
 
-    print(f"[INFO] Initializing SAFE model...")
-    model = SAFEModel(
-        llm_model_name=config["llm_model_name"],
-        vision_model_name=config["vision_model_name"],
-        audio_encoder_type=config["audio_encoder_type"],
-        audio_encoder_config=config["audio_encoder_config"],
-        llm_hidden_size=config["llm_hidden_size"],
-        audio_embed_dim=config["audio_embed_dim"],
-        projector_type=config["projector_type"],
-        num_audio_tokens=config["num_audio_tokens"],
-        projector_config=config.get("projector_config", {}),
-        fusion_type=config["fusion_type"],
-        fusion_layer_indices=config["fusion_layer_indices"],
-        lora_rank=config["lora_rank"],
-        fusion_config=config.get("fusion_config", {}),
-        freeze_base_vl=config["freeze_base_vl"],
-        freeze_audio_encoder=config["freeze_audio_encoder"],
+    print(f"[INFO] Creating model using train_safe.create_model()...")
+    # Use the exact same model creation as training
+    model = create_model(config)
+
+    # Move to device first (required for load_checkpoint)
+    device_obj = torch.device(device)
+    model = model.to(device_obj)
+
+    print(f"[INFO] Loading checkpoint using train_safe.load_checkpoint()...")
+    # Use the exact same checkpoint loading as training
+    metrics = load_checkpoint(
+        checkpoint_path=checkpoint_path,
+        model=model,
+        optimizer=None,  # Not needed for eval
+        scheduler=None,  # Not needed for eval
+        device=device_obj,
     )
 
-    print(f"[INFO] Loading checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    print(f"[INFO] Checkpoint loaded from epoch: {metrics.get('epoch', 'unknown')}")
+    if 'val_cider' in metrics:
+        print(f"[INFO] Checkpoint val CIDEr: {metrics['val_cider']:.2f}")
 
-    state_dict = checkpoint.get("model_state_dict") if isinstance(checkpoint, dict) else checkpoint
-    if state_dict is None:
-        state_dict = checkpoint
-
-    # Debug: show checkpoint contents
-    if isinstance(checkpoint, dict):
-        print(f"[DEBUG] Checkpoint format: {checkpoint.get('format', 'unknown')}")
-        print(f"[DEBUG] Checkpoint keys: {list(checkpoint.keys())}")
-    print(f"[DEBUG] State dict has {len(state_dict)} keys")
-    print(f"[DEBUG] First 10 state dict keys: {list(state_dict.keys())[:10]}")
-
-    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-
-    print(f"[DEBUG] Missing keys: {len(missing_keys)}, Unexpected keys: {len(unexpected_keys)}")
-
-    relevant_missing = [
-        k for k in missing_keys
-        if k.startswith(("audio_projector.", "fusion_adapter.", "audio_token_embeddings."))
-    ]
-    if relevant_missing:
-        print(f"[WARN] Missing {len(relevant_missing)} SAFE keys: {relevant_missing[:5]}...")
-    else:
-        print(f"[INFO] All SAFE adapter keys loaded successfully")
-
-    if isinstance(checkpoint, dict):
-        metrics = checkpoint.get("metrics", {})
-        epoch = metrics.get("epoch", checkpoint.get("epoch", "unknown"))
-        print(f"[INFO] Checkpoint from epoch: {epoch}")
-
-    model = model.to(device)
     model.eval()
-
     return model
 
 

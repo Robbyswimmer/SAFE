@@ -1311,6 +1311,57 @@ def evaluate(
 
 
 # ============================================================================
+# SECTION 3.5: MODEL CREATION HELPER
+# ============================================================================
+
+# Whitelist of valid SAFEModel constructor arguments
+SAFE_MODEL_CONSTRUCTOR_KEYS = {
+    "llm_model_name",
+    "vision_model_name",
+    "audio_encoder_type",
+    "audio_encoder_config",
+    "projector_type",
+    "num_audio_tokens",
+    "projector_config",
+    "fusion_type",
+    "fusion_layer_indices",
+    "lora_rank",
+    "fusion_config",
+    "freeze_base_vl",
+    "freeze_audio_encoder",
+    "llm_hidden_size",
+    "audio_embed_dim",
+}
+
+
+def create_model(config: Dict[str, Any]) -> SAFEModel:
+    """
+    Create a SAFEModel from a config dictionary.
+
+    This is the canonical way to create SAFE models for training and evaluation.
+    It filters config keys to only those accepted by SAFEModel constructor.
+
+    Args:
+        config: Model configuration dictionary (e.g., from get_config("phase1"))
+
+    Returns:
+        Initialized SAFEModel (on CPU, not moved to device)
+    """
+    # Filter config to only include valid constructor arguments
+    constructor_config = {k: v for k, v in config.items() if k in SAFE_MODEL_CONSTRUCTOR_KEYS}
+
+    print(f"[create_model] Initializing SAFE model...")
+    print(f"  LLM: {constructor_config.get('llm_model_name', 'N/A')}")
+    print(f"  Vision: {constructor_config.get('vision_model_name', 'N/A')}")
+    print(f"  Audio: {constructor_config.get('audio_encoder_type', 'N/A')}")
+    print(f"  Fusion layers: {constructor_config.get('fusion_layer_indices', 'N/A')}")
+    print(f"  LoRA rank: {constructor_config.get('lora_rank', 'N/A')}")
+
+    model = SAFEModel(**constructor_config)
+    return model
+
+
+# ============================================================================
 # SECTION 4: TRAINING
 # ============================================================================
 
@@ -2700,35 +2751,8 @@ def main():
     print(f"\nLoading model config: {args.model_config}")
     model_config = get_config(args.model_config)
 
-    # Whitelist of valid SAFEModel constructor arguments
-    safe_model_keys = {
-        "llm_model_name",
-        "vision_model_name",
-        "audio_encoder_type",
-        "audio_encoder_config",
-        "projector_type",
-        "num_audio_tokens",
-        "projector_config",
-        "fusion_type",
-        "fusion_layer_indices",
-        "lora_rank",
-        "fusion_config",
-        "freeze_base_vl",
-        "freeze_audio_encoder",
-        "llm_hidden_size",
-        "audio_embed_dim",
-    }
-
-    # Filter config to only include valid constructor arguments
-    constructor_config = {k: v for k, v in model_config.items() if k in safe_model_keys}
-
-    # Initialize model
-    print(f"\nInitializing SAFE model...")
-    print(f"  LLM: {constructor_config.get('llm_model_name', 'N/A')}")
-    print(f"  Vision: {constructor_config.get('vision_model_name', 'N/A')}")
-    print(f"  Audio: {constructor_config.get('audio_encoder_type', 'N/A')}")
-
-    model = SAFEModel(**constructor_config)
+    # Initialize model using the canonical create_model helper
+    model = create_model(model_config)
     model = model.to(device)
 
     # Enable gradient checkpointing if requested (saves ~10-15GB memory)
