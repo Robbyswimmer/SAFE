@@ -2519,6 +2519,7 @@ def load_checkpoint(
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     checkpoint_path: Path,
     device: torch.device,
+    debug_keys: bool = False,
 ) -> Dict[str, float]:
     """Load model checkpoint"""
     print(f"📂 Loading checkpoint: {checkpoint_path}")
@@ -2530,6 +2531,25 @@ def load_checkpoint(
     state_dict = checkpoint.get("model_state_dict") if isinstance(checkpoint, dict) else None
     if state_dict is None and isinstance(checkpoint, dict):
         state_dict = checkpoint
+
+    # Debug: print checkpoint keys vs model expected keys
+    if debug_keys:
+        print("\n[DEBUG] === CHECKPOINT STATE DICT KEYS ===")
+        ckpt_safe_keys = [k for k in sorted(state_dict.keys())
+                         if k.startswith(("audio_projector.", "fusion_adapter.", "audio_token_embeddings."))]
+        for k in ckpt_safe_keys[:20]:
+            print(f"  CKPT: {k}")
+        if len(ckpt_safe_keys) > 20:
+            print(f"  ... and {len(ckpt_safe_keys) - 20} more")
+
+        print("\n[DEBUG] === MODEL EXPECTED KEYS (trainable) ===")
+        model_safe_keys = [n for n, p in model.named_parameters() if p.requires_grad
+                          and n.startswith(("audio_projector.", "fusion_adapter.", "audio_token_embeddings."))]
+        for k in model_safe_keys[:20]:
+            print(f"  MODEL: {k}")
+        if len(model_safe_keys) > 20:
+            print(f"  ... and {len(model_safe_keys) - 20} more")
+        print()
 
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
     if missing_keys:

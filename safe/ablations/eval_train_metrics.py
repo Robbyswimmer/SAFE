@@ -50,12 +50,14 @@ def load_model_from_checkpoint(
 
     print(f"[INFO] Loading checkpoint using train_safe.load_checkpoint()...")
     # Use the exact same checkpoint loading as training
+    # Enable debug_keys=True to see the key format mismatch
     metrics = load_checkpoint(
         checkpoint_path=checkpoint_path,
         model=model,
         optimizer=None,  # Not needed for eval
         scheduler=None,  # Not needed for eval
         device=device_obj,
+        debug_keys=True,  # Show checkpoint vs model key formats
     )
 
     print(f"[INFO] Checkpoint loaded from epoch: {metrics.get('epoch', 'unknown')}")
