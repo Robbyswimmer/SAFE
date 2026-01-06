@@ -17,7 +17,6 @@ import sys
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -25,7 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from configs.model_configs import get_config
 from safe.models.safe_model import SAFEModel
-from safe.data.datasets import AudioCapsDataset, _collate_multimodal_batch
+from safe.data.datasets import AudioCapsDataset, create_safe_dataloader
 from train_safe import evaluate, format_time
 
 
@@ -65,7 +64,16 @@ def load_model_from_checkpoint(
     if state_dict is None:
         state_dict = checkpoint
 
+    # Debug: show checkpoint contents
+    if isinstance(checkpoint, dict):
+        print(f"[DEBUG] Checkpoint format: {checkpoint.get('format', 'unknown')}")
+        print(f"[DEBUG] Checkpoint keys: {list(checkpoint.keys())}")
+    print(f"[DEBUG] State dict has {len(state_dict)} keys")
+    print(f"[DEBUG] First 10 state dict keys: {list(state_dict.keys())[:10]}")
+
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+
+    print(f"[DEBUG] Missing keys: {len(missing_keys)}, Unexpected keys: {len(unexpected_keys)}")
 
     relevant_missing = [
         k for k in missing_keys
@@ -73,6 +81,8 @@ def load_model_from_checkpoint(
     ]
     if relevant_missing:
         print(f"[WARN] Missing {len(relevant_missing)} SAFE keys: {relevant_missing[:5]}...")
+    else:
+        print(f"[INFO] All SAFE adapter keys loaded successfully")
 
     if isinstance(checkpoint, dict):
         metrics = checkpoint.get("metrics", {})
@@ -138,12 +148,11 @@ def main():
 
     print(f"[INFO] Dataset size: {len(dataset)} samples")
 
-    dataloader = DataLoader(
+    dataloader = create_safe_dataloader(
         dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=0,
-        collate_fn=_collate_multimodal_batch,
     )
 
     # Compute max_batches
