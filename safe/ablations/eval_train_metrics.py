@@ -381,9 +381,8 @@ def main():
     data_path = Path(args.data_path)
 
     dataset = AudioCapsDataset(
-        data_dir=data_path / "audiocaps",
+        data_path=data_path,
         split=args.split,
-        max_samples=args.max_samples,
     )
 
     print(f"[INFO] Dataset size: {len(dataset)} samples")
