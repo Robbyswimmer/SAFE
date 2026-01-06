@@ -299,16 +299,23 @@ class LoRAFusionAdapter(nn.Module):
         # CrossAttentionBlock is randomly initialized. Training its full 5120×5120
         # projection matrices is extremely parameter-heavy; by default we train only
         # LoRA weights + a small residual scale. Enable full training explicitly.
+        #
+        # IMPORTANT: We need to selectively freeze/unfreeze:
+        # - LoRA weights (lora_A, lora_B) should ALWAYS be trainable
+        # - Base layer weights should only be trainable if train_base_cross_attention=True
+        # - residual_scale should always be trainable
         base_model = getattr(self.cross_attention, "base_model", None)
         if base_model is not None:
-            for param in base_model.parameters():
-                param.requires_grad = bool(train_base_cross_attention)
-            # Always allow the fusion residual scale to learn (cheap but important).
-            if hasattr(base_model, "residual_scale"):
-                try:
-                    base_model.residual_scale.requires_grad = True
-                except Exception:
-                    pass
+            for name, param in base_model.named_parameters():
+                # LoRA weights should always be trainable
+                if "lora_" in name:
+                    param.requires_grad = True
+                # residual_scale should always be trainable
+                elif "residual_scale" in name:
+                    param.requires_grad = True
+                # Base layer weights are only trainable if explicitly requested
+                else:
+                    param.requires_grad = bool(train_base_cross_attention)
         else:
             # Fallback: if PEFT wrapper doesn't expose base_model, do not attempt
             # to unfreeze everything.

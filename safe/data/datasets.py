@@ -740,6 +740,7 @@ def create_safe_dataloader(
     shuffle: bool = True,
     num_workers: int = 2,
     *,
+    sampler=None,
     persistent_workers: bool | None = None,
     prefetch_factor: int | None = None,
     pin_memory: bool | None = None,
@@ -752,6 +753,9 @@ def create_safe_dataloader(
     - prefetch_factor=1 to avoid buffering many batches in RAM.
     - pin_memory=False unless explicitly requested.
 
+    For distributed training, pass a DistributedSampler via the `sampler` argument.
+    When a sampler is provided, `shuffle` is ignored (controlled by sampler).
+
     Callers (e.g., training scripts) can still override these via the keyword
     arguments when needed.
     """
@@ -763,10 +767,14 @@ def create_safe_dataloader(
     )
     resolved_pin_memory = False if pin_memory is None else pin_memory
 
+    # When using a sampler, shuffle must be False (sampler controls ordering)
+    effective_shuffle = shuffle if sampler is None else False
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=effective_shuffle,
+        sampler=sampler,
         num_workers=num_workers,
         collate_fn=_collate_multimodal_batch,
         persistent_workers=resolved_persistent_workers if num_workers > 0 else False,

@@ -30,9 +30,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from torch.cuda.amp import GradScaler, autocast
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
 # Optional: Weights & Biases
 try:
@@ -50,8 +53,47 @@ from safe.models.safe_model import SAFEModel
 # SECTION 1: UTILITIES
 # ============================================================================
 
-def set_seed(seed: int):
-    """Set random seeds for reproducibility"""
+def setup_distributed():
+    """Initialize distributed training if available."""
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+        torch.cuda.set_device(local_rank)
+
+        return {
+            "rank": rank,
+            "world_size": world_size,
+            "local_rank": local_rank,
+            "is_main": rank == 0,
+            "distributed": True,
+        }
+    else:
+        return {
+            "rank": 0,
+            "world_size": 1,
+            "local_rank": 0,
+            "is_main": True,
+            "distributed": False,
+        }
+
+
+def cleanup_distributed():
+    """Clean up distributed training."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def is_main_process(dist_info: Dict) -> bool:
+    """Check if this is the main process (for logging/saving)."""
+    return dist_info["is_main"]
+
+
+def set_seed(seed: int, rank: int = 0):
+    """Set random seeds for reproducibility (offset by rank for distributed)"""
+    seed = seed + rank  # Different seed per process for data shuffling
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -1977,6 +2019,8 @@ def train(
     wandb_run: Any = None,
     wandb_log_checkpoints: bool = False,
     wandb_sample_count: int = 0,
+    dist_info: Optional[Dict[str, Any]] = None,
+    train_sampler: Optional[DistributedSampler] = None,
 ) -> Dict[str, Any]:
     """
     Main training loop
@@ -1988,10 +2032,20 @@ def train(
         config: Training configuration
         output_dir: Output directory for checkpoints
         device: Device to train on
+        dist_info: Distributed training info (rank, world_size, etc.)
+        train_sampler: DistributedSampler for training (if distributed)
 
     Returns:
         Training history dict
     """
+    # Handle distributed training info
+    if dist_info is None:
+        dist_info = {"rank": 0, "world_size": 1, "is_main": True, "distributed": False}
+    is_main = dist_info["is_main"]
+
+    # For DDP, get the underlying model for parameter grouping
+    base_model = model.module if dist_info["distributed"] else model
+
     # Setup optimizer with different learning rates (Stage-A style defaults)
     lr_projector = config.get("learning_rate_projector", 2e-4)
     lr_adapter = config.get("learning_rate_adapter", 1e-4)
@@ -2019,7 +2073,7 @@ def train(
     other_decay = []
     other_no_decay = []
 
-    for name, param in model.named_parameters():
+    for name, param in base_model.named_parameters():
         if not param.requires_grad:
             continue
 
@@ -2252,9 +2306,14 @@ def train(
         )
 
     for epoch in range(1, num_epochs + 1):
-        print(f"\n{'='*80}")
-        print(f"Epoch {epoch}/{num_epochs}")
-        print(f"{'='*80}\n")
+        if is_main:
+            print(f"\n{'='*80}")
+            print(f"Epoch {epoch}/{num_epochs}")
+            print(f"{'='*80}\n")
+
+        # Set epoch on DistributedSampler for proper shuffling across epochs
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
 
         # Allow datasets to reshuffle/resample between epochs (e.g., WavCaps subset sampling).
         try:
@@ -2335,28 +2394,37 @@ def train(
             history["val_bleu4"].append(val_metrics["bleu4"])
             history["epochs"].append(epoch)
 
-            # Save checkpoint
+            # Save checkpoint (only on main process)
             is_best = val_metrics["cider"] > best_cider
             if is_best:
                 best_cider = val_metrics["cider"]
                 patience_counter = 0
-                print(f"\n🎉 New best CIDEr: {best_cider:.2f}")
+                if is_main:
+                    print(f"\n🎉 New best CIDEr: {best_cider:.2f}")
             else:
                 patience_counter += 1
 
-            ckpt_paths = save_checkpoint(
-                model,
-                optimizer,
-                scheduler,
-                {**train_metrics, **val_metrics, "epoch": epoch},
-                output_dir,
-                is_best=is_best,
-                save_full_checkpoint=bool(config.get("save_full_checkpoint", False)),
-            )
+            # Only save checkpoints from main process
+            if is_main:
+                # For DDP, save the underlying model, not the wrapper
+                model_to_save = base_model
+                ckpt_paths = save_checkpoint(
+                    model_to_save,
+                    optimizer,
+                    scheduler,
+                    {**train_metrics, **val_metrics, "epoch": epoch},
+                    output_dir,
+                    is_best=is_best,
+                    save_full_checkpoint=bool(config.get("save_full_checkpoint", False)),
+                )
 
-            # Save history
-            with open(output_dir / "history.json", "w") as f:
-                json.dump(history, f, indent=2)
+                # Save history
+                with open(output_dir / "history.json", "w") as f:
+                    json.dump(history, f, indent=2)
+
+            # Sync processes after checkpoint save
+            if dist_info["distributed"]:
+                dist.barrier()
 
             if wandb_run is not None:
                 val_log = {
@@ -2752,67 +2820,106 @@ def main():
 
     args = parser.parse_args()
 
-    # Set seed
-    set_seed(args.seed)
+    # Setup distributed training
+    dist_info = setup_distributed()
+    is_main = is_main_process(dist_info)
 
-    # Device
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    # Set seed (offset by rank for different data ordering per GPU)
+    set_seed(args.seed, rank=dist_info["rank"])
 
-    # Create output directory
+    # Device - use local_rank for multi-GPU
+    if dist_info["distributed"]:
+        device = torch.device(f"cuda:{dist_info['local_rank']}")
+        if is_main:
+            print(f"🚀 Distributed training: {dist_info['world_size']} GPUs")
+    else:
+        device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    if is_main:
+        print(f"Using device: {device}")
+
+    # Create output directory (only on main process)
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if is_main:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save args
-    with open(output_dir / "args.json", "w") as f:
-        json.dump(vars(args), f, indent=2)
+    # Sync all processes before continuing
+    if dist_info["distributed"]:
+        dist.barrier()
+
+    # Save args (only on main process)
+    if is_main:
+        with open(output_dir / "args.json", "w") as f:
+            json.dump(vars(args), f, indent=2)
 
     # Load model config
-    print(f"\nLoading model config: {args.model_config}")
+    if is_main:
+        print(f"\nLoading model config: {args.model_config}")
     model_config = get_config(args.model_config)
 
     # Initialize model using the canonical create_model helper
-    model = create_model(model_config)
+    model = create_model(model_config) if is_main else create_model(model_config)
     model = model.to(device)
 
-    # Enable gradient checkpointing if requested (saves ~10-15GB memory)
-    if args.gradient_checkpointing:
-        print(f"  Enabling gradient checkpointing for memory optimization...")
-        if hasattr(model.base_vl, 'llm') and hasattr(model.base_vl.llm, 'gradient_checkpointing_enable'):
-            model.base_vl.llm.gradient_checkpointing_enable()
-            print(f"  ✓ Gradient checkpointing enabled on LLM")
-        else:
-            print(f"  ⚠️  LLM does not support gradient checkpointing")
+    # Wrap model with DDP for distributed training
+    if dist_info["distributed"]:
+        # Find parameters that require gradients for DDP
+        model = DDP(
+            model,
+            device_ids=[dist_info["local_rank"]],
+            output_device=dist_info["local_rank"],
+            find_unused_parameters=True,  # SAFE has some unused params depending on input
+        )
+        if is_main:
+            print(f"  ✓ Model wrapped with DistributedDataParallel")
 
-    # Count parameters
-    total_params, trainable_params = count_parameters(model)
-    print(f"\n📊 Model parameters:")
-    print(f"  Total: {total_params:,}")
-    print(f"  Trainable: {trainable_params:,} ({100*trainable_params/total_params:.2f}%)")
-    breakdown = summarize_trainable_parameters(model)
-    if breakdown:
-        print("  Trainable breakdown:")
-        for key in sorted(breakdown.keys()):
-            print(f"    - {key}: {_format_param_count(breakdown[key])}")
+    # Enable gradient checkpointing if requested (saves ~10-15GB memory)
+    # Access the underlying model if wrapped in DDP
+    base_model = model.module if dist_info["distributed"] else model
+    if args.gradient_checkpointing:
+        if is_main:
+            print(f"  Enabling gradient checkpointing for memory optimization...")
+        if hasattr(base_model.base_vl, 'llm') and hasattr(base_model.base_vl.llm, 'gradient_checkpointing_enable'):
+            base_model.base_vl.llm.gradient_checkpointing_enable()
+            if is_main:
+                print(f"  ✓ Gradient checkpointing enabled on LLM")
+        else:
+            if is_main:
+                print(f"  ⚠️  LLM does not support gradient checkpointing")
+
+    # Count parameters (use base_model for accurate count)
+    total_params, trainable_params = count_parameters(base_model)
+    if is_main:
+        print(f"\n📊 Model parameters:")
+        print(f"  Total: {total_params:,}")
+        print(f"  Trainable: {trainable_params:,} ({100*trainable_params/total_params:.2f}%)")
+        breakdown = summarize_trainable_parameters(base_model)
+        if breakdown:
+            print("  Trainable breakdown:")
+            for key in sorted(breakdown.keys()):
+                print(f"    - {key}: {_format_param_count(breakdown[key])}")
 
     # Load datasets
-    print(f"\n📂 Loading datasets from: {args.data_path}")
+    if is_main:
+        print(f"\n📂 Loading datasets from: {args.data_path}")
     audiocaps_train = AudioCapsDataset(args.data_path, split=args.train_split)
     if args.max_train_samples is not None:
-        print(f"  ⚠️  Limiting training samples to {args.max_train_samples} for smoke testing")
+        if is_main:
+            print(f"  ⚠️  Limiting training samples to {args.max_train_samples} for smoke testing")
         indices = list(range(min(len(audiocaps_train), args.max_train_samples)))
         audiocaps_train = torch.utils.data.Subset(audiocaps_train, indices)
-    
+
     val_dataset = AudioCapsDataset(args.data_path, split=args.val_split)
 
     wavcaps_train = None
     if args.use_wavcaps:
         try:
             wavcaps_train = WavCapsDataset(args.data_path, split=args.wavcaps_split)
-            print(f"  WavCaps train: {len(wavcaps_train)} samples (split='{args.wavcaps_split}')")
-            print(f"  WavCaps ratio: {args.wavcaps_ratio:.2f}")
+            if is_main:
+                print(f"  WavCaps train: {len(wavcaps_train)} samples (split='{args.wavcaps_split}')")
+                print(f"  WavCaps ratio: {args.wavcaps_ratio:.2f}")
         except Exception as e:
-            print(f"⚠️  Failed to load WavCaps dataset: {e}. Continuing with AudioCaps only.", flush=True)
+            if is_main:
+                print(f"⚠️  Failed to load WavCaps dataset: {e}. Continuing with AudioCaps only.", flush=True)
             wavcaps_train = None
 
     if wavcaps_train is not None:
@@ -2824,20 +2931,40 @@ def main():
             seed=args.seed,
             resample_wavcaps_each_epoch=bool(args.resample_wavcaps_each_epoch),
         )
-        print(f"  AudioCaps train: {len(audiocaps_train)} samples")
-        print(f"  Mixed train samples: {len(train_dataset)} (AudioCaps + WavCaps subset)")
+        if is_main:
+            print(f"  AudioCaps train: {len(audiocaps_train)} samples")
+            print(f"  Mixed train samples: {len(train_dataset)} (AudioCaps + WavCaps subset)")
     else:
         train_dataset = audiocaps_train
-        print(f"  Train (AudioCaps only): {len(train_dataset)} samples")
+        if is_main:
+            print(f"  Train (AudioCaps only): {len(train_dataset)} samples")
 
-    print(f"  Val (AudioCaps): {len(val_dataset)} samples")
+    if is_main:
+        print(f"  Val (AudioCaps): {len(val_dataset)} samples")
 
-    # Create dataloaders
+    # Create dataloaders with DistributedSampler for multi-GPU
+    train_sampler = None
+    val_sampler = None
+    if dist_info["distributed"]:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=dist_info["world_size"],
+            rank=dist_info["rank"],
+            shuffle=True,
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=dist_info["world_size"],
+            rank=dist_info["rank"],
+            shuffle=False,
+        )
+
     train_loader = create_safe_dataloader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),  # Don't shuffle if using DistributedSampler
         num_workers=args.num_workers,
+        sampler=train_sampler,
     )
 
     val_loader = create_safe_dataloader(
@@ -2845,6 +2972,7 @@ def main():
         batch_size=args.val_batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        sampler=val_sampler,
     )
 
     # Training config
@@ -2999,6 +3127,8 @@ def main():
         wandb_run=wandb_run,
         wandb_log_checkpoints=bool(args.wandb_log_checkpoints),
         wandb_sample_count=int(args.wandb_sample_count),
+        dist_info=dist_info,
+        train_sampler=train_sampler,
     )
 
     if wandb_run is not None:
@@ -3007,7 +3137,11 @@ def main():
         except Exception:
             pass
 
-    print(f"\n✅ Training complete! Results saved to: {output_dir}")
+    # Cleanup distributed training
+    cleanup_distributed()
+
+    if is_main:
+        print(f"\n✅ Training complete! Results saved to: {output_dir}")
 
 
 if __name__ == "__main__":

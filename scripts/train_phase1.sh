@@ -3,8 +3,10 @@
 # Phase 1 Training Script - Clean SAFE Training
 #
 # Usage:
-#   bash scripts/train_phase1.sh
-#   sbatch scripts/train_phase1.sh  # For SLURM
+#   bash scripts/train_phase1.sh                    # Single GPU
+#   NUM_GPUS=3 bash scripts/train_phase1.sh         # Multi-GPU
+#   sbatch scripts/train_phase1.sh                  # SLURM single GPU
+#   NUM_GPUS=3 sbatch scripts/train_phase1.sh       # SLURM multi-GPU
 
 #SBATCH --job-name=SAFE-Train
 #SBATCH --output=logs/train_%j.txt
@@ -12,7 +14,7 @@
 #SBATCH --time=72:00:00
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:3
 #SBATCH --mail-type=FAIL,END
 #SBATCH --mail-user=rmose009@ucr.edu
 #SBATCH -p gpu
@@ -68,6 +70,9 @@ EXTRA_ARGS=${EXTRA_ARGS:-""}
 GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-1}
 NUM_WORKERS=${NUM_WORKERS:-0}              # Disable workers to avoid per-worker RAM overhead
 MAX_EVAL_BATCHES=${MAX_EVAL_BATCHES:-10}   # Keep eval lightweight to avoid memory buildup
+
+# Multi-GPU configuration
+NUM_GPUS=${NUM_GPUS:-3}                    # Number of GPUs to use (default: 3)
 
 # Weights & Biases logging (optional)
 USE_WANDB=${USE_WANDB:-0}
@@ -141,6 +146,7 @@ echo "Gate warmup steps: ${GATE_WARMUP_STEPS}"
 echo "Gradient checkpointing: ${GRADIENT_CHECKPOINTING}"
 echo "Num workers: ${NUM_WORKERS}"
 echo "Max eval batches: ${MAX_EVAL_BATCHES}"
+echo "Num GPUs: ${NUM_GPUS}"
 if [[ -n "${MAX_TRAIN_SAMPLES}" ]]; then
   echo "Max train samples: ${MAX_TRAIN_SAMPLES}"
 fi
@@ -156,8 +162,17 @@ fi
 echo "========================================"
 echo ""
 
-# Run training
-python train_safe.py \
+# Run training with torchrun for multi-GPU support
+# torchrun handles setting RANK, WORLD_SIZE, LOCAL_RANK environment variables
+if [[ "${NUM_GPUS}" -gt 1 ]]; then
+    echo "🚀 Launching distributed training with ${NUM_GPUS} GPUs..."
+    LAUNCHER="torchrun --nproc_per_node=${NUM_GPUS} --standalone"
+else
+    echo "🚀 Launching single-GPU training..."
+    LAUNCHER="python"
+fi
+
+${LAUNCHER} train_safe.py \
     --model-config "${MODEL_CONFIG}" \
     --data-path "${DATA_PATH}" \
     --output-dir "${OUTPUT_DIR}" \
