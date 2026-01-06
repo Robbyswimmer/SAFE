@@ -220,11 +220,11 @@ def evaluate_on_split(
     total_loss = 0.0
     num_batches = 0
 
-    print(f"[INFO] Running evaluation (max_batches={max_batches})...")
+    print(f"[INFO] Running evaluation (max_batches={max_batches})...", flush=True)
     start_time = time.time()
 
     with torch.no_grad():
-        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Evaluating")):
+        for batch_idx, batch in enumerate(dataloader):
             if max_batches is not None and batch_idx >= max_batches:
                 break
 
@@ -276,16 +276,33 @@ def evaluate_on_split(
                 training_mode=False,
             )
 
+            # Generate with settings matching train_safe.py
+            gen_input_ids = gen_inputs["input_ids"].to(device)
+            gen_attention_mask = gen_inputs["attention_mask"].to(device)
+            gen_audio_tokens = gen_inputs.get("audio_tokens")
+            if gen_audio_tokens is not None:
+                gen_audio_tokens = gen_audio_tokens.to(device)
+            gen_audio_attention_mask = gen_inputs.get("audio_attention_mask")
+            if gen_audio_attention_mask is not None:
+                gen_audio_attention_mask = gen_audio_attention_mask.to(device)
+
+            generation_kwargs = {
+                "max_new_tokens": max_new_tokens,
+                "min_new_tokens": 1,
+                "num_beams": num_beams,
+                "repetition_penalty": 1.2,
+                "no_repeat_ngram_size": 3,
+                "do_sample": False,
+                "pad_token_id": tokenizer.pad_token_id,
+                "eos_token_id": tokenizer.eos_token_id,
+            }
+
             generated_ids = model.generate(
-                input_ids=gen_inputs["input_ids"].to(device),
-                attention_mask=gen_inputs["attention_mask"].to(device),
-                audio_tokens=gen_inputs.get("audio_tokens", torch.tensor([])).to(device) if gen_inputs.get("audio_tokens") is not None else None,
-                audio_attention_mask=gen_inputs.get("audio_attention_mask", torch.tensor([])).to(device) if gen_inputs.get("audio_attention_mask") is not None else None,
-                max_new_tokens=max_new_tokens,
-                num_beams=num_beams,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
+                input_ids=gen_input_ids,
+                attention_mask=gen_attention_mask,
+                audio_tokens=gen_audio_tokens,
+                audio_attention_mask=gen_audio_attention_mask,
+                **generation_kwargs,
             )
 
             # Decode predictions
@@ -317,6 +334,10 @@ def evaluate_on_split(
                 else:
                     refs = [str(answer)]
                 all_references.append(refs)
+
+            # Progress every 10 batches
+            if (batch_idx + 1) % 10 == 0:
+                print(f"  Batch {batch_idx + 1}, samples: {len(all_predictions)}", flush=True)
 
     elapsed = time.time() - start_time
 
