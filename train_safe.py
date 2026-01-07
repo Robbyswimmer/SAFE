@@ -120,6 +120,22 @@ def count_parameters(model: nn.Module) -> Tuple[int, int]:
     return total, trainable
 
 
+def cast_trainable_params_to_fp32(model: nn.Module) -> int:
+    """
+    Ensure all *trainable* parameters are fp32.
+
+    AMP GradScaler cannot unscale fp16 gradients. If trainable params (e.g., LoRA
+    weights created under a fp16 base model) are fp16, GradScaler will error with:
+      ValueError: Attempting to unscale FP16 gradients.
+    """
+    converted = 0
+    for p in model.parameters():
+        if getattr(p, "requires_grad", False) and p.dtype == torch.float16:
+            p.data = p.data.float()
+            converted += 1
+    return converted
+
+
 def summarize_trainable_parameters(model: nn.Module) -> Dict[str, int]:
     """
     Return a breakdown of trainable parameters by component and sub-type.
@@ -2915,6 +2931,12 @@ def main():
     # Initialize model using the canonical create_model helper
     model = create_model(model_config) if is_main else create_model(model_config)
     model = model.to(device)
+
+    # If the base model is fp16 (common), LoRA/adapters may also be fp16.
+    # GradScaler cannot unscale fp16 gradients, so keep trainable params fp32.
+    converted = cast_trainable_params_to_fp32(model)
+    if is_main and converted:
+        print(f"  ✓ Cast {converted} trainable parameter tensors to fp32 (AMP-safe)", flush=True)
 
     # Wrap model with DDP for distributed training
     if dist_info["distributed"]:
