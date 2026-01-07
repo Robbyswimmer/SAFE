@@ -1544,11 +1544,34 @@ def train_epoch(
     token_correct = 0
     token_total = 0
 
+    def _ddp_noop_loss() -> torch.Tensor:
+        """
+        Create a zero-valued loss that still touches every trainable parameter.
+
+        In DDP, *skipping* a backward pass on one rank (e.g., due to a bad batch)
+        can cause other ranks to hang in NCCL all-reduce. This helper ensures we
+        always run a backward pass and trigger DDP gradient hooks with zero grads.
+        """
+
+        # Use fp32 scalar for stability; gradients will still flow to the params' dtype.
+        loss0 = torch.zeros((), device=device, dtype=torch.float32)
+        for p in model.parameters():
+            if getattr(p, "requires_grad", False):
+                # Touch a single element per tensor to keep this O(#tensors), not O(#elements).
+                loss0 = loss0 + p.view(-1)[0].float() * 0.0
+        return loss0
+
+    ddp_enabled = bool(world_size and int(world_size) > 1 and dist.is_available() and dist.is_initialized())
+
     for batch_idx, batch in enumerate(dataloader):
         # Move batch to device
         questions = batch["questions"]
         answers = batch["answers"]
         audio = batch["audio"]
+
+        dummy_batch = False
+        audio_tokens = None
+        audio_attention_mask = None
 
         # Skip samples with missing audio OR missing captions.
         if isinstance(audio, list):
@@ -1574,7 +1597,13 @@ def train_epoch(
                         flush=True,
                     )
                     last_skip_log_time = now
-                continue
+                # In DDP, do NOT early-continue: ranks must execute the same number
+                # of backward passes to avoid NCCL hangs. Run a no-op backward.
+                if ddp_enabled:
+                    dummy_batch = True
+                    questions = []
+                else:
+                    continue
             if len(valid_indices) < len(audio):
                 filtered_samples += len(audio) - len(valid_indices)
                 missing_audio = sum(1 for a in audio if a is None)
@@ -1593,29 +1622,45 @@ def train_epoch(
                 answers = [answers[i] for i in valid_indices]
                 audio = [audio[i] for i in valid_indices]
 
-        # Prepare inputs (use base_model for helper method)
-        inputs = base_model.prepare_multimodal_inputs(
-            text=questions,
-            audio=audio,
-            answers=answers,
-            device=device,
-            training_mode=True
-        )
+        if dummy_batch:
+            outputs = {"loss": _ddp_noop_loss(), "logits": None}
+            loss = outputs["loss"]
+            input_ids = None
+            attention_mask = None
+            labels = None
+        else:
+            # Prepare inputs (use base_model for helper method)
+            inputs = base_model.prepare_multimodal_inputs(
+                text=questions,
+                audio=audio,
+                answers=answers,
+                device=device,
+                training_mode=True
+            )
 
-        # Move to device
-        input_ids = inputs["input_ids"].to(device)
-        attention_mask = inputs["attention_mask"].to(device)
-        labels = inputs["labels"].to(device)
-        audio_tokens = inputs.get("audio_tokens")
-        if audio_tokens is not None:
-            audio_tokens = audio_tokens.to(device)
-        audio_attention_mask = inputs.get("audio_attention_mask")
-        if audio_attention_mask is not None:
-            audio_attention_mask = audio_attention_mask.to(device)
+            # Move to device
+            input_ids = inputs["input_ids"].to(device)
+            attention_mask = inputs["attention_mask"].to(device)
+            labels = inputs["labels"].to(device)
+            audio_tokens = inputs.get("audio_tokens")
+            if audio_tokens is not None:
+                audio_tokens = audio_tokens.to(device)
+            audio_attention_mask = inputs.get("audio_attention_mask")
+            if audio_attention_mask is not None:
+                audio_attention_mask = audio_attention_mask.to(device)
 
-        # Forward pass with optional mixed precision
-        if use_amp:
-            with autocast():
+            # Forward pass with optional mixed precision
+            if use_amp:
+                with autocast():
+                    outputs = model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                        audio_tokens=audio_tokens,
+                        audio_attention_mask=audio_attention_mask,
+                    )
+                    loss = outputs["loss"]
+            else:
                 outputs = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -1624,15 +1669,6 @@ def train_epoch(
                     audio_attention_mask=audio_attention_mask,
                 )
                 loss = outputs["loss"]
-        else:
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-                audio_tokens=audio_tokens,
-                audio_attention_mask=audio_attention_mask,
-            )
-            loss = outputs["loss"]
 
         # Token-level training accuracy on supervised positions (captioning analogue of "accuracy")
         logits = outputs.get("logits") if isinstance(outputs, dict) else None
@@ -1694,8 +1730,11 @@ def train_epoch(
         # If loss has no gradient path (e.g., SAFE gate effectively off),
         # skip this batch to avoid autograd errors.
         if not isinstance(loss, torch.Tensor) or not loss.requires_grad:
-            # Optionally log once, but keep silent in normal operation
-            continue
+            # In DDP, do not skip backward on only some ranks (can hang).
+            if ddp_enabled:
+                loss = _ddp_noop_loss()
+            else:
+                continue
 
         # Normalize by gradient accumulation steps
         loss = loss / gradient_accumulation_steps
