@@ -1506,6 +1506,8 @@ def train_epoch(
     wandb_run: Any = None,
     optimizer_step: int = 0,
     world_size: int = 1,
+    train_eval_loader: Optional[DataLoader] = None,
+    train_eval_steps: int = 0,
 ) -> Tuple[Dict[str, float], int]:
     """
     Train for one epoch
@@ -1884,6 +1886,40 @@ def train_epoch(
 
                 _wandb_log(wandb_run, log_dict, step=optimizer_step)
 
+            # Periodic training accuracy eval (CIDEr/METEOR on training subset)
+            if (train_eval_loader is not None and
+                train_eval_steps > 0 and
+                optimizer_step % train_eval_steps == 0 and
+                wandb_run is not None):
+                print(f"[TrainEval] Computing training accuracy at step {optimizer_step}...", flush=True)
+                try:
+                    train_eval_metrics = evaluate(
+                        model=model,
+                        dataloader=train_eval_loader,
+                        device=device,
+                        max_batches=None,  # Use all samples in the small loader
+                        max_new_tokens=config.get("max_new_tokens", 20),
+                        num_beams=1,  # Greedy for speed
+                        light_metrics=True,
+                    )
+                    train_eval_log = {
+                        "train_acc/cider": train_eval_metrics.get("cider", 0.0),
+                        "train_acc/meteor": train_eval_metrics.get("meteor", 0.0),
+                        "train_acc/bleu4": train_eval_metrics.get("bleu4", 0.0),
+                        "train_acc/rouge_l": train_eval_metrics.get("rouge_l", 0.0),
+                    }
+                    _wandb_log(wandb_run, train_eval_log, step=optimizer_step)
+                    print(f"[TrainEval] CIDEr={train_eval_metrics.get('cider', 0.0):.2f} "
+                          f"METEOR={train_eval_metrics.get('meteor', 0.0):.4f}", flush=True)
+
+                    # Re-enable training mode after eval
+                    if hasattr(base_model, "enable_audio_training"):
+                        base_model.enable_audio_training()
+                    else:
+                        model.train()
+                except Exception as e:
+                    print(f"[TrainEval] Error: {e}", flush=True)
+
             # Reset step accumulators
             step_start_time = time.time()
             step_loss_sum = 0.0
@@ -2092,6 +2128,8 @@ def train(
     wandb_sample_count: int = 0,
     dist_info: Optional[Dict[str, Any]] = None,
     train_sampler: Optional[DistributedSampler] = None,
+    train_eval_loader: Optional[DataLoader] = None,
+    train_eval_steps: int = 0,
 ) -> Dict[str, Any]:
     """
     Main training loop
@@ -2105,6 +2143,8 @@ def train(
         device: Device to train on
         dist_info: Distributed training info (rank, world_size, etc.)
         train_sampler: DistributedSampler for training (if distributed)
+        train_eval_loader: DataLoader for periodic training accuracy eval
+        train_eval_steps: Evaluate training accuracy every N optimizer steps
 
     Returns:
         Training history dict
@@ -2407,6 +2447,8 @@ def train(
             wandb_run=wandb_run,
             optimizer_step=optimizer_step,
             world_size=dist_info["world_size"],
+            train_eval_loader=train_eval_loader,
+            train_eval_steps=train_eval_steps,
         )
         if wandb_run is not None:
             train_log = {"train/optimizer_step": optimizer_step, "epoch": epoch}
@@ -2740,6 +2782,9 @@ def main():
     parser.add_argument("--model-config", type=str, default="phase1",
                         choices=["demo", "full", "multimodal", "phase1"],
                         help="Model configuration name")
+    parser.add_argument("--fusion-layer-indices", type=str, default=None,
+                        help="Comma-separated layer indices for fusion injection (e.g., '8,16,24'). "
+                             "Overrides the config default.")
 
     # Data
     parser.add_argument("--data-path", type=str, required=True,
@@ -2806,6 +2851,10 @@ def main():
     # Evaluation
     parser.add_argument("--eval-frequency", type=int, default=1,
                         help="Evaluate every N epochs")
+    parser.add_argument("--train-eval-steps", type=int, default=500,
+                        help="Compute CIDEr/METEOR on training subset every N optimizer steps (0=disabled)")
+    parser.add_argument("--train-eval-samples", type=int, default=50,
+                        help="Number of training samples to use for training accuracy eval")
     parser.add_argument("--max-eval-batches", type=int, default=None,
                         help="Max batches for validation (None = all)")
     parser.add_argument("--max-new-tokens", type=int, default=20,
@@ -2927,6 +2976,16 @@ def main():
     if is_main:
         print(f"\nLoading model config: {args.model_config}")
     model_config = get_config(args.model_config)
+
+    # Override fusion layer indices if specified via CLI
+    if args.fusion_layer_indices:
+        layer_indices = [int(x.strip()) for x in args.fusion_layer_indices.split(",")]
+        model_config["fusion_layer_indices"] = layer_indices
+        # Also update nested fusion_adapter config if present
+        if "fusion_adapter" in model_config and isinstance(model_config["fusion_adapter"], dict):
+            model_config["fusion_adapter"]["layer_indices"] = layer_indices
+        if is_main:
+            print(f"  ✓ Fusion layer indices overridden: {layer_indices}")
 
     # Initialize model using the canonical create_model helper
     model = create_model(model_config) if is_main else create_model(model_config)
@@ -3066,6 +3125,21 @@ def main():
         num_workers=args.num_workers,
         sampler=val_sampler,
     )
+
+    # Create training accuracy eval loader (small fixed subset of training data)
+    train_eval_loader = None
+    if args.train_eval_steps > 0 and args.train_eval_samples > 0:
+        # Use a fixed subset of training data for consistent training accuracy measurement
+        train_eval_indices = list(range(min(len(audiocaps_train), args.train_eval_samples)))
+        train_eval_subset = torch.utils.data.Subset(audiocaps_train, train_eval_indices)
+        train_eval_loader = create_safe_dataloader(
+            train_eval_subset,
+            batch_size=args.val_batch_size,
+            shuffle=False,
+            num_workers=0,  # Keep it lightweight
+        )
+        if is_main:
+            print(f"  Train eval: {len(train_eval_subset)} samples (every {args.train_eval_steps} steps)")
 
     # Training config
     resolved_max_eval_batches = args.max_eval_batches
@@ -3221,6 +3295,8 @@ def main():
         wandb_sample_count=int(args.wandb_sample_count),
         dist_info=dist_info,
         train_sampler=train_sampler,
+        train_eval_loader=train_eval_loader,
+        train_eval_steps=args.train_eval_steps,
     )
 
     if wandb_run is not None:

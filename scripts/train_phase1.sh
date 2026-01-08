@@ -14,7 +14,7 @@
 #SBATCH --time=72:00:00
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:3
+#SBATCH --gres=gpu:1
 #SBATCH --mail-type=FAIL,END
 #SBATCH --mail-user=rmose009@ucr.edu
 #SBATCH -p gpu
@@ -64,6 +64,9 @@ AUDIO_CONTRASTIVE_TEMPERATURE=${AUDIO_CONTRASTIVE_TEMPERATURE:-0.07}
 AUDIO_CONTRASTIVE_MAX_LENGTH=${AUDIO_CONTRASTIVE_MAX_LENGTH:-48}
 GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-0}
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
+FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}  # e.g., "8,16,24" - overrides config default
+TRAIN_EVAL_STEPS=${TRAIN_EVAL_STEPS:-500}         # Compute train CIDEr/METEOR every N steps
+TRAIN_EVAL_SAMPLES=${TRAIN_EVAL_SAMPLES:-300}     # Number of train samples for accuracy eval
 EXTRA_ARGS=${EXTRA_ARGS:-""}
 
 # Memory optimization - enable by default for 48GB GPUs with large datasets
@@ -72,7 +75,7 @@ NUM_WORKERS=${NUM_WORKERS:-0}              # Disable workers to avoid per-worker
 MAX_EVAL_BATCHES=${MAX_EVAL_BATCHES:-10}   # Keep eval lightweight to avoid memory buildup
 
 # Multi-GPU configuration
-NUM_GPUS=${NUM_GPUS:-3}                    # Number of GPUs to use (default: 3)
+NUM_GPUS=${NUM_GPUS:-1}                    # Number of GPUs to use (default: 1)
 
 # Weights & Biases logging (optional)
 USE_WANDB=${USE_WANDB:-0}
@@ -113,6 +116,11 @@ if [[ -n "${MAX_TRAIN_SAMPLES}" ]]; then
   MAX_TRAIN_ARGS+=(--max-train-samples "${MAX_TRAIN_SAMPLES}")
 fi
 
+FUSION_LAYER_ARGS=()
+if [[ -n "${FUSION_LAYER_INDICES}" ]]; then
+  FUSION_LAYER_ARGS+=(--fusion-layer-indices "${FUSION_LAYER_INDICES}")
+fi
+
 # Create output directory
 mkdir -p "${OUTPUT_DIR}"
 mkdir -p logs
@@ -147,6 +155,9 @@ echo "Gradient checkpointing: ${GRADIENT_CHECKPOINTING}"
 echo "Num workers: ${NUM_WORKERS}"
 echo "Max eval batches: ${MAX_EVAL_BATCHES}"
 echo "Num GPUs: ${NUM_GPUS}"
+if [[ -n "${FUSION_LAYER_INDICES}" ]]; then
+  echo "Fusion layer indices: ${FUSION_LAYER_INDICES}"
+fi
 if [[ -n "${MAX_TRAIN_SAMPLES}" ]]; then
   echo "Max train samples: ${MAX_TRAIN_SAMPLES}"
 fi
@@ -195,9 +206,12 @@ ${LAUNCHER} train_safe.py \
     --gate-warmup-steps "${GATE_WARMUP_STEPS}" \
     --num-workers "${NUM_WORKERS}" \
     --max-eval-batches "${MAX_EVAL_BATCHES}" \
+    --train-eval-steps "${TRAIN_EVAL_STEPS}" \
+    --train-eval-samples "${TRAIN_EVAL_SAMPLES}" \
     $( [[ "${GRADIENT_CHECKPOINTING}" != "0" ]] && echo --gradient-checkpointing ) \
     ${FP16} \
     "${MAX_TRAIN_ARGS[@]}" \
+    "${FUSION_LAYER_ARGS[@]}" \
     "${WANDB_ARGS[@]}" \
     ${EXTRA_ARGS}
 
