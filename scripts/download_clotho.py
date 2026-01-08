@@ -25,7 +25,6 @@ import numpy as np
 
 try:
     from aac_datasets import Clotho
-    from aac_datasets.utils.download import download_file
 except ImportError:
     raise SystemExit(
         "aac-datasets package required. Install with: pip install aac-datasets"
