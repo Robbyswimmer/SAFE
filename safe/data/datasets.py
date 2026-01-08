@@ -21,6 +21,8 @@ __all__ = [
     "AVQADataset",
     "WavCapsDataset",
     "AudioSetCapsDataset",
+    "ClothoDataset",
+    "MACSDataset",
 ]
 
 
@@ -726,6 +728,130 @@ class AudioSetCapsDataset(_BaseQADataset):
             "answers": answers,
             "audio": self._load_audio(entry),
             "images": None,  # AudioSetCaps is audio-only
+        }
+        return sample
+
+
+class ClothoDataset(_BaseQADataset):
+    """
+    Clotho dataset - high-quality audio captioning with ~6K Freesound clips.
+
+    Each audio clip has 5 human-written captions.
+
+    Expected directory structure:
+        data/clotho/
+            Clotho_train.json  (or .jsonl)
+            Clotho_val.json
+            Clotho_test.json
+            audio/
+                train/
+                val/
+                test/
+    """
+    dataset_name = "clotho"
+    file_stem = "Clotho"
+
+    def __init__(self, data_path: str | Path, split: str = "train"):
+        data_root = Path(data_path)
+        dataset_dir = data_root / self.dataset_name
+        preferred_file: Optional[Path] = None
+
+        # Map split names to file names (Clotho uses capitalized names)
+        split_map = {
+            "train": "train",
+            "val": "val",
+            "validation": "val",
+            "test": "test",
+            "evaluation": "test",
+        }
+        local_split = split_map.get(split.lower(), split)
+
+        # Try both JSON and JSONL formats
+        for ext in [".json", ".jsonl"]:
+            candidate = dataset_dir / f"Clotho_{local_split}{ext}"
+            if candidate.exists():
+                preferred_file = candidate
+                break
+
+        super().__init__(data_path=data_path, split=local_split, preferred_file=preferred_file)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        entry = self.examples[idx]
+
+        question = entry.get("question") or "Describe the audio."
+
+        # Clotho has multiple captions per audio
+        captions = entry.get("captions")
+        if isinstance(captions, (list, tuple)):
+            answers = [str(cap).strip() for cap in captions if str(cap).strip()]
+        else:
+            answers = entry.get("answers") or entry.get("answer") or entry.get("caption")
+
+        resolved_audio = self._resolve_audio_file(entry)
+
+        sample = {
+            "sample_id": entry.get("sound_name") or entry.get("file_name") or entry.get("id"),
+            "question": question,
+            "answers": answers,
+            "audio_path": str(resolved_audio) if resolved_audio else entry.get("file_path"),
+            "audio": self._load_audio(entry),
+            "images": None,  # Clotho is audio-only
+        }
+        return sample
+
+
+class MACSDataset(_BaseQADataset):
+    """
+    MACS (Multi-Annotator Captioned Sounds) dataset.
+
+    High-quality dataset with ~3K diverse sounds, each with multiple human annotations.
+
+    Expected directory structure:
+        data/macs/
+            MACS_train.json (or .jsonl)
+            MACS_val.json
+            audio/
+                train/
+                val/
+    """
+    dataset_name = "macs"
+    file_stem = "MACS"
+
+    def __init__(self, data_path: str | Path, split: str = "train"):
+        data_root = Path(data_path)
+        dataset_dir = data_root / self.dataset_name
+        preferred_file: Optional[Path] = None
+
+        # Try both JSON and JSONL formats
+        for ext in [".json", ".jsonl"]:
+            candidate = dataset_dir / f"MACS_{split}{ext}"
+            if candidate.exists():
+                preferred_file = candidate
+                break
+
+        super().__init__(data_path=data_path, split=split, preferred_file=preferred_file)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        entry = self.examples[idx]
+
+        question = entry.get("question") or "What sound is this?"
+
+        # MACS has multiple captions from different annotators
+        captions = entry.get("captions")
+        if isinstance(captions, (list, tuple)):
+            answers = [str(cap).strip() for cap in captions if str(cap).strip()]
+        else:
+            answers = entry.get("answers") or entry.get("answer") or entry.get("caption")
+
+        resolved_audio = self._resolve_audio_file(entry)
+
+        sample = {
+            "sample_id": entry.get("sound_name") or entry.get("filename") or entry.get("id"),
+            "question": question,
+            "answers": answers,
+            "audio_path": str(resolved_audio) if resolved_audio else entry.get("file_path"),
+            "audio": self._load_audio(entry),
+            "images": None,  # MACS is audio-only
         }
         return sample
 

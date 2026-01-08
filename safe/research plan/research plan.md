@@ -482,14 +482,70 @@ Suggested experiment naming:
 
 `YYYYMMDD__task__cfg__layers-12-24-36__inj-preffn__tok-8__rank-16__projbn-1024__mix-ac0.5-wc0.7__seed-42`
 
-## 14) Open Decisions (Resolve Early)
+## 14) Experiment Log & Findings
+
+### 2026-01-08: LoRA Bug Fix & Layer Ablation Study
+
+**Bug Discovery:** Found that LoRA weights in fusion adapters were being frozen incorrectly. In `fusion_adapter.py`, the code `for param in base_model.parameters(): param.requires_grad = bool(train_base_cross_attention)` was freezing ALL parameters including LoRA weights when `train_base_cross_attention=False`.
+
+**Fix Applied:** Updated to check parameter names - LoRA weights (`lora_` in name) and `residual_scale` are always trainable, base layers controlled by flag.
+
+**Surprising Finding:** Despite frozen LoRA, we achieved CIDEr ~49 and METEOR ~0.19 using only:
+- Audio projector (~42M params)
+- Token gates (~0.03M params)
+- Residual scales (~0.00M params)
+
+This serves as an **ablation baseline** showing what's achievable without cross-attention adaptation.
+
+**Current Trainable Params (with LoRA fix):**
+- audio_projector: 42.52M
+- fusion_adapter/lora: 1.97M (now unfrozen!)
+- fusion_adapter/token_gate: 0.03M
+- Total trainable: ~44.5M
+
+### Current Experiment: Layer Ablation (Running)
+
+Testing how fusion layer depth impacts accuracy. Using layers at 8, 16, 24, 32 (evenly distributed through 40-layer LLM):
+
+| Run | Layers | Hypothesis |
+|-----|--------|------------|
+| 1L | [8] | Early-only fusion - tests if semantic alignment needs depth |
+| 2L | [8, 16] | Early+mid - progressive refinement |
+| 3L | [8, 16, 24] | Distributed fusion |
+| 4L | [8, 16, 24, 32] | Full depth coverage |
+
+**Metrics tracked:**
+- `val/cider`, `val/meteor` - validation performance (per epoch)
+- `train_acc/cider`, `train_acc/meteor` - training accuracy on fixed 300 samples (every 500 steps)
+
+**Training config:**
+- Single GPU (DDP had issues, deferred)
+- WavCaps 50% mix
+- 20 epochs
+- LoRA rank 8
+
+### Multi-GPU Status
+
+Attempted DDP support with 3 GPUs but encountered performance issues (slower than single GPU). Likely causes:
+- `find_unused_parameters=True` overhead (fixed in code but not yet tested)
+- Communication overhead with large frozen backbone
+
+Deferred to single-GPU runs for current experiments. Multi-GPU optimization is future work.
+
+### Infrastructure Improvements
+
+1. **`--fusion-layer-indices` CLI arg** - Override fusion layers without changing config files
+2. **Training accuracy logging** - `train_acc/cider`, `train_acc/meteor` logged to W&B every 500 steps on fixed 300 training samples
+3. **LoRA parameter detection** - Startup now warns if LoRA params are missing from trainable set
+
+## 15) Open Decisions (Resolve Early)
 
 1) Primary backbone for paper (LLaVA 13B vs smaller for sweeps).
 2) Retention suite scope (COCO/VQA minimum; add more if feasible).
-3) Audio tokenization approach for “bandwidth” study (pooled vs temporal).
+3) Audio tokenization approach for "bandwidth" study (pooled vs temporal).
 4) Final continual learning protocol (A vs B vs both).
 
-## 15) Links Into Repo (to keep aligned with implementation)
+## 16) Links Into Repo (to keep aligned with implementation)
 
 - Model presets: `configs/model_configs.py`
 - Training configs: `configs/training/full.yaml`

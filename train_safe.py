@@ -45,7 +45,7 @@ except Exception:  # pragma: no cover
 
 # SAFE imports
 from configs.model_configs import get_config
-from safe.data.datasets import AudioCapsDataset, WavCapsDataset, create_safe_dataloader
+from safe.data.datasets import AudioCapsDataset, WavCapsDataset, ClothoDataset, MACSDataset, create_safe_dataloader
 from safe.models.safe_model import SAFEModel
 
 
@@ -2804,6 +2804,10 @@ def main():
         action="store_true",
         help="Re-sample the WavCaps subset each epoch (useful when wavcaps_ratio < 1.0).",
     )
+    parser.add_argument("--use-clotho", action="store_true",
+                        help="Include Clotho dataset in training mix")
+    parser.add_argument("--use-macs", action="store_true",
+                        help="Include MACS dataset in training mix")
     parser.add_argument("--max-train-samples", type=int, default=None,
                         help="Limit number of training samples for smoke testing")
 
@@ -2984,6 +2988,16 @@ def main():
         # Also update nested fusion_adapter config if present
         if "fusion_adapter" in model_config and isinstance(model_config["fusion_adapter"], dict):
             model_config["fusion_adapter"]["layer_indices"] = layer_indices
+        # CRITICAL: Also update fusion_config.modalities.audio.layer_indices
+        # This is what MultiLayerFusionAdapter actually uses when modalities is provided
+        if "fusion_config" in model_config and isinstance(model_config["fusion_config"], dict):
+            fusion_cfg = model_config["fusion_config"]
+            if "modalities" in fusion_cfg and isinstance(fusion_cfg["modalities"], dict):
+                for modality_name, modality_cfg in fusion_cfg["modalities"].items():
+                    if isinstance(modality_cfg, dict):
+                        modality_cfg["layer_indices"] = layer_indices
+                if is_main:
+                    print(f"  ✓ Updated modalities config with layer indices: {layer_indices}")
         if is_main:
             print(f"  ✓ Fusion layer indices overridden: {layer_indices}")
 
@@ -3061,6 +3075,10 @@ def main():
 
     val_dataset = AudioCapsDataset(args.data_path, split=args.val_split)
 
+    # Collect additional datasets
+    additional_datasets = []
+
+    # WavCaps
     wavcaps_train = None
     if args.use_wavcaps:
         try:
@@ -3070,9 +3088,36 @@ def main():
                 print(f"  WavCaps ratio: {args.wavcaps_ratio:.2f}")
         except Exception as e:
             if is_main:
-                print(f"⚠️  Failed to load WavCaps dataset: {e}. Continuing with AudioCaps only.", flush=True)
+                print(f"⚠️  Failed to load WavCaps dataset: {e}. Continuing without WavCaps.", flush=True)
             wavcaps_train = None
 
+    # Clotho
+    clotho_train = None
+    if args.use_clotho:
+        try:
+            clotho_train = ClothoDataset(args.data_path, split="train")
+            additional_datasets.append(clotho_train)
+            if is_main:
+                print(f"  Clotho train: {len(clotho_train)} samples")
+        except Exception as e:
+            if is_main:
+                print(f"⚠️  Failed to load Clotho dataset: {e}. Continuing without Clotho.", flush=True)
+            clotho_train = None
+
+    # MACS
+    macs_train = None
+    if args.use_macs:
+        try:
+            macs_train = MACSDataset(args.data_path, split="train")
+            additional_datasets.append(macs_train)
+            if is_main:
+                print(f"  MACS train: {len(macs_train)} samples")
+        except Exception as e:
+            if is_main:
+                print(f"⚠️  Failed to load MACS dataset: {e}. Continuing without MACS.", flush=True)
+            macs_train = None
+
+    # Combine all datasets
     if wavcaps_train is not None:
         train_dataset = MixedAudioCaptionDataset(
             audiocaps_dataset=audiocaps_train,
@@ -3089,6 +3134,19 @@ def main():
         train_dataset = audiocaps_train
         if is_main:
             print(f"  Train (AudioCaps only): {len(train_dataset)} samples")
+
+    # Add Clotho and MACS via ConcatDataset if available
+    if additional_datasets:
+        all_datasets = [train_dataset] + additional_datasets
+        train_dataset = torch.utils.data.ConcatDataset(all_datasets)
+        if is_main:
+            total_samples = sum(len(d) for d in all_datasets)
+            dataset_names = ["AudioCaps/WavCaps" if wavcaps_train else "AudioCaps"]
+            if clotho_train:
+                dataset_names.append("Clotho")
+            if macs_train:
+                dataset_names.append("MACS")
+            print(f"  Combined train: {total_samples} samples ({' + '.join(dataset_names)})")
 
     if is_main:
         print(f"  Val (AudioCaps): {len(val_dataset)} samples")

@@ -14,10 +14,11 @@
 #SBATCH --time=72:00:00
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:1
 #SBATCH --mail-type=FAIL,END
 #SBATCH --mail-user=rmose009@ucr.edu
 #SBATCH -p gpu
+# NOTE: --gres=gpu:N must be passed on sbatch command line, e.g.:
+#   sbatch --gres=gpu:1 scripts/train_phase1.sh
 
 set -euo pipefail
 
@@ -57,8 +58,10 @@ MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-20}
 NUM_BEAMS=${NUM_BEAMS:-1}
 FP16=${FP16:-"--fp16"}
 SEED=${SEED:-42}
-USE_WAVCAPS=${USE_WAVCAPS:-0}
+USE_WAVCAPS=${USE_WAVCAPS:-1}
 WAVCAPS_RATIO=${WAVCAPS_RATIO:-0.8}
+USE_CLOTHO=${USE_CLOTHO:-1}
+USE_MACS=${USE_MACS:-1}
 AUDIO_CONTRASTIVE_WEIGHT=${AUDIO_CONTRASTIVE_WEIGHT:-0.0}
 AUDIO_CONTRASTIVE_TEMPERATURE=${AUDIO_CONTRASTIVE_TEMPERATURE:-0.07}
 AUDIO_CONTRASTIVE_MAX_LENGTH=${AUDIO_CONTRASTIVE_MAX_LENGTH:-48}
@@ -149,6 +152,8 @@ echo "Warmup steps: ${WARMUP_STEPS}"
 echo "Mixed precision: ${FP16}"
 echo "Seed: ${SEED}"
 echo "Use WavCaps: ${USE_WAVCAPS} (ratio=${WAVCAPS_RATIO})"
+echo "Use Clotho: ${USE_CLOTHO}"
+echo "Use MACS: ${USE_MACS}"
 echo "Audio contrastive weight: ${AUDIO_CONTRASTIVE_WEIGHT}"
 echo "Gate warmup steps: ${GATE_WARMUP_STEPS}"
 echo "Gradient checkpointing: ${GRADIENT_CHECKPOINTING}"
@@ -200,6 +205,8 @@ ${LAUNCHER} train_safe.py \
     --seed "${SEED}" \
     $( [[ "${USE_WAVCAPS}" != "0" ]] && echo --use-wavcaps ) \
     --wavcaps-ratio "${WAVCAPS_RATIO}" \
+    $( [[ "${USE_CLOTHO}" != "0" ]] && echo --use-clotho ) \
+    $( [[ "${USE_MACS}" != "0" ]] && echo --use-macs ) \
     --audio-contrastive-weight "${AUDIO_CONTRASTIVE_WEIGHT}" \
     --audio-contrastive-temperature "${AUDIO_CONTRASTIVE_TEMPERATURE}" \
     --audio-contrastive-max-length "${AUDIO_CONTRASTIVE_MAX_LENGTH}" \
