@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Download Clotho dataset from Hugging Face and prepare for SAFE training.
+Download Clotho dataset using aac-datasets package and prepare for SAFE training.
 
 Clotho is a high-quality audio captioning dataset with ~6K Freesound clips,
 each with 5 human-written captions.
 
 Usage:
+    pip install aac-datasets
     python scripts/download_clotho.py --output-dir experiments/full_training/data/clotho
 
 On cluster:
@@ -16,17 +17,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 try:
-    from datasets import load_dataset, Audio
+    from aac_datasets import Clotho
+    from aac_datasets.utils.download import download_file
 except ImportError:
     raise SystemExit(
-        "datasets package required. Install with: pip install datasets soundfile"
+        "aac-datasets package required. Install with: pip install aac-datasets"
     )
 
 
@@ -36,9 +38,9 @@ def save_audio_wav(target: Path, audio_array: np.ndarray, sample_rate: int) -> N
 
     np_array = np.asarray(audio_array, dtype=np.float32)
 
-    # Ensure 2D array (channels, samples) -> (samples, channels) for soundfile
+    # Ensure correct shape for soundfile (samples,) or (samples, channels)
     if np_array.ndim == 1:
-        np_array = np_array.reshape(-1, 1)
+        pass  # Already correct shape
     elif np_array.ndim == 2 and np_array.shape[0] < np_array.shape[1]:
         # Assume (channels, samples) -> transpose to (samples, channels)
         np_array = np_array.T
@@ -53,38 +55,40 @@ def process_clotho_split(
     overwrite: bool = False,
     max_samples: Optional[int] = None,
 ) -> Tuple[int, int]:
-    """Process a single Clotho split."""
+    """Process a single Clotho split using aac-datasets."""
 
     print(f"\n📥 Loading Clotho split: {split_name}", flush=True)
 
-    # Clotho on HuggingFace: https://huggingface.co/datasets/audiofolder/clotho
-    # Alternative: https://huggingface.co/datasets/d0rj/clotho
+    # Map split names for aac-datasets (uses 'dev', 'val', 'eval')
+    aac_split_map = {
+        "development": "dev",
+        "train": "dev",
+        "validation": "val",
+        "val": "val",
+        "evaluation": "eval",
+        "test": "eval",
+    }
+    aac_split = aac_split_map.get(split_name, split_name)
+
+    # Map to our output convention
+    output_split_map = {
+        "dev": "train",
+        "val": "val",
+        "eval": "test",
+    }
+    local_split = output_split_map.get(aac_split, split_name)
+
+    # Load dataset using aac-datasets
     try:
-        ds = load_dataset(
-            "d0rj/clotho",
-            split=split_name,
-            cache_dir=str(cache_dir),
-            trust_remote_code=True,
+        dataset = Clotho(
+            root=str(cache_dir),
+            subset=aac_split,
+            download=True,
+            verbose=1,
         )
     except Exception as e:
-        print(f"   ⚠️  Failed to load from d0rj/clotho: {e}", flush=True)
-        print("   Trying alternative source...", flush=True)
-        ds = load_dataset(
-            "clotho",
-            split=split_name,
-            cache_dir=str(cache_dir),
-            trust_remote_code=True,
-        )
-
-    # Map split names to local convention
-    split_map = {
-        "development": "train",
-        "validation": "val",
-        "evaluation": "test",
-        "test": "test",
-        "train": "train",
-    }
-    local_split = split_map.get(split_name, split_name)
+        print(f"   ⚠️  Failed to load Clotho {aac_split}: {e}", flush=True)
+        return 0, 0
 
     audio_dir = output_dir / "audio" / local_split
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -93,8 +97,7 @@ def process_clotho_split(
     processed = 0
     skipped = 0
 
-    # Limit samples if requested
-    total = len(ds)
+    total = len(dataset)
     if max_samples is not None:
         total = min(total, max_samples)
 
@@ -102,39 +105,34 @@ def process_clotho_split(
         if idx % 100 == 0:
             print(f"   Processing {idx}/{total}...", flush=True)
 
-        sample = ds[idx]
-
         try:
-            # Clotho has 'audio' field with array and sampling_rate
-            audio_data = sample.get("audio")
+            item = dataset[idx]
+
+            # aac-datasets returns dict with 'audio', 'captions', 'fname', etc.
+            audio_data = item.get("audio")
             if audio_data is None:
                 skipped += 1
                 continue
 
-            if isinstance(audio_data, dict):
-                audio_array = np.asarray(audio_data["array"], dtype=np.float32)
-                sample_rate = audio_data["sampling_rate"]
+            # Audio is typically a tensor or numpy array
+            if hasattr(audio_data, "numpy"):
+                audio_array = audio_data.numpy()
             else:
-                skipped += 1
-                continue
+                audio_array = np.asarray(audio_data, dtype=np.float32)
 
-            # Get filename - Clotho uses 'file_name' field
-            filename = sample.get("file_name") or sample.get("filename") or f"clotho_{local_split}_{idx:05d}.wav"
+            # Get sample rate (Clotho is 44.1kHz)
+            sample_rate = item.get("sr", item.get("sample_rate", 44100))
+
+            # Get filename
+            filename = item.get("fname", item.get("filename", f"clotho_{local_split}_{idx:05d}.wav"))
             if not filename.endswith(".wav"):
                 filename = filename.rsplit(".", 1)[0] + ".wav"
 
-            # Collect all 5 captions (Clotho has caption_1 through caption_5)
-            captions = []
-            for i in range(1, 6):
-                cap = sample.get(f"caption_{i}") or sample.get(f"caption{i}")
-                if cap and str(cap).strip():
-                    captions.append(str(cap).strip())
-
-            # Fallback to single caption field
-            if not captions:
-                cap = sample.get("caption") or sample.get("text")
-                if cap:
-                    captions.append(str(cap).strip())
+            # Get captions (aac-datasets returns list of 5 captions)
+            captions = item.get("captions", [])
+            if isinstance(captions, str):
+                captions = [captions]
+            captions = [str(c).strip() for c in captions if str(c).strip()]
 
             if not captions:
                 captions = [""]
@@ -181,12 +179,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         "--cache-dir",
         type=Path,
         default=None,
-        help="HuggingFace cache directory (defaults to <output-dir>/.hf_cache)",
+        help="Download cache directory (defaults to <output-dir>/.aac_cache)",
     )
     parser.add_argument(
         "--splits",
-        default="development,validation,evaluation",
-        help="Comma-separated list of splits to download",
+        default="dev,val,eval",
+        help="Comma-separated list of splits to download (dev, val, eval)",
     )
     parser.add_argument(
         "--overwrite",
@@ -203,15 +201,16 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = parser.parse_args(argv)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    cache_dir = args.cache_dir or (args.output_dir / ".hf_cache")
+    cache_dir = args.cache_dir or (args.output_dir / ".aac_cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     splits = [s.strip() for s in args.splits.split(",") if s.strip()]
 
     print("=" * 60)
-    print("Clotho Dataset Download")
+    print("Clotho Dataset Download (via aac-datasets)")
     print("=" * 60)
     print(f"Output directory: {args.output_dir}")
+    print(f"Cache directory: {cache_dir}")
     print(f"Splits: {splits}")
     print("=" * 60)
 

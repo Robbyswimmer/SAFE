@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Download MACS (Multi-Annotator Captioned Sounds) dataset for SAFE training.
+Download MACS (Multi-Annotator Captioned Soundscapes) dataset using aac-datasets.
 
-MACS is a high-quality audio captioning dataset with ~3K diverse sounds,
-each with multiple human-written captions from different annotators.
-
-The dataset is hosted on Zenodo. This script downloads and processes it.
+MACS contains ~3,930 audio files from TAU Urban Acoustic Scenes with multiple
+human-written captions per audio.
 
 Usage:
+    pip install aac-datasets
     python scripts/download_macs.py --output-dir experiments/full_training/data/macs
 
 On cluster:
@@ -18,153 +17,55 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
-import subprocess
-import sys
-import tarfile
-import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-import csv
+
+import numpy as np
 
 try:
-    import requests
+    from aac_datasets import MACS
 except ImportError:
-    raise SystemExit("requests package required. Install with: pip install requests")
+    raise SystemExit(
+        "aac-datasets package required. Install with: pip install aac-datasets"
+    )
 
 
-# MACS dataset URLs (Zenodo)
-MACS_ZENODO_RECORD = "5114771"
-MACS_AUDIO_URL = f"https://zenodo.org/record/{MACS_ZENODO_RECORD}/files/MACS.zip"
-MACS_CAPTIONS_URL = f"https://zenodo.org/record/{MACS_ZENODO_RECORD}/files/MACS_captions.csv"
+def save_audio_wav(target: Path, audio_array: np.ndarray, sample_rate: int) -> None:
+    """Save audio array to WAV file."""
+    import soundfile as sf
 
+    np_array = np.asarray(audio_array, dtype=np.float32)
 
-def download_file(url: str, target: Path, chunk_size: int = 8192) -> None:
-    """Download a file with progress indication."""
-    print(f"   Downloading: {url}", flush=True)
+    if np_array.ndim == 1:
+        pass  # Already correct shape
+    elif np_array.ndim == 2 and np_array.shape[0] < np_array.shape[1]:
+        np_array = np_array.T
 
-    response = requests.get(url, stream=True)
-    response.raise_for_status()
-
-    total_size = int(response.headers.get("content-length", 0))
-    downloaded = 0
-
-    with open(target, "wb") as f:
-        for chunk in response.iter_content(chunk_size=chunk_size):
-            if chunk:
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total_size > 0:
-                    pct = (downloaded / total_size) * 100
-                    print(f"\r   Progress: {pct:.1f}% ({downloaded // 1024 // 1024}MB)", end="", flush=True)
-
-    print(f"\n   ✓ Downloaded to {target}", flush=True)
-
-
-def extract_archive(archive_path: Path, extract_to: Path) -> None:
-    """Extract zip or tar archive."""
-    print(f"   Extracting: {archive_path}", flush=True)
-
-    if archive_path.suffix == ".zip":
-        with zipfile.ZipFile(archive_path, "r") as zf:
-            zf.extractall(extract_to)
-    elif archive_path.suffix in (".tar", ".gz", ".tgz"):
-        with tarfile.open(archive_path, "r:*") as tf:
-            tf.extractall(extract_to)
-    else:
-        raise ValueError(f"Unknown archive format: {archive_path}")
-
-    print(f"   ✓ Extracted to {extract_to}", flush=True)
-
-
-def parse_macs_captions(captions_csv: Path) -> Dict[str, List[str]]:
-    """
-    Parse MACS captions CSV file.
-
-    Returns dict mapping filename -> list of captions
-    """
-    filename_to_captions: Dict[str, List[str]] = {}
-
-    with open(captions_csv, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-
-        for row in reader:
-            # MACS CSV has columns: filename, caption, annotator_id (or similar)
-            # Try common column names
-            filename = (
-                row.get("filename")
-                or row.get("file_name")
-                or row.get("audio_filename")
-                or row.get("sound_id")
-            )
-            caption = (
-                row.get("caption")
-                or row.get("sentence")
-                or row.get("description")
-                or row.get("text")
-            )
-
-            if filename and caption:
-                # Normalize filename
-                filename = filename.strip()
-                if not filename.endswith(".wav"):
-                    filename = filename + ".wav"
-
-                caption = caption.strip()
-                if caption:
-                    if filename not in filename_to_captions:
-                        filename_to_captions[filename] = []
-                    # Avoid duplicates
-                    if caption not in filename_to_captions[filename]:
-                        filename_to_captions[filename].append(caption)
-
-    return filename_to_captions
+    sf.write(str(target), np_array, sample_rate)
 
 
 def process_macs_dataset(
     output_dir: Path,
-    temp_dir: Path,
+    cache_dir: Path,
     overwrite: bool = False,
     train_ratio: float = 0.8,
+    max_samples: Optional[int] = None,
 ) -> Tuple[int, int]:
-    """
-    Download and process MACS dataset.
+    """Process MACS dataset using aac-datasets."""
 
-    Returns (processed_count, skipped_count)
-    """
+    print(f"\n📥 Loading MACS dataset...", flush=True)
 
-    # Download files
-    audio_zip = temp_dir / "MACS.zip"
-    captions_csv = temp_dir / "MACS_captions.csv"
-
-    if not audio_zip.exists() or overwrite:
-        download_file(MACS_AUDIO_URL, audio_zip)
-    else:
-        print(f"   Using cached: {audio_zip}", flush=True)
-
-    if not captions_csv.exists() or overwrite:
-        download_file(MACS_CAPTIONS_URL, captions_csv)
-    else:
-        print(f"   Using cached: {captions_csv}", flush=True)
-
-    # Extract audio
-    audio_extract_dir = temp_dir / "MACS_audio"
-    if not audio_extract_dir.exists():
-        extract_archive(audio_zip, audio_extract_dir)
-
-    # Find audio files (may be in subdirectory)
-    audio_files = list(audio_extract_dir.rglob("*.wav"))
-    if not audio_files:
-        audio_files = list(audio_extract_dir.rglob("*.mp3"))
-    if not audio_files:
-        audio_files = list(audio_extract_dir.rglob("*.flac"))
-
-    print(f"   Found {len(audio_files)} audio files", flush=True)
-
-    # Parse captions
-    filename_to_captions = parse_macs_captions(captions_csv)
-    print(f"   Parsed captions for {len(filename_to_captions)} files", flush=True)
+    # Load dataset using aac-datasets
+    try:
+        dataset = MACS(
+            root=str(cache_dir),
+            download=True,
+            verbose=1,
+        )
+    except Exception as e:
+        print(f"   ⚠️  Failed to load MACS: {e}", flush=True)
+        return 0, 0
 
     # Create output directories
     train_audio_dir = output_dir / "audio" / "train"
@@ -172,60 +73,81 @@ def process_macs_dataset(
     train_audio_dir.mkdir(parents=True, exist_ok=True)
     val_audio_dir.mkdir(parents=True, exist_ok=True)
 
-    # Process files with train/val split
     train_metadata: List[Dict] = []
     val_metadata: List[Dict] = []
 
     processed = 0
     skipped = 0
 
-    # Deterministic split based on filename hash
+    total = len(dataset)
+    if max_samples is not None:
+        total = min(total, max_samples)
+
     import hashlib
 
-    for audio_file in sorted(audio_files):
-        filename = audio_file.name
+    for idx in range(total):
+        if idx % 100 == 0:
+            print(f"   Processing {idx}/{total}...", flush=True)
 
-        # Find captions
-        captions = filename_to_captions.get(filename, [])
-        if not captions:
-            # Try without extension
-            base_name = audio_file.stem
-            for key in filename_to_captions:
-                if key.startswith(base_name):
-                    captions = filename_to_captions[key]
-                    break
+        try:
+            item = dataset[idx]
 
-        if not captions:
+            audio_data = item.get("audio")
+            if audio_data is None:
+                skipped += 1
+                continue
+
+            if hasattr(audio_data, "numpy"):
+                audio_array = audio_data.numpy()
+            else:
+                audio_array = np.asarray(audio_data, dtype=np.float32)
+
+            sample_rate = item.get("sr", item.get("sample_rate", 44100))
+
+            filename = item.get("fname", item.get("filename", f"macs_{idx:05d}.wav"))
+            if not filename.endswith(".wav"):
+                filename = filename.rsplit(".", 1)[0] + ".wav"
+
+            # Get captions
+            captions = item.get("captions", [])
+            if isinstance(captions, str):
+                captions = [captions]
+            captions = [str(c).strip() for c in captions if str(c).strip()]
+
+            if not captions:
+                captions = [""]
+
+            # Deterministic train/val split
+            file_hash = int(hashlib.md5(filename.encode()).hexdigest(), 16)
+            is_train = (file_hash % 100) < (train_ratio * 100)
+
+            if is_train:
+                split = "train"
+                target_dir = train_audio_dir
+                metadata_list = train_metadata
+            else:
+                split = "val"
+                target_dir = val_audio_dir
+                metadata_list = val_metadata
+
+            audio_path = target_dir / filename
+            rel_path = Path("audio") / split / filename
+
+            if overwrite or not audio_path.exists():
+                save_audio_wav(audio_path, audio_array, sample_rate)
+
+            metadata_list.append({
+                "split": split,
+                "sound_name": filename,
+                "file_path": str(rel_path.as_posix()),
+                "captions": captions,
+            })
+            processed += 1
+
+        except Exception as e:
+            print(f"   ⚠️  Error processing sample {idx}: {e}", flush=True)
             skipped += 1
             continue
-
-        # Determine split (hash-based for reproducibility)
-        file_hash = int(hashlib.md5(filename.encode()).hexdigest(), 16)
-        is_train = (file_hash % 100) < (train_ratio * 100)
-
-        if is_train:
-            split = "train"
-            target_dir = train_audio_dir
-            metadata_list = train_metadata
-        else:
-            split = "val"
-            target_dir = val_audio_dir
-            metadata_list = val_metadata
-
-        # Copy audio file
-        target_path = target_dir / filename
-        rel_path = Path("audio") / split / filename
-
-        if overwrite or not target_path.exists():
-            shutil.copy2(audio_file, target_path)
-
-        metadata_list.append({
-            "split": split,
-            "sound_name": filename,
-            "file_path": str(rel_path.as_posix()),
-            "captions": captions,
-        })
-        processed += 1
 
     # Save metadata
     train_meta_path = output_dir / "MACS_train.json"
@@ -254,10 +176,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Output directory for dataset",
     )
     parser.add_argument(
-        "--temp-dir",
+        "--cache-dir",
         type=Path,
         default=None,
-        help="Temporary directory for downloads (defaults to <output-dir>/.downloads)",
+        help="Download cache directory (defaults to <output-dir>/.aac_cache)",
     )
     parser.add_argument(
         "--overwrite",
@@ -271,47 +193,40 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Fraction of data for training (default: 0.8)",
     )
     parser.add_argument(
-        "--keep-temp",
-        action="store_true",
-        help="Keep temporary download files",
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Max samples to process (for testing)",
     )
 
     args = parser.parse_args(argv)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    temp_dir = args.temp_dir or (args.output_dir / ".downloads")
-    temp_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = args.cache_dir or (args.output_dir / ".aac_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
-    print("MACS Dataset Download")
+    print("MACS Dataset Download (via aac-datasets)")
     print("=" * 60)
     print(f"Output directory: {args.output_dir}")
-    print(f"Temp directory: {temp_dir}")
+    print(f"Cache directory: {cache_dir}")
     print(f"Train ratio: {args.train_ratio}")
     print("=" * 60)
 
-    try:
-        processed, skipped = process_macs_dataset(
-            output_dir=args.output_dir,
-            temp_dir=temp_dir,
-            overwrite=args.overwrite,
-            train_ratio=args.train_ratio,
-        )
+    processed, skipped = process_macs_dataset(
+        output_dir=args.output_dir,
+        cache_dir=cache_dir,
+        overwrite=args.overwrite,
+        train_ratio=args.train_ratio,
+        max_samples=args.max_samples,
+    )
 
-        print("\n" + "=" * 60)
-        print(f"✅ Download complete!")
-        print(f"   Total processed: {processed} samples")
-        print(f"   Skipped (no captions): {skipped} samples")
-        print(f"   Location: {args.output_dir}")
-        print("=" * 60)
-
-    finally:
-        if not args.keep_temp and temp_dir.exists():
-            print(f"\n🧹 Cleaning up temp directory: {temp_dir}", flush=True)
-            # Keep downloaded archives, only remove extracted files
-            for item in temp_dir.iterdir():
-                if item.is_dir():
-                    shutil.rmtree(item)
+    print("\n" + "=" * 60)
+    print(f"✅ Download complete!")
+    print(f"   Total processed: {processed} samples")
+    print(f"   Skipped: {skipped} samples")
+    print(f"   Location: {args.output_dir}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
