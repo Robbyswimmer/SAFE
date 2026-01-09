@@ -18,12 +18,23 @@ import sys
 from pathlib import Path
 
 import torch
+import random
+import numpy as np
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from configs.model_configs import get_config
+
+
+def set_seed(seed: int = 42):
+    """Set random seeds for reproducibility - must match training."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 from safe.data.datasets import AudioCapsDataset, create_safe_dataloader
 # Import model creation and checkpoint loading directly from train_safe.py
 # This ensures identical architecture and weight loading behavior
@@ -121,6 +132,11 @@ def main():
     fusion_layer_indices = None
     if args.fusion_layer_indices:
         fusion_layer_indices = [int(x.strip()) for x in args.fusion_layer_indices.split(",")]
+
+    # Set seed BEFORE model creation to match training initialization
+    # Default seed=42 matches train_safe.py default
+    set_seed(42)
+    print(f"[INFO] Set seed=42 for reproducible initialization")
 
     # Load model
     device = torch.device(args.device)
