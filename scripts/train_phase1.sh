@@ -69,7 +69,7 @@ GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-0}
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}  # e.g., "8,16,24" - overrides config default
 LORA_RANK=${LORA_RANK:-""}                        # e.g., "8" - overrides config default
-TRAIN_EVAL_STEPS=${TRAIN_EVAL_STEPS:-500}         # Compute train CIDEr/METEOR every N steps
+TRAIN_EVAL_STEPS=${TRAIN_EVAL_STEPS:-30}          # Compute train CIDEr/METEOR every N steps
 TRAIN_EVAL_SAMPLES=${TRAIN_EVAL_SAMPLES:-300}     # Number of train samples for accuracy eval
 EXTRA_ARGS=${EXTRA_ARGS:-""}
 
