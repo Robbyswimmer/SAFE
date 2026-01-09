@@ -5,7 +5,8 @@
       "Bash(head:*)",
       "Bash(find:*)",
       "Bash(xargs -I{} sh -c \"echo \"\"=== {} ===\"\" && head -2 \"\"{}\"\"\")",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "WebSearch"
     ],
     "deny": []
   }

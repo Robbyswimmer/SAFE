@@ -1,20 +1,32 @@
 # SAFE Research Plan (Jan–Jun 2026)
 
 Owner: Robby Moseley
-Last updated: 2026-01-06
+Last updated: 2026-01-08
 Repo: `SAFE/`
 
 ## 0) Executive Summary
 
-**Core thesis:** We propose an architecture for **incremental modality learning with guaranteed zero forgetting** of the base model's original capabilities. By keeping the base vision-language model completely frozen and introducing new modalities through isolated, additive adapter pathways, we achieve **architectural guarantees** against catastrophic forgetting—not just empirical mitigation.
+**Core claim:** ***Composable, independently-trainable modality adapters with guaranteed zero interference.***
 
-**Key insight:** Unlike prior continual learning approaches that rely on regularization (EWC, distillation, replay) to *reduce* forgetting, our architecture makes forgetting *impossible by construction*: the base model's forward pass is unchanged when audio tokens are absent, and audio adapters only add residual information without modifying existing representations.
+**Why this is novel:**
+1. **Composition is genuinely new** — No prior work trains modality adapters independently then composes them
+2. **Practical deployment story** — Deploy VLM → add audio later → add depth later → no retraining needed
+3. **The guarantee enables composition** — Without architectural guarantee, adapters would interfere
 
-**Validation strategy:** We demonstrate this approach on **two modalities**:
-1. **Audio** (primary): Audio captioning on AudioCaps/WavCaps
-2. **Depth** (secondary): Depth-conditioned image understanding on NYUv2/SUN RGB-D
+**Key insight:** Unlike prior continual learning approaches that rely on regularization (EWC, distillation, replay) to *reduce* forgetting, our architecture makes forgetting *impossible by construction*. More importantly, this guarantee enables something new: **independently trained modality adapters that compose without interference**.
 
-By showing the same architectural pattern works for both modalities with zero retention loss, we establish a **general methodology** for incremental modality expansion.
+**The three conditions for zero interference:**
+1. **Frozen backbone:** All base model parameters frozen (∇_θ L = 0)
+2. **Additive-only fusion:** h' = h + Δh (new modalities add, never replace)
+3. **Gated bypass with zero default:** When modality absent, gate → 0, contribution → 0
+
+**Validation strategy:** We demonstrate on **two modalities trained independently**:
+1. **Audio** (primary): Audio captioning on AudioCaps/WavCaps — temporal, 1D
+2. **Point Cloud** (secondary): 3D scene understanding on ScanNet/ModelNet — spatial, 3D sparse
+
+Then show: (a) each works alone, (b) both work together, (c) VL performance unchanged throughout.
+
+**Why Point Cloud over Depth?** Point cloud is undeniably different from both vision (3D vs 2D) and audio (spatial vs temporal). This makes the "generality" claim stronger than depth, which could be seen as "just another visual modality."
 
 This document defines:
 
@@ -47,36 +59,44 @@ This document defines:
 
 ## 2) Target Contribution (Top-Conference, H1 2026)
 
-### Primary Claim: Architectural Guarantee Against Forgetting
+### Primary Claim: Composable Modality Adapters
 
-**Zero-forgetting modality expansion by construction:** Our architecture guarantees that adding a new modality adapter cannot degrade the base model's performance on its original tasks. This is achieved through:
+**Core contribution:** *Independently-trainable modality adapters that compose without interference, enabled by architectural guarantees.*
 
-1. **Complete backbone freezing:** All base model parameters remain frozen—no gradients flow through them.
-2. **Additive-only fusion:** New modality information is injected via residual cross-attention that adds to (never replaces) existing hidden states.
-3. **Gated bypass:** When the new modality is absent, the adapter pathway outputs zero, making the forward pass mathematically identical to the original model.
+This is novel because:
+1. **No prior work** trains modality adapters completely independently then loads them together
+2. **Practical value:** Deploy a VLM, add audio capability months later, add depth later—no joint retraining
+3. **The guarantee is what enables composition:** Without it, adapters trained separately would interfere
 
-**Formal statement:** Let $f_\theta$ be the frozen base model and $g_\phi$ be the modality adapter. For any input $x$ without the new modality:
-$$f_{\theta+\phi}(x) = f_\theta(x)$$
+### The Architectural Guarantee (What Enables Composition)
 
-This is not an empirical observation—it is a *structural property* of the architecture.
+**Formal statement:** Let $f_\theta$ be the frozen base model and $\phi_1, \phi_2$ be independently trained adapters. Then:
+- $f_{\theta+\phi_1}(x, m_1=\emptyset) = f_\theta(x)$ — Audio adapter doesn't affect VL when audio absent
+- $f_{\theta+\phi_2}(x, m_2=\emptyset) = f_\theta(x)$ — Depth adapter doesn't affect VL when depth absent
+- $f_{\theta+\phi_1+\phi_2}(x, m_1, m_2=\emptyset) = f_{\theta+\phi_1}(x, m_1)$ — Depth adapter doesn't interfere with audio
 
-### Secondary Claims (Supporting)
+This is achieved through three conditions:
+1. **Frozen backbone:** ∇_θ L = 0 for all adapter training
+2. **Additive-only fusion:** h' = h + Δh (never replace, only add)
+3. **Gated bypass:** gate → 0 when modality absent, so Δh → 0
 
-- **Generality:** The same architectural pattern applies to multiple modalities (audio, depth) with identical retention guarantees.
-- **Efficiency:** Competitive task performance with <3% additional parameters over the frozen base.
-- **Composability:** Multiple modality adapters can be added incrementally without interference (each adapter is independently gated).
+### Supporting Claims
+
+- **Generality:** Same architecture pattern works for different modalities (audio, point cloud)
+- **Extreme Efficiency:** 0.4% trainable parameters — 250x fewer than fine-tuning, 3x fewer than LoRA — yet *better* composition
+- **Simplicity:** No MoE routing, no task IDs, no replay buffer, no Fisher computation, no retention hyperparameters
 
 ### What We Explicitly Claim vs. Don't Claim
 
 **We claim:**
-- Zero forgetting *by design* (not "reduced" or "mitigated")
-- Demonstrated on two distinct modalities (audio + depth)
+- Zero interference by design (not "reduced" or "mitigated")
+- Independent training → successful composition (demonstrated)
 - Competitive performance on modality-specific tasks
 
 **We do NOT claim:**
-- SOTA on any single benchmark (our focus is the learning paradigm, not benchmark racing)
-- That this approach is optimal for joint multi-modal learning (it's for *incremental* addition)
-- That adapters trained separately will exhibit emergent cross-modal reasoning
+- SOTA on any single benchmark (our focus is the composition paradigm)
+- Emergent cross-modal reasoning between independently trained adapters
+- That this is optimal for joint multimodal training from scratch
 
 ## 3) Research Questions & Hypotheses
 
@@ -111,31 +131,84 @@ How does our architectural guarantee compare to traditional continual learning m
 
 ## 4) Experimental Design Overview (What We Will Run)
 
-We structure experiments in four blocks:
+### Minimum Experiments for Top-Venue Submission
 
-### Block A: Architectural Guarantee Verification
-Prove that our architecture achieves *exact* zero forgetting.
-- Run frozen baseline on retention suite (COCO captions, VQAv2)
-- Run model with audio adapter on same retention suite (audio input absent)
-- Demonstrate outputs are bitwise identical (or within fp16 precision)
+| Experiment | Purpose | Effort | Priority |
+|------------|---------|--------|----------|
+| Full audio training | Competitive CIDEr on AudioCaps | 1-2 days | P0 |
+| Point cloud adapter (ScanNet) | Prove generality, enable composition | 1 week | P0 |
+| Composition test | Audio + point cloud loaded together | 1 day | P0 |
+| Retention suite (COCO/VQAv2) | Prove zero forgetting on real benchmarks | 2-3 days | P0 |
+| One baseline (EWC or distillation) | Show alternative fails at composition | 3-4 days | P1 |
+
+**Nice to have:**
+- Multiple seeds (3x) for key results
+- Additional ablations on full data
+- Qualitative analysis of attention patterns
+
+### Block A: Composition Demonstration (THE KEY RESULT)
+This is what makes us novel. Must show:
+1. Train audio adapter independently → works on audio tasks
+2. Train point cloud adapter independently → works on 3D tasks
+3. Load both simultaneously → both still work, no interference
+4. VL performance identical throughout (COCO/VQAv2)
 
 ### Block B: Audio Modality (Primary)
 Demonstrate competitive performance on audio captioning.
-- Train audio adapter on AudioCaps + WavCaps
+- Train audio adapter on AudioCaps + WavCaps (full data)
 - Evaluate on AudioCaps test (CIDEr, BLEU, METEOR, ROUGE-L)
-- Ablate: fusion layers, token count, projector size, gate warmup
+- Target: Within striking distance of SOTA (CIDEr > 60)
+- Ablations: fusion layers, token count (exploratory done, need full-scale)
 
-### Block C: Depth Modality (Secondary Validation)
-Demonstrate the same pattern works for a different modality.
-- Train depth adapter on NYUv2 or SUN RGB-D
-- Task: depth-conditioned captioning or depth QA
+### Block C: Point Cloud Modality (Secondary, HIGH PRIORITY)
+**This is the highest-risk item—start ASAP.**
+
+**Why Point Cloud:**
+- Undeniably different: 3D sparse vs 2D dense vs 1D temporal
+- Stronger generality claim than depth (which is "just another 2D visual modality")
+- Clean story: Vision (2D) + Audio (temporal) + Point Cloud (3D)
+
+**Implementation:**
+- Encoder: PointNet++ or Point-BERT (frozen or fine-tuned)
+- Projector: Same architecture as audio (embed_dim → hidden_dim × T)
+- Fusion: Same gated cross-attention pattern
+- Dataset: ScanNet (3D scenes) or ModelNet (3D objects)
+- Task: 3D scene captioning or 3D object classification/description
+
+**Verification:**
 - Show identical zero-forgetting property
+- If this fails, the generality claim falls apart
 
-### Block D: Comparison to Regularization Baselines
-Show our architectural approach is superior to empirical mitigation.
-- Implement: EWC, distillation, replay buffer baselines
-- Show they *reduce* but don't *eliminate* forgetting
-- Our approach: zero forgetting, no hyperparameter sensitivity
+### Block D: Retention Suite
+Prove zero forgetting on standard VL benchmarks.
+- Run frozen LLaVA baseline on COCO Captions val, VQAv2 val
+- Run SAFE (audio only) → must match baseline exactly
+- Run SAFE (point cloud only) → must match baseline exactly
+- Run SAFE (audio + point cloud) → must match baseline exactly
+
+### Block E: Baseline Comparison (Efficiency + Composition)
+Show that we achieve *better* composition with *fewer* parameters.
+
+**Baselines to run:**
+1. **Sequential Fine-tuning:** Unfreeze LLM, train audio, then train point cloud
+2. **EWC:** Fine-tune with Fisher penalty to protect important weights
+3. **LoRA Fine-tuning:** Standard LoRA on LLM self-attention (not isolated)
+
+**Key comparison table:**
+| Method | Trainable Params | Audio | 3D | COCO Δ | VQAv2 Δ | Composable? |
+|--------|------------------|-------|-----|--------|---------|-------------|
+| Sequential FT | 100% (~7B) | ↓ degraded | ✓ | -5-10% | -5-10% | ❌ |
+| EWC | 100% (~7B) | ~ok | ✓ | -2-5% | -2-5% | ❌ |
+| LoRA FT | ~1-2% | ? | ? | -1-3%? | -1-3%? | ❌ |
+| **Ours** | **0.4%** (~35M) | ✓ | ✓ | **0.0%** | **0.0%** | ✅ |
+
+**The story:** "250x fewer parameters than full fine-tuning, yet perfect composition where they fail."
+
+**Efficiency advantages:**
+- 0.4% trainable params (vs 100% for FT, 1-2% for LoRA)
+- No replay buffer needed
+- No Fisher computation needed
+- No retention hyperparameters (λ for EWC)
 
 Each experiment must define:
 - Model config (fusion layers, rank, tokens, projector)
@@ -537,6 +610,83 @@ Deferred to single-GPU runs for current experiments. Multi-GPU optimization is f
 1. **`--fusion-layer-indices` CLI arg** - Override fusion layers without changing config files
 2. **Training accuracy logging** - `train_acc/cider`, `train_acc/meteor` logged to W&B every 500 steps on fixed 300 training samples
 3. **LoRA parameter detection** - Startup now warns if LoRA params are missing from trainable set
+
+### 2026-01-08: Layer Ablation Bug Fix & Extended Dataset Support
+
+**Critical Bug Found:** The `--fusion-layer-indices` CLI flag was NOT actually being applied to the model. Investigation revealed:
+
+1. The phase1 config has nested `fusion_config.modalities.audio.layer_indices`
+2. `MultiLayerFusionAdapter.__init__` prioritizes `modalities` parameter over `fusion_layer_indices`
+3. The CLI override only updated top-level `fusion_layer_indices` but not nested modalities config
+
+**Result:** All layer ablation runs were using the same config (identical curves despite different CLI args).
+
+**Fix Applied:** Updated `train_safe.py` (lines 2991-3000) to also update `fusion_config.modalities.audio.layer_indices` when CLI override is provided. Verified fix working - different runs now show different trainable parameter counts.
+
+**Key Learning:** Always verify architectural changes by checking trainable parameter counts. Different layer counts should yield ~0.5M parameter difference per layer.
+
+### Extended Dataset Support
+
+Added support for Clotho (~6K samples) and MACS (~3.9K samples) datasets to address training data plateau:
+
+**Dataset Breakdown:**
+| Dataset | Train Samples | Status |
+|---------|--------------|--------|
+| AudioCaps | ~23K (50% of full) | Available |
+| WavCaps | ~400K | Available |
+| Clotho | ~6K | Download scripts ready |
+| MACS | ~3.9K | Download scripts ready |
+| **Total** | **~433K** | - |
+
+**New Scripts:**
+- `scripts/download_clotho.py` - Downloads Clotho via `aac-datasets` package
+- `scripts/download_macs.py` - Downloads MACS via `aac-datasets` package
+- `scripts/benchmark_eval.py` - Comprehensive evaluation benchmark script
+
+**Training Integration:**
+- `--use-clotho` and `--use-macs` flags added to `train_safe.py`
+- Enabled by default in `scripts/train_phase1.sh`
+- WavCaps ratio still works (`--wavcaps-ratio 0.8`)
+
+### Evaluation Benchmark Script
+
+Created `scripts/benchmark_eval.py` for paper-worthy evaluation:
+
+**Features:**
+- Evaluates on AudioCaps test and Clotho evaluation sets
+- Computes: CIDEr, BLEU-1/2/3/4, METEOR, ROUGE-L, SPICE, SPIDEr
+- Handles both `trainable_only` and `full` checkpoint formats
+- Outputs LaTeX table format for paper
+
+**Usage:**
+```bash
+python scripts/benchmark_eval.py \
+    --checkpoint checkpoints/best.pt \
+    --data-path experiments/full_training/data \
+    --datasets audiocaps,clotho \
+    --output results.json
+```
+
+### Current Layer Ablation (Re-running)
+
+After fixing the bug, restarted layer ablation with `MAX_SAMPLES=3000` for faster iteration:
+
+| Run | Layers | Trainable Params | Status |
+|-----|--------|------------------|--------|
+| 1L | [8] | ~34.6M | Running |
+| 2L | [8, 16] | ~35.1M | Running |
+| 3L | [8, 16, 24] | ~35.6M | Running |
+| 4L | [8, 16, 24, 32] | ~36.1M | Running |
+
+Each layer adds ~0.5M parameters (LoRA cross-attention weights).
+
+### Paper Draft Progress
+
+Created detailed methodology section in `safe/research plan/publication/paper_draft.md`:
+- Section 4.1: Problem Formulation with formal definitions
+- Section 4.2: Architectural Guarantee (three conditions)
+- Section 4.3: SAFE Architecture with exact parameter counts
+- Full mathematical notation for zero-forgetting proof
 
 ## 15) Open Decisions (Resolve Early)
 

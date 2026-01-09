@@ -33,12 +33,25 @@ from train_safe import create_model, load_checkpoint, evaluate, format_time
 def load_model_from_checkpoint(
     checkpoint_path: Path,
     config_name: str = "phase1",
-    device: str = "cuda"
+    device: str = "cuda",
+    fusion_layer_indices: list = None,
 ):
     """Load SAFE model using the same code path as train_safe.py."""
 
     print(f"[INFO] Loading config: {config_name}")
     config = get_config(config_name)
+
+    # Override fusion layer indices if specified
+    if fusion_layer_indices:
+        config["fusion_layer_indices"] = fusion_layer_indices
+        # Also update nested configs
+        if "fusion_config" in config and isinstance(config["fusion_config"], dict):
+            fusion_cfg = config["fusion_config"]
+            if "modalities" in fusion_cfg and isinstance(fusion_cfg["modalities"], dict):
+                for modality_name, modality_cfg in fusion_cfg["modalities"].items():
+                    if isinstance(modality_cfg, dict):
+                        modality_cfg["layer_indices"] = fusion_layer_indices
+        print(f"[INFO] Using custom fusion layer indices: {fusion_layer_indices}")
 
     print(f"[INFO] Creating model using train_safe.create_model()...")
     # Use the exact same model creation as training
@@ -77,6 +90,8 @@ def main():
     parser.add_argument("--config", type=str, default="phase1",
                         choices=["demo", "full", "multimodal", "phase1"],
                         help="Model config name")
+    parser.add_argument("--fusion-layer-indices", type=str, default=None,
+                        help="Comma-separated layer indices (e.g., '8' or '8,16'). Must match checkpoint.")
     parser.add_argument("--split", type=str, default="train",
                         help="Data split to evaluate (train or val)")
     parser.add_argument("--max_samples", type=int, default=None,
@@ -102,12 +117,18 @@ def main():
     print(f"Max samples: {args.max_samples or 'all'}")
     print("=" * 60)
 
+    # Parse fusion layer indices if provided
+    fusion_layer_indices = None
+    if args.fusion_layer_indices:
+        fusion_layer_indices = [int(x.strip()) for x in args.fusion_layer_indices.split(",")]
+
     # Load model
     device = torch.device(args.device)
     model = load_model_from_checkpoint(
         Path(args.checkpoint),
         config_name=args.config,
-        device=args.device
+        device=args.device,
+        fusion_layer_indices=fusion_layer_indices,
     )
 
     # Load dataset

@@ -26,34 +26,47 @@ echo "Activating conda environment '${CONDA_ENV}'"
 conda activate "${CONDA_ENV}"
 
 # Default arguments
-RUN_ID=${1:-""}
+RUN_ID_OR_PATH=${1:-""}
 SPLIT=${2:-"val"}
+MAX_SAMPLES=${3:-""}
 # Model configuration overrides.
-# Default to Phase 1 (32 tokens, rank 64) since many recent runs
-# including 20251121_* were trained with this config.
-# Override via environment if you need a different preset, e.g.:
-#   MODEL_CONFIG=full NUM_AUDIO_TOKENS=16 sbatch scripts/run_eval.sh 232xxx val
 MODEL_CONFIG=${MODEL_CONFIG:-phase1}
 NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-32}
 
-if [[ -z "$RUN_ID" ]]; then
-    echo "Usage: sbatch scripts/run_eval.sh <RUN_ID> [SPLIT]"
-    echo "Example: sbatch scripts/run_eval.sh 232228 test"
+if [[ -z "$RUN_ID_OR_PATH" ]]; then
+    echo "Usage: sbatch scripts/run_eval.sh <RUN_ID_OR_CHECKPOINT_PATH> [SPLIT] [MAX_SAMPLES]"
+    echo "Examples:"
+    echo "  sbatch scripts/run_eval.sh 232228 test"
+    echo "  sbatch scripts/run_eval.sh checkpoints/ablation_6layer/checkpoint_best.pt train 3000"
     exit 1
 fi
 
-echo "Starting Evaluation for Run ID: $RUN_ID on Split: $SPLIT"
+# Determine if argument is a path or run ID
+if [[ -f "$RUN_ID_OR_PATH" ]]; then
+    CHECKPOINT_ARG="--checkpoint-path $RUN_ID_OR_PATH"
+    echo "Starting Evaluation for Checkpoint: $RUN_ID_OR_PATH on Split: $SPLIT"
+else
+    CHECKPOINT_ARG="--run_id $RUN_ID_OR_PATH"
+    echo "Starting Evaluation for Run ID: $RUN_ID_OR_PATH on Split: $SPLIT"
+fi
+
+MAX_SAMPLES_ARG=""
+if [[ -n "$MAX_SAMPLES" ]]; then
+    MAX_SAMPLES_ARG="--max_samples $MAX_SAMPLES"
+    echo "Max samples: $MAX_SAMPLES"
+fi
 echo "Date: $(date)"
 echo "Node: $(hostname)"
 
 DATA_ROOT=${DATA_ROOT:-"$PWD/experiments/full_training/data"}
 
 python -u scripts/evaluate_checkpoint.py \
-    --run_id "$RUN_ID" \
+    $CHECKPOINT_ARG \
     --split "$SPLIT" \
     --data_root "$DATA_ROOT" \
     --device cuda \
     --model_config "$MODEL_CONFIG" \
-    --num_audio_tokens "$NUM_AUDIO_TOKENS"
+    --num_audio_tokens "$NUM_AUDIO_TOKENS" \
+    $MAX_SAMPLES_ARG
 
 echo "Evaluation complete."

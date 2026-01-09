@@ -68,6 +68,7 @@ AUDIO_CONTRASTIVE_MAX_LENGTH=${AUDIO_CONTRASTIVE_MAX_LENGTH:-48}
 GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-0}
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}  # e.g., "8,16,24" - overrides config default
+LORA_RANK=${LORA_RANK:-""}                        # e.g., "8" - overrides config default
 TRAIN_EVAL_STEPS=${TRAIN_EVAL_STEPS:-500}         # Compute train CIDEr/METEOR every N steps
 TRAIN_EVAL_SAMPLES=${TRAIN_EVAL_SAMPLES:-300}     # Number of train samples for accuracy eval
 EXTRA_ARGS=${EXTRA_ARGS:-""}
@@ -124,6 +125,11 @@ if [[ -n "${FUSION_LAYER_INDICES}" ]]; then
   FUSION_LAYER_ARGS+=(--fusion-layer-indices "${FUSION_LAYER_INDICES}")
 fi
 
+LORA_RANK_ARGS=()
+if [[ -n "${LORA_RANK}" ]]; then
+  LORA_RANK_ARGS+=(--lora-rank "${LORA_RANK}")
+fi
+
 # Create output directory
 mkdir -p "${OUTPUT_DIR}"
 mkdir -p logs
@@ -162,6 +168,9 @@ echo "Max eval batches: ${MAX_EVAL_BATCHES}"
 echo "Num GPUs: ${NUM_GPUS}"
 if [[ -n "${FUSION_LAYER_INDICES}" ]]; then
   echo "Fusion layer indices: ${FUSION_LAYER_INDICES}"
+fi
+if [[ -n "${LORA_RANK}" ]]; then
+  echo "LoRA rank: ${LORA_RANK}"
 fi
 if [[ -n "${MAX_TRAIN_SAMPLES}" ]]; then
   echo "Max train samples: ${MAX_TRAIN_SAMPLES}"
@@ -219,6 +228,7 @@ ${LAUNCHER} train_safe.py \
     ${FP16} \
     "${MAX_TRAIN_ARGS[@]}" \
     "${FUSION_LAYER_ARGS[@]}" \
+    "${LORA_RANK_ARGS[@]}" \
     "${WANDB_ARGS[@]}" \
     ${EXTRA_ARGS}
 

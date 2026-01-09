@@ -1,209 +1,291 @@
 # SAFE Phased Checklist (Jan–Jun 2026)
 
-Last updated: 2026-01-06
+Last updated: 2026-01-08
 Companion doc: `safe/research plan/research plan.md`
 
-## Core Thesis
+## Core Claim (Refined 2026-01-08)
 
-**Zero-forgetting modality expansion by architectural guarantee.** We add new modalities (audio, depth) to a frozen VL model via gated residual adapters. When the new modality is absent, the model output is *identical* to the frozen baseline—by construction, not regularization.
+***Composable, independently-trainable modality adapters with guaranteed zero interference.***
 
----
+**Why this is novel:**
+1. No prior work trains modality adapters independently then composes them
+2. Practical deployment: VLM → add audio → add depth → no retraining
+3. The architectural guarantee enables composition (without it, adapters interfere)
 
-## Phase 0 — Architecture Lock-In (Jan Week 1) ✓
-
-**Goal:** Formalize architecture, math, and training process before proceeding with experiments.
-
-**Reference Document:** `safe/research plan/notes/architecture_lock_in.md`
-
-### 0.1 Architecture Specification
-- [x] Document frozen VL backbone (LLaVA 1.5 13B, 5120-dim, 40 layers)
-- [x] Document audio encoder (CLAP, 512-dim output, frozen)
-- [x] Document audio projector (512 → 1024 → 5120×T, ~42.5M params)
-- [x] Document cross-attention LoRA fusion (r=16, α=16, ~2M params)
-- [x] Document multi-layer injection points (layers 12, 24, 36)
-
-### 0.2 Mathematical Guarantee
-- [x] Formal definition: f_{θ,φ}(x, a=∅) = f_θ(x)
-- [x] Proof by construction: gated residual with gate=0 when audio absent
-- [x] Implementation verification: code path analysis
-
-### 0.3 Training Specification
-- [x] Document optimizer settings (AdamW, lr=2e-4, wd=0.01)
-- [x] Document batch/accumulation (effective batch=128)
-- [x] Document evaluation metrics (CIDEr, BLEU-4, METEOR, ROUGE-L)
-
-### 0.4 Parameter Accounting
-- [x] Frozen: ~13.4B (LLaVA + CLIP + CLAP)
-- [x] Trainable: ~44.5M (0.33% of total)
-- [x] Breakdown by component documented
-
-**Done when:** Architecture document complete and ready for advisor review.
-
-**Status:** ✓ COMPLETE — See `architecture_lock_in.md`
+**The key result we need:** Train audio adapter. Train depth adapter separately. Load both. Show both work + VL unchanged.
 
 ---
 
-## Phase 1 — Architectural Guarantee Proof (Jan Weeks 1–2)
+## Minimum Experiments for Top-Venue Submission
 
-**Goal:** Demonstrate exact zero forgetting with audio adapter.
+| # | Experiment | Purpose | Effort | Status |
+|---|------------|---------|--------|--------|
+| 1 | Full audio training | Competitive CIDEr | 1-2 days | 🟡 Exploratory done |
+| 2 | Point cloud adapter (ScanNet) | Prove generality (3D modality) | 1 week | ⬜ Not started |
+| 3 | Composition test | Audio + point cloud together | 1 day | ⬜ Blocked on #2 |
+| 4 | Retention suite (COCO/VQAv2) | Zero forgetting proof | 2-3 days | 🟡 Partial |
+| 5 | One baseline (EWC) | Show alternative fails | 3-4 days | ⬜ Not started |
 
-### 1.1 Baseline Establishment
-- [ ] Run frozen LLaVA baseline on COCO Captions val → record CIDEr, BLEU, METEOR
-- [ ] Run frozen LLaVA baseline on VQAv2 val → record accuracy
-- [ ] Save baseline outputs for exact comparison
+**Why Point Cloud over Depth?**
+- Undeniably different: 3D sparse vs 2D dense vs 1D temporal
+- Stronger generality claim (depth is "just another 2D visual modality")
+- Clean story: Vision (2D) + Audio (temporal) + Point Cloud (3D)
 
-### 1.2 Audio Adapter Training
-- [ ] Train audio adapter on AudioCaps (use current best config)
-- [ ] Verify training completes without NaN/instability
-
-### 1.3 Zero-Forgetting Verification
-- [x] Run SAFE model on COCO val (audio input = None) ✓ 2026-01-06
-- [ ] Run audio-adapted model on VQAv2 val (audio input = None)
-- [x] **CRITICAL:** Verify outputs are *bitwise identical* to baseline → **100% exact match** ✓
-- [x] Document: exact match = architectural guarantee proven ✓
-
-**Done when:** Retention Δ = 0.0% demonstrated and documented.
-
-**Status:** Core verification COMPLETE. VQAv2 test optional (same architecture, same guarantee).
+**Timeline:** NeurIPS 2026 (deadline ~May 2026)
+- Jan-Feb: Complete experiments 1-5
+- Mar: Write full draft
+- Apr: Internal review, fill gaps
+- May: Submit
 
 ---
 
-## Phase 2 — Audio Task Performance (Jan Weeks 3–4)
+## Phase 0 — Architecture Lock-In ✅ COMPLETE
 
-**Goal:** Optimize audio captioning within the frozen-backbone constraint.
+**Reference:** `safe/research plan/notes/architecture_lock_in.md`
 
-### 2.1 Core Ablations
-- [ ] Fusion layer sweep: early (layer 6) vs mid (layer 18) vs late (layer 30)
-- [ ] Token count sweep: T ∈ {8, 16, 32}
-- [ ] Projector bottleneck: {512, 1024, 2048}
-
-### 2.2 Best Configuration
-- [ ] Select best audio config based on CIDEr
-- [ ] Run 3-seed evaluation for final numbers
-- [ ] Record: AudioCaps test CIDEr, BLEU-4, METEOR, ROUGE-L
-
-**Done when:** Best audio config identified with multi-seed results.
+- [x] Frozen VL backbone (LLaVA 1.5 13B)
+- [x] Audio encoder (CLAP, frozen)
+- [x] Audio projector (~34M params)
+- [x] Cross-attention LoRA fusion (~2M params)
+- [x] Three conditions formalized (frozen + additive + gated bypass)
+- [x] Zero-forgetting verified on COCO val (100% exact match)
 
 ---
 
-## Phase 3 — Depth Modality Setup (Feb Weeks 5–6)
+## Phase 1 — Audio Modality (Jan Weeks 2-3) 🟡 IN PROGRESS
 
-**Goal:** Prepare second modality to validate generality.
+**Goal:** Competitive audio captioning performance.
 
-### 3.1 Depth Encoder Integration
-- [ ] Select depth encoder: DPT-Large or MiDaS
-- [ ] Implement depth projector (same architecture as audio projector)
-- [ ] Implement depth fusion adapter (same pattern as audio)
+### 1.1 Exploratory Ablations (Quick, 10% data)
+- [x] Layer ablation bug fixed (2026-01-08)
+- [ ] Layer sweep: 1L, 2L, 3L, 4L at layers 8, 16, 24, 32 — RUNNING
+- [ ] Identify best layer configuration
 
-### 3.2 Dataset Preparation
-- [ ] Download NYUv2 RGB-D dataset
-- [ ] Create depth captioning task: "Describe this scene using the depth information"
-- [ ] Implement NYUv2 dataloader with depth + image + caption
+### 1.2 Full-Scale Training
+- [ ] Train best config on full data (AudioCaps + WavCaps + Clotho + MACS)
+- [ ] Target: CIDEr > 60 on AudioCaps test
+- [ ] Run `scripts/benchmark_eval.py` for paper metrics
 
-**Done when:** Depth adapter trainable end-to-end.
+### 1.3 Audio Retention Verification
+- [x] Verify COCO outputs identical when audio=None ✅
+- [ ] Verify VQAv2 outputs identical when audio=None
+
+**Done when:** CIDEr > 60, retention verified.
 
 ---
 
-## Phase 4 — Depth Validation (Feb Weeks 7–8)
+## Phase 2 — Point Cloud Modality (Jan Week 3 – Feb Week 1) ⬜ HIGH PRIORITY
 
-**Goal:** Prove same architecture works for depth with zero forgetting.
+**Goal:** Second modality to prove generality. START ASAP—this is highest risk.
 
-### 4.1 Depth Adapter Training
-- [ ] Train depth adapter on NYUv2
+**Why Point Cloud over Depth:**
+- Undeniably different: 3D sparse vs 2D dense (vision) vs 1D temporal (audio)
+- Stronger generality claim than depth (which is "just another 2D visual modality")
+- Clean story: Vision (2D) + Audio (temporal) + Point Cloud (3D)
+
+### 2.1 Point Cloud Encoder Integration
+- [ ] Select encoder: PointNet++ or Point-BERT (recommend Point-BERT for better features)
+- [ ] Implement `PointCloudEncoder` class (similar to `CLAPEncoder`)
+- [ ] Implement `PointCloudProjector` (encoder_dim → 5120×T, same architecture as audio)
+- [ ] Add point cloud fusion adapter (same pattern as audio)
+
+### 2.2 Dataset Preparation
+- [ ] Download ScanNet dataset (3D indoor scenes) or ModelNet (3D objects)
+- [ ] Create `ScanNetDataset` class with point cloud + caption/description
+- [ ] Define task: "Describe this 3D scene" or 3D object classification
+
+### 2.3 Point Cloud Training
+- [ ] Train point cloud adapter on ScanNet (independent of audio—don't load audio weights)
 - [ ] Verify training stability
+- [ ] Evaluate on 3D understanding task
 
-### 4.2 Zero-Forgetting Verification (Depth)
-- [ ] Run depth-adapted model on COCO Captions val (depth = None)
-- [ ] Run depth-adapted model on VQAv2 val (depth = None)
-- [ ] **CRITICAL:** Verify outputs identical to frozen baseline
-- [ ] Document: same guarantee, different modality
+### 2.4 Point Cloud Retention Verification
+- [ ] Verify COCO outputs identical when point_cloud=None
+- [ ] Verify VQAv2 outputs identical when point_cloud=None
 
-### 4.3 Depth Task Performance
-- [ ] Evaluate on NYUv2 depth captioning task
-- [ ] Report qualitative examples
+**Done when:** Point cloud adapter works, retention verified.
 
-**Done when:** Two modalities, both with proven zero forgetting.
+**Risk mitigation:** If point cloud doesn't work, can fall back to depth. Start immediately.
 
 ---
 
-## Phase 5 — Composition & Baselines (Mar Weeks 9–12)
+## Phase 3 — Composition Test (Feb Week 2) ⬜ THE KEY RESULT
 
-**Goal:** Demonstrate composability and comparison to alternatives.
+**Goal:** Demonstrate independently trained adapters compose without interference.
 
-### 5.1 Adapter Composition
-- [ ] Load audio adapter + depth adapter simultaneously
-- [ ] Verify: audio-only inputs work correctly
-- [ ] Verify: depth-only inputs work correctly
-- [ ] Verify: image-only inputs match frozen baseline exactly
-- [ ] Optional: test audio + depth + image together
+### 3.1 Load Both Adapters
+- [ ] Load audio adapter weights (trained in Phase 1)
+- [ ] Load point cloud adapter weights (trained in Phase 2)
+- [ ] Verify both load without conflict
 
-### 5.2 Regularization Baselines
-- [ ] Implement EWC baseline (unfreeze some layers + EWC penalty)
-- [ ] Implement distillation baseline (distill to frozen model outputs)
-- [ ] Run baselines, measure forgetting on COCO/VQAv2
-- [ ] Document: regularization reduces but doesn't eliminate forgetting
+### 3.2 Composition Verification
+- [ ] Test audio-only input → audio captioning works
+- [ ] Test point cloud-only input → 3D task works
+- [ ] Test image-only input → matches frozen baseline EXACTLY
+- [ ] Test audio + image → audio captioning works
+- [ ] Test point cloud + image → 3D task works
+- [ ] Optional: Test audio + point cloud + image together
 
-**Done when:** Clear comparison table showing ours = 0% forgetting, baselines > 0%.
+### 3.3 Quantitative Results
+- [ ] AudioCaps metrics with both adapters loaded (should match audio-only)
+- [ ] ScanNet metrics with both adapters loaded (should match point cloud-only)
+- [ ] COCO/VQAv2 metrics (should match frozen baseline)
 
----
-
-## Phase 6 — Final Results & Writing (Apr–May)
-
-**Goal:** Complete all experiments and write paper.
-
-### 6.1 Final Numbers
-- [ ] Multi-seed runs for all main results (3 seeds minimum)
-- [ ] Compile main results table
-- [ ] Compile ablation table
-- [ ] Generate all figures
-
-### 6.2 Paper Draft
-- [ ] Introduction: incremental modality problem, our solution
-- [ ] Method: architecture, guarantee proof, training
-- [ ] Experiments: audio, depth, composition, baselines
-- [ ] Results: tables, figures, analysis
-- [ ] Discussion: limitations, future work
-
-### 6.3 Internal Review
-- [ ] Advisor review
-- [ ] Address feedback
-- [ ] Final revision
-
-**Done when:** Complete draft ready for submission.
+**Done when:** Table showing all combinations work, no interference.
 
 ---
 
-## Phase 7 — Submission (Jun)
+## Phase 4 — Retention Suite (Feb Week 2-3) 🟡 PARTIAL
 
-**Goal:** Submit to target venue.
+**Goal:** Formal retention metrics on standard VL benchmarks.
 
-- [ ] Finalize camera-ready figures
-- [ ] Prepare supplementary material
+### 4.1 Baseline Establishment
+- [ ] Run frozen LLaVA on COCO Captions val → save outputs + metrics
+- [ ] Run frozen LLaVA on VQAv2 val → save outputs + metrics
+
+### 4.2 Retention Verification Table
+| Model | COCO CIDEr | VQAv2 Acc | Δ from Baseline |
+|-------|------------|-----------|-----------------|
+| Frozen baseline | X | Y | — |
+| + Audio (no audio input) | ? | ? | Must be 0.0% |
+| + Point Cloud (no PC input) | ? | ? | Must be 0.0% |
+| + Audio + Point Cloud (neither input) | ? | ? | Must be 0.0% |
+
+- [ ] Fill in all cells
+- [ ] Verify Δ = 0.0% for all rows
+
+**Done when:** Table complete, all Δ = 0.0%.
+
+---
+
+## Phase 5 — Baseline Comparison: Efficiency + Composition (Feb Week 3-4) ⬜ P1
+
+**Goal:** Show we achieve *better* composition with *fewer* parameters.
+
+**The story:** "250x fewer parameters than fine-tuning, yet perfect composition where they fail."
+
+### 5.1 Sequential Fine-tuning Baseline (Start here—simplest)
+- [ ] Fine-tune LLM on audio (unfreeze all, ~7B params)
+- [ ] Fine-tune same LLM on point cloud
+- [ ] Measure: audio degradation, VL degradation
+- [ ] Record total trainable params: ~7B (100%)
+
+### 5.2 EWC Baseline (More rigorous)
+- [ ] Implement EWC loss (Fisher Information penalty)
+- [ ] Train audio with EWC (unfreeze LLM + EWC penalty)
+- [ ] Compute Fisher matrix, train point cloud with EWC
+- [ ] Load both → measure interference
+- [ ] Record total trainable params: ~7B (100%)
+
+### 5.3 LoRA Fine-tuning Baseline (Parameter-efficient but still fails)
+- [ ] Standard LoRA on LLM self-attention (not isolated adapters)
+- [ ] Train audio with LoRA, then point cloud with LoRA
+- [ ] Show: still has interference despite fewer params
+- [ ] Record total trainable params: ~70-140M (1-2%)
+
+### 5.4 Full Comparison Table
+| Method | Trainable Params | Audio | 3D | COCO Δ | VQAv2 Δ | Composable? |
+|--------|------------------|-------|-----|--------|---------|-------------|
+| Sequential FT | 100% (~7B) | ↓ degraded | ✓ | -5-10% | -5-10% | ❌ |
+| EWC | 100% (~7B) | ~ok | ✓ | -2-5% | -2-5% | ❌ |
+| LoRA FT | 1-2% (~100M) | ? | ? | -1-3% | -1-3% | ❌ |
+| **Ours** | **0.4%** (~35M) | ✓ | ✓ | **0.0%** | **0.0%** | ✅ |
+
+### 5.5 Efficiency Summary
+| Metric | Full FT | EWC | LoRA FT | Ours |
+|--------|---------|-----|---------|------|
+| Trainable params | 7B | 7B | 100M | **35M** |
+| Replay buffer | Maybe | Maybe | Maybe | **No** |
+| Fisher computation | No | Yes | No | **No** |
+| Retention λ tuning | No | Yes | No | **No** |
+| Zero interference | ❌ | ❌ | ❌ | **✅** |
+
+**Done when:** Table filled, efficiency + composition advantage clear.
+
+---
+
+## Phase 6 — Paper Writing (Mar-Apr)
+
+### 6.1 Required Figures
+- [ ] Figure 1: Architecture diagram (frozen backbone + gated adapters)
+- [ ] Figure 2: Composition demonstration (audio + depth loaded together)
+- [ ] Figure 3: Retention proof (Δ = 0 for all configurations)
+
+### 6.2 Required Tables
+- [ ] Table 1: Zero-interference proof (retention metrics)
+- [ ] Table 2: Audio captioning results (AudioCaps test)
+- [ ] Table 3: Point cloud task results (ScanNet)
+- [ ] Table 4: Composition results (both adapters loaded)
+- [ ] Table 5: Comparison to baselines
+
+### 6.3 Paper Sections
+- [ ] Abstract (~150 words)
+- [ ] Introduction (composition story, practical value)
+- [ ] Related Work (see `notes/related_work_analysis.md`)
+- [ ] Method (three conditions, architecture)
+- [ ] Experiments (audio, depth, composition, baselines)
+- [ ] Analysis & Discussion
+- [ ] Conclusion
+
+**Done when:** Complete draft ready for review.
+
+---
+
+## Phase 7 — Submission (May)
+
+- [ ] Internal review and revisions
+- [ ] Camera-ready figures
+- [ ] Supplementary material
 - [ ] Code release preparation
-- [ ] Submit
+- [ ] Submit to NeurIPS 2026
 
 ---
 
 ## Running Log
 
-| Date | Description | Config | Key Result | Notes |
-|------|-------------|--------|------------|-------|
-| 2026-01-05 | Phase 1 audio training | phase1_clean | CIDEr ~49 | Initial baseline |
-| 2026-01-06 | **Zero-forgetting verification** | 7B, COCO val | **100% exact match** | Architectural guarantee proven |
-| | | | | |
+| Date | Description | Key Result | Notes |
+|------|-------------|------------|-------|
+| 2026-01-05 | Audio training | CIDEr ~49 | Initial baseline on limited data |
+| 2026-01-06 | Zero-forgetting verification | **100% exact match** | Core guarantee proven |
+| 2026-01-08 | Layer ablation bug fix | CLI now works | Nested config priority issue |
+| 2026-01-08 | Extended datasets | +6K Clotho, +3.9K MACS | Download scripts ready |
+| 2026-01-08 | Benchmark eval script | Full metric suite | `scripts/benchmark_eval.py` |
+| 2026-01-08 | **Contribution refined** | Composition story | See research plan |
+| 2026-01-08 | Layer ablation restart | 1L/2L/3L/4L running | 3K samples, bug fixed |
+
+---
+
+## Key Risks
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Point cloud doesn't work | Generality claim fails | Fall back to depth (simpler), start ASAP |
+| Audio CIDEr too low | "Why care about guarantee?" | Full data training, may need SCST |
+| Composition has interference | Core claim fails | Should work by design—verify early |
+| PointNet integration complex | Delays schedule | Use pretrained Point-BERT, freeze encoder |
+| Not enough time | Miss deadline | Prioritize P0 experiments, skip nice-to-haves |
 
 ---
 
 ## Key Code Pointers
 
-- **Architecture Lock-In:** `safe/research plan/notes/architecture_lock_in.md` ← START HERE
+- **Architecture Lock-In:** `safe/research plan/notes/architecture_lock_in.md`
+- **Related Work Analysis:** `safe/research plan/notes/related_work_analysis.md`
+- **Paper Draft:** `safe/research plan/publication/paper_draft.md`
+- **Paper Outline:** `safe/research plan/publication/paper_outline.md`
 - Fusion adapter: `safe/models/fusion_adapter.py`
 - Audio projector: `safe/models/projectors.py`
 - SAFE model: `safe/models/safe_model.py`
-- Audio encoder: `safe/models/audio_encoders.py`
-- Layer hooks: `safe/models/layer_hooks.py`
-- Gated bypass logic: `safe/models/fusion_adapter.py` → `forward()` silence handling
-- Training loop: `train_safe.py`
-- Model configs: `configs/model_configs.py`
-- Ablation scripts: `safe/ablations/` (to be created)
-- Retention evaluation: TBD (need to add COCO/VQAv2 eval scripts)
+- Training: `train_safe.py`
+- Benchmark eval: `scripts/benchmark_eval.py`
+- Dataset downloads: `scripts/download_clotho.py`, `scripts/download_macs.py`
+
+---
+
+## Recent Bugs & Fixes
+
+| Date | Bug | Fix | File |
+|------|-----|-----|------|
+| 2026-01-08 | `--fusion-layer-indices` CLI not applied | Update nested config | `train_safe.py:2991-3000` |
+| 2026-01-07 | LoRA params frozen incorrectly | Check param names | `fusion_adapter.py` |
+| 2026-01-06 | DDP slower than single GPU | Deferred | - |

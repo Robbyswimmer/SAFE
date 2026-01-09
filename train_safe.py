@@ -2785,6 +2785,9 @@ def main():
     parser.add_argument("--fusion-layer-indices", type=str, default=None,
                         help="Comma-separated layer indices for fusion injection (e.g., '8,16,24'). "
                              "Overrides the config default.")
+    parser.add_argument("--lora-rank", type=int, default=None,
+                        help="LoRA rank for fusion adapter (e.g., 4, 8, 16). "
+                             "Overrides the config default.")
 
     # Data
     parser.add_argument("--data-path", type=str, required=True,
@@ -3000,6 +3003,12 @@ def main():
                     print(f"  ✓ Updated modalities config with layer indices: {layer_indices}")
         if is_main:
             print(f"  ✓ Fusion layer indices overridden: {layer_indices}")
+
+    # Override LoRA rank if specified via CLI
+    if args.lora_rank is not None:
+        model_config["lora_rank"] = args.lora_rank
+        if is_main:
+            print(f"  ✓ LoRA rank overridden: {args.lora_rank}")
 
     # Initialize model using the canonical create_model helper
     model = create_model(model_config) if is_main else create_model(model_config)

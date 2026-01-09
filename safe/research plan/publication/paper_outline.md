@@ -1,42 +1,69 @@
-# SAFE Paper Outline - NeurIPS Style
+# SALMAN Paper Outline - NeurIPS Style
 
-**Working Title:** Zero-Forgetting Modality Expansion via Architectural Guarantees
+**Working Title:** SALMAN: Safe Adapter Learning for Multimodal Addition to Networks
 
-**Target:** NeurIPS 2026 (or ICML/ICLR)
+**Subtitle Options:**
+- "Composable Modality Expansion with Zero-Interference Guarantees"
+- "Train Separately, Deploy Together: Composable Modality Adapters for VLMs"
+
+**Target:** NeurIPS 2026 (deadline ~May 2026)
+
+---
+
+## Core Claim (Refined 2026-01-08)
+
+***Composable, independently-trainable modality adapters with guaranteed zero interference.***
+
+**The key result:** Train audio adapter. Train point cloud adapter separately (never together). Load both. Both work + VL performance unchanged.
+
+**Why this is novel:**
+1. **Composition is genuinely new** — No prior work trains adapters independently then composes them
+2. **Practical deployment story** — Deploy VLM → add audio later → add point cloud later → no retraining
+3. **The guarantee enables composition** — Without it, adapters trained separately would interfere
 
 ---
 
 ## 1. Abstract (~150 words)
 
 ### Requirements:
-- [ ] One sentence: Problem (adding modalities causes forgetting)
-- [ ] One sentence: Our key insight (architectural guarantee vs empirical mitigation)
-- [ ] One sentence: Method summary (frozen backbone + gated residual adapters)
-- [ ] One sentence: Main result (zero forgetting by construction, demonstrated on 2 modalities)
-- [ ] One sentence: Significance (first architectural guarantee for continual multimodal learning)
+- [ ] One sentence: Problem (incrementally adding modalities to deployed VLMs)
+- [ ] One sentence: Key insight (architectural guarantee enables independent training + composition)
+- [ ] One sentence: Method summary (frozen backbone + gated residual adapters with three conditions)
+- [ ] One sentence: Main result (audio + depth adapters trained independently, composed without interference)
+- [ ] One sentence: Significance (first demonstration of composable, independently-trained modality adapters)
+
+### Key result to highlight:
+"We train audio and depth adapters completely independently—never seeing each other during training—then load both simultaneously. Both modalities work correctly, and the original VL performance is mathematically identical to the frozen baseline."
 
 ### Questions to answer:
-- What is our single most impressive quantitative result?
-- What makes this fundamentally different from prior work?
+- What is our single most impressive quantitative result? → Composition works perfectly
+- What makes this fundamentally different from prior work? → Independent training → composition
 
 ---
 
 ## 2. Introduction (~1 page)
 
-### Requirements:
-- [ ] Opening hook: The forgetting problem in multimodal learning
-- [ ] Current approaches and their limitations (regularization reduces but doesn't eliminate)
-- [ ] Our key insight: Make forgetting impossible by design, not unlikely by training
-- [ ] Contribution bullets (3-4 crisp claims)
-- [ ] Paper roadmap
+### The Story Arc:
+1. **Hook:** VLMs are deployed, but users want to add new modalities (audio, depth) over time
+2. **Problem:** Current approaches require joint retraining or suffer from interference
+3. **Prior attempts:** Frozen backbones help, but no one has shown independent training → composition
+4. **Our insight:** Three architectural conditions enable truly independent adapters that compose
+5. **Result:** Train audio alone. Train depth alone. Load both. Everything works.
+
+### Contribution Bullets:
+1. **Composable modality adapters:** First demonstration of independently-trained adapters that compose without interference
+2. **Architectural guarantee:** Three conditions (frozen + additive + gated bypass) that make composition possible
+3. **Extreme efficiency:** 0.4% trainable parameters — 250x fewer than fine-tuning, 3x fewer than LoRA — yet *better* composition
+4. **Practical deployment:** Add modalities incrementally to deployed VLMs — no retraining, no replay, no hyperparameter tuning
+
+### Key Figure:
+- [ ] Figure 1: Architecture showing frozen backbone + multiple independent adapters
+- Show: VLM → +audio adapter → +depth adapter → both work, VL unchanged
 
 ### Questions to answer:
-- What real-world scenario motivates this? (e.g., deploying VLMs that need to add audio later)
-- Why haven't others done this? What's the perceived tradeoff we overcome?
-- What's the "aha" moment for the reader?
-
-### Key figure:
-- [ ] Figure 1: Architecture diagram showing frozen backbone + gated bypass
+- What real-world scenario motivates this? → "Your VLM is deployed. Users want audio understanding. Later, depth. No retraining allowed."
+- Why haven't others done this? → They freeze backbones but don't verify composition works
+- What's the "aha" moment? → Train completely independently, load together, everything works
 
 ---
 
@@ -76,7 +103,7 @@
 - [ ] Mathematical statement: f(x; θ+φ) = f(x; θ) when modality absent
 - [ ] Proof sketch or argument for why this holds
 
-### 4.3 SAFE Architecture
+### 4.3 SALMAN Architecture
 - [ ] Modality encoder (CLAP for audio)
 - [ ] Projector (maps encoder → LLM hidden dim)
 - [ ] Gated cross-attention fusion with LoRA
@@ -102,66 +129,75 @@
 ## 5. Experiments (~2.5 pages)
 
 ### 5.1 Experimental Setup
-- [ ] Base model: LLaVA 13B (or which variant?)
-- [ ] Audio encoder: CLAP
-- [ ] Depth encoder: DPT/MiDaS
-- [ ] Datasets: AudioCaps, WavCaps, NYUv2, COCO, VQAv2
-- [ ] Training details: LRs, epochs, batch size, hardware
+- [ ] Base model: LLaVA 1.5 7B/13B
+- [ ] Audio encoder: CLAP (frozen)
+- [ ] Point cloud encoder: Point-BERT or PointNet++ (frozen)
+- [ ] Datasets: AudioCaps, WavCaps, ScanNet, COCO, VQAv2
+- [ ] Training: AdamW, lr=2e-4, effective batch=128
 
-### 5.2 Zero-Forgetting Verification (Block A)
-**This is the core claim - must be bulletproof**
+### 5.2 Composition Demonstration (THE KEY RESULT)
+**This is what makes us novel—must be the centerpiece**
 
-- [ ] Table: Retention metrics (COCO CIDEr, VQAv2 acc) for:
-  - Frozen baseline
-  - + Audio adapter (no audio input) → must be identical
-  - + Depth adapter (no depth input) → must be identical
-- [ ] Statistical significance / variance across seeds
-- [ ] Discuss numerical precision (fp16 vs fp32)
+- [ ] Table: Composition results
+| Configuration | Audio Task | 3D Task | COCO CIDEr | VQAv2 Acc |
+|---------------|------------|---------|------------|-----------|
+| Frozen baseline | — | — | X | Y |
+| + Audio only | ✓ CIDEr=Z | — | X (identical) | Y (identical) |
+| + Point Cloud only | — | ✓ Metric=W | X (identical) | Y (identical) |
+| + Both (composed) | ✓ CIDEr=Z | ✓ Metric=W | X (identical) | Y (identical) |
 
-### Questions to answer:
-- How do we show "identical" convincingly? Bit-wise? Within epsilon?
-- Do we need multiple random seeds?
-- What if there's tiny numerical drift - how do we address?
+- [ ] Key point: Audio + point cloud trained COMPLETELY INDEPENDENTLY, loaded together, both work
+- [ ] VL performance unchanged in ALL configurations
+- [ ] **Story:** Vision (2D) + Audio (temporal) + Point Cloud (3D) — three fundamentally different modalities
 
-### 5.3 Audio Captioning Performance (Block B)
+### 5.3 Audio Modality Results
 - [ ] Main results table: CIDEr, BLEU-4, METEOR, ROUGE-L on AudioCaps test
-- [ ] Comparison to audio captioning baselines (if fair comparison exists)
+- [ ] Target: CIDEr > 60 (competitive, not necessarily SOTA)
+- [ ] Qualitative examples
+- [ ] Comparison to SALMONN, Qwen-Audio (if fair)
+
+**Framing:** "We achieve competitive performance while enabling composition—something prior work cannot do."
+
+### 5.4 Point Cloud Modality Results
+- [ ] Same architecture pattern applied to point cloud
+- [ ] ScanNet 3D scene understanding task
+- [ ] Zero-interference verification (same as audio)
 - [ ] Qualitative examples
 
-### Questions to answer:
-- What's SOTA on AudioCaps? Can we compare fairly?
-- If we're not SOTA, how do we frame this? (We trade peak performance for guarantees)
+**Why Point Cloud:** Undeniably different from both vision (3D vs 2D) and audio (spatial vs temporal). Stronger generality claim than depth.
 
-### 5.4 Depth Modality Validation (Block C)
-- [ ] Same architecture applied to depth
-- [ ] Zero-forgetting verification (same as 5.2)
-- [ ] Task performance on depth-conditioned captioning/QA
+### 5.5 Baseline Comparison: Efficiency + Composition
+**Show we achieve *better* composition with *fewer* parameters**
 
-### Questions to answer:
-- What's a good depth task that's clearly different from audio?
-- Do we have depth results yet?
+**The story:** "250x fewer parameters than fine-tuning, yet perfect composition where they fail."
 
-### 5.5 Comparison to Regularization Methods (Block D)
-- [ ] Table comparing:
-  - EWC: reduced forgetting, non-zero
-  - Distillation: reduced forgetting, non-zero
-  - Replay: reduced forgetting, non-zero
-  - **Ours: zero forgetting**
-- [ ] Show the fundamental difference (ours is 0.0%, others are >0%)
+- [ ] Table: Full comparison (efficiency + composition)
+| Method | Params | Audio | 3D | COCO Δ | VQAv2 Δ | Composable? |
+|--------|--------|-------|-----|--------|---------|-------------|
+| Sequential FT | 100% (7B) | ↓ | ✓ | -5-10% | -5-10% | ❌ |
+| EWC | 100% (7B) | ~ok | ✓ | -2-5% | -2-5% | ❌ |
+| LoRA FT | 1-2% (100M) | ? | ? | -1-3% | -1-3% | ❌ |
+| **Ours** | **0.4% (35M)** | ✓ | ✓ | **0.0%** | **0.0%** | ✅ |
 
-### Questions to answer:
-- Which baselines are essential vs nice-to-have?
-- How much effort to implement EWC/distillation properly?
+- [ ] Table: Efficiency comparison
+| Metric | Full FT | EWC | LoRA FT | Ours |
+|--------|---------|-----|---------|------|
+| Trainable params | 7B | 7B | 100M | **35M** |
+| Replay buffer | Maybe | Maybe | Maybe | **No** |
+| Fisher computation | No | Yes | No | **No** |
+| Retention hyperparams | No | Yes (λ) | No | **No** |
+
+- [ ] Key points:
+  - Without architectural guarantee, composition fails (even LoRA has interference)
+  - We use 250x fewer params than full FT, 3x fewer than LoRA
+  - Simpler: no replay, no Fisher, no λ tuning
 
 ### 5.6 Ablation Studies
-- [ ] Fusion layer depth (1L, 2L, 3L, 4L)
-- [ ] LoRA rank (if it matters)
-- [ ] Audio token count (if it matters)
-- [ ] Gate warmup (if it matters)
+- [ ] Fusion layer depth (1L, 2L, 3L, 4L) — which layers matter?
+- [ ] LoRA rank — how small can we go?
+- [ ] Audio token count — temporal resolution vs efficiency
 
-### Questions to answer:
-- Which ablations tell the most interesting story?
-- What if ablations show "nothing matters much"? (Could be a finding: robustness)
+**Note:** Ablations must be on full data for paper
 
 ### ⚠️ IMPORTANT: Ablation Data Requirements
 
@@ -178,7 +214,7 @@
 3. Re-run winners at full scale for paper tables
 4. Reviewers expect converged models, not early stopping
 
-**Current status:** Layer ablation running at 10% data (exploratory). Will need full-scale runs for Table 4.
+**Current status:** Layer ablation restarted 2026-01-08 after bug fix. Previous runs used identical configs due to CLI override not being applied to nested config. Now running at 3K samples (exploratory) with verified different parameter counts. Will need full-scale runs for Table 4.
 
 ### Key tables:
 - [ ] Table 1: Zero-forgetting proof (retention metrics)
@@ -329,4 +365,4 @@ h' = h_base + α_audio * audio_residual + α_depth * depth_residual
 
 ---
 
-*Last updated: 2026-01-08*
+*Last updated: 2026-01-09*

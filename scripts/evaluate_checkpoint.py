@@ -385,24 +385,40 @@ def compute_metrics(predictions, references):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run_id", required=True, help="Run ID (e.g. 232228)")
+    parser.add_argument("--run_id", help="Run ID (e.g. 232228)")
     parser.add_argument("--checkpoint", help="Specific checkpoint filename")
+    parser.add_argument("--checkpoint-path", help="Direct path to checkpoint file (alternative to --run_id)")
     parser.add_argument("--data_root", default="experiments/full_training/data")
-    parser.add_argument("--split", default="val", help="Dataset split (default: validation used during Stage A)")
+    parser.add_argument("--split", default="val", help="Dataset split: train, val, or test")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--llm_model_name", help="Override LLM model name (e.g. google/flan-t5-base)")
     parser.add_argument("--num_audio_tokens", type=int, default=16, help="Number of audio tokens")
-    parser.add_argument("--model_config", default="full", help="SAFE model preset (demo/full/multimodal)")
+    parser.add_argument("--model_config", default="full", help="SAFE model preset (demo/full/multimodal/phase1)")
+    parser.add_argument("--max_samples", type=int, default=None, help="Limit evaluation to N samples")
     args = parser.parse_args()
-    
+
+    if not args.run_id and not args.checkpoint_path:
+        parser.error("Either --run_id or --checkpoint-path is required")
+
     print(f"Using device: {args.device}")
-    
+
     # 1. Locate Checkpoint
-    checkpoint_path = load_checkpoint(args.run_id, args.checkpoint)
+    if args.checkpoint_path:
+        checkpoint_path = Path(args.checkpoint_path)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        print(f"Using checkpoint: {checkpoint_path}")
+    else:
+        checkpoint_path = load_checkpoint(args.run_id, args.checkpoint)
+
+    # Determine run directory for saving results
     run_dir = checkpoint_path.parent.parent
-    config_path = run_dir / "config.json" 
-    
+    if not (run_dir / "config.json").exists():
+        # Fallback: use checkpoint's parent directory
+        run_dir = checkpoint_path.parent
+    config_path = run_dir / "config.json"
+
     if config_path.exists():
         print(f"Loading trainer config from {config_path}")
     else:
@@ -495,6 +511,12 @@ def main():
     }
     normalized_split = split_aliases.get(args.split.lower(), args.split)
     dataset = AudioCapsDataset(data_path=args.data_root, split=normalized_split)
+
+    # Limit samples if requested
+    if args.max_samples and args.max_samples < len(dataset):
+        from torch.utils.data import Subset
+        dataset = Subset(dataset, range(args.max_samples))
+        print(f"Limiting to {args.max_samples} samples")
 
     if normalized_split.startswith("val"):
         probe_count = min(len(dataset), 16)

@@ -48,6 +48,7 @@ MAX_SAMPLES=${MAX_SAMPLES:-2000}
 BATCH_SIZE=${BATCH_SIZE:-4}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-30}
 NUM_BEAMS=${NUM_BEAMS:-1}
+FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}
 
 # Validate checkpoint
 if [[ -z "${CHECKPOINT}" ]]; then
@@ -75,8 +76,17 @@ echo "Max samples: ${MAX_SAMPLES}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "Max new tokens: ${MAX_NEW_TOKENS}"
 echo "Num beams: ${NUM_BEAMS}"
+if [[ -n "${FUSION_LAYER_INDICES}" ]]; then
+  echo "Fusion layer indices: ${FUSION_LAYER_INDICES}"
+fi
 echo "========================================"
 echo ""
+
+# Build fusion layer indices argument
+FUSION_ARGS=""
+if [[ -n "${FUSION_LAYER_INDICES}" ]]; then
+  FUSION_ARGS="--fusion-layer-indices ${FUSION_LAYER_INDICES}"
+fi
 
 # Run evaluation
 python safe/ablations/eval_train_metrics.py \
@@ -87,7 +97,8 @@ python safe/ablations/eval_train_metrics.py \
     --max_samples "${MAX_SAMPLES}" \
     --batch_size "${BATCH_SIZE}" \
     --max_new_tokens "${MAX_NEW_TOKENS}" \
-    --num_beams "${NUM_BEAMS}"
+    --num_beams "${NUM_BEAMS}" \
+    ${FUSION_ARGS}
 
 echo ""
 echo "========================================"
