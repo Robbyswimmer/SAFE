@@ -242,6 +242,250 @@ class CrossAttentionBlock(nn.Module):
         return delta
 
 
+class BottleneckCrossAttentionBlock(nn.Module):
+    """
+    Bottleneck cross-attention block for efficient audio fusion.
+    Uses small projections instead of full hidden_size, equivalent to LoRA in parameter count
+    but simpler (no PEFT dependency, no frozen random base layers).
+
+    Parameter equivalence:
+    - bottleneck_dim=32 ≈ LoRA rank-16 (655K params per layer)
+    - bottleneck_dim=16 ≈ LoRA rank-8 (328K params per layer)
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        bottleneck_dim: int = 32,
+        num_attention_heads: int = 4,
+        attention_dropout: float = 0.1,
+        output_dropout: float = 0.1,
+        layer_norm_eps: float = 1e-5
+    ):
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.bottleneck_dim = bottleneck_dim
+        self.num_attention_heads = max(num_attention_heads, 1)
+
+        # Ensure bottleneck_dim is divisible by num_heads
+        if bottleneck_dim % self.num_attention_heads != 0:
+            # Adjust num_heads to divide evenly
+            for n in [4, 2, 1]:
+                if bottleneck_dim % n == 0:
+                    self.num_attention_heads = n
+                    break
+
+        self.attention_head_size = bottleneck_dim // self.num_attention_heads
+        self.all_head_size = bottleneck_dim  # This is the bottleneck dimension
+
+        self.debug_logging = False
+        self._attention_log_limit = 5
+        self._attention_logs_emitted = 0
+
+        # Bottleneck projections - small dimensions
+        # Q: hidden_size → bottleneck_dim
+        self.query = nn.Linear(hidden_size, bottleneck_dim)
+        # K: hidden_size → bottleneck_dim
+        self.key = nn.Linear(hidden_size, bottleneck_dim)
+        # V: hidden_size → bottleneck_dim
+        self.value = nn.Linear(hidden_size, bottleneck_dim)
+        # O: bottleneck_dim → hidden_size
+        self.output_dense = nn.Linear(bottleneck_dim, hidden_size)
+
+        self.output_dropout = nn.Dropout(output_dropout)
+        self.attention_dropout = nn.Dropout(attention_dropout)
+
+        # Layer norm on residual (applied to hidden_size)
+        self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+
+        # Residual scaling - start conservative
+        self.residual_scale = nn.Parameter(torch.tensor(0.1), requires_grad=True)
+        self.register_buffer("residual_scale_max", torch.tensor(5.0), persistent=False)
+
+        # Initialize with Xavier for good gradient flow
+        self._init_weights()
+
+    def _init_weights(self):
+        for module in [self.query, self.key, self.value, self.output_dense]:
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+    def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
+        """Reshape for multi-head attention: (B, L, bottleneck) → (B, H, L, head_size)"""
+        new_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_shape)
+        return x.permute(0, 2, 1, 3)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        audio_tokens: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        supervised_mask: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Forward pass of bottleneck cross-attention.
+
+        Args:
+            hidden_states: (B, seq_len, hidden_size) - LLM hidden states (Query source)
+            audio_tokens: (B, audio_len, hidden_size) - Audio tokens (Key/Value source)
+            attention_mask: Optional mask for audio tokens (1=attend, 0=ignore)
+
+        Returns:
+            delta: (B, seq_len, hidden_size) - Residual to add to hidden states
+        """
+        orig_dtype = hidden_states.dtype
+
+        # Clean and upcast to fp32
+        hs = torch.nan_to_num(hidden_states, nan=0.0, posinf=1e4, neginf=-1e4).float()
+        at = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e4, neginf=-1e4).float()
+
+        # Project to bottleneck dimension
+        query_layer = self.transpose_for_scores(self.query(hs))  # (B, H, seq_len, head_size)
+        key_layer = self.transpose_for_scores(self.key(at))       # (B, H, audio_len, head_size)
+        value_layer = self.transpose_for_scores(self.value(at))   # (B, H, audio_len, head_size)
+
+        # Attention scores
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        scale_factor = max(math.sqrt(self.attention_head_size), 1e-8)
+        attention_scores = attention_scores / scale_factor
+        attention_scores = torch.clamp(attention_scores, min=-50.0, max=50.0)
+
+        # Apply mask if provided
+        if attention_mask is not None:
+            mask = attention_mask.to(device=attention_scores.device)
+            if mask.dtype == torch.bool:
+                attend_mask = mask
+            else:
+                mask = mask.float()
+                attend_mask = mask > 0.5
+            while attend_mask.dim() < attention_scores.dim():
+                attend_mask = attend_mask.unsqueeze(-2)
+            attention_scores = attention_scores.masked_fill(~attend_mask, -1e4)
+
+        # Softmax
+        attention_probs = F.softmax(attention_scores, dim=-1)
+        attention_probs = torch.nan_to_num(attention_probs, nan=0.0, posinf=1.0, neginf=0.0)
+        attention_probs = self.attention_dropout(attention_probs)
+
+        # Apply attention to values
+        context_layer = torch.matmul(attention_probs, value_layer)  # (B, H, seq_len, head_size)
+
+        # Reshape back: (B, H, seq_len, head_size) → (B, seq_len, bottleneck_dim)
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        context_layer = context_layer.view(context_layer.size(0), context_layer.size(1), self.bottleneck_dim)
+
+        # Project back to hidden_size
+        delta = self.output_dense(context_layer)
+        delta = torch.nan_to_num(delta, nan=0.0, posinf=1e4, neginf=-1e4)
+        delta = self.output_dropout(delta)
+
+        # Apply residual scale
+        residual_scale = torch.clamp(self.residual_scale, 0.0, float(self.residual_scale_max))
+        delta = residual_scale * delta
+
+        # Layer norm
+        if self.layer_norm is not None:
+            delta = self.layer_norm(delta)
+
+        return delta.to(orig_dtype)
+
+
+class SimpleFusionAdapter(nn.Module):
+    """
+    Simple fusion adapter using bottleneck cross-attention.
+    No PEFT/LoRA - just straightforward small cross-attention blocks.
+    All parameters are trainable.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        bottleneck_dim: int = 32,
+        num_attention_heads: int = 4,
+        attention_dropout: float = 0.1,
+        use_tokenwise_gate: bool = False,
+    ):
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.bottleneck_dim = bottleneck_dim
+        self.use_tokenwise_gate = bool(use_tokenwise_gate)
+        self.debug_logging = False
+
+        # Bottleneck cross-attention
+        self.cross_attention = BottleneckCrossAttentionBlock(
+            hidden_size=hidden_size,
+            bottleneck_dim=bottleneck_dim,
+            num_attention_heads=num_attention_heads,
+            attention_dropout=attention_dropout,
+        )
+
+        # Optional token-wise gating
+        if self.use_tokenwise_gate:
+            self.token_gate = nn.Linear(hidden_size * 2, 1)
+
+    def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
+        self.debug_logging = bool(enabled)
+        self.cross_attention.debug_logging = enabled
+        self.cross_attention._attention_log_limit = log_limit
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        audio_tokens: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        gate: float = 1.0,
+        supervised_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Forward pass with optional gating.
+
+        Args:
+            hidden_states: (B, seq_len, hidden_size) - LLM hidden states
+            audio_tokens: (B, audio_len, hidden_size) - Audio tokens
+            attention_mask: Optional mask for audio tokens
+            gate: Scalar gating factor (0.0 = no audio, 1.0 = full audio)
+
+        Returns:
+            output: (B, seq_len, hidden_size) - hidden_states + gated residual
+        """
+        orig_dtype = hidden_states.dtype
+
+        # Get cross-attention residual
+        delta = self.cross_attention(
+            hidden_states=hidden_states,
+            audio_tokens=audio_tokens,
+            attention_mask=attention_mask,
+            supervised_mask=supervised_mask,
+        )
+
+        # Apply gating
+        if self.use_tokenwise_gate:
+            batch_size, seq_len, _ = hidden_states.size()
+            pooled_audio = audio_tokens.mean(dim=1, keepdim=True).expand(-1, seq_len, -1)
+            gate_input = torch.cat([hidden_states, pooled_audio], dim=-1)
+            g = torch.sigmoid(self.token_gate(gate_input))
+            if isinstance(gate, torch.Tensor):
+                g = g * gate.to(g.device, g.dtype).view(-1, 1, 1)
+            else:
+                g = g * float(gate)
+            output = hidden_states + g * delta
+        else:
+            if isinstance(gate, torch.Tensor):
+                gate_tensor = gate.to(hidden_states.device, hidden_states.dtype)
+                while gate_tensor.dim() < delta.dim():
+                    gate_tensor = gate_tensor.unsqueeze(-1)
+                output = hidden_states + gate_tensor * delta
+            else:
+                output = hidden_states + float(gate) * delta
+
+        return output.to(orig_dtype)
+
+
 class LoRAFusionAdapter(nn.Module):
     """
     LoRA-based fusion adapter that adds audio cross-attention to LLM layers.
@@ -437,6 +681,14 @@ class MultiLayerFusionAdapter(nn.Module):
     """
     Multi-layer fusion adapter that can insert modality fusion at configurable decoder layers.
     Supports multiple modalities sharing the same adapter instance.
+
+    Supports two modes:
+    - LoRA mode (use_bottleneck=False): Uses LoRAFusionAdapter with PEFT
+    - Bottleneck mode (use_bottleneck=True): Uses SimpleFusionAdapter with small cross-attention
+
+    Parameter equivalence for bottleneck_dim:
+    - bottleneck_dim=32 ≈ LoRA rank-16 (~655K params per layer)
+    - bottleneck_dim=16 ≈ LoRA rank-8 (~328K params per layer)
     """
 
     def __init__(
@@ -451,6 +703,8 @@ class MultiLayerFusionAdapter(nn.Module):
         attention_dropout: float = 0.1,
         modalities: Optional[Dict[str, Any]] = None,
         use_tokenwise_gate: bool = False,
+        use_bottleneck: bool = False,
+        bottleneck_dim: int = 32,
         **unused_kwargs,
     ):
         super().__init__()
@@ -458,6 +712,8 @@ class MultiLayerFusionAdapter(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.use_tokenwise_gate = bool(use_tokenwise_gate)
+        self.use_bottleneck = bool(use_bottleneck)
+        self.bottleneck_dim = bottleneck_dim
         # Last recorded attention summary from any inner fusion adapter
         self.last_attention_summary: Optional[dict] = None
         self.extra_config = dict(unused_kwargs)
@@ -474,17 +730,28 @@ class MultiLayerFusionAdapter(nn.Module):
         for modality, indices in self.fusion_layers.items():
             for layer_idx in indices:
                 key = self._adapter_key(modality, layer_idx)
-                self.fusion_adapters[key] = LoRAFusionAdapter(
-                    hidden_size=hidden_size,
-                    num_attention_heads=num_attention_heads,
-                    lora_rank=lora_rank,
-                    lora_alpha=lora_alpha,
-                    lora_dropout=lora_dropout,
-                    attention_dropout=attention_dropout,
-                    target_modules=target_modules,
-                    train_base_cross_attention=train_base_cross_attention,
-                    use_tokenwise_gate=self.use_tokenwise_gate,
-                )
+                if self.use_bottleneck:
+                    # Use simple bottleneck cross-attention (no PEFT)
+                    self.fusion_adapters[key] = SimpleFusionAdapter(
+                        hidden_size=hidden_size,
+                        bottleneck_dim=bottleneck_dim,
+                        num_attention_heads=min(num_attention_heads, bottleneck_dim),
+                        attention_dropout=attention_dropout,
+                        use_tokenwise_gate=self.use_tokenwise_gate,
+                    )
+                else:
+                    # Use LoRA-based fusion adapter (original behavior)
+                    self.fusion_adapters[key] = LoRAFusionAdapter(
+                        hidden_size=hidden_size,
+                        num_attention_heads=num_attention_heads,
+                        lora_rank=lora_rank,
+                        lora_alpha=lora_alpha,
+                        lora_dropout=lora_dropout,
+                        attention_dropout=attention_dropout,
+                        target_modules=target_modules,
+                        train_base_cross_attention=train_base_cross_attention,
+                        use_tokenwise_gate=self.use_tokenwise_gate,
+                    )
 
     def forward(
         self,

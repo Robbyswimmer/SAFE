@@ -144,6 +144,8 @@ class SAFEModel(nn.Module):
                 attention_dropout=fusion_config.get("attention_dropout", 0.1),
                 modalities=fusion_config.get("modalities", None),
                 use_tokenwise_gate=fusion_config.get("use_tokenwise_gate", False),
+                use_bottleneck=fusion_config.get("use_bottleneck", False),
+                bottleneck_dim=fusion_config.get("bottleneck_dim", 32),
             )
         elif fusion_type == "gated":
             self.fusion_adapter = GatedFusionAdapter(

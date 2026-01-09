@@ -228,7 +228,12 @@ PHASE1_CONFIG = {
                 "num_tokens": 8
             }
         },
-        # Adapt all projections; base cross-attention weights stay frozen (LoRA-only).
+        # Use bottleneck cross-attention instead of LoRA (simpler, no PEFT dependency)
+        # bottleneck_dim=32 ≈ LoRA rank-16 (~655K params per layer)
+        # bottleneck_dim=16 ≈ LoRA rank-8 (~328K params per layer)
+        "use_bottleneck": True,
+        "bottleneck_dim": 32,
+        # Legacy LoRA settings (only used if use_bottleneck=False)
         "target_modules": ["query", "key", "value", "output_dense"],
         "train_base_cross_attention": False,
         # Default fusion injection point for Phase 1: inject BEFORE FFN
