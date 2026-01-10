@@ -468,7 +468,11 @@ class SimpleFusionAdapter(nn.Module):
             batch_size, seq_len, _ = hidden_states.size()
             pooled_audio = audio_tokens.mean(dim=1, keepdim=True).expand(-1, seq_len, -1)
             gate_input = torch.cat([hidden_states, pooled_audio], dim=-1)
+            # Cast to token_gate weight dtype (may be fp32 while input is fp16)
+            gate_input = gate_input.to(self.token_gate.weight.dtype)
             g = torch.sigmoid(self.token_gate(gate_input))
+            # Cast gate back to original dtype for multiplication
+            g = g.to(orig_dtype)
             if isinstance(gate, torch.Tensor):
                 g = g * gate.to(g.device, g.dtype).view(-1, 1, 1)
             else:
