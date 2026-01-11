@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 from transformers import (
-    AutoTokenizer, 
+    AutoTokenizer,
     AutoModelForCausalLM,
-    CLIPVisionModel, 
+    CLIPVisionModel,
     CLIPImageProcessor,
     AutoConfig,
     LlavaForConditionalGeneration,
@@ -12,117 +12,126 @@ from transformers import (
     Blip2Processor,
     AutoProcessor
 )
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
+
+
+def _detect_model_type(model_name: str) -> str:
+    """Detect model type from model name."""
+    name_lower = model_name.lower()
+    if "llava" in name_lower:
+        return "llava"
+    elif "blip2" in name_lower or "blip-2" in name_lower:
+        return "blip2"
+    elif any(t in name_lower for t in ["llama", "mistral", "qwen", "phi", "gemma"]):
+        return "text_only"
+    else:
+        return "custom"
 
 
 class BaseVLModel(nn.Module):
     """
     Base Vision-Language model following LLaVA-style architecture.
-    
+
     Components:
-    - Frozen CLIP vision encoder
-    - Vision projector (trainable)
+    - Frozen CLIP vision encoder (for VL models)
+    - Vision projector (trainable, for custom models)
     - Frozen LLM backbone
+
+    Supports:
+    - Vision-Language models: LLaVA, BLIP2
+    - Text-only models: Llama, Mistral, Qwen, Phi, Gemma, etc.
     """
-    
+
     def __init__(
         self,
         llm_model_name: str = "microsoft/DialoGPT-medium",
-        vision_model_name: str = "openai/clip-vit-large-patch14",
+        vision_model_name: Optional[str] = "openai/clip-vit-large-patch14",
         vision_hidden_size: int = 1024,
         llm_hidden_size: int = 1024,
         num_vision_tokens: int = 256,
         freeze_vision: bool = True,
         freeze_llm: bool = True,
+        model_type: Optional[str] = None,
+        use_flash_attention: bool = True,
+        load_in_8bit: bool = False,
+        load_in_4bit: bool = False,
     ):
         super().__init__()
-        
+
         self.llm_model_name = llm_model_name
         self.vision_model_name = vision_model_name
         self.vision_hidden_size = vision_hidden_size
         self.llm_hidden_size = llm_hidden_size
         self.num_vision_tokens = num_vision_tokens
 
-        # Load vision encoder (frozen) - use safetensors to avoid PyTorch security issue
-        print(f"[BaseVL] Loading vision encoder: {vision_model_name}...", flush=True)
         import sys
+
+        # Detect model type if not specified
+        if model_type is None:
+            self.model_type = _detect_model_type(llm_model_name)
+        else:
+            self.model_type = model_type
+
+        print(f"[BaseVL] Detected model type: {self.model_type}", flush=True)
         sys.stdout.flush()
-        self.vision_encoder = CLIPVisionModel.from_pretrained(
-            vision_model_name,
-            use_safetensors=True
-        )
-        print(f"[BaseVL] ✓ Vision encoder loaded", flush=True)
-        sys.stdout.flush()
-        print(f"[BaseVL] Loading image processor: {vision_model_name}...", flush=True)
-        sys.stdout.flush()
-        self.image_processor = CLIPImageProcessor.from_pretrained(vision_model_name)
-        print(f"[BaseVL] ✓ Image processor loaded", flush=True)
-        sys.stdout.flush()
-        
-        if freeze_vision:
-            for param in self.vision_encoder.parameters():
-                param.requires_grad = False
-        
+
         # Determine appropriate dtype based on device availability
-        # Use float16 for GPU, float32 for CPU to avoid LayerNorm issues
         device_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-        # Load LLM (frozen) - handle different VL models
+        # Load vision encoder only for vision-language models
+        if self.model_type in ["llava", "blip2", "custom"] and vision_model_name is not None:
+            print(f"[BaseVL] Loading vision encoder: {vision_model_name}...", flush=True)
+            sys.stdout.flush()
+            self.vision_encoder = CLIPVisionModel.from_pretrained(
+                vision_model_name,
+                use_safetensors=True
+            )
+            print(f"[BaseVL] ✓ Vision encoder loaded", flush=True)
+            sys.stdout.flush()
+            print(f"[BaseVL] Loading image processor: {vision_model_name}...", flush=True)
+            sys.stdout.flush()
+            self.image_processor = CLIPImageProcessor.from_pretrained(vision_model_name)
+            print(f"[BaseVL] ✓ Image processor loaded", flush=True)
+            sys.stdout.flush()
+
+            if freeze_vision:
+                for param in self.vision_encoder.parameters():
+                    param.requires_grad = False
+        else:
+            # Text-only models don't need vision encoder
+            self.vision_encoder = None
+            self.image_processor = None
+            print(f"[BaseVL] Text-only model - skipping vision encoder", flush=True)
+            sys.stdout.flush()
+
+        # Load LLM based on model type
         print(f"[BaseVL] Loading LLM: {llm_model_name}...", flush=True)
         sys.stdout.flush()
-        if "llava" in llm_model_name.lower():
-            print(f"[BaseVL] Detected LLaVA model type", flush=True)
-            sys.stdout.flush()
-            self.llm = LlavaForConditionalGeneration.from_pretrained(
-                llm_model_name,
-                torch_dtype=device_dtype,
-                low_cpu_mem_usage=True,
-                use_safetensors=True
+
+        if self.model_type == "llava":
+            self._load_llava_model(llm_model_name, device_dtype)
+        elif self.model_type == "blip2":
+            self._load_blip2_model(llm_model_name, device_dtype)
+        elif self.model_type == "text_only":
+            self._load_text_only_model(
+                llm_model_name, device_dtype,
+                use_flash_attention, load_in_8bit, load_in_4bit
             )
-            print(f"[BaseVL] ✓ LLM model loaded", flush=True)
-            sys.stdout.flush()
-            self.processor = LlavaProcessor.from_pretrained(llm_model_name)
-            self.tokenizer = self.processor.tokenizer
-            self.model_type = "llava"
-        elif "blip2" in llm_model_name.lower():
-            print(f"[BaseVL] Detected BLIP2 model type", flush=True)
-            sys.stdout.flush()
-            self.llm = Blip2ForConditionalGeneration.from_pretrained(
-                llm_model_name,
-                torch_dtype=device_dtype,
-                low_cpu_mem_usage=True,
-                use_safetensors=True
-            )
-            print(f"[BaseVL] ✓ LLM model loaded", flush=True)
-            sys.stdout.flush()
-            self.processor = Blip2Processor.from_pretrained(llm_model_name)
-            self.tokenizer = self.processor.tokenizer
-            self.model_type = "blip2"
         else:
-            print(f"[BaseVL] Using AutoModel for custom LLM", flush=True)
-            sys.stdout.flush()
-            self.llm = AutoModelForCausalLM.from_pretrained(
-                llm_model_name,
-                use_safetensors=True
-            )
-            print(f"[BaseVL] ✓ LLM model loaded", flush=True)
-            sys.stdout.flush()
-            self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
-            print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
-            sys.stdout.flush()
-            self.model_type = "custom"
+            self._load_custom_model(llm_model_name, device_dtype)
+
         print(f"[BaseVL] ✓ All LLM components loaded (type: {self.model_type})", flush=True)
         sys.stdout.flush()
-        
+
         # Configure all tokenizers comprehensively
         self._configure_tokenizers()
-            
+
         if freeze_llm:
             for param in self.llm.parameters():
                 param.requires_grad = False
-                
-        # Vision projector - only needed for custom models
-        if self.model_type == "custom":
+
+        # Vision projector - only needed for custom models with vision
+        if self.model_type == "custom" and self.vision_encoder is not None:
             vision_output_dim = self.vision_encoder.config.hidden_size
             self.vision_projector = nn.Sequential(
                 nn.Linear(vision_output_dim, llm_hidden_size),
@@ -133,22 +142,202 @@ class BaseVLModel(nn.Module):
             for param in self.vision_projector.parameters():
                 param.requires_grad = False
         else:
-            # LLaVA and BLIP2 already have vision integration, we'll use them directly
+            # LLaVA/BLIP2 have vision integration, text-only doesn't need it
             self.vision_projector = None
-        
-        # Special tokens - only for custom models
-        if self.model_type == "custom":
+
+        # Special tokens - only for custom models with vision
+        if self.model_type == "custom" and self.vision_encoder is not None:
             self.vision_start_token = "<img>"
             self.vision_end_token = "</img>"
-            
+
             # Add special tokens to tokenizer
             special_tokens = [self.vision_start_token, self.vision_end_token]
             self.tokenizer.add_tokens(special_tokens)
             self.llm.resize_token_embeddings(len(self.tokenizer))
         else:
-            # LLaVA and BLIP2 use their own vision tokens
+            # LLaVA/BLIP2 use their own vision tokens, text-only doesn't need them
             self.vision_start_token = None
             self.vision_end_token = None
+
+    def _load_llava_model(self, model_name: str, device_dtype: torch.dtype):
+        """Load LLaVA model."""
+        import sys
+        print(f"[BaseVL] Detected LLaVA model type", flush=True)
+        sys.stdout.flush()
+        self.llm = LlavaForConditionalGeneration.from_pretrained(
+            model_name,
+            torch_dtype=device_dtype,
+            low_cpu_mem_usage=True,
+            use_safetensors=True
+        )
+        print(f"[BaseVL] ✓ LLM model loaded", flush=True)
+        sys.stdout.flush()
+        self.processor = LlavaProcessor.from_pretrained(model_name)
+        self.tokenizer = self.processor.tokenizer
+
+    def _load_blip2_model(self, model_name: str, device_dtype: torch.dtype):
+        """Load BLIP2 model."""
+        import sys
+        print(f"[BaseVL] Detected BLIP2 model type", flush=True)
+        sys.stdout.flush()
+        self.llm = Blip2ForConditionalGeneration.from_pretrained(
+            model_name,
+            torch_dtype=device_dtype,
+            low_cpu_mem_usage=True,
+            use_safetensors=True
+        )
+        print(f"[BaseVL] ✓ LLM model loaded", flush=True)
+        sys.stdout.flush()
+        self.processor = Blip2Processor.from_pretrained(model_name)
+        self.tokenizer = self.processor.tokenizer
+
+    def _load_text_only_model(
+        self,
+        model_name: str,
+        device_dtype: torch.dtype,
+        use_flash_attention: bool = True,
+        load_in_8bit: bool = False,
+        load_in_4bit: bool = False
+    ):
+        """Load text-only model (Llama, Mistral, etc.)."""
+        import sys
+        print(f"[BaseVL] Loading text-only model: {model_name}", flush=True)
+        sys.stdout.flush()
+
+        # Prepare loading kwargs
+        load_kwargs = {
+            "torch_dtype": device_dtype,
+            "low_cpu_mem_usage": True,
+            "trust_remote_code": True,
+        }
+
+        # Flash attention
+        if use_flash_attention and torch.cuda.is_available():
+            try:
+                load_kwargs["attn_implementation"] = "flash_attention_2"
+                print(f"[BaseVL] Using Flash Attention 2", flush=True)
+            except Exception:
+                print(f"[BaseVL] Flash Attention not available", flush=True)
+
+        # Quantization
+        if load_in_8bit or load_in_4bit:
+            try:
+                from transformers import BitsAndBytesConfig
+                quant_config = BitsAndBytesConfig(
+                    load_in_8bit=load_in_8bit,
+                    load_in_4bit=load_in_4bit,
+                    bnb_4bit_compute_dtype=device_dtype if load_in_4bit else None,
+                )
+                load_kwargs["quantization_config"] = quant_config
+                print(f"[BaseVL] Using {'4-bit' if load_in_4bit else '8-bit'} quantization", flush=True)
+            except ImportError:
+                print("[BaseVL] bitsandbytes not available, skipping quantization", flush=True)
+
+        # Try loading with flash attention first
+        try:
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                use_safetensors=True,
+                **load_kwargs
+            )
+        except Exception as e:
+            print(f"[BaseVL] Flash attention failed ({e}), falling back", flush=True)
+            load_kwargs.pop("attn_implementation", None)
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                use_safetensors=True,
+                **load_kwargs
+            )
+
+        print(f"[BaseVL] ✓ Text-only LLM model loaded", flush=True)
+        sys.stdout.flush()
+
+        # Load tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
+        sys.stdout.flush()
+
+        # No processor for text-only models
+        self.processor = None
+
+    def _load_custom_model(self, model_name: str, device_dtype: torch.dtype):
+        """Load custom model with AutoModel."""
+        import sys
+        print(f"[BaseVL] Using AutoModel for custom LLM", flush=True)
+        sys.stdout.flush()
+        self.llm = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            use_safetensors=True
+        )
+        print(f"[BaseVL] ✓ LLM model loaded", flush=True)
+        sys.stdout.flush()
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
+        sys.stdout.flush()
+        self.processor = None
+
+    @property
+    def has_vision(self) -> bool:
+        """Check if model has vision capabilities."""
+        return self.vision_encoder is not None or self.model_type in ["llava", "blip2"]
+
+    @property
+    def hidden_size(self) -> int:
+        """Get the hidden size of the language model."""
+        if hasattr(self.llm, "config"):
+            if hasattr(self.llm.config, "text_config"):
+                return self.llm.config.text_config.hidden_size
+            return getattr(self.llm.config, "hidden_size", self.llm_hidden_size)
+        return self.llm_hidden_size
+
+    @property
+    def num_layers(self) -> int:
+        """Get the number of layers in the language model."""
+        if hasattr(self.llm, "config"):
+            if hasattr(self.llm.config, "text_config"):
+                return self.llm.config.text_config.num_hidden_layers
+            return getattr(self.llm.config, "num_hidden_layers", 32)
+        return 32
+
+    @property
+    def num_attention_heads(self) -> int:
+        """Get the number of attention heads."""
+        if hasattr(self.llm, "config"):
+            if hasattr(self.llm.config, "text_config"):
+                return self.llm.config.text_config.num_attention_heads
+            return getattr(self.llm.config, "num_attention_heads", 32)
+        return 32
+
+    def get_decoder_layers(self) -> nn.ModuleList:
+        """Get decoder layers for hook injection."""
+        if self.model_type == "llava":
+            return self.llm.language_model.model.layers
+        elif self.model_type == "blip2":
+            return self.llm.language_model.model.decoder.layers
+        elif self.model_type == "text_only":
+            # Try common attribute names for different model architectures
+            model = self.llm
+            layer_attrs = [
+                "model.layers",          # Llama, Mistral, Qwen
+                "transformer.h",         # GPT-2 style
+                "gpt_neox.layers",       # GPT-NeoX
+                "decoder.layers",        # Some encoder-decoder models
+            ]
+            for attr_path in layer_attrs:
+                obj = model
+                try:
+                    for attr in attr_path.split("."):
+                        obj = getattr(obj, attr)
+                    if isinstance(obj, nn.ModuleList):
+                        return obj
+                except AttributeError:
+                    continue
+            raise AttributeError(f"Could not find decoder layers in model {type(model)}")
+        else:
+            # Custom models - try to find layers
+            if hasattr(self.llm, "transformer") and hasattr(self.llm.transformer, "h"):
+                return self.llm.transformer.h
+            raise AttributeError(f"Could not find decoder layers for custom model")
     
     def _set_padding_side_left(self, tokenizer, context: str) -> bool:
         """Utility to set padding_side to left if needed."""
