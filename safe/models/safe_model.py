@@ -41,7 +41,8 @@ class SAFEModel(nn.Module):
         # Training configuration
         freeze_base_vl: bool = True,
         freeze_audio_encoder: bool = True,
-        
+        label_smoothing: float = 0.0,
+
         # Model dimensions
         llm_hidden_size: int = 1024,
         audio_embed_dim: int = 512,
@@ -53,6 +54,7 @@ class SAFEModel(nn.Module):
         self.fusion_type = fusion_type
         self.num_audio_tokens = num_audio_tokens
         self.llm_hidden_size = llm_hidden_size
+        self.label_smoothing = label_smoothing
 
         # Initialize base VL model
         print(f"[SAFE] Initializing BaseVLModel (LLM: {llm_model_name}, Vision: {vision_model_name})...", flush=True)
@@ -1637,7 +1639,7 @@ class SAFEModel(nn.Module):
                 flat_logits = flat_logits[:min_size]
                 flat_labels = flat_labels[:min_size]
             
-            loss_fct = nn.CrossEntropyLoss()
+            loss_fct = nn.CrossEntropyLoss(label_smoothing=self.label_smoothing)
             loss = loss_fct(flat_logits, flat_labels)
         
         return {

@@ -1391,6 +1391,7 @@ SAFE_MODEL_CONSTRUCTOR_KEYS = {
     "fusion_config",
     "freeze_base_vl",
     "freeze_audio_encoder",
+    "label_smoothing",
     "llm_hidden_size",
     "audio_embed_dim",
 }
@@ -2788,6 +2789,9 @@ def main():
     parser.add_argument("--lora-rank", type=int, default=None,
                         help="LoRA rank for fusion adapter (e.g., 4, 8, 16). "
                              "Overrides the config default.")
+    parser.add_argument("--label-smoothing", type=float, default=None,
+                        help="Label smoothing factor for cross-entropy loss (e.g., 0.1). "
+                             "Overrides the config default.")
 
     # Data
     parser.add_argument("--data-path", type=str, required=True,
@@ -3009,6 +3013,12 @@ def main():
         model_config["lora_rank"] = args.lora_rank
         if is_main:
             print(f"  ✓ LoRA rank overridden: {args.lora_rank}")
+
+    # Override label smoothing if specified via CLI
+    if args.label_smoothing is not None:
+        model_config["label_smoothing"] = args.label_smoothing
+        if is_main:
+            print(f"  ✓ Label smoothing overridden: {args.label_smoothing}")
 
     # Initialize model using the canonical create_model helper
     model = create_model(model_config) if is_main else create_model(model_config)

@@ -62,13 +62,14 @@ USE_WAVCAPS=${USE_WAVCAPS:-1}
 WAVCAPS_RATIO=${WAVCAPS_RATIO:-0.8}
 USE_CLOTHO=${USE_CLOTHO:-1}
 USE_MACS=${USE_MACS:-1}
-AUDIO_CONTRASTIVE_WEIGHT=${AUDIO_CONTRASTIVE_WEIGHT:-0.0}
+AUDIO_CONTRASTIVE_WEIGHT=${AUDIO_CONTRASTIVE_WEIGHT:-0.1}
 AUDIO_CONTRASTIVE_TEMPERATURE=${AUDIO_CONTRASTIVE_TEMPERATURE:-0.07}
 AUDIO_CONTRASTIVE_MAX_LENGTH=${AUDIO_CONTRASTIVE_MAX_LENGTH:-48}
 GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-0}
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}  # e.g., "8,16,24" - overrides config default
 LORA_RANK=${LORA_RANK:-""}                        # e.g., "8" - overrides config default
+LABEL_SMOOTHING=${LABEL_SMOOTHING:-""}            # e.g., "0.1" - overrides config default
 TRAIN_EVAL_STEPS=${TRAIN_EVAL_STEPS:-30}          # Compute train CIDEr/METEOR every N steps
 TRAIN_EVAL_SAMPLES=${TRAIN_EVAL_SAMPLES:-300}     # Number of train samples for accuracy eval
 EXTRA_ARGS=${EXTRA_ARGS:-""}
@@ -128,6 +129,11 @@ fi
 LORA_RANK_ARGS=()
 if [[ -n "${LORA_RANK}" ]]; then
   LORA_RANK_ARGS+=(--lora-rank "${LORA_RANK}")
+fi
+
+LABEL_SMOOTHING_ARGS=()
+if [[ -n "${LABEL_SMOOTHING}" ]]; then
+  LABEL_SMOOTHING_ARGS+=(--label-smoothing "${LABEL_SMOOTHING}")
 fi
 
 # Create output directory
@@ -229,6 +235,7 @@ ${LAUNCHER} train_safe.py \
     "${MAX_TRAIN_ARGS[@]}" \
     "${FUSION_LAYER_ARGS[@]}" \
     "${LORA_RANK_ARGS[@]}" \
+    "${LABEL_SMOOTHING_ARGS[@]}" \
     "${WANDB_ARGS[@]}" \
     ${EXTRA_ARGS}
 

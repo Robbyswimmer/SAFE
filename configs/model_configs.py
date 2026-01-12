@@ -245,6 +245,7 @@ PHASE1_CONFIG = {
     # Training configuration
     "freeze_base_vl": True,
     "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,  # Prevents overconfidence, improves generalization
 
     # Memory and compute (increased due to more tokens/rank)
     "expected_vram_gb": 40,
