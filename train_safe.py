@@ -46,6 +46,7 @@ except Exception:  # pragma: no cover
 # SAFE imports
 from configs.model_configs import get_config
 from safe.data.datasets import AudioCapsDataset, WavCapsDataset, ClothoDataset, MACSDataset, create_safe_dataloader
+from safe.data.audio_augment import create_augment_pipeline, AudioAugmentPipeline
 from safe.models.safe_model import SAFEModel
 
 
@@ -1495,6 +1496,63 @@ def _extract_fusion_residual_scales(model: Any) -> Dict[str, float]:
     return residuals
 
 
+def _apply_audio_augmentation(
+    audio: List[Any],
+    pipeline: AudioAugmentPipeline,
+    device: torch.device,
+) -> List[Any]:
+    """
+    Apply audio augmentation to a batch of audio samples.
+
+    Args:
+        audio: List of audio samples (waveform tensors or tuples of (waveform, sr))
+        pipeline: AudioAugmentPipeline instance
+        device: Device to use for augmentation
+
+    Returns:
+        List of augmented audio samples in the same format as input
+    """
+    augmented = []
+    for item in audio:
+        if item is None:
+            augmented.append(None)
+            continue
+
+        # Extract waveform and sample rate
+        if isinstance(item, tuple) and len(item) >= 2:
+            waveform, sr = item[0], item[1]
+        elif isinstance(item, torch.Tensor):
+            waveform = item
+            sr = 48000  # Default sample rate
+        elif isinstance(item, np.ndarray):
+            waveform = torch.from_numpy(item).float()
+            sr = 48000
+        else:
+            # Unknown format, pass through
+            augmented.append(item)
+            continue
+
+        # Ensure tensor
+        if not isinstance(waveform, torch.Tensor):
+            waveform = torch.from_numpy(np.array(waveform)).float()
+
+        # Apply augmentation
+        try:
+            aug_waveform = pipeline(waveform.to(device), training=True)
+            aug_waveform = aug_waveform.cpu()
+
+            # Return in same format as input
+            if isinstance(item, tuple):
+                augmented.append((aug_waveform, sr))
+            else:
+                augmented.append(aug_waveform)
+        except Exception:
+            # On error, use original
+            augmented.append(item)
+
+    return augmented
+
+
 def train_epoch(
     model: SAFEModel,
     dataloader: DataLoader,
@@ -1509,6 +1567,7 @@ def train_epoch(
     world_size: int = 1,
     train_eval_loader: Optional[DataLoader] = None,
     train_eval_steps: int = 0,
+    audio_augment_pipeline: Optional[AudioAugmentPipeline] = None,
 ) -> Tuple[Dict[str, float], int]:
     """
     Train for one epoch
@@ -1648,6 +1707,10 @@ def train_epoch(
             attention_mask = None
             labels = None
         else:
+            # Apply audio augmentation if enabled
+            if audio_augment_pipeline is not None and audio:
+                audio = _apply_audio_augmentation(audio, audio_augment_pipeline, device)
+
             # Prepare inputs (use base_model for helper method)
             inputs = base_model.prepare_multimodal_inputs(
                 text=questions,
@@ -2417,6 +2480,20 @@ def train(
             export_audio=bool(config.get("export_eval_samples_audio", False)),
         )
 
+    # Create audio augmentation pipeline if enabled (off by default)
+    audio_augment_pipeline = None
+    if config.get("audio_augment", False):
+        augment_prob = config.get("audio_augment_prob", 0.5)
+        audio_augment_pipeline = create_augment_pipeline(
+            enabled=True,
+            spec_augment=True,
+            waveform_augment=True,
+            spec_augment_config={"p": augment_prob},
+            waveform_augment_config={"p": augment_prob},
+        )
+        if is_main:
+            print(f"[AudioAugment] Enabled with probability {augment_prob}")
+
     for epoch in range(1, num_epochs + 1):
         if is_main:
             print(f"\n{'='*80}")
@@ -2450,6 +2527,7 @@ def train(
             world_size=dist_info["world_size"],
             train_eval_loader=train_eval_loader,
             train_eval_steps=train_eval_steps,
+            audio_augment_pipeline=audio_augment_pipeline,
         )
         if wandb_run is not None:
             train_log = {"train/optimizer_step": optimizer_step, "epoch": epoch}
@@ -2859,6 +2937,12 @@ def main():
     parser.add_argument("--gate-warmup-steps", type=int, default=0,
                         help="If >0, ramp SAFE gate 0→1 over this many optimizer steps")
 
+    # Audio augmentation (off by default)
+    parser.add_argument("--audio-augment", action="store_true",
+                        help="Enable audio augmentation (SpecAugment + waveform augment) during training")
+    parser.add_argument("--audio-augment-prob", type=float, default=0.5,
+                        help="Probability of applying audio augmentation per sample")
+
     # Evaluation
     parser.add_argument("--eval-frequency", type=int, default=1,
                         help="Evaluate every N epochs")
@@ -3246,6 +3330,8 @@ def main():
         "audio_contrastive_temperature": args.audio_contrastive_temperature,
         "audio_contrastive_max_length": args.audio_contrastive_max_length,
         "gate_warmup_steps": args.gate_warmup_steps,
+        "audio_augment": args.audio_augment,
+        "audio_augment_prob": args.audio_augment_prob,
         "export_eval_samples": bool(args.export_eval_samples),
         "export_eval_samples_audio": bool(args.export_eval_samples_audio),
     }

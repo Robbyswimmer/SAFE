@@ -192,7 +192,8 @@ class CrossAttentionBlock(nn.Module):
         delta = delta.to(input_dtype)
 
         # Allow residual scale to grow but keep it bounded for stability
-        residual_scale = torch.clamp(self.residual_scale, 0.0, float(self.residual_scale_max))
+        # Clamp minimum to 0.5 to force model to attend to audio
+        residual_scale = torch.clamp(self.residual_scale, 0.5, float(self.residual_scale_max))
         if getattr(self, "debug_logging", False):
             print(
                 f"[ResidualScale] scale={float(residual_scale.item()):.4f}",
@@ -384,7 +385,8 @@ class BottleneckCrossAttentionBlock(nn.Module):
         delta = self.output_dropout(delta)
 
         # Apply residual scale
-        residual_scale = torch.clamp(self.residual_scale, 0.0, float(self.residual_scale_max))
+        # Clamp minimum to 0.5 to force model to attend to audio
+        residual_scale = torch.clamp(self.residual_scale, 0.5, float(self.residual_scale_max))
         delta = residual_scale * delta
 
         # Layer norm

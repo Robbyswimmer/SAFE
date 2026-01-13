@@ -13,6 +13,12 @@ from .curriculum import (
     ProgressionStatus,
     DifficultyLevel,
 )
+from .audio_augment import (
+    SpecAugment,
+    WaveformAugment,
+    AudioAugmentPipeline,
+    create_augment_pipeline,
+)
 
 __all__ = [
     "create_safe_dataloader",
@@ -24,4 +30,8 @@ __all__ = [
     "CurriculumManager",
     "ProgressionStatus",
     "DifficultyLevel",
+    "SpecAugment",
+    "WaveformAugment",
+    "AudioAugmentPipeline",
+    "create_augment_pipeline",
 ]

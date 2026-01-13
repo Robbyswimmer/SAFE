@@ -72,6 +72,8 @@ LORA_RANK=${LORA_RANK:-""}                        # e.g., "8" - overrides config
 LABEL_SMOOTHING=${LABEL_SMOOTHING:-""}            # e.g., "0.1" - overrides config default
 TRAIN_EVAL_STEPS=${TRAIN_EVAL_STEPS:-30}          # Compute train CIDEr/METEOR every N steps
 TRAIN_EVAL_SAMPLES=${TRAIN_EVAL_SAMPLES:-300}     # Number of train samples for accuracy eval
+AUDIO_AUGMENT=${AUDIO_AUGMENT:-0}                 # Audio augmentation (SpecAugment + waveform), off by default
+AUDIO_AUGMENT_PROB=${AUDIO_AUGMENT_PROB:-0.5}     # Probability of applying augmentation per sample
 EXTRA_ARGS=${EXTRA_ARGS:-""}
 
 # Memory optimization - enable by default for 48GB GPUs with large datasets
@@ -134,6 +136,12 @@ fi
 LABEL_SMOOTHING_ARGS=()
 if [[ -n "${LABEL_SMOOTHING}" ]]; then
   LABEL_SMOOTHING_ARGS+=(--label-smoothing "${LABEL_SMOOTHING}")
+fi
+
+AUDIO_AUGMENT_ARGS=()
+if [[ "${AUDIO_AUGMENT}" != "0" ]]; then
+  AUDIO_AUGMENT_ARGS+=(--audio-augment)
+  AUDIO_AUGMENT_ARGS+=(--audio-augment-prob "${AUDIO_AUGMENT_PROB}")
 fi
 
 # Create output directory
@@ -236,6 +244,7 @@ ${LAUNCHER} train_safe.py \
     "${FUSION_LAYER_ARGS[@]}" \
     "${LORA_RANK_ARGS[@]}" \
     "${LABEL_SMOOTHING_ARGS[@]}" \
+    "${AUDIO_AUGMENT_ARGS[@]}" \
     "${WANDB_ARGS[@]}" \
     ${EXTRA_ARGS}
 
