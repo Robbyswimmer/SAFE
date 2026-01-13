@@ -141,8 +141,9 @@ class AudioProjector(nn.Module):
         audio_tokens = self.output_norm(audio_tokens)
 
         # Apply learnable scale to match LLM embedding magnitude
-        # Note: EMA calibration happens in SAFE model forward pass
-        audio_tokens = audio_tokens * self.output_scale
+        # Clamp minimum to 1.0 to prevent model from shrinking audio signal
+        clamped_scale = torch.clamp(self.output_scale, 1.0, 10.0)
+        audio_tokens = audio_tokens * clamped_scale
 
         # Log embedding norms for debugging
         if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
