@@ -1483,10 +1483,11 @@ def _extract_fusion_residual_scales(model: Any) -> Dict[str, float]:
 
         cap = getattr(candidate, "residual_scale_max", None)
         try:
+            # Use same minimum (1.0) as forward pass to show true applied value
             if cap is not None:
-                value = float(torch.clamp(residual_param, 0.0, float(cap)).detach().cpu().float().item())
+                value = float(torch.clamp(residual_param, 1.0, float(cap)).detach().cpu().float().item())
             else:
-                value = float(residual_param.detach().cpu().float().item())
+                value = float(torch.clamp(residual_param, 1.0, 5.0).detach().cpu().float().item())
         except Exception:
             continue
 

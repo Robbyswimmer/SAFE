@@ -204,9 +204,8 @@ PHASE1_CONFIG = {
 
     # Projector configuration
     "projector_type": "standard",
-    # For pooled audio embeddings (e.g., CLAP), more tokens mostly adds capacity.
-    # Keep smaller for stability/generalization and scale up only if needed.
-    "num_audio_tokens": 8,
+    # Increased tokens for more temporal detail
+    "num_audio_tokens": 16,
     "projector_config": {
         "dropout": 0.1,
         "bottleneck_dim": 1024  # Keep for Phase 1, remove in Phase 2
@@ -225,14 +224,13 @@ PHASE1_CONFIG = {
             "audio": {
                 # Match fusion_layer_indices and num_audio_tokens
                 "layer_indices": [12, 24, 36],
-                "num_tokens": 8
+                "num_tokens": 16
             }
         },
         # Use bottleneck cross-attention instead of LoRA (simpler, no PEFT dependency)
-        # bottleneck_dim=32 ≈ LoRA rank-16 (~655K params per layer)
-        # bottleneck_dim=16 ≈ LoRA rank-8 (~328K params per layer)
+        # bottleneck_dim=64 for increased capacity
         "use_bottleneck": True,
-        "bottleneck_dim": 32,
+        "bottleneck_dim": 64,
         # Legacy LoRA settings (only used if use_bottleneck=False)
         "target_modules": ["query", "key", "value", "output_dense"],
         "train_base_cross_attention": False,
