@@ -74,6 +74,12 @@ SEED=${SEED:-42}
 EVAL_FREQUENCY=${EVAL_FREQUENCY:-1}
 MAX_EVAL_SAMPLES=${MAX_EVAL_SAMPLES:-500}
 
+# Wandb
+WANDB=${WANDB:-1}
+WANDB_PROJECT=${WANDB_PROJECT:-"SAFE"}
+WANDB_NAME=${WANDB_NAME:-""}
+WANDB_MODE=${WANDB_MODE:-"online"}
+
 # Create directories
 mkdir -p "${OUTPUT_DIR}"
 mkdir -p logs
@@ -110,6 +116,15 @@ if [[ -n "${FUSION_LAYER_INDICES}" ]]; then
     FUSION_ARGS="--fusion-layer-indices ${FUSION_LAYER_INDICES}"
 fi
 
+# Build wandb args
+WANDB_ARGS=""
+if [[ "${WANDB}" == "1" ]]; then
+    WANDB_ARGS="--wandb --wandb-project ${WANDB_PROJECT} --wandb-mode ${WANDB_MODE}"
+    if [[ -n "${WANDB_NAME}" ]]; then
+        WANDB_ARGS="${WANDB_ARGS} --wandb-name ${WANDB_NAME}"
+    fi
+fi
+
 # Run training
 python scripts/train_scst.py \
     --checkpoint "${CHECKPOINT}" \
@@ -130,7 +145,8 @@ python scripts/train_scst.py \
     --eval-frequency "${EVAL_FREQUENCY}" \
     --max-eval-samples "${MAX_EVAL_SAMPLES}" \
     --seed "${SEED}" \
-    ${FP16}
+    ${FP16} \
+    ${WANDB_ARGS}
 
 echo ""
 echo "========================================"

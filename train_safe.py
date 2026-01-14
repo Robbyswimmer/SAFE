@@ -850,6 +850,7 @@ def compute_caption_metrics(
     references: List[List[str]],
     compute_bertscore: bool = False,
     light_metrics: bool = False,
+    quiet: bool = False,
 ) -> Dict[str, float]:
     """
     Compute caption metrics, mirroring StageATrainer's metric stack as closely
@@ -896,7 +897,7 @@ def compute_caption_metrics(
 
     # Reference statistics (useful sanity check; mirrors StageATrainer logs)
     ref_counts = [len(r) for r in refs_list]
-    if ref_counts:
+    if ref_counts and not quiet:
         avg_refs = sum(ref_counts) / len(ref_counts)
         min_refs = min(ref_counts)
         max_refs = max(ref_counts)

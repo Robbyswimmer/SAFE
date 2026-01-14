@@ -177,6 +177,32 @@ def parse_args():
         help="Max samples for evaluation",
     )
 
+    # Wandb logging
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Enable wandb logging",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="SAFE-SCST",
+        help="Wandb project name",
+    )
+    parser.add_argument(
+        "--wandb-name",
+        type=str,
+        default=None,
+        help="Wandb run name",
+    )
+    parser.add_argument(
+        "--wandb-mode",
+        type=str,
+        default="online",
+        choices=["online", "offline", "disabled"],
+        help="Wandb mode",
+    )
+
     return parser.parse_args()
 
 
@@ -186,19 +212,45 @@ def collate_fn(batch: List[Dict]) -> Dict[str, List]:
     audio_paths = []
     answers = []
 
-    for sample in batch:
+    for idx, sample in enumerate(batch):
         # Build question prompt
         question = sample.get("question", "Describe this audio.")
         questions.append(question)
 
-        # Get audio path
-        audio_path = sample.get("audio_path") or sample.get("audio")
-        audio_paths.append(audio_path)
+        # Get audio path - handle both tensor and path formats
+        audio = sample.get("audio")
+        audio_path = sample.get("audio_path")
+        if audio is not None and not isinstance(audio, str):
+            # Audio is already loaded as tensor/waveform
+            audio_paths.append(audio)
+        else:
+            audio_paths.append(audio_path or audio)
 
-        # Get reference captions (may be list)
-        ans = sample.get("answers") or sample.get("answer") or sample.get("caption")
-        if isinstance(ans, str):
+        # Get reference captions (may be list) - try multiple field names
+        # AudioCaps uses "answers" which should be a list of 5 captions
+        ans = sample.get("answers")
+        if ans is None:
+            ans = sample.get("captions")
+        if ans is None:
+            ans = sample.get("answer")
+        if ans is None:
+            ans = sample.get("caption")
+
+        # Ensure it's a list
+        if ans is None:
+            ans = []
+        elif isinstance(ans, str):
             ans = [ans]
+        elif not isinstance(ans, (list, tuple)):
+            ans = [str(ans)]
+
+        # Debug first few samples
+        if idx < 2 and not hasattr(collate_fn, '_debug_logged'):
+            print(f"[SCST collate_fn] Sample {idx}: answers type={type(sample.get('answers'))}, "
+                  f"len={len(ans) if ans else 0}, sample_keys={list(sample.keys())}", flush=True)
+            if idx == 1:
+                collate_fn._debug_logged = True
+
         answers.append(ans)
 
     return {
@@ -266,11 +318,20 @@ def compute_per_sample_cider(
     references: List[List[str]],
 ) -> List[float]:
     """Compute CIDEr score for each sample individually."""
+    import io
+    import sys
+
     scores = []
     for pred, refs in zip(predictions, references):
         try:
-            metrics = compute_caption_metrics([pred], [refs], light_metrics=True)
-            scores.append(metrics.get("cider", 0.0))
+            # Suppress pycocoevalcap verbose output
+            old_stdout = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                metrics = compute_caption_metrics([pred], [refs], light_metrics=True, quiet=True)
+                scores.append(metrics.get("cider", 0.0))
+            finally:
+                sys.stdout = old_stdout
         except Exception:
             scores.append(0.0)
     return scores
@@ -540,7 +601,33 @@ def main():
     print(f"Temperature: {args.temperature}")
     print(f"Num samples: {args.num_samples}")
     print(f"Learning rate: {args.lr}")
+    print(f"Wandb: {args.wandb}")
     print("=" * 60)
+
+    # Initialize wandb
+    wandb_run = None
+    if args.wandb:
+        import wandb
+        wandb_name = args.wandb_name or f"scst_{Path(args.checkpoint).stem}"
+        wandb_run = wandb.init(
+            project=args.wandb_project,
+            name=wandb_name,
+            mode=args.wandb_mode,
+            config={
+                "checkpoint": args.checkpoint,
+                "temperature": args.temperature,
+                "num_samples": args.num_samples,
+                "lr": args.lr,
+                "num_epochs": args.num_epochs,
+                "batch_size": args.batch_size,
+                "gradient_accumulation": args.gradient_accumulation,
+                "max_new_tokens": args.max_new_tokens,
+                "fusion_layer_indices": args.fusion_layer_indices,
+                "num_audio_tokens": args.num_audio_tokens,
+                "bottleneck_dim": args.bottleneck_dim,
+            },
+        )
+        print(f"  Wandb run: {wandb_run.url}")
 
     # Load model config
     print("\n[1/5] Loading model configuration...")
@@ -601,6 +688,19 @@ def main():
 
     print(f"  Train samples: {len(train_dataset)}")
     print(f"  Val samples: {len(val_dataset)}")
+
+    # Check reference count in first few samples
+    sample = train_dataset[0]
+    ans = sample.get("answers") or sample.get("captions") or sample.get("answer")
+    if isinstance(ans, str):
+        ref_count = 1
+    elif isinstance(ans, (list, tuple)):
+        ref_count = len(ans)
+    else:
+        ref_count = 1
+    print(f"  References per sample (sample 0): {ref_count}")
+    if ref_count < 5:
+        print(f"  ⚠️  WARNING: Expected ~5 refs/sample for AudioCaps. Check data format.")
 
     train_loader = DataLoader(
         train_dataset,
@@ -711,6 +811,17 @@ def main():
                         f"baseline_cider={avg_base:.2f}, lr={lr:.2e}"
                     )
 
+                    # Wandb logging
+                    if wandb_run is not None:
+                        wandb_run.log({
+                            "train/loss": avg_loss,
+                            "train/reward": avg_reward,
+                            "train/sampled_cider": avg_samp,
+                            "train/baseline_cider": avg_base,
+                            "train/lr": lr,
+                            "train/step": optimizer_step,
+                        })
+
         # Epoch summary
         epoch_time = time.time() - start_time
         avg_loss = epoch_loss / num_batches
@@ -744,6 +855,15 @@ def main():
             print(f"  Val METEOR: {val_meteor:.4f}")
             print(f"  Val BLEU-4: {val_bleu4:.4f}")
 
+            # Wandb logging for validation
+            if wandb_run is not None:
+                wandb_run.log({
+                    "val/cider": val_cider,
+                    "val/meteor": val_meteor,
+                    "val/bleu4": val_bleu4,
+                    "epoch": epoch + 1,
+                })
+
             # Save checkpoint
             is_best = val_cider > best_cider
             if is_best:
@@ -769,6 +889,11 @@ def main():
     print(f"Best validation CIDEr: {best_cider:.2f}")
     print(f"Checkpoints saved to: {output_dir}")
     print("=" * 60)
+
+    # Finish wandb
+    if wandb_run is not None:
+        wandb_run.log({"best_cider": best_cider})
+        wandb_run.finish()
 
 
 if __name__ == "__main__":
