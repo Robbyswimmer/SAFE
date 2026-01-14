@@ -267,6 +267,45 @@ class SAFEModel(nn.Module):
         if self.debug_logging:
             print(f"[ResidualWarmup] epoch={epoch}, target_scale={target_scale:.3f}", flush=True)
 
+    def set_scale_minimum_warmup(self, epoch: int, warmup_epochs: int = 5, start_min: float = 0.5, end_min: float = 3.0) -> None:
+        """
+        Gradually increase the minimum clamp for scale parameters over warmup_epochs.
+
+        This prevents early collapse (random attention × high scale = garbage) while
+        still forcing strong audio signal later in training to prevent suppression.
+
+        Args:
+            epoch: Current training epoch (0-indexed)
+            warmup_epochs: Number of epochs to warm up over
+            start_min: Initial minimum clamp value
+            end_min: Final minimum clamp value after warmup
+        """
+        if epoch >= warmup_epochs:
+            min_scale = end_min
+        else:
+            # Linear interpolation
+            progress = epoch / warmup_epochs
+            min_scale = start_min + (end_min - start_min) * progress
+
+        # Set on audio projector
+        if hasattr(self.audio_projector, '_scale_min'):
+            self.audio_projector._scale_min = min_scale
+        else:
+            self.audio_projector._scale_min = min_scale
+
+        # Set on fusion adapter's cross-attention blocks
+        if hasattr(self.fusion_adapter, 'fusion_adapters'):
+            # MultiLayerFusionAdapter
+            for adapter in self.fusion_adapter.fusion_adapters.values():
+                if hasattr(adapter, 'cross_attention'):
+                    adapter.cross_attention._scale_min = min_scale
+        elif hasattr(self.fusion_adapter, 'cross_attention'):
+            # Single adapter
+            self.fusion_adapter.cross_attention._scale_min = min_scale
+
+        if self.debug_logging:
+            print(f"[ScaleMinWarmup] epoch={epoch}, min_scale={min_scale:.3f}", flush=True)
+
     def set_debug_logging(self, enabled: bool) -> None:
         """Enable or disable verbose debugging across SAFE components."""
 

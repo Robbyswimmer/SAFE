@@ -2506,6 +2506,16 @@ def train(
             print(f"Epoch {epoch}/{num_epochs}")
             print(f"{'='*80}\n")
 
+        # Apply scale minimum warmup to prevent early collapse while forcing
+        # strong audio signal later in training
+        if hasattr(model, 'set_scale_minimum_warmup'):
+            model.set_scale_minimum_warmup(
+                epoch=epoch - 1,  # 0-indexed
+                warmup_epochs=5,
+                start_min=0.5,
+                end_min=3.0,
+            )
+
         # Set epoch on DistributedSampler for proper shuffling across epochs
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)

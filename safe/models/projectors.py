@@ -144,9 +144,10 @@ class AudioProjector(nn.Module):
         audio_tokens = self.output_norm(audio_tokens)
 
         # Apply learnable scale to match LLM embedding magnitude.
-        # EXPERIMENT: Clamp minimum to 3.0 to force strong audio signal and prevent
-        # the model from learning to suppress audio over time.
-        clamped_scale = torch.clamp(self.output_scale, 3.0, 10.0)
+        # Use warmup minimum that increases over training to prevent early collapse
+        # while still forcing strong audio signal later.
+        min_scale = getattr(self, '_scale_min', 0.5)  # Default 0.5, can be set externally
+        clamped_scale = torch.clamp(self.output_scale, min_scale, 10.0)
         audio_tokens = audio_tokens * clamped_scale
 
         # Log embedding norms for debugging
