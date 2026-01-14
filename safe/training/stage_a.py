@@ -574,11 +574,11 @@ class StageATrainer:
         lr_multiplier = stage_config.get("learning_rate_multiplier", 1.0)
         if lr_multiplier != 1.0:
             for param_group in self.optimizer.param_groups:
-                if param_group["name"] == "projector":
+                if str(param_group.get("name", "")).startswith("projector"):
                     param_group["lr"] = self.config["learning_rate_projector"] * lr_multiplier
-                elif param_group["name"] == "adapter":
+                elif str(param_group.get("name", "")).startswith("adapter"):
                     param_group["lr"] = self.config["learning_rate_adapter"] * lr_multiplier
-                elif param_group["name"] == "audio_tokens":
+                elif str(param_group.get("name", "")).startswith("audio_tokens"):
                     base_lr = self.config.get(
                         "learning_rate_audio_embeddings",
                         self.config["learning_rate_projector"],
@@ -593,53 +593,86 @@ class StageATrainer:
     def _setup_optimizer(self):
         """Setup optimizer with different learning rates for different components."""
         param_groups = []
+
+        weight_decay = float(self.config.get("weight_decay", 0.01) or 0.01)
+
+        def _use_weight_decay(param_name: str, param: torch.nn.Parameter) -> bool:
+            """Return True if this parameter should receive weight decay."""
+            # Standard practice: do not decay biases / LayerNorm / scalar scales.
+            if param.ndim <= 1:
+                return False
+            name = str(param_name).lower()
+            if name.endswith(".bias") or name.endswith("bias"):
+                return False
+            if "layernorm" in name or "layer_norm" in name or ".norm" in name or "norm." in name:
+                return False
+            if name.endswith(("output_scale", "residual_scale")):
+                return False
+            return True
+
+        def _append_component_groups(
+            component_name: str,
+            named_params: list,
+            lr: float,
+        ) -> None:
+            decay: list = []
+            no_decay: list = []
+            for n, p in named_params:
+                if not getattr(p, "requires_grad", False):
+                    continue
+                if _use_weight_decay(n, p):
+                    decay.append(p)
+                else:
+                    no_decay.append(p)
+
+            if decay:
+                param_groups.append({
+                    "params": decay,
+                    "lr": lr,
+                    "base_lr": lr,
+                    "name": f"{component_name}_decay",
+                    "weight_decay": weight_decay,
+                })
+            if no_decay:
+                param_groups.append({
+                    "params": no_decay,
+                    "lr": lr,
+                    "base_lr": lr,
+                    "name": f"{component_name}_no_decay",
+                    "weight_decay": 0.0,
+                })
         
         # Projector parameters
-        projector_params = list(self.safe_model.audio_projector.parameters())
-        if projector_params:
-            projector_lr = self.config["learning_rate_projector"]
-            param_groups.append({
-                "params": projector_params,
-                "lr": projector_lr,
-                "base_lr": projector_lr,  # Store base learning rate for warmup
-                "name": "projector"
-            })
+        projector_lr = float(self.config["learning_rate_projector"])
+        projector_named = list(self.safe_model.audio_projector.named_parameters())
+        if projector_named:
+            _append_component_groups("projector", projector_named, projector_lr)
         
         # Fusion adapter parameters (LoRA)
-        adapter_params = list(self.safe_model.fusion_adapter.parameters())
-        if adapter_params:
-            adapter_lr = self.config["learning_rate_adapter"]
-            param_groups.append({
-                "params": adapter_params,
-                "lr": adapter_lr,
-                "base_lr": adapter_lr,  # Store base learning rate for warmup
-                "name": "adapter"
-            })
+        adapter_lr = float(self.config["learning_rate_adapter"])
+        adapter_named = list(self.safe_model.fusion_adapter.named_parameters())
+        if adapter_named:
+            _append_component_groups("adapter", adapter_named, adapter_lr)
 
         # Audio token embedding parameters (if present)
         audio_token_module = getattr(self.safe_model, "audio_token_embeddings", None)
         if audio_token_module is not None:
-            audio_token_params = [
-                p for p in audio_token_module.parameters() if p.requires_grad
+            audio_token_named = [
+                (n, p) for n, p in audio_token_module.named_parameters() if p.requires_grad
             ]
-            if audio_token_params:
-                token_lr = self.config.get(
+            if audio_token_named:
+                token_lr = float(self.config.get(
                     "learning_rate_audio_embeddings",
                     self.config["learning_rate_projector"],
-                )
-                param_groups.append({
-                    "params": audio_token_params,
-                    "lr": token_lr,
-                    "base_lr": token_lr,
-                    "name": "audio_tokens"
-                })
+                ))
+                _append_component_groups("audio_tokens", audio_token_named, token_lr)
 
         if not param_groups:
             raise ValueError("No trainable parameters found!")
         
         self.optimizer = AdamW(
             param_groups,
-            weight_decay=self.config["weight_decay"],
+            weight_decay=0.0,
             betas=(0.9, 0.999)
         )
         

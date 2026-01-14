@@ -55,6 +55,14 @@ class CrossAttentionBlock(nn.Module):
         # Model will learn to increase scale as audio representations improve
         self.residual_scale = nn.Parameter(torch.tensor(0.1), requires_grad=True)
         self.register_buffer("residual_scale_max", torch.tensor(5.0), persistent=False)
+
+        # Default-safe initialization: start as an exact no-op on the frozen LM path.
+        # This prevents early training collapse (token accuracy cliff) while still allowing
+        # gradients to update output_dense immediately; upstream attention learns once the
+        # residual branch becomes non-zero.
+        nn.init.zeros_(self.output_dense.weight)
+        if self.output_dense.bias is not None:
+            nn.init.zeros_(self.output_dense.bias)
         
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         """Transpose tensor for multi-head attention computation."""
@@ -191,9 +199,10 @@ class CrossAttentionBlock(nn.Module):
         delta = self.output_dropout(delta)
         delta = delta.to(input_dtype)
 
-        # Allow residual scale to grow but keep it bounded for stability
-        # Clamp minimum to 1.0 to force full audio injection
-        residual_scale = torch.clamp(self.residual_scale, 1.0, float(self.residual_scale_max))
+        # Allow residual scale to grow but keep it bounded for stability.
+        # Do not force a high minimum here: early in training the fusion branch is effectively random,
+        # and hard minimums can destabilize the frozen LM and permanently tank token accuracy.
+        residual_scale = torch.clamp(self.residual_scale, 0.0, float(self.residual_scale_max))
         if getattr(self, "debug_logging", False):
             print(
                 f"[ResidualScale] scale={float(residual_scale.item()):.4f}",
@@ -308,10 +317,15 @@ class BottleneckCrossAttentionBlock(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        for module in [self.query, self.key, self.value, self.output_dense]:
+        for module in [self.query, self.key, self.value]:
             nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
+
+        # Zero-init the residual output projection for a stable no-op start.
+        nn.init.zeros_(self.output_dense.weight)
+        if self.output_dense.bias is not None:
+            nn.init.zeros_(self.output_dense.bias)
 
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         """Reshape for multi-head attention: (B, L, bottleneck) → (B, H, L, head_size)"""
@@ -384,9 +398,8 @@ class BottleneckCrossAttentionBlock(nn.Module):
         delta = torch.nan_to_num(delta, nan=0.0, posinf=1e4, neginf=-1e4)
         delta = self.output_dropout(delta)
 
-        # Apply residual scale
-        # Clamp minimum to 1.0 to force full audio injection
-        residual_scale = torch.clamp(self.residual_scale, 1.0, float(self.residual_scale_max))
+        # Apply residual scale (bounded for stability; allow ramp-up during training)
+        residual_scale = torch.clamp(self.residual_scale, 0.0, float(self.residual_scale_max))
         delta = residual_scale * delta
 
         # Layer norm
