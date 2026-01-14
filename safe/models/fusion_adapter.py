@@ -203,10 +203,9 @@ class CrossAttentionBlock(nn.Module):
         delta = self.output_dropout(delta)
         delta = delta.to(input_dtype)
 
-        # Allow residual scale to grow but keep it bounded for stability.
-        # Do not force a high minimum here: early in training the fusion branch is effectively random,
-        # and hard minimums can destabilize the frozen LM and permanently tank token accuracy.
-        residual_scale = torch.clamp(self.residual_scale, 0.0, float(self.residual_scale_max))
+        # EXPERIMENT: Clamp minimum to 3.0 to force strong audio fusion and prevent
+        # the model from learning to suppress audio over time.
+        residual_scale = torch.clamp(self.residual_scale, 3.0, float(self.residual_scale_max))
         if getattr(self, "debug_logging", False):
             print(
                 f"[ResidualScale] scale={float(residual_scale.item()):.4f}",
@@ -404,8 +403,8 @@ class BottleneckCrossAttentionBlock(nn.Module):
         delta = torch.nan_to_num(delta, nan=0.0, posinf=1e4, neginf=-1e4)
         delta = self.output_dropout(delta)
 
-        # Apply residual scale (bounded for stability; allow ramp-up during training)
-        residual_scale = torch.clamp(self.residual_scale, 0.0, float(self.residual_scale_max))
+        # EXPERIMENT: Clamp minimum to 3.0 to force strong audio fusion
+        residual_scale = torch.clamp(self.residual_scale, 3.0, float(self.residual_scale_max))
         delta = residual_scale * delta
 
         # Layer norm
