@@ -307,33 +307,38 @@ def generate_sampled(
         )
 
 
-def compute_per_sample_cider(
+def compute_per_sample_reward(
     predictions: List[str],
     references: List[List[str]],
     debug: bool = False,
 ) -> List[float]:
-    """Compute CIDEr score for each sample individually."""
+    """
+    Compute reward score for each sample using METEOR (works per-sample).
+    CIDEr doesn't work well per-sample due to IDF computation.
+    """
     import io
     import sys
 
     scores = []
     for i, (pred, refs) in enumerate(zip(predictions, references)):
         try:
-            # Suppress pycocoevalcap verbose output
+            # Suppress verbose output
             old_stdout = sys.stdout
             sys.stdout = io.StringIO()
             try:
                 metrics = compute_caption_metrics([pred], [refs], light_metrics=True, quiet=True)
-                score = metrics.get("cider", 0.0)
+                # Use METEOR as reward - works per-sample unlike CIDEr
+                # Scale by 100 to match CIDEr scale
+                score = metrics.get("meteor", 0.0) * 100.0
                 scores.append(score)
             finally:
                 sys.stdout = old_stdout
 
             if debug and i == 0:
-                print(f"[CIDEr Debug] pred='{pred[:50]}...', refs='{refs[0][:50] if refs else 'EMPTY'}...', score={score:.2f}", flush=True)
+                print(f"[Reward Debug] pred='{pred[:50]}...', refs='{refs[0][:50] if refs else 'EMPTY'}...', meteor={score:.2f}", flush=True)
         except Exception as e:
             if debug:
-                print(f"[CIDEr Error] {e}", flush=True)
+                print(f"[Reward Error] {e}", flush=True)
             scores.append(0.0)
     return scores
 
@@ -378,8 +383,8 @@ def compute_scst_reward(
         print(f"[SCST Reward] baseline='{baseline_captions[0][:60] if baseline_captions else 'EMPTY'}...'", flush=True)
         print(f"[SCST Reward] refs='{references[0][0][:60] if references and references[0] else 'EMPTY'}...'", flush=True)
 
-    sampled_scores = compute_per_sample_cider(sampled_captions, references, debug=debug)
-    baseline_scores = compute_per_sample_cider(baseline_captions, references, debug=debug)
+    sampled_scores = compute_per_sample_reward(sampled_captions, references, debug=debug)
+    baseline_scores = compute_per_sample_reward(baseline_captions, references, debug=debug)
 
     rewards = [s - b for s, b in zip(sampled_scores, baseline_scores)]
 
@@ -489,8 +494,8 @@ def scst_train_step(
     # Sample multiple captions and accumulate policy gradient
     total_loss = torch.tensor(0.0, device=device)
     total_reward = 0.0
-    total_sampled_cider = 0.0
-    total_baseline_cider = 0.0
+    total_sampled_meteor = 0.0
+    total_baseline_meteor = 0.0
 
     for sample_idx in range(num_samples):
         # Generate sampled caption
@@ -511,11 +516,11 @@ def scst_train_step(
         rewards = compute_scst_reward(sampled_captions, greedy_captions, references)
         rewards = rewards.to(device)
 
-        # Track CIDEr scores
-        sampled_scores = compute_per_sample_cider(sampled_captions, references)
-        baseline_scores = compute_per_sample_cider(greedy_captions, references)
-        total_sampled_cider += sum(sampled_scores) / len(sampled_scores)
-        total_baseline_cider += sum(baseline_scores) / len(baseline_scores)
+        # Track reward scores (METEOR-based, scaled to 0-100)
+        sampled_scores = compute_per_sample_reward(sampled_captions, references)
+        baseline_scores = compute_per_sample_reward(greedy_captions, references)
+        total_sampled_meteor += sum(sampled_scores) / len(sampled_scores)
+        total_baseline_meteor += sum(baseline_scores) / len(baseline_scores)
 
         # Compute log probabilities (with gradients)
         if use_amp:
@@ -549,14 +554,14 @@ def scst_train_step(
     # Average over samples
     avg_loss = total_loss / num_samples
     avg_reward = total_reward / num_samples
-    avg_sampled_cider = total_sampled_cider / num_samples
-    avg_baseline_cider = total_baseline_cider / num_samples
+    avg_sampled_meteor = total_sampled_meteor / num_samples
+    avg_baseline_meteor = total_baseline_meteor / num_samples
 
     return {
         "loss": avg_loss,
         "reward": avg_reward,
-        "sampled_cider": avg_sampled_cider,
-        "baseline_cider": avg_baseline_cider,
+        "sampled_meteor": avg_sampled_meteor,
+        "baseline_meteor": avg_baseline_meteor,
     }
 
 
@@ -781,8 +786,8 @@ def main():
         model.train()
         epoch_loss = 0.0
         epoch_reward = 0.0
-        epoch_sampled_cider = 0.0
-        epoch_baseline_cider = 0.0
+        epoch_sampled_meteor = 0.0
+        epoch_baseline_meteor = 0.0
         num_batches = 0
 
         start_time = time.time()
@@ -813,15 +818,15 @@ def main():
 
             epoch_loss += metrics["loss"].item() if torch.is_tensor(metrics["loss"]) else metrics["loss"]
             epoch_reward += metrics["reward"]
-            epoch_sampled_cider += metrics["sampled_cider"]
-            epoch_baseline_cider += metrics["baseline_cider"]
+            epoch_sampled_meteor += metrics["sampled_meteor"]
+            epoch_baseline_meteor += metrics["baseline_meteor"]
             num_batches += 1
 
             # Progress logging every batch
             if batch_idx % 10 == 0:
                 elapsed = time.time() - start_time
                 print(f"  Batch {batch_idx}/{len(train_loader)} ({elapsed:.1f}s) - "
-                      f"reward={metrics['reward']:.3f}, sampled_cider={metrics['sampled_cider']:.1f}", flush=True)
+                      f"reward={metrics['reward']:.3f}, sampled_meteor={metrics['sampled_meteor']:.1f}", flush=True)
 
             # Optimizer step
             if (batch_idx + 1) % args.gradient_accumulation == 0:
@@ -844,13 +849,13 @@ def main():
                 if optimizer_step % 1 == 0:
                     avg_loss = epoch_loss / num_batches
                     avg_reward = epoch_reward / num_batches
-                    avg_samp = epoch_sampled_cider / num_batches
-                    avg_base = epoch_baseline_cider / num_batches
+                    avg_samp = epoch_sampled_meteor / num_batches
+                    avg_base = epoch_baseline_meteor / num_batches
                     lr = scheduler.get_last_lr()[0]
                     print(
                         f"  Step {optimizer_step}: loss={avg_loss:.4f}, "
-                        f"reward={avg_reward:.4f}, sampled_cider={avg_samp:.2f}, "
-                        f"baseline_cider={avg_base:.2f}, lr={lr:.2e}"
+                        f"reward={avg_reward:.4f}, sampled_meteor={avg_samp:.2f}, "
+                        f"baseline_meteor={avg_base:.2f}, lr={lr:.2e}"
                     )
 
                     # Wandb logging
@@ -858,8 +863,8 @@ def main():
                         wandb_run.log({
                             "train/loss": avg_loss,
                             "train/reward": avg_reward,
-                            "train/sampled_cider": avg_samp,
-                            "train/baseline_cider": avg_base,
+                            "train/sampled_meteor": avg_samp,
+                            "train/baseline_meteor": avg_base,
                             "train/lr": lr,
                             "train/step": optimizer_step,
                         })
@@ -868,14 +873,14 @@ def main():
         epoch_time = time.time() - start_time
         avg_loss = epoch_loss / num_batches
         avg_reward = epoch_reward / num_batches
-        avg_sampled_cider = epoch_sampled_cider / num_batches
-        avg_baseline_cider = epoch_baseline_cider / num_batches
+        avg_sampled_meteor = epoch_sampled_meteor / num_batches
+        avg_baseline_meteor = epoch_baseline_meteor / num_batches
 
         print(f"\nEpoch {epoch + 1}/{args.num_epochs} ({epoch_time:.1f}s)")
         print(f"  Train loss: {avg_loss:.4f}")
         print(f"  Train reward: {avg_reward:.4f}")
-        print(f"  Sampled CIDEr: {avg_sampled_cider:.2f}")
-        print(f"  Baseline CIDEr: {avg_baseline_cider:.2f}")
+        print(f"  Sampled METEOR: {avg_sampled_meteor:.2f}")
+        print(f"  Baseline METEOR: {avg_baseline_meteor:.2f}")
 
         # Evaluation
         if (epoch + 1) % args.eval_frequency == 0:
