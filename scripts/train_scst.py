@@ -244,12 +244,6 @@ def collate_fn(batch: List[Dict]) -> Dict[str, List]:
         elif not isinstance(ans, (list, tuple)):
             ans = [str(ans)]
 
-        # Debug first few samples
-        if idx < 2 and not hasattr(collate_fn, '_debug_logged'):
-            print(f"[SCST collate_fn] Sample {idx}: answers type={type(sample.get('answers'))}, "
-                  f"len={len(ans) if ans else 0}, sample_keys={list(sample.keys())}", flush=True)
-            if idx == 1:
-                collate_fn._debug_logged = True
 
         answers.append(ans)
 
@@ -781,6 +775,12 @@ def main():
             epoch_baseline_cider += metrics["baseline_cider"]
             num_batches += 1
 
+            # Progress logging every batch
+            if batch_idx % 10 == 0:
+                elapsed = time.time() - start_time
+                print(f"  Batch {batch_idx}/{len(train_loader)} ({elapsed:.1f}s) - "
+                      f"reward={metrics['reward']:.3f}, sampled_cider={metrics['sampled_cider']:.1f}", flush=True)
+
             # Optimizer step
             if (batch_idx + 1) % args.gradient_accumulation == 0:
                 if args.fp16:
@@ -798,8 +798,8 @@ def main():
                 optimizer.zero_grad()
                 optimizer_step += 1
 
-                # Log progress
-                if optimizer_step % 10 == 0:
+                # Log progress (every step, not just every 10)
+                if optimizer_step % 1 == 0:
                     avg_loss = epoch_loss / num_batches
                     avg_reward = epoch_reward / num_batches
                     avg_samp = epoch_sampled_cider / num_batches
