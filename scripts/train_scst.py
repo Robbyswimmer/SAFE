@@ -87,6 +87,18 @@ def parse_args():
         default="phase1",
         help="Base model config name",
     )
+    parser.add_argument(
+        "--num-audio-tokens",
+        type=int,
+        default=None,
+        help="Number of audio tokens (must match checkpoint)",
+    )
+    parser.add_argument(
+        "--bottleneck-dim",
+        type=int,
+        default=None,
+        help="Bottleneck dimension for fusion adapter (must match checkpoint)",
+    )
 
     # SCST hyperparameters
     parser.add_argument(
@@ -548,6 +560,23 @@ def main():
                         mod_cfg["layer_indices"] = layer_indices
 
         print(f"  Fusion layer indices: {layer_indices}")
+
+    # Override num_audio_tokens if specified
+    if args.num_audio_tokens is not None:
+        model_config["num_audio_tokens"] = args.num_audio_tokens
+        if "fusion_config" in model_config:
+            fusion_cfg = model_config["fusion_config"]
+            if "modalities" in fusion_cfg:
+                for mod_cfg in fusion_cfg["modalities"].values():
+                    if isinstance(mod_cfg, dict):
+                        mod_cfg["num_tokens"] = args.num_audio_tokens
+        print(f"  Num audio tokens: {args.num_audio_tokens}")
+
+    # Override bottleneck_dim if specified
+    if args.bottleneck_dim is not None:
+        if "fusion_config" in model_config:
+            model_config["fusion_config"]["bottleneck_dim"] = args.bottleneck_dim
+        print(f"  Bottleneck dim: {args.bottleneck_dim}")
 
     # Create model
     print("\n[2/5] Creating model...")

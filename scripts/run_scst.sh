@@ -52,6 +52,10 @@ DATA_PATH=${DATA_PATH:-"experiments/full_training/data"}
 OUTPUT_DIR=${OUTPUT_DIR:-"checkpoints/scst"}
 CONFIG=${CONFIG:-"phase1"}
 
+# Model architecture overrides (must match checkpoint)
+NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-8}
+BOTTLENECK_DIM=${BOTTLENECK_DIM:-32}
+
 # SCST hyperparameters
 NUM_EPOCHS=${NUM_EPOCHS:-5}
 LR=${LR:-1e-5}
@@ -80,6 +84,8 @@ echo "========================================"
 echo "Checkpoint: ${CHECKPOINT}"
 echo "Fusion layers: ${FUSION_LAYER_INDICES}"
 echo "Output dir: ${OUTPUT_DIR}"
+echo "Num audio tokens: ${NUM_AUDIO_TOKENS}"
+echo "Bottleneck dim: ${BOTTLENECK_DIM}"
 echo "Temperature: ${TEMPERATURE}"
 echo "Num samples: ${NUM_SAMPLES}"
 echo "Learning rate: ${LR}"
@@ -111,6 +117,8 @@ python scripts/train_scst.py \
     --output-dir "${OUTPUT_DIR}" \
     --config "${CONFIG}" \
     ${FUSION_ARGS} \
+    --num-audio-tokens "${NUM_AUDIO_TOKENS}" \
+    --bottleneck-dim "${BOTTLENECK_DIM}" \
     --num-epochs "${NUM_EPOCHS}" \
     --lr "${LR}" \
     --temperature "${TEMPERATURE}" \
