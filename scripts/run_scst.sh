@@ -1,16 +1,32 @@
-#!/bin/bash
-#SBATCH --job-name=scst_train
+#!/bin/bash -l
+
+#SBATCH --job-name="SAFE-SCST"
 #SBATCH --output=logs/scst_%j.out
 #SBATCH --error=logs/scst_%j.err
 #SBATCH --time=24:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
-#SBATCH --partition=gpu
+#SBATCH --mail-type=FAIL,END
+#SBATCH --mail-user=rmose009@ucr.edu
+#SBATCH -p gpu
+
+set -euo pipefail
+
+# Force unbuffered output for Python
+export PYTHONUNBUFFERED=1
 
 # Activate conda environment
-source ~/.bashrc
-conda activate safe
+if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+  source "$HOME/miniconda3/etc/profile.d/conda.sh"
+elif command -v module &>/dev/null; then
+  module load anaconda &>/dev/null || true
+  source "$HOME/.bashrc"
+fi
+
+CONDA_ENV=${CONDA_ENV:-safe-env}
+echo "Activating conda environment '${CONDA_ENV}'"
+conda activate "${CONDA_ENV}"
 
 # ============================================================================
 # SCST (Self-Critical Sequence Training) for Audio Captioning
