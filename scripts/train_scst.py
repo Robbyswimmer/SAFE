@@ -310,26 +310,35 @@ def generate_sampled(
 def compute_per_sample_cider(
     predictions: List[str],
     references: List[List[str]],
+    debug: bool = False,
 ) -> List[float]:
     """Compute CIDEr score for each sample individually."""
     import io
     import sys
 
     scores = []
-    for pred, refs in zip(predictions, references):
+    for i, (pred, refs) in enumerate(zip(predictions, references)):
         try:
             # Suppress pycocoevalcap verbose output
             old_stdout = sys.stdout
             sys.stdout = io.StringIO()
             try:
                 metrics = compute_caption_metrics([pred], [refs], light_metrics=True, quiet=True)
-                scores.append(metrics.get("cider", 0.0))
+                score = metrics.get("cider", 0.0)
+                scores.append(score)
             finally:
                 sys.stdout = old_stdout
-        except Exception:
+
+            if debug and i == 0:
+                print(f"[CIDEr Debug] pred='{pred[:50]}...', refs='{refs[0][:50] if refs else 'EMPTY'}...', score={score:.2f}", flush=True)
+        except Exception as e:
+            if debug:
+                print(f"[CIDEr Error] {e}", flush=True)
             scores.append(0.0)
     return scores
 
+
+_scst_debug_count = 0
 
 def compute_scst_reward(
     sampled_captions: List[str],
@@ -341,10 +350,23 @@ def compute_scst_reward(
 
     Returns per-sample rewards as a tensor.
     """
-    sampled_scores = compute_per_sample_cider(sampled_captions, references)
-    baseline_scores = compute_per_sample_cider(baseline_captions, references)
+    global _scst_debug_count
+    debug = _scst_debug_count < 3
+    _scst_debug_count += 1
+
+    if debug:
+        print(f"[SCST Reward] sampled='{sampled_captions[0][:60] if sampled_captions else 'EMPTY'}...'", flush=True)
+        print(f"[SCST Reward] baseline='{baseline_captions[0][:60] if baseline_captions else 'EMPTY'}...'", flush=True)
+        print(f"[SCST Reward] refs='{references[0][0][:60] if references and references[0] else 'EMPTY'}...'", flush=True)
+
+    sampled_scores = compute_per_sample_cider(sampled_captions, references, debug=debug)
+    baseline_scores = compute_per_sample_cider(baseline_captions, references, debug=debug)
 
     rewards = [s - b for s, b in zip(sampled_scores, baseline_scores)]
+
+    if debug:
+        print(f"[SCST Reward] sampled_scores={sampled_scores}, baseline_scores={baseline_scores}, rewards={rewards}", flush=True)
+
     return torch.tensor(rewards, dtype=torch.float32)
 
 
