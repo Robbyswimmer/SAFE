@@ -1192,13 +1192,15 @@ def evaluate(
             num_batches += 1
 
         logits = outputs.get("logits")
-        if isinstance(logits, torch.Tensor) and logits.ndim >= 3:
+        if isinstance(logits, torch.Tensor) and logits.ndim >= 3 and isinstance(labels, torch.Tensor) and labels.ndim >= 2:
             try:
                 with torch.no_grad():
-                    preds = logits.argmax(dim=-1)
-                    mask = labels != -100
+                    shift_logits = logits[..., :-1, :]
+                    shift_labels = labels[..., 1:]
+                    preds = shift_logits.argmax(dim=-1)
+                    mask = shift_labels != -100
                     if mask.any():
-                        token_correct += int((preds[mask] == labels[mask]).sum().item())
+                        token_correct += int((preds[mask] == shift_labels[mask]).sum().item())
                         token_total += int(mask.sum().item())
             except Exception:
                 pass
@@ -1752,15 +1754,18 @@ def train_epoch(
                 )
                 loss = outputs["loss"]
 
-        # Token-level training accuracy on supervised positions (captioning analogue of "accuracy")
+        # Token-level training accuracy on supervised positions.
+        # IMPORTANT: match the shifted next-token objective used in SAFEModel.forward().
         logits = outputs.get("logits") if isinstance(outputs, dict) else None
-        if isinstance(logits, torch.Tensor) and logits.ndim >= 3:
+        if isinstance(logits, torch.Tensor) and logits.ndim >= 3 and isinstance(labels, torch.Tensor) and labels.ndim >= 2:
             try:
                 with torch.no_grad():
-                    preds = logits.argmax(dim=-1)
-                    mask = labels != -100
+                    shift_logits = logits[..., :-1, :]
+                    shift_labels = labels[..., 1:]
+                    preds = shift_logits.argmax(dim=-1)
+                    mask = shift_labels != -100
                     if mask.any():
-                        token_correct += int((preds[mask] == labels[mask]).sum().item())
+                        token_correct += int((preds[mask] == shift_labels[mask]).sum().item())
                         token_total += int(mask.sum().item())
             except Exception:
                 pass

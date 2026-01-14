@@ -223,6 +223,50 @@ class SAFEModel(nn.Module):
         gate = min(1.0, global_step / warmup_steps)
         self.set_gate(gate)
 
+    def set_residual_scale_warmup(self, epoch: int, warmup_epochs: int = 5, start_scale: float = 0.1, end_scale: float = 1.0) -> None:
+        """
+        Gradually increase residual scale over warmup_epochs.
+
+        This allows the model to learn *what* audio features to inject before
+        injecting them strongly. Helps avoid early training collapse.
+
+        Args:
+            epoch: Current training epoch (0-indexed)
+            warmup_epochs: Number of epochs to warm up over
+            start_scale: Initial scale value
+            end_scale: Final scale value after warmup
+        """
+        if epoch >= warmup_epochs:
+            target_scale = end_scale
+        else:
+            # Linear interpolation
+            progress = epoch / warmup_epochs
+            target_scale = start_scale + (end_scale - start_scale) * progress
+
+        # Apply to fusion adapter's cross-attention blocks
+        if hasattr(self.fusion_adapter, 'fusion_adapters'):
+            # MultiLayerFusionAdapter
+            for adapter in self.fusion_adapter.fusion_adapters.values():
+                if hasattr(adapter, 'cross_attention'):
+                    ca = adapter.cross_attention
+                    # Handle PEFT-wrapped models
+                    if hasattr(ca, 'base_model'):
+                        ca = ca.base_model
+                    if hasattr(ca, 'residual_scale'):
+                        with torch.no_grad():
+                            ca.residual_scale.fill_(target_scale)
+        elif hasattr(self.fusion_adapter, 'cross_attention'):
+            # Single adapter (LoRAFusionAdapter or SimpleFusionAdapter)
+            ca = self.fusion_adapter.cross_attention
+            if hasattr(ca, 'base_model'):
+                ca = ca.base_model
+            if hasattr(ca, 'residual_scale'):
+                with torch.no_grad():
+                    ca.residual_scale.fill_(target_scale)
+
+        if self.debug_logging:
+            print(f"[ResidualWarmup] epoch={epoch}, target_scale={target_scale:.3f}", flush=True)
+
     def set_debug_logging(self, enabled: bool) -> None:
         """Enable or disable verbose debugging across SAFE components."""
 

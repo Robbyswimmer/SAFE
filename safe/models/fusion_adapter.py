@@ -51,16 +51,20 @@ class CrossAttentionBlock(nn.Module):
         self.attention_dropout = nn.Dropout(attention_dropout)
 
         # Residual scaling for fusion (trainable with clamp)
-        # Start conservative to avoid noisy audio injection from untrained attention
-        # Model will learn to increase scale as audio representations improve
-        self.residual_scale = nn.Parameter(torch.tensor(0.1), requires_grad=True)
+        # Start at 0.5 to provide meaningful gradient signal from epoch 1.
+        # Previous 0.1 init caused gradient starvation - audio contribution was
+        # too weak to generate useful gradients, leading to training plateau at ~3 epochs.
+        # The model can still learn to decrease this if needed.
+        self.residual_scale = nn.Parameter(torch.tensor(0.5), requires_grad=True)
         self.register_buffer("residual_scale_max", torch.tensor(5.0), persistent=False)
 
-        # Default-safe initialization: start as an exact no-op on the frozen LM path.
-        # This prevents early training collapse (token accuracy cliff) while still allowing
-        # gradients to update output_dense immediately; upstream attention learns once the
-        # residual branch becomes non-zero.
-        nn.init.zeros_(self.output_dense.weight)
+        # Initialize output projection with Xavier for proper gradient flow.
+        # Zero-init causes gradient starvation - the fusion block produces near-zero
+        # gradients, preventing the model from learning to use audio information.
+        # Xavier provides balanced initialization that allows meaningful gradients
+        # from the start while the residual_scale (starting at 0.5) controls the
+        # actual contribution magnitude.
+        nn.init.xavier_uniform_(self.output_dense.weight)
         if self.output_dense.bias is not None:
             nn.init.zeros_(self.output_dense.bias)
         
@@ -309,8 +313,9 @@ class BottleneckCrossAttentionBlock(nn.Module):
         # Layer norm on residual (applied to hidden_size)
         self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
 
-        # Residual scaling - start conservative
-        self.residual_scale = nn.Parameter(torch.tensor(0.1), requires_grad=True)
+        # Residual scaling - start at 0.5 for meaningful gradient flow
+        # (0.1 was too conservative, causing gradient starvation)
+        self.residual_scale = nn.Parameter(torch.tensor(0.5), requires_grad=True)
         self.register_buffer("residual_scale_max", torch.tensor(5.0), persistent=False)
 
         # Initialize with Xavier for good gradient flow
@@ -322,8 +327,9 @@ class BottleneckCrossAttentionBlock(nn.Module):
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
 
-        # Zero-init the residual output projection for a stable no-op start.
-        nn.init.zeros_(self.output_dense.weight)
+        # Initialize output projection with Xavier for proper gradient flow.
+        # Zero-init causes gradient starvation - prevents learning audio fusion.
+        nn.init.xavier_uniform_(self.output_dense.weight)
         if self.output_dense.bias is not None:
             nn.init.zeros_(self.output_dense.bias)
 

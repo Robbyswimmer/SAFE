@@ -26,9 +26,12 @@ class AudioProjector(nn.Module):
         self.llm_hidden_size = llm_hidden_size
         self.num_audio_tokens = num_audio_tokens
 
-        # Default bottleneck to 1024 if not specified (80% param reduction)
+        # Default bottleneck to 2048 if not specified.
+        # Previous 1024 was too aggressive (5x compression for LLaVA's 5120 hidden size),
+        # creating an information bottleneck that choked gradient flow.
+        # 2048 provides better capacity while still reducing parameters.
         if bottleneck_dim is None:
-            bottleneck_dim = min(1024, llm_hidden_size // 4)
+            bottleneck_dim = min(2048, llm_hidden_size // 2)
         self.bottleneck_dim = bottleneck_dim
 
         # Activation function
