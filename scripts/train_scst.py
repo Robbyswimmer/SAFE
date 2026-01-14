@@ -338,6 +338,25 @@ def compute_per_sample_cider(
     return scores
 
 
+def extract_assistant_response(caption: str) -> str:
+    """Extract only the assistant's response from the full decoded sequence."""
+    # Try common patterns
+    for marker in ["ASSISTANT:", "Assistant:", "assistant:", "A:"]:
+        if marker in caption:
+            response = caption.split(marker)[-1].strip()
+            return response
+
+    # If no marker found, try to remove common prompt patterns
+    if "USER:" in caption or "User:" in caption:
+        # Take everything after the last question mark or colon in the prompt
+        parts = caption.split("?")
+        if len(parts) > 1:
+            return parts[-1].strip()
+
+    # Fallback: return as-is
+    return caption.strip()
+
+
 _scst_debug_count = 0
 
 def compute_scst_reward(
@@ -464,8 +483,8 @@ def scst_train_step(
     )
     greedy_captions = tokenizer.batch_decode(greedy_ids, skip_special_tokens=True)
 
-    # Clean up greedy captions
-    greedy_captions = [cap.strip() for cap in greedy_captions]
+    # Extract only the assistant's response (remove prompt)
+    greedy_captions = [extract_assistant_response(cap) for cap in greedy_captions]
 
     # Sample multiple captions and accumulate policy gradient
     total_loss = torch.tensor(0.0, device=device)
@@ -485,7 +504,8 @@ def scst_train_step(
             temperature=temperature,
         )
         sampled_captions = tokenizer.batch_decode(sampled_ids, skip_special_tokens=True)
-        sampled_captions = [cap.strip() for cap in sampled_captions]
+        # Extract only the assistant's response (remove prompt)
+        sampled_captions = [extract_assistant_response(cap) for cap in sampled_captions]
 
         # Compute reward
         rewards = compute_scst_reward(sampled_captions, greedy_captions, references)
