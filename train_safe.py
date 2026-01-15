@@ -2513,7 +2513,7 @@ def train(
                 epoch=epoch - 1,  # 0-indexed
                 warmup_epochs=5,
                 start_min=0.5,
-                end_min=3.0,
+                end_min=1.0,
             )
 
         # Set epoch on DistributedSampler for proper shuffling across epochs
