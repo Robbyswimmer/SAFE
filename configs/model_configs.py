@@ -208,7 +208,11 @@ PHASE1_CONFIG = {
     "num_audio_tokens": 16,
     "projector_config": {
         "dropout": 0.1,
-        "bottleneck_dim": 1024  # Keep for Phase 1, remove in Phase 2
+        "bottleneck_dim": 1024,  # Keep for Phase 1, remove in Phase 2
+        # NEW: SwiGLU activation for better gradient flow (used in LLaMA/PaLM)
+        "use_swiglu": True,
+        # NEW: Positional embeddings for temporal structure in audio tokens
+        "use_positional_embedding": True,
     },
 
     # Fusion configuration - MULTI-LAYER + HIGHER RANK
@@ -231,6 +235,12 @@ PHASE1_CONFIG = {
         # bottleneck_dim=64 for increased capacity
         "use_bottleneck": True,
         "bottleneck_dim": 64,
+        # NEW: Add FFN after cross-attention (standard transformer pattern)
+        # This provides crucial non-linear transformation capacity
+        "use_ffn": True,
+        "ffn_expansion": 2.0,
+        # NEW: Use pre-norm for more stable training (like modern LLMs)
+        "use_pre_norm": True,
         # Legacy LoRA settings (only used if use_bottleneck=False)
         "target_modules": ["query", "key", "value", "output_dense"],
         "train_base_cross_attention": False,

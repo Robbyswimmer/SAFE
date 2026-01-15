@@ -262,6 +262,9 @@ class BottleneckCrossAttentionBlock(nn.Module):
     Uses small projections instead of full hidden_size, equivalent to LoRA in parameter count
     but simpler (no PEFT dependency, no frozen random base layers).
 
+    Now follows standard transformer pattern: CrossAttention → FFN
+    This provides the non-linear transformation capacity that was missing.
+
     Parameter equivalence:
     - bottleneck_dim=32 ≈ LoRA rank-16 (655K params per layer)
     - bottleneck_dim=16 ≈ LoRA rank-8 (328K params per layer)
@@ -274,13 +277,18 @@ class BottleneckCrossAttentionBlock(nn.Module):
         num_attention_heads: int = 4,
         attention_dropout: float = 0.1,
         output_dropout: float = 0.1,
-        layer_norm_eps: float = 1e-5
+        layer_norm_eps: float = 1e-5,
+        use_ffn: bool = True,
+        ffn_expansion: float = 2.0,
+        use_pre_norm: bool = False,
     ):
         super().__init__()
 
         self.hidden_size = hidden_size
         self.bottleneck_dim = bottleneck_dim
         self.num_attention_heads = max(num_attention_heads, 1)
+        self.use_ffn = use_ffn
+        self.use_pre_norm = use_pre_norm
 
         # Ensure bottleneck_dim is divisible by num_heads
         if bottleneck_dim % self.num_attention_heads != 0:
@@ -297,6 +305,12 @@ class BottleneckCrossAttentionBlock(nn.Module):
         self._attention_log_limit = 5
         self._attention_logs_emitted = 0
 
+        # Pre-norm layer (applied before Q/K/V projections if use_pre_norm=True)
+        # Pre-norm is more stable for training (used in GPT-2+, LLaMA, etc.)
+        if use_pre_norm:
+            self.pre_norm_q = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+            self.pre_norm_kv = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+
         # Bottleneck projections - small dimensions
         # Q: hidden_size → bottleneck_dim
         self.query = nn.Linear(hidden_size, bottleneck_dim)
@@ -311,7 +325,24 @@ class BottleneckCrossAttentionBlock(nn.Module):
         self.attention_dropout = nn.Dropout(attention_dropout)
 
         # Layer norm on residual (applied to hidden_size)
+        # For pre-norm, this becomes the post-attention norm
         self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+
+        # FFN block (standard transformer pattern: Attention → FFN)
+        # This provides crucial non-linear transformation capacity
+        if use_ffn:
+            ffn_hidden = int(hidden_size * ffn_expansion)
+            self.ffn = nn.Sequential(
+                nn.LayerNorm(hidden_size, eps=layer_norm_eps),
+                nn.Linear(hidden_size, ffn_hidden),
+                nn.GELU(),
+                nn.Dropout(output_dropout),
+                nn.Linear(ffn_hidden, hidden_size),
+                nn.Dropout(output_dropout),
+            )
+            # Initialize FFN output to small values for stable residual
+            nn.init.normal_(self.ffn[-2].weight, std=0.02)
+            nn.init.zeros_(self.ffn[-2].bias)
 
         # Residual scaling - start at 0.5 for meaningful gradient flow
         # (0.1 was too conservative, causing gradient starvation)
@@ -348,7 +379,7 @@ class BottleneckCrossAttentionBlock(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         """
-        Forward pass of bottleneck cross-attention.
+        Forward pass of bottleneck cross-attention with optional FFN.
 
         Args:
             hidden_states: (B, seq_len, hidden_size) - LLM hidden states (Query source)
@@ -364,10 +395,18 @@ class BottleneckCrossAttentionBlock(nn.Module):
         hs = torch.nan_to_num(hidden_states, nan=0.0, posinf=1e4, neginf=-1e4).float()
         at = torch.nan_to_num(audio_tokens, nan=0.0, posinf=1e4, neginf=-1e4).float()
 
+        # Apply pre-norm if enabled (more stable training, used in modern LLMs)
+        if self.use_pre_norm:
+            hs_normed = self.pre_norm_q(hs)
+            at_normed = self.pre_norm_kv(at)
+        else:
+            hs_normed = hs
+            at_normed = at
+
         # Project to bottleneck dimension
-        query_layer = self.transpose_for_scores(self.query(hs))  # (B, H, seq_len, head_size)
-        key_layer = self.transpose_for_scores(self.key(at))       # (B, H, audio_len, head_size)
-        value_layer = self.transpose_for_scores(self.value(at))   # (B, H, audio_len, head_size)
+        query_layer = self.transpose_for_scores(self.query(hs_normed))  # (B, H, seq_len, head_size)
+        key_layer = self.transpose_for_scores(self.key(at_normed))       # (B, H, audio_len, head_size)
+        value_layer = self.transpose_for_scores(self.value(at_normed))   # (B, H, audio_len, head_size)
 
         # Attention scores
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
@@ -409,9 +448,14 @@ class BottleneckCrossAttentionBlock(nn.Module):
         residual_scale = torch.clamp(self.residual_scale, min_scale, float(self.residual_scale_max))
         delta = residual_scale * delta
 
-        # Layer norm
+        # Layer norm (post-attention)
         if self.layer_norm is not None:
             delta = self.layer_norm(delta)
+
+        # Apply FFN if enabled (standard transformer pattern: Attention → FFN)
+        # This provides crucial non-linear transformation capacity
+        if self.use_ffn:
+            delta = delta + self.ffn(delta)
 
         return delta.to(orig_dtype)
 
@@ -421,6 +465,10 @@ class SimpleFusionAdapter(nn.Module):
     Simple fusion adapter using bottleneck cross-attention.
     No PEFT/LoRA - just straightforward small cross-attention blocks.
     All parameters are trainable.
+
+    Now supports:
+    - use_ffn: Add FFN after cross-attention (standard transformer pattern)
+    - use_pre_norm: Use pre-norm instead of post-norm (more stable training)
     """
 
     def __init__(
@@ -430,6 +478,9 @@ class SimpleFusionAdapter(nn.Module):
         num_attention_heads: int = 4,
         attention_dropout: float = 0.1,
         use_tokenwise_gate: bool = False,
+        use_ffn: bool = True,
+        ffn_expansion: float = 2.0,
+        use_pre_norm: bool = False,
     ):
         super().__init__()
 
@@ -438,12 +489,15 @@ class SimpleFusionAdapter(nn.Module):
         self.use_tokenwise_gate = bool(use_tokenwise_gate)
         self.debug_logging = False
 
-        # Bottleneck cross-attention
+        # Bottleneck cross-attention with optional FFN and pre-norm
         self.cross_attention = BottleneckCrossAttentionBlock(
             hidden_size=hidden_size,
             bottleneck_dim=bottleneck_dim,
             num_attention_heads=num_attention_heads,
             attention_dropout=attention_dropout,
+            use_ffn=use_ffn,
+            ffn_expansion=ffn_expansion,
+            use_pre_norm=use_pre_norm,
         )
 
         # Optional token-wise gating
@@ -712,6 +766,11 @@ class MultiLayerFusionAdapter(nn.Module):
     - LoRA mode (use_bottleneck=False): Uses LoRAFusionAdapter with PEFT
     - Bottleneck mode (use_bottleneck=True): Uses SimpleFusionAdapter with small cross-attention
 
+    New architectural options (bottleneck mode only):
+    - use_ffn: Add FFN after cross-attention (standard transformer pattern, default=True)
+    - ffn_expansion: FFN hidden size multiplier (default=2.0)
+    - use_pre_norm: Use pre-norm instead of post-norm (default=False)
+
     Parameter equivalence for bottleneck_dim:
     - bottleneck_dim=32 ≈ LoRA rank-16 (~655K params per layer)
     - bottleneck_dim=16 ≈ LoRA rank-8 (~328K params per layer)
@@ -731,6 +790,9 @@ class MultiLayerFusionAdapter(nn.Module):
         use_tokenwise_gate: bool = False,
         use_bottleneck: bool = False,
         bottleneck_dim: int = 32,
+        use_ffn: bool = True,
+        ffn_expansion: float = 2.0,
+        use_pre_norm: bool = False,
         **unused_kwargs,
     ):
         super().__init__()
@@ -740,6 +802,9 @@ class MultiLayerFusionAdapter(nn.Module):
         self.use_tokenwise_gate = bool(use_tokenwise_gate)
         self.use_bottleneck = bool(use_bottleneck)
         self.bottleneck_dim = bottleneck_dim
+        self.use_ffn = use_ffn
+        self.ffn_expansion = ffn_expansion
+        self.use_pre_norm = use_pre_norm
         # Last recorded attention summary from any inner fusion adapter
         self.last_attention_summary: Optional[dict] = None
         self.extra_config = dict(unused_kwargs)
@@ -758,12 +823,16 @@ class MultiLayerFusionAdapter(nn.Module):
                 key = self._adapter_key(modality, layer_idx)
                 if self.use_bottleneck:
                     # Use simple bottleneck cross-attention (no PEFT)
+                    # Now includes FFN and pre-norm options
                     self.fusion_adapters[key] = SimpleFusionAdapter(
                         hidden_size=hidden_size,
                         bottleneck_dim=bottleneck_dim,
                         num_attention_heads=min(num_attention_heads, bottleneck_dim),
                         attention_dropout=attention_dropout,
                         use_tokenwise_gate=self.use_tokenwise_gate,
+                        use_ffn=use_ffn,
+                        ffn_expansion=ffn_expansion,
+                        use_pre_norm=use_pre_norm,
                     )
                 else:
                     # Use LoRA-based fusion adapter (original behavior)

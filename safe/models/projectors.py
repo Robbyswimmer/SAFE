@@ -1,16 +1,39 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional
+
+
+class SwiGLU(nn.Module):
+    """
+    SwiGLU activation as used in LLaMA, PaLM, etc.
+    Provides better gradient flow than simple GELU/ReLU.
+
+    SwiGLU(x) = (x @ W1) * SiLU(x @ W_gate)
+    """
+
+    def __init__(self, in_features: int, hidden_features: int, out_features: int, bias: bool = True):
+        super().__init__()
+        self.w1 = nn.Linear(in_features, hidden_features, bias=bias)
+        self.w_gate = nn.Linear(in_features, hidden_features, bias=bias)
+        self.w2 = nn.Linear(hidden_features, out_features, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w2(F.silu(self.w_gate(x)) * self.w1(x))
 
 
 class AudioProjector(nn.Module):
     """
     Trainable projector that maps audio features to LLM token space.
-    
+
     Architecture: 2-layer MLP that converts CLAP/audio features to d_model of LLM,
     emitting k audio tokens where k ∈ {0, 4, 8, 12}.
+
+    Supports SwiGLU activation (use_swiglu=True) for better gradient flow,
+    and learnable positional embeddings (use_positional_embedding=True) for
+    temporal structure in audio tokens.
     """
-    
+
     def __init__(
         self,
         audio_embed_dim: int,
@@ -18,13 +41,17 @@ class AudioProjector(nn.Module):
         num_audio_tokens: int = 8,
         dropout: float = 0.1,
         activation: str = "gelu",
-        bottleneck_dim: Optional[int] = None  # New parameter for bottleneck
+        bottleneck_dim: Optional[int] = None,
+        use_swiglu: bool = False,
+        use_positional_embedding: bool = False,
     ):
         super().__init__()
 
         self.audio_embed_dim = audio_embed_dim
         self.llm_hidden_size = llm_hidden_size
         self.num_audio_tokens = num_audio_tokens
+        self.use_swiglu = use_swiglu
+        self.use_positional_embedding = use_positional_embedding
 
         # Default bottleneck to 2048 if not specified.
         # Previous 1024 was too aggressive (5x compression for LLaVA's 5120 hidden size),
@@ -34,28 +61,50 @@ class AudioProjector(nn.Module):
             bottleneck_dim = min(2048, llm_hidden_size // 2)
         self.bottleneck_dim = bottleneck_dim
 
-        # Activation function
-        if activation.lower() == "gelu":
-            self.activation = nn.GELU()
-        elif activation.lower() == "relu":
-            self.activation = nn.ReLU()
-        elif activation.lower() == "silu":
-            self.activation = nn.SiLU()
-        else:
-            raise ValueError(f"Unsupported activation: {activation}")
-
         # Input normalization for stability
         self.input_norm = nn.LayerNorm(audio_embed_dim, eps=1e-6)
 
-        # 2-layer MLP with bottleneck for parameter efficiency
-        # Architecture: audio_embed_dim → bottleneck_dim → llm_hidden_size * num_audio_tokens
-        # NOTE: No Tanh - LayerNorm provides sufficient normalization without gradient compression
-        self.projector = nn.Sequential(
-            nn.Linear(audio_embed_dim, bottleneck_dim),
-            self.activation,
-            nn.Dropout(dropout),
-            nn.Linear(bottleneck_dim, llm_hidden_size * num_audio_tokens),
-        )
+        if use_swiglu:
+            # SwiGLU-based projector (better gradient flow, used in LLaMA/PaLM)
+            # Architecture: audio_embed_dim → SwiGLU(bottleneck_dim) → llm_hidden_size * num_audio_tokens
+            self.projector = nn.Sequential(
+                SwiGLU(audio_embed_dim, bottleneck_dim, bottleneck_dim),
+                nn.Dropout(dropout),
+                nn.Linear(bottleneck_dim, llm_hidden_size * num_audio_tokens),
+            )
+        else:
+            # Standard MLP projector
+            # Activation function
+            if activation.lower() == "gelu":
+                act_fn = nn.GELU()
+            elif activation.lower() == "relu":
+                act_fn = nn.ReLU()
+            elif activation.lower() == "silu":
+                act_fn = nn.SiLU()
+            else:
+                raise ValueError(f"Unsupported activation: {activation}")
+            self.activation = act_fn
+
+            # 2-layer MLP with bottleneck for parameter efficiency
+            # Architecture: audio_embed_dim → bottleneck_dim → llm_hidden_size * num_audio_tokens
+            # NOTE: No Tanh - LayerNorm provides sufficient normalization without gradient compression
+            self.projector = nn.Sequential(
+                nn.Linear(audio_embed_dim, bottleneck_dim),
+                act_fn,
+                nn.Dropout(dropout),
+                nn.Linear(bottleneck_dim, llm_hidden_size * num_audio_tokens),
+            )
+
+        # Learnable positional embeddings for audio tokens
+        # Helps the model understand temporal structure in audio
+        if use_positional_embedding:
+            self.pos_embedding = nn.Parameter(
+                torch.zeros(1, num_audio_tokens, llm_hidden_size)
+            )
+            # Initialize with small values for stability
+            nn.init.normal_(self.pos_embedding, mean=0.0, std=0.02)
+        else:
+            self.pos_embedding = None
 
         # Output normalization
         self.output_norm = nn.LayerNorm(llm_hidden_size, eps=1e-6)
@@ -138,6 +187,11 @@ class AudioProjector(nn.Module):
             self.num_audio_tokens,
             self.llm_hidden_size
         )
+
+        # Add positional embeddings if enabled
+        # This helps the model understand temporal structure in audio tokens
+        if self.pos_embedding is not None:
+            audio_tokens = audio_tokens + self.pos_embedding
 
         # Apply output normalization per token (centers around 0, variance 1)
         # This naturally aligns with LLM embedding distribution without saturation
