@@ -720,6 +720,20 @@ def main():
     load_checkpoint(model, None, None, checkpoint_path, device)
     print("  Checkpoint loaded successfully")
 
+    # Disable scale minimum warmup for SCST - we're fine-tuning a pre-trained checkpoint
+    # that was trained with different scale settings. Forcing high minimums would destabilize.
+    # Set _scale_min to 0 (no minimum clamp) on all components.
+    if hasattr(model, 'audio_projector'):
+        model.audio_projector._scale_min = 0.0
+    if hasattr(model, 'fusion_adapter'):
+        if hasattr(model.fusion_adapter, 'fusion_adapters'):
+            for adapter in model.fusion_adapter.fusion_adapters.values():
+                if hasattr(adapter, 'cross_attention'):
+                    adapter.cross_attention._scale_min = 0.0
+        elif hasattr(model.fusion_adapter, 'cross_attention'):
+            model.fusion_adapter.cross_attention._scale_min = 0.0
+    print("  Scale minimum warmup disabled for SCST fine-tuning")
+
     tokenizer = model.base_vl.tokenizer
 
     # Load datasets
