@@ -40,8 +40,9 @@ try:
 except ImportError:
     wandb = None
 
-# SAFE imports
-from safe.models.audio_encoders import CLAPAudioEncoder
+# SAFE imports - use SAFEModel directly for exact architecture match
+from safe.models.safe_model import SAFEModel
+from configs.model_configs import get_config
 
 
 # ============================================================================
@@ -131,29 +132,22 @@ class AVEDataset(Dataset):
     """
     Audio-Visual Event (AVE) dataset for audio classification.
 
-    Expected directory structure:
+    Supports two formats:
+
+    1. Original AVE text format (auto-detected):
         data_path/
-            ave/
-                train.json (or train.jsonl)
-                val.json (or val.jsonl)
-                test.json (or test.jsonl)
-                audio/
-                    train/
-                    val/
-                    test/
+            trainSet.txt, valSet.txt, testSet.txt
+            audio/
+                {video_id}_{start}_{end}.wav
 
-    JSON format:
-        [
-            {
-                "id": "video_id",
-                "audio": "audio/train/video_id.wav",
-                "label": "Church bell",
-                "category_id": 0
-            },
-            ...
-        ]
+        Annotation format: Category&VideoID&Quality&StartTime&EndTime
+        Example: Church bell&RUhOCu3LNXM&good&0&10
 
-    Or JSONL format (one JSON object per line).
+    2. JSON/JSONL format:
+        data_path/
+            train.json (or train.jsonl)
+            audio/
+                train/
     """
 
     def __init__(
@@ -181,7 +175,7 @@ class AVEDataset(Dataset):
             dataset_dir = self.data_path
         self.dataset_dir = dataset_dir
 
-        # Find data file
+        # Find and load data file (supports both text and JSON formats)
         data_file = self._find_data_file(split)
         self.examples = self._load_data(data_file)
 
@@ -195,7 +189,17 @@ class AVEDataset(Dataset):
 
     def _find_data_file(self, split: str) -> Path:
         """Find the data file for the given split."""
+        # Map split names to AVE text file names
+        split_to_txt = {
+            "train": "trainSet.txt",
+            "val": "valSet.txt",
+            "test": "testSet.txt",
+        }
+
         candidates = [
+            # Original AVE text format (highest priority)
+            self.dataset_dir / split_to_txt.get(split, f"{split}Set.txt"),
+            # JSON/JSONL formats
             self.dataset_dir / f"{split}.json",
             self.dataset_dir / f"{split}.jsonl",
             self.dataset_dir / f"ave_{split}.json",
@@ -214,10 +218,13 @@ class AVEDataset(Dataset):
         )
 
     def _load_data(self, data_file: Path) -> List[Dict[str, Any]]:
-        """Load data from JSON or JSONL file."""
+        """Load data from text, JSON, or JSONL file."""
         examples = []
 
-        if data_file.suffix == ".jsonl":
+        # Check if it's the original AVE text format
+        if data_file.suffix == ".txt":
+            return self._load_ave_text_format(data_file)
+        elif data_file.suffix == ".jsonl":
             with open(data_file, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -235,6 +242,47 @@ class AVEDataset(Dataset):
 
         return examples
 
+    def _load_ave_text_format(self, data_file: Path) -> List[Dict[str, Any]]:
+        """
+        Load data from original AVE text format.
+
+        Format: Category&VideoID&Quality&StartTime&EndTime
+        Example: Church bell&RUhOCu3LNXM&good&0&10
+
+        Audio filename: {VideoID}_{StartTime}_{EndTime}.wav
+        Example: RUhOCu3LNXM_0_10.wav
+        """
+        examples = []
+
+        with open(data_file, "r", encoding="utf-8") as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+
+                parts = line.split("&")
+                if len(parts) != 5:
+                    print(f"[AVEDataset] Warning: Skipping malformed line {line_num}: {line}", flush=True)
+                    continue
+
+                category, video_id, quality, start_time, end_time = parts
+
+                # Construct audio filename: {video_id}_{start}_{end}.wav
+                audio_filename = f"{video_id}_{start_time}_{end_time}.wav"
+
+                examples.append({
+                    "id": f"{video_id}_{start_time}_{end_time}",
+                    "video_id": video_id,
+                    "label": category,
+                    "quality": quality,
+                    "start_time": int(start_time),
+                    "end_time": int(end_time),
+                    "audio": audio_filename,
+                    "audio_path": audio_filename,
+                })
+
+        return examples
+
     def _resolve_audio_path(self, entry: Dict[str, Any]) -> Optional[Path]:
         """Resolve audio path from entry."""
         audio_path = entry.get("audio") or entry.get("audio_path") or entry.get("file_path")
@@ -246,9 +294,15 @@ class AVEDataset(Dataset):
 
         # Try different path resolutions
         candidates = [
+            # Absolute path
             audio_path if audio_path.is_absolute() else None,
+            # AVE format: audio/{filename}.wav (all in one folder)
+            self.dataset_dir / "audio" / audio_path.name,
+            # Relative to dataset dir
             self.dataset_dir / audio_path,
+            # Relative to data path
             self.data_path / audio_path,
+            # Split-based structure: audio/{split}/{filename}.wav
             self.dataset_dir / "audio" / self.split / audio_path.name,
         ]
 
@@ -373,50 +427,100 @@ def collate_classification_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # ============================================================================
-# SECTION 3: AUDIO CLASSIFICATION MODEL
+# SECTION 3: AUDIO CLASSIFICATION MODEL (SAFE Architecture)
 # ============================================================================
 
-class AudioClassifier(nn.Module):
+class SAFEClassifier(nn.Module):
     """
-    Audio classification model using CLAP encoder.
+    Audio classification model using EXACT SAME architecture as train_safe.py.
 
     Architecture:
-        Audio -> CLAP Encoder (frozen) -> Projection -> Classification Head -> Logits
+        Audio -> CLAP Encoder (frozen)
+              -> Audio Projector (trainable)
+              -> Multi-layer Fusion via hooks at fusion_layer_indices
+              -> LLaVA 1.5 13B LLM (frozen)
+              -> Classification Head (trainable)
+
+    Prompt: "What is in this sound? Answer with 1 word."
+
+    Frozen: CLAP encoder, LLaVA 13B, CLIP vision
+    Trainable: Audio projector, Fusion adapters (SimpleFusionAdapter at each layer), Classification head
     """
+
+    # Classification prompt
+    CLASSIFICATION_PROMPT = "What is in this sound? Answer with 1 word."
 
     def __init__(
         self,
         num_classes: int = 28,
-        hidden_dim: int = 512,
+        model_config: str = "phase1",  # Use same config as train_safe.py
+        fusion_layer_indices: Optional[List[int]] = None,  # Override fusion layers
+        use_ffn: bool = False,  # Disable FFN by default (original SAFE architecture)
         dropout: float = 0.1,
-        freeze_encoder: bool = True,
     ):
         super().__init__()
 
         self.num_classes = num_classes
-        self.hidden_dim = hidden_dim
 
-        # Initialize CLAP encoder
-        print("[AudioClassifier] Initializing CLAP audio encoder...", flush=True)
-        self.audio_encoder = CLAPAudioEncoder(freeze=freeze_encoder)
-        self.audio_embed_dim = self.audio_encoder.audio_embed_dim  # 512
+        # 1. Load config (same as train_safe.py)
+        config = get_config(model_config)
+        print(f"[SAFEClassifier] Using config: {model_config}", flush=True)
 
-        # Classification head
+        # Override fusion layers if specified
+        if fusion_layer_indices is not None:
+            config["fusion_layer_indices"] = fusion_layer_indices
+            if "fusion_config" in config and "modalities" in config["fusion_config"]:
+                config["fusion_config"]["modalities"]["audio"]["layer_indices"] = fusion_layer_indices
+
+        # Disable FFN in fusion adapter (original SAFE architecture didn't have it)
+        if "fusion_config" in config:
+            config["fusion_config"]["use_ffn"] = use_ffn
+            print(f"[SAFEClassifier] Fusion FFN: {use_ffn}", flush=True)
+
+        # 2. Initialize SAFEModel (EXACT same as train_safe.py)
+        print("[SAFEClassifier] Initializing SAFEModel...", flush=True)
+        self.safe_model = SAFEModel(
+            llm_model_name=config.get("llm_model_name", "llava-hf/llava-1.5-13b-hf"),
+            vision_model_name=config.get("vision_model_name", "openai/clip-vit-large-patch14"),
+            audio_encoder_type=config.get("audio_encoder_type", "clap"),
+            audio_encoder_config=config.get("audio_encoder_config"),
+            projector_type=config.get("projector_type", "standard"),
+            num_audio_tokens=config.get("num_audio_tokens", 8),
+            projector_config=config.get("projector_config"),
+            fusion_type=config.get("fusion_type", "multilayer"),
+            fusion_layer_indices=config.get("fusion_layer_indices"),
+            lora_rank=config.get("lora_rank", 8),
+            fusion_config=config.get("fusion_config"),
+            freeze_base_vl=True,
+            freeze_audio_encoder=True,
+            llm_hidden_size=config.get("llm_hidden_size", 5120),
+            audio_embed_dim=config.get("audio_embed_dim", 512),
+        )
+        print("[SAFEClassifier] ✓ SAFEModel initialized", flush=True)
+
+        # Get hidden size from model
+        self.llm_hidden_size = config.get("llm_hidden_size", 5120)
+
+        # 3. Classification head on LLM output (trainable)
+        print("[SAFEClassifier] Initializing classification head (trainable)...", flush=True)
         self.classifier = nn.Sequential(
-            nn.LayerNorm(self.audio_embed_dim),
-            nn.Linear(self.audio_embed_dim, hidden_dim),
-            nn.GELU(),
+            nn.LayerNorm(self.llm_hidden_size),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes),
+            nn.Linear(self.llm_hidden_size, num_classes),
         )
 
         # Initialize classifier weights
-        self._init_weights()
+        self._init_classifier_weights()
 
-        print(f"[AudioClassifier] Initialized with {num_classes} classes", flush=True)
+        # Enable audio training mode (same as train_safe.py)
+        self.safe_model.enable_audio_training()
 
-    def _init_weights(self):
-        """Initialize classifier weights."""
+        print(f"[SAFEClassifier] Initialized with {num_classes} classes", flush=True)
+        print(f"[SAFEClassifier] Fusion layers: {config.get('fusion_layer_indices')}", flush=True)
+        print(f"[SAFEClassifier] Prompt: '{self.CLASSIFICATION_PROMPT}'", flush=True)
+
+    def _init_classifier_weights(self):
+        """Initialize classifier weights with Xavier initialization."""
         for module in self.classifier.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
@@ -429,29 +533,142 @@ class AudioClassifier(nn.Module):
         return_embeddings: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        Forward pass.
+        Forward pass using SAFEModel (EXACT same architecture as train_safe.py).
 
         Args:
             audio: List of (waveform, sample_rate) tuples
-            return_embeddings: If True, also return audio embeddings
+            return_embeddings: If True, also return pooled hidden states
 
         Returns:
             logits: Classification logits (batch_size, num_classes)
-            embeddings: Audio embeddings (batch_size, embed_dim) if return_embeddings=True
+            pooled: Pooled hidden states if return_embeddings=True
         """
-        # Encode audio
-        audio_embeddings = self.audio_encoder(audio)  # (batch_size, audio_embed_dim)
+        batch_size = len(audio)
+        device = next(self.safe_model.audio_projector.parameters()).device
 
-        # Classify
-        logits = self.classifier(audio_embeddings)  # (batch_size, num_classes)
+        # 1. Prepare inputs using SAFEModel (same as train_safe.py)
+        inputs = self.safe_model.prepare_multimodal_inputs(
+            text=[self.CLASSIFICATION_PROMPT] * batch_size,
+            images=None,
+            audio=audio,
+            answers=None,
+            device=device,
+            include_audio_tokens=True,
+            training_mode=False,  # No answer appending for classification
+        )
+
+        # 2. Forward through SAFEModel to get logits
+        # We need hidden states, so we'll modify to get them
+        input_ids = inputs.get("input_ids")
+        attention_mask = inputs.get("attention_mask")
+        audio_tokens = inputs.get("audio_tokens")
+        audio_attention_mask = inputs.get("audio_attention_mask")
+
+        # Run forward pass with output_hidden_states=True
+        # We need to call the LLM directly to get hidden states
+        if audio_tokens is not None:
+            audio_tokens = audio_tokens.to(device)
+        if audio_attention_mask is not None:
+            audio_attention_mask = audio_attention_mask.to(device)
+
+        # Get embeddings
+        inputs_embeds = self.safe_model.get_input_embeddings(input_ids)
+        base_dtype = next(self.safe_model.base_vl.llm.parameters()).dtype
+        inputs_embeds = inputs_embeds.to(base_dtype)
+
+        # Run through LLM with fusion hooks (same as SAFEModel.forward)
+        model_inputs = {
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "output_hidden_states": True,
+            "return_dict": True,
+        }
+
+        # Check if we should use midlayer fusion
+        use_midlayer = (
+            audio_tokens is not None
+            and self.safe_model.enable_midlayer_fusion
+            and hasattr(self.safe_model.fusion_adapter, "apply_fusion_at_layer")
+        )
+
+        if use_midlayer:
+            # Use hooks for multi-layer fusion (same as train_safe.py)
+            from safe.models.layer_hooks import LayerHookManager
+
+            audio_tokens = audio_tokens.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+
+            language_model = self.safe_model._resolve_language_model(self.safe_model.base_vl.llm)
+            fusion_layers = self.safe_model._resolve_fusion_layers()
+
+            modality_tokens = {"audio": audio_tokens}
+            modality_masks = {"audio": audio_attention_mask} if audio_attention_mask is not None else None
+
+            hook_manager = LayerHookManager(
+                model=language_model,
+                fusion_adapter=self.safe_model.fusion_adapter,
+                fusion_layers=fusion_layers,
+                injection_point=self.safe_model.fusion_injection_point,
+            )
+            hook_manager.register_hooks(
+                modality_tokens=modality_tokens,
+                modality_masks=modality_masks,
+                gate={"audio": 1.0},
+                supervised_mask=None,
+            )
+            try:
+                outputs = self.safe_model.base_vl.llm(**model_inputs)
+            finally:
+                hook_manager.remove_hooks()
+        else:
+            # Single-layer fusion or no audio
+            if audio_tokens is not None:
+                fused_embeds = self.safe_model.fusion_adapter(
+                    hidden_states=inputs_embeds,
+                    audio_tokens=audio_tokens,
+                    attention_mask=audio_attention_mask,
+                    gate=1.0,
+                )
+                model_inputs["inputs_embeds"] = fused_embeds
+
+            outputs = self.safe_model.base_vl.llm(**model_inputs)
+
+        # 3. Get last hidden state
+        hidden_states = outputs.hidden_states[-1]  # (batch_size, seq_len, hidden_size)
+
+        # 4. Pool using last token (like generation)
+        pooled = hidden_states[:, -1, :]  # (batch_size, hidden_size)
+
+        # 5. Classify
+        logits = self.classifier(pooled.float())  # (batch_size, num_classes)
 
         if return_embeddings:
-            return logits, audio_embeddings
+            return logits, pooled
         return logits
 
     def get_trainable_params(self) -> List[nn.Parameter]:
-        """Get trainable parameters (classifier only if encoder is frozen)."""
-        return [p for p in self.parameters() if p.requires_grad]
+        """Get trainable parameters (same components as train_safe.py + classifier)."""
+        params = list(self.safe_model.get_trainable_parameters())
+        params.extend(self.classifier.parameters())
+        return params
+
+    def train(self, mode: bool = True):
+        """Set training mode."""
+        super().train(mode)
+        if mode:
+            self.safe_model.enable_audio_training()
+            self.classifier.train()
+        return self
+
+    def eval(self):
+        """Set eval mode."""
+        super().eval()
+        self.safe_model.eval()
+        self.classifier.eval()
+        return self
+
+
+# Backward compatibility alias
+AudioClassifier = SAFEClassifier
 
 
 # ============================================================================
@@ -556,7 +773,8 @@ def train_epoch(
     epoch: int,
     args: argparse.Namespace,
     dist_info: Dict[str, Any],
-) -> Dict[str, float]:
+    global_step: int = 0,
+) -> Tuple[Dict[str, float], int]:
     """Train for one epoch."""
     model.train()
 
@@ -607,6 +825,9 @@ def train_epoch(
         total_samples += len(labels)
         num_batches += 1
 
+        # Update global step
+        global_step += 1
+
         # Log progress
         if dist_info["is_main"] and (batch_idx + 1) % args.log_interval == 0:
             avg_loss = total_loss / num_batches
@@ -622,6 +843,18 @@ def train_epoch(
                 flush=True,
             )
 
+            # Log to wandb (step-level)
+            if wandb is not None and args.wandb:
+                wandb.log({
+                    "train/step_loss": loss.item(),
+                    "train/step_accuracy": (preds == labels).float().mean().item(),
+                    "train/running_loss": avg_loss,
+                    "train/running_accuracy": accuracy,
+                    "train/learning_rate": lr,
+                    "train/samples_per_sec": samples_per_sec,
+                    "global_step": global_step,
+                }, step=global_step)
+
     # Compute epoch metrics
     avg_loss = total_loss / num_batches if num_batches > 0 else 0
     accuracy = total_correct / total_samples if total_samples > 0 else 0
@@ -630,7 +863,7 @@ def train_epoch(
         "loss": avg_loss,
         "accuracy": accuracy,
         "samples": total_samples,
-    }
+    }, global_step
 
 
 @torch.no_grad()
@@ -762,13 +995,19 @@ def main(args: argparse.Namespace):
 
     # Create model
     if dist_info["is_main"]:
-        print("[Model] Creating audio classifier...")
+        print("[Model] Creating SAFE classifier (same architecture as train_safe.py)...")
 
-    model = AudioClassifier(
+    # Parse fusion layer indices if provided
+    fusion_layers = None
+    if args.fusion_layer_indices:
+        fusion_layers = [int(x.strip()) for x in args.fusion_layer_indices.split(",")]
+
+    model = SAFEClassifier(
         num_classes=num_classes,
-        hidden_dim=args.hidden_dim,
+        model_config=args.model_config,
+        fusion_layer_indices=fusion_layers,
+        use_ffn=args.use_ffn,
         dropout=args.dropout,
-        freeze_encoder=not args.train_encoder,
     )
     model = model.to(device)
 
@@ -824,6 +1063,7 @@ def main(args: argparse.Namespace):
     # Training loop
     best_val_acc = 0.0
     best_epoch = 0
+    global_step = 0
 
     if dist_info["is_main"]:
         print("=" * 60)
@@ -839,7 +1079,7 @@ def main(args: argparse.Namespace):
             print("-" * 40)
 
         # Train
-        train_metrics = train_epoch(
+        train_metrics, global_step = train_epoch(
             model=model,
             dataloader=train_loader,
             optimizer=optimizer,
@@ -849,6 +1089,7 @@ def main(args: argparse.Namespace):
             epoch=epoch,
             args=args,
             dist_info=dist_info,
+            global_step=global_step,
         )
 
         if dist_info["is_main"]:
@@ -943,18 +1184,23 @@ def parse_args() -> argparse.Namespace:
         help="Output directory for checkpoints and logs"
     )
 
-    # Model arguments
+    # Model arguments (uses same configs as train_safe.py)
     parser.add_argument(
-        "--hidden-dim", type=int, default=512,
-        help="Hidden dimension of classification head"
+        "--model-config", type=str, default="phase1",
+        choices=["demo", "full", "multimodal", "phase1"],
+        help="Model config to use (same as train_safe.py). phase1 = LLaVA 13B + CLAP"
+    )
+    parser.add_argument(
+        "--fusion-layer-indices", type=str, default=None,
+        help="Comma-separated fusion layer indices to override config (e.g., '6,12,24')"
+    )
+    parser.add_argument(
+        "--use-ffn", action="store_true",
+        help="Enable FFN in fusion adapter (disabled by default for original SAFE architecture)"
     )
     parser.add_argument(
         "--dropout", type=float, default=0.1,
-        help="Dropout rate"
-    )
-    parser.add_argument(
-        "--train-encoder", action="store_true",
-        help="Fine-tune the audio encoder (default: frozen)"
+        help="Dropout rate for classification head"
     )
 
     # Training arguments
