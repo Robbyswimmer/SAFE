@@ -736,14 +736,23 @@ class SAFEClassifier(nn.Module):
 
             audio_tokens = audio_tokens.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype)
 
+            # Normalize audio tokens to match text embedding scale
+            # Text embeddings have much smaller per-element magnitude than LayerNorm'd audio tokens
+            with torch.no_grad():
+                text_rms = inputs_embeds.float().pow(2).mean().sqrt().clamp(min=1e-6)
+                audio_rms = audio_tokens.float().pow(2).mean().sqrt().clamp(min=1e-6)
+                scale_factor = text_rms / audio_rms
+            audio_tokens = audio_tokens * scale_factor
+
             language_model = self.safe_model._resolve_language_model(self.safe_model.base_vl.llm)
             fusion_layers = self.safe_model._resolve_fusion_layers()
 
             # Debug: log fusion configuration on first call
             if not hasattr(self, '_logged_fusion_config'):
                 print(f"[Forward] use_midlayer=True, fusion_layers={fusion_layers}", flush=True)
-                print(f"[Forward] audio_tokens shape: {audio_tokens.shape}, norm: {audio_tokens.norm().item():.4f}", flush=True)
+                print(f"[Forward] audio_tokens shape: {audio_tokens.shape}, norm: {audio_tokens.norm().item():.4f} (after scaling)", flush=True)
                 print(f"[Forward] inputs_embeds shape: {inputs_embeds.shape}, norm: {inputs_embeds.norm().item():.4f}", flush=True)
+                print(f"[Forward] audio/text scale_factor: {scale_factor.item():.4f}", flush=True)
                 self._logged_fusion_config = True
 
             modality_tokens = {"audio": audio_tokens}
