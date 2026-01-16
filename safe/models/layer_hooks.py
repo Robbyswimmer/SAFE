@@ -155,6 +155,17 @@ class LayerHookManager:
         supervised_mask: Optional[torch.Tensor] = None,
     ) -> None:
         self.remove_hooks()
+        requested_layers = {idx for indices in self.fusion_layers.values() for idx in indices}
+        available_layers = set(self.layer_modules.keys())
+        missing_layers = sorted(requested_layers - available_layers)
+        if missing_layers and not getattr(self, "_warned_missing_layers", False):
+            print(
+                f"[LayerHookManager] Warning: requested fusion layers not found in model: {missing_layers}. "
+                f"Available layer indices span [{min(available_layers)}..{max(available_layers)}] "
+                f"({len(available_layers)} total).",
+                flush=True,
+            )
+            self._warned_missing_layers = True
         # Inject either at the layer output (post_layer) or before FFN (pre_ffn)
         for idx, layer_module in self.layer_modules.items():
             modalities = self.layer_to_modalities.get(idx, [])
@@ -189,6 +200,10 @@ class LayerHookManager:
                 )
                 handle = layer_module.register_forward_hook(hook)
                 self._handles.append(handle)
+
+    @property
+    def num_hooks(self) -> int:
+        return len(self._handles)
 
     def remove_hooks(self) -> None:
         if not self._handles:

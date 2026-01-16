@@ -261,9 +261,22 @@ class AVEDataset(Dataset):
 
         # Build label statistics
         label_counts = defaultdict(int)
+        unknown_labels: List[str] = []
         for ex in self.examples:
-            label_counts[ex.get("label", "unknown")] += 1
+            label = ex.get("label", "unknown")
+            if isinstance(label, str):
+                label = label.strip()
+            label_counts[label] += 1
+            if label != "unknown" and label not in self.label_map:
+                if len(unknown_labels) < 5:
+                    unknown_labels.append(str(label))
         self._label_counts = dict(label_counts)
+        if unknown_labels:
+            print(
+                f"[AVEDataset] Warning: {len([k for k in label_counts if k not in self.label_map and k != 'unknown'])} "
+                f"label(s) not in label_map; examples: {unknown_labels}",
+                flush=True,
+            )
 
     def _find_data_file(self, split: str) -> Path:
         """Find the data file for the given split."""
@@ -344,6 +357,11 @@ class AVEDataset(Dataset):
                     continue
 
                 category, video_id, quality, start_time, end_time = parts
+                category = category.strip()
+                video_id = video_id.strip()
+                quality = quality.strip()
+                start_time = start_time.strip()
+                end_time = end_time.strip()
 
                 # Construct audio filename: {video_id}_{start}_{end}.wav
                 audio_filename = f"{video_id}_{start_time}_{end_time}.wav"
@@ -619,6 +637,21 @@ class SAFEClassifier(nn.Module):
         print(f"[SAFEClassifier] Fusion layers: {config.get('fusion_layer_indices')}", flush=True)
         print(f"[SAFEClassifier] Prompt: '{self.CLASSIFICATION_PROMPT}'", flush=True)
 
+        # Diagnostics: confirm which fusion layers are actually active on the underlying SAFEModel.
+        try:
+            resolved = self.safe_model._resolve_fusion_layers()
+            print(f"[SAFEClassifier] Resolved fusion layers: {resolved}", flush=True)
+            language_model = self.safe_model._resolve_language_model(self.safe_model.base_vl.llm)
+            layer_count = None
+            if hasattr(language_model, "layers"):
+                layer_count = len(language_model.layers)
+            elif hasattr(language_model, "h"):
+                layer_count = len(language_model.h)
+            if layer_count is not None:
+                print(f"[SAFEClassifier] Language model layers: {layer_count}", flush=True)
+        except Exception:
+            pass
+
         # Debug: show which fusion adapters were created
         if hasattr(self.safe_model.fusion_adapter, 'fusion_adapters'):
             adapter_keys = list(self.safe_model.fusion_adapter.fusion_adapters.keys())
@@ -728,6 +761,13 @@ class SAFEClassifier(nn.Module):
                 gate={"audio": 1.0},
                 supervised_mask=None,
             )
+            if self.training and not getattr(self, "_fusion_diag_printed", False):
+                print(
+                    f"[SAFEClassifier] Fusion hooks registered: {hook_manager.num_hooks} "
+                    f"(injection_point={self.safe_model.fusion_injection_point}, layers={fusion_layers})",
+                    flush=True,
+                )
+                self._fusion_diag_printed = True
             try:
                 outputs = self.safe_model.base_vl.llm(**model_inputs)
             finally:
@@ -759,6 +799,13 @@ class SAFEClassifier(nn.Module):
             pooled = (hidden_states * mask.unsqueeze(-1)).sum(dim=1) / denom  # (B, H)
         else:
             pooled = hidden_states.mean(dim=1)  # (B, H)
+        if self.training and not getattr(self, "_pooled_var_printed", False):
+            try:
+                pooled_var = float(pooled.float().var(dim=0).mean().detach().cpu().item())
+                print(f"[SAFEClassifier] Pooled embedding var (batch): {pooled_var:.6e}", flush=True)
+            except Exception:
+                pass
+            self._pooled_var_printed = True
 
         # 5. Classify
         logits = self.classifier(pooled.float())  # (batch_size, num_classes)
