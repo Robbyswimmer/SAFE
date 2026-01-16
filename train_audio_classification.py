@@ -111,6 +111,58 @@ def count_parameters(model: nn.Module) -> Tuple[int, int]:
     return total, trainable
 
 
+def build_optimizer(
+    model: nn.Module,
+    learning_rate: float,
+    weight_decay: float,
+) -> AdamW:
+    """
+    Build AdamW optimizer with standard no-decay rules.
+
+    Important for SAFE-style training:
+    - Do not weight-decay scalar scale parameters (e.g., output_scale/residual_scale) or norms/biases.
+      Otherwise the model learns to suppress audio by shrinking these to ~0.
+    """
+
+    base_model = model.module if hasattr(model, "module") else model
+
+    def _use_weight_decay(param_name: str, param: torch.nn.Parameter) -> bool:
+        if not getattr(param, "requires_grad", False):
+            return False
+        # Standard practice: do not decay biases / LayerNorm / scalar scales.
+        if param.ndim <= 1:
+            return False
+        name = str(param_name).lower()
+        if name.endswith(".bias") or name.endswith("bias"):
+            return False
+        if "layernorm" in name or "layer_norm" in name or ".norm" in name or "norm." in name:
+            return False
+        if name.endswith(("output_scale", "residual_scale")):
+            return False
+        return True
+
+    decay: List[torch.nn.Parameter] = []
+    no_decay: List[torch.nn.Parameter] = []
+    for name, param in base_model.named_parameters():
+        if not getattr(param, "requires_grad", False):
+            continue
+        if _use_weight_decay(name, param):
+            decay.append(param)
+        else:
+            no_decay.append(param)
+
+    param_groups: List[Dict[str, Any]] = []
+    if decay:
+        param_groups.append({"params": decay, "lr": learning_rate, "weight_decay": float(weight_decay)})
+    if no_decay:
+        param_groups.append({"params": no_decay, "lr": learning_rate, "weight_decay": 0.0})
+
+    if not param_groups:
+        raise RuntimeError("No trainable parameters found for optimizer.")
+
+    return AdamW(param_groups, lr=learning_rate, weight_decay=0.0)
+
+
 # ============================================================================
 # SECTION 2: AVE DATASET
 # ============================================================================
@@ -403,14 +455,20 @@ class AVEDataset(Dataset):
 
         # Get label
         label_str = entry.get("label") or entry.get("category")
+        if isinstance(label_str, str):
+            label_str = label_str.strip()
         if label_str is None:
             # Try to use category_id directly
             label_idx = entry.get("category_id", 0)
         else:
-            label_idx = self.label_map.get(label_str, 0)
+            label_idx = self.label_map.get(label_str, -1)
 
         # Load audio
         audio = self._load_audio(entry)
+
+        # If the label is unknown, drop the sample (treat like missing audio).
+        if label_idx < 0:
+            audio = None
 
         return {
             "sample_id": entry.get("id") or entry.get("video_id") or idx,
@@ -439,7 +497,7 @@ class AVEDataset(Dataset):
 def collate_classification_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Collate function for classification batches."""
     # Filter out samples with missing audio
-    valid_batch = [s for s in batch if s.get("audio") is not None]
+    valid_batch = [s for s in batch if s.get("audio") is not None and int(s.get("label", -1)) >= 0]
 
     if not valid_batch:
         return {
@@ -561,6 +619,12 @@ class SAFEClassifier(nn.Module):
         print(f"[SAFEClassifier] Fusion layers: {config.get('fusion_layer_indices')}", flush=True)
         print(f"[SAFEClassifier] Prompt: '{self.CLASSIFICATION_PROMPT}'", flush=True)
 
+        # Debug: show which fusion adapters were created
+        if hasattr(self.safe_model.fusion_adapter, 'fusion_adapters'):
+            adapter_keys = list(self.safe_model.fusion_adapter.fusion_adapters.keys())
+            print(f"[SAFEClassifier] Fusion adapter keys: {adapter_keys}", flush=True)
+            print(f"[SAFEClassifier] enable_midlayer_fusion: {self.safe_model.enable_midlayer_fusion}", flush=True)
+
     def _init_classifier_weights(self):
         """Initialize classifier weights with Xavier initialization."""
         for module in self.classifier.modules():
@@ -642,6 +706,13 @@ class SAFEClassifier(nn.Module):
             language_model = self.safe_model._resolve_language_model(self.safe_model.base_vl.llm)
             fusion_layers = self.safe_model._resolve_fusion_layers()
 
+            # Debug: log fusion configuration on first call
+            if not hasattr(self, '_logged_fusion_config'):
+                print(f"[Forward] use_midlayer=True, fusion_layers={fusion_layers}", flush=True)
+                print(f"[Forward] audio_tokens shape: {audio_tokens.shape}, norm: {audio_tokens.norm().item():.4f}", flush=True)
+                print(f"[Forward] inputs_embeds shape: {inputs_embeds.shape}, norm: {inputs_embeds.norm().item():.4f}", flush=True)
+                self._logged_fusion_config = True
+
             modality_tokens = {"audio": audio_tokens}
             modality_masks = {"audio": audio_attention_mask} if audio_attention_mask is not None else None
 
@@ -663,6 +734,10 @@ class SAFEClassifier(nn.Module):
                 hook_manager.remove_hooks()
         else:
             # Single-layer fusion or no audio
+            if not hasattr(self, '_logged_fusion_config'):
+                print(f"[Forward] use_midlayer=False (enable_midlayer_fusion={self.safe_model.enable_midlayer_fusion})", flush=True)
+                print(f"[Forward] audio_tokens is None: {audio_tokens is None}", flush=True)
+                self._logged_fusion_config = True
             if audio_tokens is not None:
                 fused_embeds = self.safe_model.fusion_adapter(
                     hidden_states=inputs_embeds,
@@ -677,8 +752,13 @@ class SAFEClassifier(nn.Module):
         # 3. Get last hidden state
         hidden_states = outputs.hidden_states[-1]  # (batch_size, seq_len, hidden_size)
 
-        # 4. Pool using last token (like generation)
-        pooled = hidden_states[:, -1, :]  # (batch_size, hidden_size)
+        # 4. Pool hidden states (mask-aware mean pooling is more stable than "last token")
+        if isinstance(attention_mask, torch.Tensor):
+            mask = attention_mask.to(device=hidden_states.device, dtype=hidden_states.dtype)  # (B, L)
+            denom = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+            pooled = (hidden_states * mask.unsqueeze(-1)).sum(dim=1) / denom  # (B, H)
+        else:
+            pooled = hidden_states.mean(dim=1)  # (B, H)
 
         # 5. Classify
         logits = self.classifier(pooled.float())  # (batch_size, num_classes)
@@ -848,13 +928,15 @@ def train_epoch(
             scaler.scale(loss).backward()
             if args.max_grad_norm > 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                params = model.module.get_trainable_params() if hasattr(model, "module") else model.get_trainable_params()
+                torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
             if args.max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                params = model.module.get_trainable_params() if hasattr(model, "module") else model.get_trainable_params()
+                torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
             optimizer.step()
 
         if scheduler is not None:
@@ -884,6 +966,43 @@ def train_epoch(
                 f"LR: {lr:.2e} | {samples_per_sec:.1f} samples/s",
                 flush=True,
             )
+
+            # Log gradient norms once per epoch (first log interval)
+            if batch_idx + 1 == args.log_interval:
+                base_model = model.module if hasattr(model, "module") else model
+                # Projector gradient norm
+                proj_grad_norm = 0.0
+                proj_count = 0
+                for p in base_model.safe_model.audio_projector.parameters():
+                    if p.grad is not None:
+                        proj_grad_norm += p.grad.norm().item() ** 2
+                        proj_count += 1
+                proj_grad_norm = proj_grad_norm ** 0.5 if proj_count > 0 else 0.0
+
+                # Fusion adapter gradient norm
+                fusion_grad_norm = 0.0
+                fusion_count = 0
+                for p in base_model.safe_model.fusion_adapter.parameters():
+                    if p.grad is not None:
+                        fusion_grad_norm += p.grad.norm().item() ** 2
+                        fusion_count += 1
+                fusion_grad_norm = fusion_grad_norm ** 0.5 if fusion_count > 0 else 0.0
+
+                # Classifier gradient norm
+                clf_grad_norm = 0.0
+                clf_count = 0
+                for p in base_model.classifier.parameters():
+                    if p.grad is not None:
+                        clf_grad_norm += p.grad.norm().item() ** 2
+                        clf_count += 1
+                clf_grad_norm = clf_grad_norm ** 0.5 if clf_count > 0 else 0.0
+
+                print(
+                    f"  [Gradients] Projector: {proj_grad_norm:.4f} ({proj_count} params) | "
+                    f"Fusion: {fusion_grad_norm:.4f} ({fusion_count} params) | "
+                    f"Classifier: {clf_grad_norm:.4f} ({clf_count} params)",
+                    flush=True,
+                )
 
             # Log to wandb (step-level)
             if wandb is not None and args.wandb:
@@ -1063,10 +1182,10 @@ def main(args: argparse.Namespace):
         print(f"[Model] Trainable parameters: {trainable_params / 1e6:.2f}M")
         print()
 
-    # Create optimizer
-    optimizer = AdamW(
-        model.parameters(),
-        lr=args.learning_rate,
+    # Create optimizer (trainable params only + no-decay rules)
+    optimizer = build_optimizer(
+        model=model,
+        learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
     )
 
