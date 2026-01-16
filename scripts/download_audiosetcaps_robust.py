@@ -35,6 +35,7 @@ import logging
 import os
 import random
 import sqlite3
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -627,7 +628,9 @@ class RobustYouTubeDownloader:
         duration: int = 10,
     ) -> bool:
         """
-        Download 10-second audio segment from YouTube video.
+        Download 10-second audio segment from YouTube video using subprocess.
+
+        Uses Android/iOS client emulation to bypass bot detection (no proxy needed).
 
         Returns:
             True if successful, False otherwise
@@ -637,62 +640,94 @@ class RobustYouTubeDownloader:
         # Apply rate limiting
         self._rate_limit()
 
-        # Create temporary download path
-        temp_path = output_path.with_suffix('.temp.wav')
+        # Ensure output directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        try:
-            # Download full audio
-            ydl_opts = self._get_yt_dlp_opts(temp_path)
+        # Retry strategies - Android client is most effective for bypassing detection
+        retry_strategies = [
+            # Strategy 1: Android client (most effective)
+            {
+                'client': 'android',
+                'user_agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12) gzip',
+                'extra_args': ['--extractor-args', 'youtube:player_client=android'],
+            },
+            # Strategy 2: Android with extra headers
+            {
+                'client': 'android_headers',
+                'user_agent': 'com.google.android.youtube/18.11.34 (Linux; U; Android 13) gzip',
+                'extra_args': [
+                    '--extractor-args', 'youtube:player_client=android',
+                    '--add-header', 'X-YouTube-Client-Name:3',
+                    '--add-header', 'X-YouTube-Client-Version:17.36.4',
+                ],
+            },
+            # Strategy 3: iOS client
+            {
+                'client': 'ios',
+                'user_agent': 'com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iOS 16_0 like Mac OS X)',
+                'extra_args': ['--extractor-args', 'youtube:player_client=ios'],
+            },
+            # Strategy 4: Android with IPv4
+            {
+                'client': 'android_ipv4',
+                'user_agent': 'com.google.android.youtube/19.09.36 (Linux; U; Android 14) gzip',
+                'extra_args': ['--force-ipv4', '--extractor-args', 'youtube:player_client=android'],
+            },
+        ]
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+        for attempt, strategy in enumerate(retry_strategies):
+            # Build command for this strategy
+            cmd = [
+                'yt-dlp',
+                '--extract-audio',
+                '--audio-format', 'wav',
+                '--audio-quality', '0',
+                '--output', str(output_path.with_suffix('.%(ext)s')),
+                '--no-playlist',
+                '--ignore-errors',
+                '--no-warnings',
+                '--quiet',
+                '--user-agent', strategy['user_agent'],
+                # Clip to 10 seconds
+                '--postprocessor-args', f'ffmpeg:-ss {start_time} -t {duration}',
+                # Human-like delays
+                '--sleep-interval', str(random.uniform(1, 2)),
+                '--max-sleep-interval', str(random.uniform(3, 5)),
+            ]
+            cmd.extend(strategy['extra_args'])
+            cmd.append(url)
 
-            # Find the downloaded file
-            downloaded_file = None
-            for ext in ['wav', 'webm', 'mp4', 'm4a', 'opus']:
-                candidate = temp_path.with_suffix(f'.{ext}')
-                if candidate.exists():
-                    downloaded_file = candidate
-                    break
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
-            if not downloaded_file or not downloaded_file.exists():
-                raise FileNotFoundError("Downloaded file not found")
+                # Check if file was created
+                wav_path = output_path.with_suffix('.wav')
+                if wav_path.exists():
+                    # Verify it's not empty
+                    if wav_path.stat().st_size > 1000:  # At least 1KB
+                        return True
+                    else:
+                        wav_path.unlink()  # Remove empty file
 
-            # Extract 10-second segment using soundfile
-            audio_data, sr = self._load_and_clip_audio(
-                downloaded_file, start_time, duration
-            )
+                # Check stderr for permanent failures
+                stderr_lower = (result.stderr or "").lower()
+                if any(x in stderr_lower for x in ['private', 'unavailable', 'not available', 'removed', 'copyright', 'account terminated']):
+                    return False  # Don't retry - video is gone
 
-            # Save clipped audio
-            self._save_audio(output_path, audio_data, sr)
+                # Bot detection - add longer delay before next attempt
+                if any(x in stderr_lower for x in ['sign in', 'bot', 'captcha', '403', '429']):
+                    time.sleep(random.uniform(10, 20))
 
-            # Clean up temp file
-            if downloaded_file.exists():
-                downloaded_file.unlink()
+            except subprocess.TimeoutExpired:
+                pass  # Try next strategy
+            except Exception:
+                pass  # Try next strategy
 
-            # Report proxy success
-            if _proxy_rotator and getattr(self, '_current_proxy', None):
-                _proxy_rotator.report_success(self._current_proxy)
+            # Backoff between attempts
+            if attempt < len(retry_strategies) - 1:
+                time.sleep(random.uniform(2, 5))
 
-            return True
-
-        except Exception as e:
-            # Only log if it's not a common "video unavailable" error
-            error_str = str(e).lower()
-            if "unavailable" not in error_str and "not available" not in error_str:
-                self.logger.debug(f"Failed to download {youtube_id}: {str(e)}")
-
-            # Report proxy failure if it looks like a network/proxy issue
-            if _proxy_rotator and getattr(self, '_current_proxy', None):
-                if any(ind in error_str for ind in ['proxy', 'connection', 'timeout', '403', '429', 'rate']):
-                    _proxy_rotator.report_failure(self._current_proxy)
-
-            # Clean up any temp files
-            for ext in ['wav', 'webm', 'mp4', 'm4a', 'opus', 'temp.wav']:
-                temp_file = temp_path.with_suffix(f'.{ext}')
-                if temp_file.exists():
-                    temp_file.unlink()
-            return False
+        return False
 
     def _load_and_clip_audio(
         self, audio_file: Path, start_time: int, duration: int
