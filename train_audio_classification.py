@@ -181,7 +181,7 @@ class AVEDataset(Dataset):
 
         print(f"[AVEDataset] Loaded {len(self.examples)} samples from {data_file.name} ({split})", flush=True)
         print(f"[AVEDataset] Dataset dir: {self.dataset_dir}", flush=True)
-        print(f"[AVEDataset] Split: {split} -> looking in train/audio and test/audio", flush=True)
+        print(f"[AVEDataset] Split: {split} -> looking in train/audio, test/audio, val/audio", flush=True)
 
         # Verify audio files exist - sample check
         found_count = 0
@@ -194,8 +194,16 @@ class AVEDataset(Dataset):
                     print(f"[AVEDataset] Sample audio path: {audio_path}", flush=True)
             else:
                 missing_count += 1
-                if missing_count <= 3:
-                    print(f"[AVEDataset] Missing audio for: {ex.get('audio') or ex.get('audio_path')}", flush=True)
+                audio_name = ex.get('audio') or ex.get('audio_path')
+                if missing_count == 1:
+                    # Show detailed search paths for first missing file
+                    print(f"[AVEDataset] Missing audio for: {audio_name}", flush=True)
+                    print(f"[AVEDataset] Searched in:", flush=True)
+                    print(f"[AVEDataset]   - {self.dataset_dir / 'train' / 'audio' / audio_name}", flush=True)
+                    print(f"[AVEDataset]   - {self.dataset_dir / 'test' / 'audio' / audio_name}", flush=True)
+                    print(f"[AVEDataset]   - {self.dataset_dir / 'val' / 'audio' / audio_name}", flush=True)
+                elif missing_count <= 3:
+                    print(f"[AVEDataset] Missing audio for: {audio_name}", flush=True)
 
         print(f"[AVEDataset] Audio check (first 10): {found_count} found, {missing_count} missing", flush=True)
 
@@ -328,6 +336,8 @@ class AVEDataset(Dataset):
             self.dataset_dir / "train" / "audio" / audio_path.name,
             # Try test/audio specifically
             self.dataset_dir / "test" / "audio" / audio_path.name,
+            # Try val/audio specifically
+            self.dataset_dir / "val" / "audio" / audio_path.name,
             # AVE subfolder format
             self.dataset_dir / "AVE" / audio_path.name,
             # Flat audio folder
@@ -986,7 +996,7 @@ def main(args: argparse.Namespace):
 
     val_dataset = AVEDataset(
         data_path=args.data_path,
-        split="val",
+        split="test",  # Use test set for validation (cleaner proof of model)
         sample_rate=48000,
         max_length=10.0,
     )
@@ -996,7 +1006,7 @@ def main(args: argparse.Namespace):
 
     if dist_info["is_main"]:
         print(f"[Data] Train samples: {len(train_dataset)}")
-        print(f"[Data] Val samples: {len(val_dataset)}")
+        print(f"[Data] Test samples (used for validation): {len(val_dataset)}")
         print(f"[Data] Num classes: {num_classes}")
         print()
 
