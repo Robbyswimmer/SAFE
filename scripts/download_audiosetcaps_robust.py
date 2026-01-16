@@ -709,19 +709,26 @@ class RobustYouTubeDownloader:
                     else:
                         wav_path.unlink()  # Remove empty file
 
+                # Log errors for debugging (first attempt only to avoid spam)
+                stderr_text = result.stderr or ""
+                if attempt == 0 and stderr_text:
+                    # Show first 200 chars of error
+                    self.logger.debug(f"  {youtube_id}: {stderr_text[:200]}")
+
                 # Check stderr for permanent failures
-                stderr_lower = (result.stderr or "").lower()
+                stderr_lower = stderr_text.lower()
                 if any(x in stderr_lower for x in ['private', 'unavailable', 'not available', 'removed', 'copyright', 'account terminated']):
                     return False  # Don't retry - video is gone
 
                 # Bot detection - add longer delay before next attempt
                 if any(x in stderr_lower for x in ['sign in', 'bot', 'captcha', '403', '429']):
+                    self.logger.warning(f"  Bot detection for {youtube_id}, cooling down...")
                     time.sleep(random.uniform(10, 20))
 
             except subprocess.TimeoutExpired:
-                pass  # Try next strategy
-            except Exception:
-                pass  # Try next strategy
+                self.logger.debug(f"  {youtube_id}: Timeout on attempt {attempt + 1}")
+            except Exception as e:
+                self.logger.debug(f"  {youtube_id}: Error on attempt {attempt + 1}: {e}")
 
             # Backoff between attempts
             if attempt < len(retry_strategies) - 1:
@@ -1244,12 +1251,28 @@ Examples:
         action="store_true",
         help="Disable proxy rotation"
     )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Show detailed error messages for debugging"
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Delete existing state DB and start fresh"
+    )
 
     args = parser.parse_args()
 
     print("=" * 70)
     print("AudioSetCaps Robust Downloader")
     print("=" * 70)
+
+    # Handle --fresh flag (delete existing state)
+    state_db_path = args.output_dir / ".download_state.db"
+    if args.fresh and state_db_path.exists():
+        state_db_path.unlink()
+        print("✓ Deleted existing state DB (--fresh)")
 
     # Initialize proxy rotator
     if not args.no_proxy:
