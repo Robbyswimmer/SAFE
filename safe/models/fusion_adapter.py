@@ -328,16 +328,18 @@ class BottleneckCrossAttentionBlock(nn.Module):
         # For pre-norm, this becomes the post-attention norm
         self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
 
-        # FFN block (standard transformer pattern: Attention → FFN)
-        # This provides crucial non-linear transformation capacity
+        # FFN block in BOTTLENECK space (not full hidden_size!)
+        # This provides non-linear transformation capacity with minimal parameters.
+        # Operating in bottleneck: 64 → 128 → 64 = ~16K params
+        # vs full hidden: 5120 → 10240 → 5120 = ~105M params
         if use_ffn:
-            ffn_hidden = int(hidden_size * ffn_expansion)
+            ffn_hidden = int(bottleneck_dim * ffn_expansion)
             self.ffn = nn.Sequential(
-                nn.LayerNorm(hidden_size, eps=layer_norm_eps),
-                nn.Linear(hidden_size, ffn_hidden),
+                nn.LayerNorm(bottleneck_dim, eps=layer_norm_eps),
+                nn.Linear(bottleneck_dim, ffn_hidden),
                 nn.GELU(),
                 nn.Dropout(output_dropout),
-                nn.Linear(ffn_hidden, hidden_size),
+                nn.Linear(ffn_hidden, bottleneck_dim),
                 nn.Dropout(output_dropout),
             )
             # Initialize FFN output to small values for stable residual
@@ -438,6 +440,13 @@ class BottleneckCrossAttentionBlock(nn.Module):
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         context_layer = context_layer.view(context_layer.size(0), context_layer.size(1), self.bottleneck_dim)
 
+        # Apply FFN in BOTTLENECK space (before output projection)
+        # This provides non-linear transformation with minimal parameters:
+        # bottleneck(64) → ffn(128) → bottleneck(64) = ~16K params
+        # vs hidden(5120) → ffn(10240) → hidden(5120) = ~105M params
+        if self.use_ffn:
+            context_layer = context_layer + self.ffn(context_layer)
+
         # Project back to hidden_size
         delta = self.output_dense(context_layer)
         delta = torch.nan_to_num(delta, nan=0.0, posinf=1e4, neginf=-1e4)
@@ -451,11 +460,6 @@ class BottleneckCrossAttentionBlock(nn.Module):
         # Layer norm (post-attention)
         if self.layer_norm is not None:
             delta = self.layer_norm(delta)
-
-        # Apply FFN if enabled (standard transformer pattern: Attention → FFN)
-        # This provides crucial non-linear transformation capacity
-        if self.use_ffn:
-            delta = delta + self.ffn(delta)
 
         return delta.to(orig_dtype)
 
