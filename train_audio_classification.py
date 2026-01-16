@@ -181,7 +181,7 @@ class AVEDataset(Dataset):
 
         print(f"[AVEDataset] Loaded {len(self.examples)} samples from {data_file.name} ({split})", flush=True)
         print(f"[AVEDataset] Dataset dir: {self.dataset_dir}", flush=True)
-        print(f"[AVEDataset] Looking for audio in: {self.dataset_dir / 'audio'}", flush=True)
+        print(f"[AVEDataset] Split: {split} -> looking in train/audio and test/audio", flush=True)
 
         # Verify audio files exist - sample check
         found_count = 0
