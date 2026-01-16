@@ -17,6 +17,13 @@ Features:
 - Error recovery and skip corrupted files
 - Parallel downloads with worker pool
 - Audio verification to ensure quality
+- Cluster file scanning to skip already-downloaded files (AudioCaps, etc.)
+- Proxy rotation support for avoiding IP bans
+
+Environment Variables:
+- YTDLP_PROXY_LIST: Path to file with proxy URLs (one per line)
+- YTDLP_PROXY: Single proxy URL
+- AUDIOSETCAPS_SKIP_PATHS: Colon-separated paths to scan for existing files
 """
 
 from __future__ import annotations
@@ -31,8 +38,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from datetime import datetime, timedelta
+import re
+import threading
 
 import numpy as np
 
@@ -45,6 +54,193 @@ except ImportError as exc:
         "Required packages missing. Install with:\n"
         "pip install yt-dlp pandas huggingface-hub soundfile"
     ) from exc
+
+
+# ============================================================================
+# Proxy Rotation Support
+# ============================================================================
+
+@dataclass
+class ProxyRotator:
+    """
+    Thread-safe proxy rotation for distributed downloading.
+
+    Loads proxies from:
+    1. YTDLP_PROXY_LIST env var (path to file with proxy list)
+    2. YTDLP_PROXY env var (single proxy)
+    3. Standard HTTP_PROXY/HTTPS_PROXY env vars
+    """
+    proxies: List[str] = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _index: int = field(default=0, repr=False)
+    _failed_proxies: Set[str] = field(default_factory=set, repr=False)
+    _proxy_failures: dict = field(default_factory=dict, repr=False)
+    max_failures: int = 5
+
+    def __post_init__(self):
+        if not self.proxies:
+            self._load_from_environment()
+
+    def _load_from_environment(self):
+        """Load proxy configuration from environment variables."""
+        # Priority 1: Proxy list file
+        proxy_list_path = os.environ.get('YTDLP_PROXY_LIST')
+        if proxy_list_path and os.path.exists(proxy_list_path):
+            try:
+                with open(proxy_list_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            if self._validate_proxy_format(line):
+                                self.proxies.append(line)
+                if self.proxies:
+                    return
+            except (IOError, OSError):
+                pass
+
+        # Priority 2: Single proxy from env
+        single_proxy = os.environ.get('YTDLP_PROXY')
+        if single_proxy and self._validate_proxy_format(single_proxy):
+            self.proxies.append(single_proxy)
+            return
+
+        # Priority 3: Standard HTTP proxy env vars
+        for env_var in ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']:
+            proxy = os.environ.get(env_var)
+            if proxy and self._validate_proxy_format(proxy):
+                self.proxies.append(proxy)
+                return
+
+    def _validate_proxy_format(self, proxy: str) -> bool:
+        """Validate proxy URL format."""
+        valid_schemes = ('http://', 'https://', 'socks4://', 'socks5://', 'socks5h://')
+        if not any(proxy.startswith(scheme) for scheme in valid_schemes):
+            return False
+        try:
+            rest = proxy.split('://', 1)[1]
+            if '@' in rest:
+                rest = rest.split('@', 1)[1]
+            return ':' in rest
+        except (IndexError, ValueError):
+            return False
+
+    def get_next_proxy(self) -> Optional[str]:
+        """Get next proxy in rotation (thread-safe)."""
+        if not self.proxies:
+            return None
+        with self._lock:
+            available = [p for p in self.proxies if p not in self._failed_proxies]
+            if not available:
+                if self._failed_proxies:
+                    self._failed_proxies.clear()
+                    self._proxy_failures.clear()
+                    available = self.proxies
+                else:
+                    return None
+            proxy = available[self._index % len(available)]
+            self._index += 1
+            return proxy
+
+    def report_failure(self, proxy: str):
+        """Report a proxy failure."""
+        if not proxy:
+            return
+        with self._lock:
+            self._proxy_failures[proxy] = self._proxy_failures.get(proxy, 0) + 1
+            if self._proxy_failures[proxy] >= self.max_failures:
+                self._failed_proxies.add(proxy)
+
+    def report_success(self, proxy: str):
+        """Report a proxy success."""
+        if not proxy:
+            return
+        with self._lock:
+            if proxy in self._proxy_failures:
+                self._proxy_failures[proxy] = max(0, self._proxy_failures[proxy] - 1)
+
+    @property
+    def has_proxies(self) -> bool:
+        return len(self.proxies) > 0
+
+
+# ============================================================================
+# Cluster File Scanner (Skip Already Downloaded)
+# ============================================================================
+
+@dataclass
+class ClusterFileScanner:
+    """
+    Scan directories to find already-downloaded files and skip them.
+
+    This prevents re-downloading files that exist in:
+    - AudioCaps directories
+    - Other AudioSetCaps download locations
+    - Shared cluster storage
+    """
+    paths: List[Path] = field(default_factory=list)
+    existing_ids: Set[str] = field(default_factory=set, repr=False)
+    _scanned: bool = field(default=False, repr=False)
+
+    def add_path(self, path: str | Path):
+        """Add a path to scan."""
+        p = Path(path).expanduser().resolve()
+        if p.exists():
+            self.paths.append(p)
+
+    def add_paths_from_env(self):
+        """Load paths from AUDIOSETCAPS_SKIP_PATHS env var."""
+        paths_env = os.environ.get('AUDIOSETCAPS_SKIP_PATHS', '')
+        if paths_env:
+            for path in paths_env.split(':'):
+                if path.strip():
+                    self.add_path(path.strip())
+
+    def scan(self, extensions: Tuple[str, ...] = ('.wav', '.mp3', '.flac', '.m4a', '.ogg')) -> int:
+        """Pre-scan all paths for existing audio files."""
+        if self._scanned:
+            return len(self.existing_ids)
+
+        for cluster_path in self.paths:
+            try:
+                for ext in extensions:
+                    for audio_file in cluster_path.rglob(f"*{ext}"):
+                        youtube_id = self._extract_youtube_id(audio_file.stem)
+                        if youtube_id:
+                            self.existing_ids.add(youtube_id)
+            except (PermissionError, OSError):
+                pass
+
+        self._scanned = True
+        return len(self.existing_ids)
+
+    def _extract_youtube_id(self, filename: str) -> Optional[str]:
+        """Extract YouTube ID from various filename formats."""
+        # YouTube IDs are 11 characters
+        if re.match(r'^[a-zA-Z0-9_-]{11}$', filename):
+            return filename
+
+        # Try to find 11-char pattern
+        match = re.search(r'([a-zA-Z0-9_-]{11})', filename)
+        if match:
+            return match.group(1)
+        return None
+
+    def exists(self, youtube_id: str) -> bool:
+        """Check if a YouTube ID already exists."""
+        if not self._scanned:
+            self.scan()
+        return youtube_id in self.existing_ids
+
+    def filter_needed(self, youtube_ids: List[str]) -> List[str]:
+        """Filter to only IDs that need downloading."""
+        if not self._scanned:
+            self.scan()
+        return [yt_id for yt_id in youtube_ids if yt_id not in self.existing_ids]
+
+
+# Global instances
+_proxy_rotator: Optional[ProxyRotator] = None
+_cluster_scanner: Optional[ClusterFileScanner] = None
 
 
 # ============================================================================
@@ -410,6 +606,16 @@ class RobustYouTubeDownloader:
                 'Sec-Fetch-Mode': 'navigate',
             }
 
+        # Add proxy if available
+        global _proxy_rotator
+        if _proxy_rotator and _proxy_rotator.has_proxies:
+            proxy = _proxy_rotator.get_next_proxy()
+            if proxy:
+                opts['proxy'] = proxy
+                self._current_proxy = proxy
+        else:
+            self._current_proxy = None
+
         return opts
 
     def download_audio_segment(
@@ -463,6 +669,10 @@ class RobustYouTubeDownloader:
             if downloaded_file.exists():
                 downloaded_file.unlink()
 
+            # Report proxy success
+            if _proxy_rotator and getattr(self, '_current_proxy', None):
+                _proxy_rotator.report_success(self._current_proxy)
+
             return True
 
         except Exception as e:
@@ -470,6 +680,12 @@ class RobustYouTubeDownloader:
             error_str = str(e).lower()
             if "unavailable" not in error_str and "not available" not in error_str:
                 self.logger.debug(f"Failed to download {youtube_id}: {str(e)}")
+
+            # Report proxy failure if it looks like a network/proxy issue
+            if _proxy_rotator and getattr(self, '_current_proxy', None):
+                if any(ind in error_str for ind in ['proxy', 'connection', 'timeout', '403', '429', 'rate']):
+                    _proxy_rotator.report_failure(self._current_proxy)
+
             # Clean up any temp files
             for ext in ['wav', 'webm', 'mp4', 'm4a', 'opus', 'temp.wav']:
                 temp_file = temp_path.with_suffix(f'.{ext}')
@@ -762,8 +978,14 @@ class AudioSetCapsDownloader:
         self.logger.info(f"Total samples from all files: {len(all_samples)}")
         return all_samples
 
-    def download_single(self, sample: Dict) -> tuple[str, bool, Optional[str]]:
-        """Download a single audio sample."""
+    def download_single(self, sample: Dict) -> tuple[str, bool, Optional[str], str]:
+        """Download a single audio sample.
+
+        Returns:
+            (audio_id, success, error, status) where status is one of:
+            'downloaded', 'exists_local', 'exists_cluster', 'skipped', 'failed'
+        """
+        global _cluster_scanner
         audio_id = sample["audio_id"]
         youtube_id = sample["youtube_id"]
         start_time = sample["start_time"]
@@ -772,10 +994,15 @@ class AudioSetCapsDownloader:
         output_filename = f"{audio_id}.{self.config.audio_format}"
         output_path = self.config.output_dir / "audio" / output_filename
 
-        # Skip if already exists
+        # Skip if already exists locally
         if output_path.exists():
             self.state_tracker.mark_completed(audio_id, str(output_path))
-            return audio_id, True, None
+            return audio_id, True, None, "exists_local"
+
+        # Skip if exists in cluster scanner (AudioCaps, etc.)
+        if _cluster_scanner and _cluster_scanner.exists(youtube_id):
+            self.state_tracker.mark_skipped(audio_id, "exists_on_cluster")
+            return audio_id, True, None, "exists_cluster"
 
         # Increment attempts
         self.state_tracker.increment_attempts(audio_id)
@@ -786,7 +1013,7 @@ class AudioSetCapsDownloader:
         if success:
             self.downloader._on_successful_download()
             self.state_tracker.mark_completed(audio_id, str(output_path))
-            return audio_id, True, None
+            return audio_id, True, None, "downloaded"
         else:
             # Check attempts
             attempts = self.state_tracker.conn.execute(
@@ -796,10 +1023,12 @@ class AudioSetCapsDownloader:
             if attempts >= self.config.max_retries:
                 if self.config.skip_on_error:
                     self.state_tracker.mark_skipped(audio_id, error or "Max retries exceeded")
+                    return audio_id, False, error, "skipped"
                 else:
                     self.state_tracker.mark_failed(audio_id, error or "Max retries exceeded", attempts)
+                    return audio_id, False, error, "failed"
 
-            return audio_id, False, error
+            return audio_id, False, error, "failed"
 
     def download_all(self):
         """Download all pending samples with parallel workers."""
@@ -811,6 +1040,11 @@ class AudioSetCapsDownloader:
 
         self.logger.info(f"Starting download of {len(pending)} samples with {self.config.max_workers} workers")
 
+        # Track detailed stats
+        downloaded_count = 0
+        exists_local_count = 0
+        exists_cluster_count = 0
+
         with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
             futures = {
                 executor.submit(self.download_single, sample): sample
@@ -818,34 +1052,37 @@ class AudioSetCapsDownloader:
             }
 
             for i, future in enumerate(as_completed(futures)):
-                audio_id, success, error = future.result()
+                audio_id, success, error, status = future.result()
 
-                if success:
+                if status == "downloaded":
+                    downloaded_count += 1
                     self.completed_count += 1
-                    # Report every 5 successful downloads
-                    if self.completed_count % 5 == 0:
-                        self.logger.info(
-                            f"✓ Successfully downloaded {self.completed_count} files "
-                            f"(processed {i + 1}/{len(pending)}, "
-                            f"skipped: {self.skipped_count})"
-                        )
-                else:
-                    if self.config.skip_on_error:
-                        self.skipped_count += 1
-                    else:
-                        self.failed_count += 1
+                    # Show each new download
+                    self.logger.info(f"✓ [{downloaded_count}] Downloaded: {audio_id}")
+                elif status == "exists_local":
+                    exists_local_count += 1
+                    self.completed_count += 1
+                elif status == "exists_cluster":
+                    exists_cluster_count += 1
+                    self.skipped_count += 1
+                elif status == "skipped":
+                    self.skipped_count += 1
+                elif status == "failed":
+                    self.failed_count += 1
 
-                # Show progress every 50 attempts (even without successes)
-                if (i + 1) % 50 == 0:
-                    success_rate = (self.completed_count / (i + 1)) * 100 if i > 0 else 0
+                # Show progress every 100 processed
+                if (i + 1) % 100 == 0:
+                    elapsed = time.time() - self.start_time
+                    rate = (i + 1) / elapsed if elapsed > 0 else 0
                     self.logger.info(
-                        f"Progress: {i + 1}/{len(pending)} processed | "
-                        f"✓ {self.completed_count} | ✗ {self.skipped_count} | "
-                        f"Success rate: {success_rate:.1f}%"
+                        f"Progress: {i + 1}/{len(pending)} | "
+                        f"New: {downloaded_count} | Local: {exists_local_count} | "
+                        f"Cluster: {exists_cluster_count} | Failed: {self.failed_count} | "
+                        f"Rate: {rate:.1f}/s"
                     )
 
-                # Full progress update every 200 samples
-                if (i + 1) % 200 == 0:
+                # Full progress update every 500 samples
+                if (i + 1) % 500 == 0:
                     self._print_progress(i + 1, len(pending))
 
         self._print_final_stats()
@@ -888,8 +1125,30 @@ class AudioSetCapsDownloader:
 # ============================================================================
 
 def main():
+    global _proxy_rotator, _cluster_scanner
+
     parser = argparse.ArgumentParser(
-        description="Robust AudioSetCaps downloader for 6M+ audio files"
+        description="Robust AudioSetCaps downloader for 6M+ audio files",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Environment Variables:
+  YTDLP_PROXY_LIST           Path to file with proxy URLs (one per line)
+  YTDLP_PROXY                Single proxy URL
+  AUDIOSETCAPS_SKIP_PATHS    Colon-separated paths to scan for existing files
+
+Examples:
+  # Basic usage (slow, no proxies)
+  python download_audiosetcaps_robust.py --max-workers 2
+
+  # Skip files already in AudioCaps
+  python download_audiosetcaps_robust.py --skip-paths /path/to/audiocaps/audio
+
+  # Resume interrupted download
+  python download_audiosetcaps_robust.py --skip-metadata
+
+  # Test with small sample
+  python download_audiosetcaps_robust.py --max-samples 100
+        """
     )
     parser.add_argument(
         "--output-dir",
@@ -906,8 +1165,8 @@ def main():
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=4,
-        help="Number of parallel download workers"
+        default=2,
+        help="Number of parallel download workers (default: 2, keep low to avoid rate limits)"
     )
     parser.add_argument(
         "--max-retries",
@@ -918,8 +1177,8 @@ def main():
     parser.add_argument(
         "--rate-limit",
         type=float,
-        default=0.5,
-        help="Delay between downloads in seconds"
+        default=1.0,
+        help="Delay between downloads in seconds (default: 1.0)"
     )
     parser.add_argument(
         "--max-samples",
@@ -932,8 +1191,70 @@ def main():
         action="store_true",
         help="Skip metadata loading (resume from existing state)"
     )
+    parser.add_argument(
+        "--skip-paths",
+        type=str,
+        default="",
+        help="Colon-separated paths to scan for existing files to skip (e.g., AudioCaps dir)"
+    )
+    parser.add_argument(
+        "--proxy-list",
+        type=str,
+        default="",
+        help="Path to file containing proxy URLs (one per line)"
+    )
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="Disable proxy rotation"
+    )
 
     args = parser.parse_args()
+
+    print("=" * 70)
+    print("AudioSetCaps Robust Downloader")
+    print("=" * 70)
+
+    # Initialize proxy rotator
+    if not args.no_proxy:
+        if args.proxy_list:
+            os.environ['YTDLP_PROXY_LIST'] = args.proxy_list
+        _proxy_rotator = ProxyRotator()
+        if _proxy_rotator.has_proxies:
+            print(f"✓ Proxy rotation: ENABLED ({len(_proxy_rotator.proxies)} proxies)")
+        else:
+            print("ℹ Proxy rotation: DISABLED (no proxies configured)")
+    else:
+        print("ℹ Proxy rotation: DISABLED (--no-proxy)")
+
+    # Initialize cluster scanner for skipping existing files
+    _cluster_scanner = ClusterFileScanner()
+
+    # Add skip paths from CLI
+    if args.skip_paths:
+        for path in args.skip_paths.split(':'):
+            if path.strip():
+                _cluster_scanner.add_path(path.strip())
+                print(f"  Adding skip path: {path.strip()}")
+
+    # Add skip paths from environment
+    _cluster_scanner.add_paths_from_env()
+
+    # Add default AudioCaps path if it exists
+    default_audiocaps = Path("experiments/full_training/data/audiocaps/audio")
+    if default_audiocaps.exists():
+        _cluster_scanner.add_path(default_audiocaps)
+        print(f"  Adding default AudioCaps path: {default_audiocaps}")
+
+    # Pre-scan for existing files
+    if _cluster_scanner.paths:
+        print(f"\nScanning {len(_cluster_scanner.paths)} path(s) for existing files...")
+        existing_count = _cluster_scanner.scan()
+        print(f"✓ Found {existing_count} existing files to skip")
+    else:
+        print("ℹ No skip paths configured (will download all files)")
+
+    print()
 
     config = DownloadConfig(
         output_dir=args.output_dir,
