@@ -180,6 +180,24 @@ class AVEDataset(Dataset):
         self.examples = self._load_data(data_file)
 
         print(f"[AVEDataset] Loaded {len(self.examples)} samples from {data_file.name} ({split})", flush=True)
+        print(f"[AVEDataset] Dataset dir: {self.dataset_dir}", flush=True)
+        print(f"[AVEDataset] Looking for audio in: {self.dataset_dir / 'audio'}", flush=True)
+
+        # Verify audio files exist - sample check
+        found_count = 0
+        missing_count = 0
+        for i, ex in enumerate(self.examples[:10]):  # Check first 10
+            audio_path = self._resolve_audio_path(ex)
+            if audio_path:
+                found_count += 1
+                if i == 0:
+                    print(f"[AVEDataset] Sample audio path: {audio_path}", flush=True)
+            else:
+                missing_count += 1
+                if missing_count <= 3:
+                    print(f"[AVEDataset] Missing audio for: {ex.get('audio') or ex.get('audio_path')}", flush=True)
+
+        print(f"[AVEDataset] Audio check (first 10): {found_count} found, {missing_count} missing", flush=True)
 
         # Build label statistics
         label_counts = defaultdict(int)
