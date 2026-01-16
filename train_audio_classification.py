@@ -310,18 +310,32 @@ class AVEDataset(Dataset):
 
         audio_path = Path(audio_path)
 
+        # Map split names to AVE directory names
+        split_to_dir = {
+            "train": "train",
+            "val": "test",  # AVE uses 'test' folder for val
+            "test": "test",
+        }
+        split_dir = split_to_dir.get(self.split, self.split)
+
         # Try different path resolutions
         candidates = [
             # Absolute path
             audio_path if audio_path.is_absolute() else None,
-            # AVE format: audio/{filename}.wav (all in one folder)
+            # AVE format: {split}/audio/{filename}.wav
+            self.dataset_dir / split_dir / "audio" / audio_path.name,
+            # Try train/audio specifically
+            self.dataset_dir / "train" / "audio" / audio_path.name,
+            # Try test/audio specifically
+            self.dataset_dir / "test" / "audio" / audio_path.name,
+            # AVE subfolder format
+            self.dataset_dir / "AVE" / audio_path.name,
+            # Flat audio folder
             self.dataset_dir / "audio" / audio_path.name,
             # Relative to dataset dir
             self.dataset_dir / audio_path,
             # Relative to data path
             self.data_path / audio_path,
-            # Split-based structure: audio/{split}/{filename}.wav
-            self.dataset_dir / "audio" / self.split / audio_path.name,
         ]
 
         for candidate in candidates:
