@@ -26,6 +26,9 @@ DROPOUT=${DROPOUT:-0.1}
 MODEL_CONFIG=${MODEL_CONFIG:-"phase1"}  # phase1 = LLaVA 13B + CLAP
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}  # Empty = use config default, or e.g., "6,12,24"
 
+# WANDB settings
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-"ave-clf-${SLURM_JOB_ID:-local}"}
+
 # Conda environment
 CONDA_ENV=${CONDA_ENV:-"safe-env"}
 
@@ -43,6 +46,7 @@ echo "Num epochs: $NUM_EPOCHS"
 echo "Learning rate: $LEARNING_RATE"
 echo "Model config: $MODEL_CONFIG (same as train_safe.py)"
 echo "Fusion layers: ${FUSION_LAYER_INDICES:-'(from config)'}"
+echo "WANDB run name: $WANDB_RUN_NAME"
 echo "========================================"
 
 # Create directories
@@ -59,7 +63,7 @@ echo "CUDA available: $(python -c 'import torch; print(torch.cuda.is_available()
 
 # Set WANDB
 export WANDB_PROJECT="SAFE_2"
-export WANDB_RUN_NAME="ave-clf-${SLURM_JOB_ID:-local}"
+export WANDB_RUN_NAME="$WANDB_RUN_NAME"
 
 # Build command
 CMD="python train_audio_classification.py"
@@ -73,7 +77,7 @@ CMD="$CMD --dropout $DROPOUT"
 CMD="$CMD --fp16"
 CMD="$CMD --wandb"
 CMD="$CMD --wandb-project SAFE_2"
-CMD="$CMD --wandb-run-name ave-clf-${SLURM_JOB_ID:-local}"
+CMD="$CMD --wandb-run-name $WANDB_RUN_NAME"
 CMD="$CMD --num-workers 4"
 CMD="$CMD --log-interval 10"
 CMD="$CMD --save-frequency 10"
