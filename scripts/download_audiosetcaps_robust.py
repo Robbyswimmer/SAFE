@@ -1328,6 +1328,15 @@ Examples:
 
     downloader = AudioSetCapsDownloader(config)
 
+    # Set verbose logging if requested
+    if args.verbose:
+        downloader.logger.setLevel(logging.DEBUG)
+        # Also set console handler to DEBUG
+        for handler in downloader.logger.handlers:
+            if isinstance(handler, logging.StreamHandler):
+                handler.setLevel(logging.DEBUG)
+        print("✓ Verbose logging: ENABLED")
+
     try:
         if not args.skip_metadata:
             downloader.load_metadata()
