@@ -1,26 +1,38 @@
 #!/usr/bin/env python3
 """
-train_audio_classification.py - Audio classification training script
+train_audio_classification.py - Generative Audio Classification Training
 
-A clean, focused training script for audio classification tasks.
-Uses CLAP audio encoder with a classification head.
+Uses the EXACT same architecture and training objective as train_safe.py (captioning),
+but with single-word answers for classification.
+
+Architecture:
+    Audio -> CLAP Encoder (frozen)
+          -> Audio Projector (trainable)
+          -> Multi-layer Fusion via hooks at fusion_layer_indices
+          -> LLaVA 1.5 13B LLM (frozen)
+          -> Generate text (LM loss on answer tokens)
+
+This proves the SAFE architecture works by showing a frozen LLM can
+correctly generate category names (e.g., "Dog", "Church bell") from audio alone.
 
 Supports:
-- AVE (Audio-Visual Event) dataset
-- Standard audio classification with cross-entropy loss
-- Accuracy, F1, and confusion matrix metrics
+- AVE (Audio-Visual Event) dataset with 28 categories
+- Language modeling loss (same as captioning)
+- Generation-based evaluation (generate text, match to labels)
 - Mixed precision training
 - Distributed training support
+- WANDB logging
 """
 
 import argparse
 import json
 import os
 import random
+import re
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -111,58 +123,6 @@ def count_parameters(model: nn.Module) -> Tuple[int, int]:
     return total, trainable
 
 
-def build_optimizer(
-    model: nn.Module,
-    learning_rate: float,
-    weight_decay: float,
-) -> AdamW:
-    """
-    Build AdamW optimizer with standard no-decay rules.
-
-    Important for SAFE-style training:
-    - Do not weight-decay scalar scale parameters (e.g., output_scale/residual_scale) or norms/biases.
-      Otherwise the model learns to suppress audio by shrinking these to ~0.
-    """
-
-    base_model = model.module if hasattr(model, "module") else model
-
-    def _use_weight_decay(param_name: str, param: torch.nn.Parameter) -> bool:
-        if not getattr(param, "requires_grad", False):
-            return False
-        # Standard practice: do not decay biases / LayerNorm / scalar scales.
-        if param.ndim <= 1:
-            return False
-        name = str(param_name).lower()
-        if name.endswith(".bias") or name.endswith("bias"):
-            return False
-        if "layernorm" in name or "layer_norm" in name or ".norm" in name or "norm." in name:
-            return False
-        if name.endswith(("output_scale", "residual_scale")):
-            return False
-        return True
-
-    decay: List[torch.nn.Parameter] = []
-    no_decay: List[torch.nn.Parameter] = []
-    for name, param in base_model.named_parameters():
-        if not getattr(param, "requires_grad", False):
-            continue
-        if _use_weight_decay(name, param):
-            decay.append(param)
-        else:
-            no_decay.append(param)
-
-    param_groups: List[Dict[str, Any]] = []
-    if decay:
-        param_groups.append({"params": decay, "lr": learning_rate, "weight_decay": float(weight_decay)})
-    if no_decay:
-        param_groups.append({"params": no_decay, "lr": learning_rate, "weight_decay": 0.0})
-
-    if not param_groups:
-        raise RuntimeError("No trainable parameters found for optimizer.")
-
-    return AdamW(param_groups, lr=learning_rate, weight_decay=0.0)
-
-
 # ============================================================================
 # SECTION 2: AVE DATASET
 # ============================================================================
@@ -179,27 +139,47 @@ AVE_CATEGORIES = [
 AVE_LABEL_TO_IDX = {label: idx for idx, label in enumerate(AVE_CATEGORIES)}
 AVE_IDX_TO_LABEL = {idx: label for label, idx in AVE_LABEL_TO_IDX.items()}
 
+# Simplified labels for generation (easier for LLM to produce)
+AVE_SIMPLE_LABELS = {
+    "Church bell": "Church bell",
+    "Male speech, man speaking": "Male speech",
+    "Bark": "Dog barking",
+    "Fixed-wing aircraft, airplane": "Airplane",
+    "Race car, auto racing": "Race car",
+    "Female speech, woman speaking": "Female speech",
+    "Helicopter": "Helicopter",
+    "Violin, fiddle": "Violin",
+    "Flute": "Flute",
+    "Ukulele": "Ukulele",
+    "Frying (food)": "Frying",
+    "Truck": "Truck",
+    "Shofar": "Shofar",
+    "Motorcycle": "Motorcycle",
+    "Acoustic guitar": "Guitar",
+    "Train horn": "Train horn",
+    "Clock": "Clock",
+    "Banjo": "Banjo",
+    "Goat": "Goat",
+    "Baby cry, infant cry": "Baby crying",
+    "Bus": "Bus",
+    "Chainsaw": "Chainsaw",
+    "Cat": "Cat",
+    "Horse": "Horse",
+    "Toilet flush": "Toilet flush",
+    "Rodents, rats, mice": "Rodents",
+    "Accordion": "Accordion",
+    "Mandolin": "Mandolin"
+}
+
+# Reverse mapping for matching generated text to labels
+SIMPLE_TO_ORIGINAL = {v.lower(): k for k, v in AVE_SIMPLE_LABELS.items()}
+
 
 class AVEDataset(Dataset):
     """
     Audio-Visual Event (AVE) dataset for audio classification.
 
-    Supports two formats:
-
-    1. Original AVE text format (auto-detected):
-        data_path/
-            trainSet.txt, valSet.txt, testSet.txt
-            audio/
-                {video_id}_{start}_{end}.wav
-
-        Annotation format: Category&VideoID&Quality&StartTime&EndTime
-        Example: Church bell&RUhOCu3LNXM&good&0&10
-
-    2. JSON/JSONL format:
-        data_path/
-            train.json (or train.jsonl)
-            audio/
-                train/
+    Returns both numeric label indices and label strings for generative training.
     """
 
     def __init__(
@@ -223,22 +203,20 @@ class AVEDataset(Dataset):
         # Find dataset directory
         dataset_dir = self.data_path / "ave"
         if not dataset_dir.exists():
-            # Try without subdirectory (data_path is directly the ave folder)
             dataset_dir = self.data_path
         self.dataset_dir = dataset_dir
 
-        # Find and load data file (supports both text and JSON formats)
+        # Find and load data file
         data_file = self._find_data_file(split)
         self.examples = self._load_data(data_file)
 
         print(f"[AVEDataset] Loaded {len(self.examples)} samples from {data_file.name} ({split})", flush=True)
         print(f"[AVEDataset] Dataset dir: {self.dataset_dir}", flush=True)
-        print(f"[AVEDataset] Split: {split} -> looking in train/audio, test/audio, val/audio", flush=True)
 
         # Verify audio files exist - sample check
         found_count = 0
         missing_count = 0
-        for i, ex in enumerate(self.examples[:10]):  # Check first 10
+        for i, ex in enumerate(self.examples[:10]):
             audio_path = self._resolve_audio_path(ex)
             if audio_path:
                 found_count += 1
@@ -246,41 +224,14 @@ class AVEDataset(Dataset):
                     print(f"[AVEDataset] Sample audio path: {audio_path}", flush=True)
             else:
                 missing_count += 1
-                audio_name = ex.get('audio') or ex.get('audio_path')
-                if missing_count == 1:
-                    # Show detailed search paths for first missing file
-                    print(f"[AVEDataset] Missing audio for: {audio_name}", flush=True)
-                    print(f"[AVEDataset] Searched in:", flush=True)
-                    print(f"[AVEDataset]   - {self.dataset_dir / 'train' / 'audio' / audio_name}", flush=True)
-                    print(f"[AVEDataset]   - {self.dataset_dir / 'test' / 'audio' / audio_name}", flush=True)
-                    print(f"[AVEDataset]   - {self.dataset_dir / 'val' / 'audio' / audio_name}", flush=True)
-                elif missing_count <= 3:
+                if missing_count <= 3:
+                    audio_name = ex.get('audio') or ex.get('audio_path')
                     print(f"[AVEDataset] Missing audio for: {audio_name}", flush=True)
 
         print(f"[AVEDataset] Audio check (first 10): {found_count} found, {missing_count} missing", flush=True)
 
-        # Build label statistics
-        label_counts = defaultdict(int)
-        unknown_labels: List[str] = []
-        for ex in self.examples:
-            label = ex.get("label", "unknown")
-            if isinstance(label, str):
-                label = label.strip()
-            label_counts[label] += 1
-            if label != "unknown" and label not in self.label_map:
-                if len(unknown_labels) < 5:
-                    unknown_labels.append(str(label))
-        self._label_counts = dict(label_counts)
-        if unknown_labels:
-            print(
-                f"[AVEDataset] Warning: {len([k for k in label_counts if k not in self.label_map and k != 'unknown'])} "
-                f"label(s) not in label_map; examples: {unknown_labels}",
-                flush=True,
-            )
-
     def _find_data_file(self, split: str) -> Path:
         """Find the data file for the given split."""
-        # Map split names to AVE text file names
         split_to_txt = {
             "train": "trainSet.txt",
             "val": "valSet.txt",
@@ -288,60 +239,43 @@ class AVEDataset(Dataset):
         }
 
         candidates = [
-            # Original AVE text format (highest priority)
             self.dataset_dir / split_to_txt.get(split, f"{split}Set.txt"),
-            # JSON/JSONL formats
             self.dataset_dir / f"{split}.json",
             self.dataset_dir / f"{split}.jsonl",
-            self.dataset_dir / f"ave_{split}.json",
-            self.dataset_dir / f"ave_{split}.jsonl",
-            self.dataset_dir / f"{split}_data.json",
-            self.dataset_dir / f"{split}_data.jsonl",
         ]
 
         for candidate in candidates:
             if candidate.exists():
                 return candidate
 
-        raise FileNotFoundError(
-            f"Could not find data file for AVE split '{split}'. "
-            f"Looked for: {', '.join(str(p) for p in candidates)}"
-        )
+        raise FileNotFoundError(f"Could not find data file for split '{split}' in {self.dataset_dir}")
 
     def _load_data(self, data_file: Path) -> List[Dict[str, Any]]:
-        """Load data from text, JSON, or JSONL file."""
-        examples = []
-
-        # Check if it's the original AVE text format
+        """Load data from file."""
         if data_file.suffix == ".txt":
             return self._load_ave_text_format(data_file)
         elif data_file.suffix == ".jsonl":
+            examples = []
             with open(data_file, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line:
                         examples.append(json.loads(line))
+            return examples
         else:
             with open(data_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict) and "data" in data:
-                    examples = data["data"]
+                    return data["data"]
                 elif isinstance(data, list):
-                    examples = data
+                    return data
                 else:
                     raise ValueError(f"Unexpected JSON format in {data_file}")
-
-        return examples
 
     def _load_ave_text_format(self, data_file: Path) -> List[Dict[str, Any]]:
         """
         Load data from original AVE text format.
-
         Format: Category&VideoID&Quality&StartTime&EndTime
-        Example: Church bell&RUhOCu3LNXM&good&0&10
-
-        Audio filename: {VideoID}_{StartTime}_{EndTime}.wav
-        Example: RUhOCu3LNXM_0_10.wav
         """
         examples = []
 
@@ -353,69 +287,42 @@ class AVEDataset(Dataset):
 
                 parts = line.split("&")
                 if len(parts) != 5:
-                    print(f"[AVEDataset] Warning: Skipping malformed line {line_num}: {line}", flush=True)
                     continue
 
                 category, video_id, quality, start_time, end_time = parts
                 category = category.strip()
                 video_id = video_id.strip()
-                quality = quality.strip()
                 start_time = start_time.strip()
                 end_time = end_time.strip()
 
-                # Construct audio filename: {video_id}_{start}_{end}.wav
                 audio_filename = f"{video_id}_{start_time}_{end_time}.wav"
 
                 examples.append({
                     "id": f"{video_id}_{start_time}_{end_time}",
                     "video_id": video_id,
                     "label": category,
-                    "quality": quality,
-                    "start_time": int(start_time),
-                    "end_time": int(end_time),
                     "audio": audio_filename,
-                    "audio_path": audio_filename,
                 })
 
         return examples
 
     def _resolve_audio_path(self, entry: Dict[str, Any]) -> Optional[Path]:
         """Resolve audio path from entry."""
-        audio_path = entry.get("audio") or entry.get("audio_path") or entry.get("file_path")
-
+        audio_path = entry.get("audio") or entry.get("audio_path")
         if not audio_path:
             return None
 
         audio_path = Path(audio_path)
 
-        # Map split names to AVE directory names
-        split_to_dir = {
-            "train": "train",
-            "val": "test",  # AVE uses 'test' folder for val
-            "test": "test",
-        }
+        split_to_dir = {"train": "train", "val": "test", "test": "test"}
         split_dir = split_to_dir.get(self.split, self.split)
 
-        # Try different path resolutions
         candidates = [
-            # Absolute path
             audio_path if audio_path.is_absolute() else None,
-            # AVE format: {split}/audio/{filename}.wav
             self.dataset_dir / split_dir / "audio" / audio_path.name,
-            # Try train/audio specifically
             self.dataset_dir / "train" / "audio" / audio_path.name,
-            # Try test/audio specifically
             self.dataset_dir / "test" / "audio" / audio_path.name,
-            # Try val/audio specifically
-            self.dataset_dir / "val" / "audio" / audio_path.name,
-            # AVE subfolder format
-            self.dataset_dir / "AVE" / audio_path.name,
-            # Flat audio folder
             self.dataset_dir / "audio" / audio_path.name,
-            # Relative to dataset dir
-            self.dataset_dir / audio_path,
-            # Relative to data path
-            self.data_path / audio_path,
         ]
 
         for candidate in candidates:
@@ -471,118 +378,105 @@ class AVEDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         entry = self.examples[idx]
 
-        # Get label
+        # Get label string
         label_str = entry.get("label") or entry.get("category")
         if isinstance(label_str, str):
             label_str = label_str.strip()
-        if label_str is None:
-            # Try to use category_id directly
-            label_idx = entry.get("category_id", 0)
-        else:
-            label_idx = self.label_map.get(label_str, -1)
+
+        # Get label index
+        label_idx = self.label_map.get(label_str, -1) if label_str else -1
+
+        # Get simplified label for generation target
+        simple_label = AVE_SIMPLE_LABELS.get(label_str, label_str) if label_str else "unknown"
 
         # Load audio
         audio = self._load_audio(entry)
 
-        # If the label is unknown, drop the sample (treat like missing audio).
+        # Skip invalid samples
         if label_idx < 0:
             audio = None
 
         return {
-            "sample_id": entry.get("id") or entry.get("video_id") or idx,
+            "sample_id": entry.get("id") or idx,
             "audio": audio,
             "label": label_idx,
-            "label_str": label_str or AVE_IDX_TO_LABEL.get(label_idx, "unknown"),
+            "label_str": label_str or "unknown",
+            "target_text": simple_label,  # Text target for generation
         }
 
-    def get_label_weights(self) -> torch.Tensor:
-        """Compute inverse frequency weights for class balancing."""
-        counts = torch.zeros(self.num_classes)
-        for ex in self.examples:
-            label_str = ex.get("label") or ex.get("category")
-            if label_str:
-                idx = self.label_map.get(label_str, 0)
-            else:
-                idx = ex.get("category_id", 0)
-            counts[idx] += 1
 
-        # Inverse frequency with smoothing
-        weights = 1.0 / (counts + 1.0)
-        weights = weights / weights.sum() * self.num_classes
-        return weights
-
-
-def collate_classification_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Collate function for classification batches."""
-    # Filter out samples with missing audio
+def collate_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Collate function for generative classification."""
+    # Filter out samples with missing audio or invalid labels
     valid_batch = [s for s in batch if s.get("audio") is not None and int(s.get("label", -1)) >= 0]
 
     if not valid_batch:
         return {
             "audio": None,
             "labels": torch.tensor([], dtype=torch.long),
-            "sample_ids": [],
             "label_strs": [],
+            "target_texts": [],
+            "sample_ids": [],
         }
 
     audios = []
     labels = []
-    sample_ids = []
     label_strs = []
+    target_texts = []
+    sample_ids = []
 
     for sample in valid_batch:
         audios.append(sample["audio"])
         labels.append(sample["label"])
-        sample_ids.append(sample["sample_id"])
         label_strs.append(sample["label_str"])
+        target_texts.append(sample["target_text"])
+        sample_ids.append(sample["sample_id"])
 
     return {
         "audio": audios,  # List of (waveform, sr) tuples
         "labels": torch.tensor(labels, dtype=torch.long),
-        "sample_ids": sample_ids,
         "label_strs": label_strs,
+        "target_texts": target_texts,  # For training: these are the answers
+        "sample_ids": sample_ids,
     }
 
 
 # ============================================================================
-# SECTION 3: AUDIO CLASSIFICATION MODEL (SAFE Architecture)
+# SECTION 3: GENERATIVE CLASSIFIER (SAME AS CAPTIONING)
 # ============================================================================
 
-class SAFEClassifier(nn.Module):
+class SAFEGenerativeClassifier(nn.Module):
     """
-    Audio classification model using EXACT SAME architecture as train_safe.py.
+    Audio classification via generation using EXACT SAME architecture as train_safe.py.
+
+    Instead of a classification head, we:
+    1. Train with LM loss on answer tokens (same as captioning)
+    2. Evaluate by generating text and matching to labels
 
     Architecture:
         Audio -> CLAP Encoder (frozen)
               -> Audio Projector (trainable)
               -> Multi-layer Fusion via hooks at fusion_layer_indices
               -> LLaVA 1.5 13B LLM (frozen)
-              -> Classification Head (trainable)
-
-    Prompt: "What is in this sound? Answer with 1 word."
+              -> Generate category name
 
     Frozen: CLAP encoder, LLaVA 13B, CLIP vision
-    Trainable: Audio projector, Fusion adapters (SimpleFusionAdapter at each layer), Classification head
+    Trainable: Audio projector, Fusion adapters (SimpleFusionAdapter at each layer)
     """
 
-    # Classification prompt
-    CLASSIFICATION_PROMPT = "What is in this sound? Answer with 1 word."
+    PROMPT = "What is in this sound? Answer in a few words."
 
     def __init__(
         self,
-        num_classes: int = 28,
-        model_config: str = "phase1",  # Use same config as train_safe.py
-        fusion_layer_indices: Optional[List[int]] = None,  # Override fusion layers
-        use_ffn: bool = False,  # Disable FFN by default (original SAFE architecture)
-        dropout: float = 0.1,
+        model_config: str = "phase1",
+        fusion_layer_indices: Optional[List[int]] = None,
+        use_ffn: Optional[bool] = None,
     ):
         super().__init__()
 
-        self.num_classes = num_classes
-
         # 1. Load config (same as train_safe.py)
         config = get_config(model_config)
-        print(f"[SAFEClassifier] Using config: {model_config}", flush=True)
+        print(f"[SAFEGenerativeClassifier] Using config: {model_config}", flush=True)
 
         # Override fusion layers if specified
         if fusion_layer_indices is not None:
@@ -590,13 +484,14 @@ class SAFEClassifier(nn.Module):
             if "fusion_config" in config and "modalities" in config["fusion_config"]:
                 config["fusion_config"]["modalities"]["audio"]["layer_indices"] = fusion_layer_indices
 
-        # Disable FFN in fusion adapter (original SAFE architecture didn't have it)
-        if "fusion_config" in config:
-            config["fusion_config"]["use_ffn"] = use_ffn
-            print(f"[SAFEClassifier] Fusion FFN: {use_ffn}", flush=True)
+        # Optional FFN override
+        if "fusion_config" in config and isinstance(config["fusion_config"], dict):
+            if use_ffn is not None:
+                config["fusion_config"]["use_ffn"] = bool(use_ffn)
+            print(f"[SAFEGenerativeClassifier] Fusion FFN: {config['fusion_config'].get('use_ffn', True)}", flush=True)
 
         # 2. Initialize SAFEModel (EXACT same as train_safe.py)
-        print("[SAFEClassifier] Initializing SAFEModel...", flush=True)
+        print("[SAFEGenerativeClassifier] Initializing SAFEModel...", flush=True)
         self.safe_model = SAFEModel(
             llm_model_name=config.get("llm_model_name", "llava-hf/llava-1.5-13b-hf"),
             vision_model_name=config.get("vision_model_name", "openai/clip-vit-large-patch14"),
@@ -614,327 +509,170 @@ class SAFEClassifier(nn.Module):
             llm_hidden_size=config.get("llm_hidden_size", 5120),
             audio_embed_dim=config.get("audio_embed_dim", 512),
         )
-        print("[SAFEClassifier] ✓ SAFEModel initialized", flush=True)
+        print("[SAFEGenerativeClassifier] ✓ SAFEModel initialized", flush=True)
 
-        # Get hidden size from model
-        self.llm_hidden_size = config.get("llm_hidden_size", 5120)
+        # Store config for reference
+        self.config = config
 
-        # 3. Classification head on LLM output (trainable)
-        print("[SAFEClassifier] Initializing classification head (trainable)...", flush=True)
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(self.llm_hidden_size),
-            nn.Dropout(dropout),
-            nn.Linear(self.llm_hidden_size, num_classes),
-        )
-
-        # Initialize classifier weights
-        self._init_classifier_weights()
-
-        # Enable audio training mode (same as train_safe.py)
+        # Enable audio training mode
         self.safe_model.enable_audio_training()
 
-        print(f"[SAFEClassifier] Initialized with {num_classes} classes", flush=True)
-        print(f"[SAFEClassifier] Fusion layers: {config.get('fusion_layer_indices')}", flush=True)
-        print(f"[SAFEClassifier] Prompt: '{self.CLASSIFICATION_PROMPT}'", flush=True)
+        print(f"[SAFEGenerativeClassifier] Fusion layers: {config.get('fusion_layer_indices')}", flush=True)
+        print(f"[SAFEGenerativeClassifier] Prompt: '{self.PROMPT}'", flush=True)
 
-        # Diagnostics: confirm which fusion layers are actually active on the underlying SAFEModel.
-        try:
-            resolved = self.safe_model._resolve_fusion_layers()
-            print(f"[SAFEClassifier] Resolved fusion layers: {resolved}", flush=True)
-            language_model = self.safe_model._resolve_language_model(self.safe_model.base_vl.llm)
-            layer_count = None
-            if hasattr(language_model, "layers"):
-                layer_count = len(language_model.layers)
-            elif hasattr(language_model, "h"):
-                layer_count = len(language_model.h)
-            if layer_count is not None:
-                print(f"[SAFEClassifier] Language model layers: {layer_count}", flush=True)
-        except Exception:
-            pass
-
-        # Debug: show which fusion adapters were created
+        # Debug info
         if hasattr(self.safe_model.fusion_adapter, 'fusion_adapters'):
             adapter_keys = list(self.safe_model.fusion_adapter.fusion_adapters.keys())
-            print(f"[SAFEClassifier] Fusion adapter keys: {adapter_keys}", flush=True)
-            print(f"[SAFEClassifier] enable_midlayer_fusion: {self.safe_model.enable_midlayer_fusion}", flush=True)
-
-    def _init_classifier_weights(self):
-        """Initialize classifier weights with Xavier initialization."""
-        for module in self.classifier.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
+            print(f"[SAFEGenerativeClassifier] Fusion adapter keys: {adapter_keys}", flush=True)
+            print(f"[SAFEGenerativeClassifier] enable_midlayer_fusion: {self.safe_model.enable_midlayer_fusion}", flush=True)
 
     def forward(
         self,
         audio: List[Tuple[torch.Tensor, int]],
-        return_embeddings: bool = False,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        target_texts: List[str],
+        label_smoothing: float = 0.0,
+    ) -> Dict[str, torch.Tensor]:
         """
-        Forward pass using SAFEModel (EXACT same architecture as train_safe.py).
+        Forward pass for training (EXACT same as train_safe.py captioning).
 
         Args:
             audio: List of (waveform, sample_rate) tuples
-            return_embeddings: If True, also return pooled hidden states
+            target_texts: List of target strings (e.g., ["Dog barking", "Church bell"])
+            label_smoothing: Label smoothing factor for loss
 
         Returns:
-            logits: Classification logits (batch_size, num_classes)
-            pooled: Pooled hidden states if return_embeddings=True
+            Dict with 'loss' and optionally 'logits'
         """
         batch_size = len(audio)
         device = next(self.safe_model.audio_projector.parameters()).device
 
-        # 1. Prepare inputs using SAFEModel (same as train_safe.py)
-        inputs = self.safe_model.prepare_multimodal_inputs(
-            text=[self.CLASSIFICATION_PROMPT] * batch_size,
+        # Prepare inputs with answers for training (same as train_safe.py)
+        # This tokenizes prompt + answer and creates labels with -100 on prompt tokens
+        outputs = self.safe_model.forward(
+            text=[self.PROMPT] * batch_size,
             images=None,
             audio=audio,
-            answers=None,
-            device=device,
-            include_audio_tokens=True,
-            training_mode=False,  # No answer appending for classification
+            answers=target_texts,  # The category names
+            training_mode=True,  # Compute LM loss
+            label_smoothing=label_smoothing,
         )
 
-        # 2. Forward through SAFEModel to get logits
-        # We need hidden states, so we'll modify to get them
-        input_ids = inputs.get("input_ids")
-        attention_mask = inputs.get("attention_mask")
-        audio_tokens = inputs.get("audio_tokens")
-        audio_attention_mask = inputs.get("audio_attention_mask")
+        return outputs
 
-        # Run forward pass with output_hidden_states=True
-        # We need to call the LLM directly to get hidden states
-        if audio_tokens is not None:
-            audio_tokens = audio_tokens.to(device)
-        if audio_attention_mask is not None:
-            audio_attention_mask = audio_attention_mask.to(device)
+    @torch.no_grad()
+    def generate(
+        self,
+        audio: List[Tuple[torch.Tensor, int]],
+        max_new_tokens: int = 20,
+        num_beams: int = 1,
+        temperature: float = 1.0,
+        do_sample: bool = False,
+    ) -> List[str]:
+        """
+        Generate text predictions for classification.
 
-        # Get embeddings
-        inputs_embeds = self.safe_model.get_input_embeddings(input_ids)
-        base_dtype = next(self.safe_model.base_vl.llm.parameters()).dtype
-        inputs_embeds = inputs_embeds.to(base_dtype)
+        Args:
+            audio: List of (waveform, sample_rate) tuples
+            max_new_tokens: Maximum tokens to generate
+            num_beams: Beam search width (1 = greedy)
+            temperature: Sampling temperature
+            do_sample: Whether to sample
 
-        # Run through LLM with fusion hooks (same as SAFEModel.forward)
-        model_inputs = {
-            "inputs_embeds": inputs_embeds,
-            "attention_mask": attention_mask,
-            "output_hidden_states": True,
-            "return_dict": True,
-        }
+        Returns:
+            List of generated strings
+        """
+        batch_size = len(audio)
 
-        # Check if we should use midlayer fusion
-        use_midlayer = (
-            audio_tokens is not None
-            and self.safe_model.enable_midlayer_fusion
-            and hasattr(self.safe_model.fusion_adapter, "apply_fusion_at_layer")
+        # Generate using SAFEModel (same as inference in train_safe.py)
+        generated_texts = self.safe_model.generate(
+            text=[self.PROMPT] * batch_size,
+            images=None,
+            audio=audio,
+            max_new_tokens=max_new_tokens,
+            num_beams=num_beams,
+            temperature=temperature,
+            do_sample=do_sample,
         )
 
-        if use_midlayer:
-            # Use hooks for multi-layer fusion (same as train_safe.py)
-            from safe.models.layer_hooks import LayerHookManager
-
-            audio_tokens = audio_tokens.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype)
-
-            # Normalize audio tokens to match text embedding scale
-            # Text embeddings have much smaller per-element magnitude than LayerNorm'd audio tokens
-            with torch.no_grad():
-                text_rms = inputs_embeds.float().pow(2).mean().sqrt().clamp(min=1e-6)
-                audio_rms = audio_tokens.float().pow(2).mean().sqrt().clamp(min=1e-6)
-                scale_factor = text_rms / audio_rms
-            audio_tokens = audio_tokens * scale_factor
-
-            language_model = self.safe_model._resolve_language_model(self.safe_model.base_vl.llm)
-            fusion_layers = self.safe_model._resolve_fusion_layers()
-
-            # Debug: log fusion configuration on first call
-            if not hasattr(self, '_logged_fusion_config'):
-                print(f"[Forward] use_midlayer=True, fusion_layers={fusion_layers}", flush=True)
-                print(f"[Forward] audio_tokens shape: {audio_tokens.shape}, norm: {audio_tokens.norm().item():.4f} (after scaling)", flush=True)
-                print(f"[Forward] inputs_embeds shape: {inputs_embeds.shape}, norm: {inputs_embeds.norm().item():.4f}", flush=True)
-                print(f"[Forward] audio/text scale_factor: {scale_factor.item():.4f}", flush=True)
-                self._logged_fusion_config = True
-
-            modality_tokens = {"audio": audio_tokens}
-            modality_masks = {"audio": audio_attention_mask} if audio_attention_mask is not None else None
-
-            hook_manager = LayerHookManager(
-                model=language_model,
-                fusion_adapter=self.safe_model.fusion_adapter,
-                fusion_layers=fusion_layers,
-                injection_point=self.safe_model.fusion_injection_point,
-            )
-            hook_manager.register_hooks(
-                modality_tokens=modality_tokens,
-                modality_masks=modality_masks,
-                gate={"audio": 1.0},
-                supervised_mask=None,
-            )
-            if self.training and not getattr(self, "_fusion_diag_printed", False):
-                print(
-                    f"[SAFEClassifier] Fusion hooks registered: {hook_manager.num_hooks} "
-                    f"(injection_point={self.safe_model.fusion_injection_point}, layers={fusion_layers})",
-                    flush=True,
-                )
-                self._fusion_diag_printed = True
-            try:
-                outputs = self.safe_model.base_vl.llm(**model_inputs)
-            finally:
-                hook_manager.remove_hooks()
-        else:
-            # Single-layer fusion or no audio
-            if not hasattr(self, '_logged_fusion_config'):
-                print(f"[Forward] use_midlayer=False (enable_midlayer_fusion={self.safe_model.enable_midlayer_fusion})", flush=True)
-                print(f"[Forward] audio_tokens is None: {audio_tokens is None}", flush=True)
-                self._logged_fusion_config = True
-            if audio_tokens is not None:
-                fused_embeds = self.safe_model.fusion_adapter(
-                    hidden_states=inputs_embeds,
-                    audio_tokens=audio_tokens,
-                    attention_mask=audio_attention_mask,
-                    gate=1.0,
-                )
-                model_inputs["inputs_embeds"] = fused_embeds
-
-            outputs = self.safe_model.base_vl.llm(**model_inputs)
-
-        # 3. Get last hidden state
-        hidden_states = outputs.hidden_states[-1]  # (batch_size, seq_len, hidden_size)
-
-        # 4. Pool hidden states (mask-aware mean pooling is more stable than "last token")
-        if isinstance(attention_mask, torch.Tensor):
-            mask = attention_mask.to(device=hidden_states.device, dtype=hidden_states.dtype)  # (B, L)
-            denom = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-            pooled = (hidden_states * mask.unsqueeze(-1)).sum(dim=1) / denom  # (B, H)
-        else:
-            pooled = hidden_states.mean(dim=1)  # (B, H)
-        if self.training and not getattr(self, "_pooled_var_printed", False):
-            try:
-                pooled_var = float(pooled.float().var(dim=0).mean().detach().cpu().item())
-                print(f"[SAFEClassifier] Pooled embedding var (batch): {pooled_var:.6e}", flush=True)
-            except Exception:
-                pass
-            self._pooled_var_printed = True
-
-        # 5. Classify
-        logits = self.classifier(pooled.float())  # (batch_size, num_classes)
-
-        if return_embeddings:
-            return logits, pooled
-        return logits
+        return generated_texts
 
     def get_trainable_params(self) -> List[nn.Parameter]:
-        """Get trainable parameters (same components as train_safe.py + classifier)."""
-        params = list(self.safe_model.get_trainable_parameters())
-        params.extend(self.classifier.parameters())
-        return params
+        """Get trainable parameters (same as train_safe.py)."""
+        return list(self.safe_model.get_trainable_parameters())
 
     def train(self, mode: bool = True):
         """Set training mode."""
         super().train(mode)
         if mode:
             self.safe_model.enable_audio_training()
-            self.classifier.train()
         return self
 
     def eval(self):
         """Set eval mode."""
         super().eval()
         self.safe_model.eval()
-        self.classifier.eval()
         return self
 
 
-# Backward compatibility alias
-AudioClassifier = SAFEClassifier
-
-
 # ============================================================================
-# SECTION 4: METRICS
+# SECTION 4: LABEL MATCHING
 # ============================================================================
 
-def compute_accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
-    """Compute classification accuracy."""
-    preds = logits.argmax(dim=-1)
-    correct = (preds == labels).float().sum()
-    return (correct / len(labels)).item()
+def normalize_text(text: str) -> str:
+    """Normalize text for comparison."""
+    text = text.lower().strip()
+    # Remove punctuation
+    text = re.sub(r'[^\w\s]', '', text)
+    # Collapse whitespace
+    text = re.sub(r'\s+', ' ', text)
+    return text
 
 
-def compute_metrics(
-    all_preds: List[int],
-    all_labels: List[int],
-    num_classes: int,
-    label_names: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+def match_generated_to_label(generated: str, label_names: List[str]) -> Tuple[int, float]:
     """
-    Compute comprehensive classification metrics.
+    Match generated text to one of the label names.
 
     Returns:
-        Dictionary with accuracy, per-class metrics, and confusion matrix
+        (predicted_index, confidence_score)
     """
-    all_preds = np.array(all_preds)
-    all_labels = np.array(all_labels)
+    gen_norm = normalize_text(generated)
 
-    # Overall accuracy
-    accuracy = (all_preds == all_labels).mean()
+    best_idx = -1
+    best_score = 0.0
 
-    # Per-class metrics
-    per_class_correct = defaultdict(int)
-    per_class_total = defaultdict(int)
-    per_class_pred_total = defaultdict(int)
+    for idx, label in enumerate(label_names):
+        label_norm = normalize_text(label)
+        simple_norm = normalize_text(AVE_SIMPLE_LABELS.get(label, label))
 
-    for pred, label in zip(all_preds, all_labels):
-        per_class_total[label] += 1
-        per_class_pred_total[pred] += 1
-        if pred == label:
-            per_class_correct[label] += 1
+        # Exact match
+        if gen_norm == label_norm or gen_norm == simple_norm:
+            return idx, 1.0
 
-    # Precision, Recall, F1 per class
-    per_class_metrics = {}
-    precisions = []
-    recalls = []
-    f1s = []
+        # Check if label is contained in generated text
+        if label_norm in gen_norm or simple_norm in gen_norm:
+            score = len(label_norm) / max(len(gen_norm), 1)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
 
-    for cls in range(num_classes):
-        tp = per_class_correct[cls]
-        total_true = per_class_total[cls]
-        total_pred = per_class_pred_total[cls]
+        # Check if generated text is contained in label
+        if gen_norm in label_norm or gen_norm in simple_norm:
+            score = len(gen_norm) / max(len(label_norm), 1)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
 
-        precision = tp / total_pred if total_pred > 0 else 0
-        recall = tp / total_true if total_true > 0 else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        # Word overlap
+        gen_words = set(gen_norm.split())
+        label_words = set(label_norm.split()) | set(simple_norm.split())
+        overlap = len(gen_words & label_words)
+        if overlap > 0:
+            score = overlap / max(len(gen_words | label_words), 1)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
 
-        cls_name = label_names[cls] if label_names else str(cls)
-        per_class_metrics[cls_name] = {
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "support": total_true,
-        }
-
-        if total_true > 0:  # Only include classes with samples
-            precisions.append(precision)
-            recalls.append(recall)
-            f1s.append(f1)
-
-    # Macro averages
-    macro_precision = np.mean(precisions) if precisions else 0
-    macro_recall = np.mean(recalls) if recalls else 0
-    macro_f1 = np.mean(f1s) if f1s else 0
-
-    # Confusion matrix
-    confusion_matrix = np.zeros((num_classes, num_classes), dtype=np.int64)
-    for pred, label in zip(all_preds, all_labels):
-        confusion_matrix[label, pred] += 1
-
-    return {
-        "accuracy": accuracy,
-        "macro_precision": macro_precision,
-        "macro_recall": macro_recall,
-        "macro_f1": macro_f1,
-        "per_class": per_class_metrics,
-        "confusion_matrix": confusion_matrix.tolist(),
-    }
+    return best_idx, best_score
 
 
 # ============================================================================
@@ -951,82 +689,78 @@ def train_epoch(
     epoch: int,
     args: argparse.Namespace,
     dist_info: Dict[str, Any],
-    global_step: int = 0,
+    global_step: int,
 ) -> Tuple[Dict[str, float], int]:
     """Train for one epoch."""
     model.train()
 
     total_loss = 0.0
-    total_correct = 0
-    total_samples = 0
     num_batches = 0
-
-    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
-
     start_time = time.time()
 
     for batch_idx, batch in enumerate(dataloader):
-        if batch["audio"] is None or len(batch["labels"]) == 0:
-            continue
-
         audio = batch["audio"]
-        labels = batch["labels"].to(device)
+        target_texts = batch["target_texts"]
+
+        if audio is None or len(audio) == 0:
+            continue
 
         optimizer.zero_grad()
 
         # Forward pass with mixed precision
         with autocast(enabled=args.fp16):
-            logits = model(audio)
-            loss = criterion(logits, labels)
+            outputs = model(
+                audio=audio,
+                target_texts=target_texts,
+                label_smoothing=args.label_smoothing,
+            )
+            loss = outputs.get("loss")
+
+        if loss is None:
+            continue
 
         # Backward pass
         if scaler is not None:
             scaler.scale(loss).backward()
             if args.max_grad_norm > 0:
                 scaler.unscale_(optimizer)
-                params = model.module.get_trainable_params() if hasattr(model, "module") else model.get_trainable_params()
+                base_model = model.module if hasattr(model, "module") else model
+                params = base_model.get_trainable_params()
                 torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
             if args.max_grad_norm > 0:
-                params = model.module.get_trainable_params() if hasattr(model, "module") else model.get_trainable_params()
+                base_model = model.module if hasattr(model, "module") else model
+                params = base_model.get_trainable_params()
                 torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
             optimizer.step()
 
         if scheduler is not None:
             scheduler.step()
 
-        # Accumulate metrics
         total_loss += loss.item()
-        preds = logits.argmax(dim=-1)
-        total_correct += (preds == labels).sum().item()
-        total_samples += len(labels)
         num_batches += 1
-
-        # Update global step
         global_step += 1
 
         # Log progress
         if dist_info["is_main"] and (batch_idx + 1) % args.log_interval == 0:
             avg_loss = total_loss / num_batches
-            accuracy = total_correct / total_samples if total_samples > 0 else 0
             elapsed = time.time() - start_time
-            samples_per_sec = total_samples / elapsed if elapsed > 0 else 0
+            samples_per_sec = (num_batches * len(audio)) / elapsed if elapsed > 0 else 0
 
             lr = optimizer.param_groups[0]["lr"]
             print(
                 f"  Epoch {epoch} | Batch {batch_idx + 1}/{len(dataloader)} | "
-                f"Loss: {avg_loss:.4f} | Acc: {accuracy:.4f} | "
-                f"LR: {lr:.2e} | {samples_per_sec:.1f} samples/s",
+                f"Loss: {avg_loss:.4f} | LR: {lr:.2e} | {samples_per_sec:.1f} samples/s",
                 flush=True,
             )
 
-            # Log gradient norms once per epoch (first log interval)
+            # Log gradient norms once per epoch
             if batch_idx + 1 == args.log_interval:
                 base_model = model.module if hasattr(model, "module") else model
-                # Projector gradient norm
+
                 proj_grad_norm = 0.0
                 proj_count = 0
                 for p in base_model.safe_model.audio_projector.parameters():
@@ -1035,7 +769,6 @@ def train_epoch(
                         proj_count += 1
                 proj_grad_norm = proj_grad_norm ** 0.5 if proj_count > 0 else 0.0
 
-                # Fusion adapter gradient norm
                 fusion_grad_norm = 0.0
                 fusion_count = 0
                 for p in base_model.safe_model.fusion_adapter.parameters():
@@ -1044,43 +777,24 @@ def train_epoch(
                         fusion_count += 1
                 fusion_grad_norm = fusion_grad_norm ** 0.5 if fusion_count > 0 else 0.0
 
-                # Classifier gradient norm
-                clf_grad_norm = 0.0
-                clf_count = 0
-                for p in base_model.classifier.parameters():
-                    if p.grad is not None:
-                        clf_grad_norm += p.grad.norm().item() ** 2
-                        clf_count += 1
-                clf_grad_norm = clf_grad_norm ** 0.5 if clf_count > 0 else 0.0
-
                 print(
-                    f"  [Gradients] Projector: {proj_grad_norm:.4f} ({proj_count} params) | "
-                    f"Fusion: {fusion_grad_norm:.4f} ({fusion_count} params) | "
-                    f"Classifier: {clf_grad_norm:.4f} ({clf_count} params)",
+                    f"  [Gradients] Projector: {proj_grad_norm:.4f} ({proj_count} tensors) | "
+                    f"Fusion: {fusion_grad_norm:.4f} ({fusion_count} tensors)",
                     flush=True,
                 )
 
-            # Log to wandb (step-level)
+            # WANDB logging
             if wandb is not None and args.wandb:
                 wandb.log({
-                    "train/step_loss": loss.item(),
-                    "train/step_accuracy": (preds == labels).float().mean().item(),
-                    "train/running_loss": avg_loss,
-                    "train/running_accuracy": accuracy,
-                    "train/learning_rate": lr,
+                    "train/loss_step": avg_loss,
+                    "train/lr": lr,
                     "train/samples_per_sec": samples_per_sec,
-                    "global_step": global_step,
+                    "train/global_step": global_step,
                 }, step=global_step)
 
-    # Compute epoch metrics
-    avg_loss = total_loss / num_batches if num_batches > 0 else 0
-    accuracy = total_correct / total_samples if total_samples > 0 else 0
+    avg_loss = total_loss / max(num_batches, 1)
 
-    return {
-        "loss": avg_loss,
-        "accuracy": accuracy,
-        "samples": total_samples,
-    }, global_step
+    return {"loss": avg_loss}, global_step
 
 
 @torch.no_grad()
@@ -1088,61 +802,152 @@ def evaluate(
     model: nn.Module,
     dataloader: DataLoader,
     device: torch.device,
-    num_classes: int,
-    label_names: Optional[List[str]] = None,
-    max_batches: Optional[int] = None,
-) -> Dict[str, Any]:
-    """Evaluate model on validation/test set."""
+    args: argparse.Namespace,
+    dist_info: Dict[str, Any],
+    label_names: List[str],
+) -> Dict[str, float]:
+    """Evaluate by generating text and matching to labels."""
     model.eval()
+    base_model = model.module if hasattr(model, "module") else model
 
-    all_preds = []
-    all_labels = []
+    total_correct = 0
+    total_samples = 0
     total_loss = 0.0
     num_batches = 0
 
-    criterion = nn.CrossEntropyLoss()
+    # For detailed analysis
+    predictions = []
+    all_generated = []
 
     for batch_idx, batch in enumerate(dataloader):
-        if max_batches and batch_idx >= max_batches:
-            break
+        audio = batch["audio"]
+        labels = batch["labels"]
+        target_texts = batch["target_texts"]
 
-        if batch["audio"] is None or len(batch["labels"]) == 0:
+        if audio is None or len(audio) == 0:
             continue
 
-        audio = batch["audio"]
-        labels = batch["labels"].to(device)
+        # Compute loss (for monitoring)
+        with autocast(enabled=args.fp16):
+            outputs = base_model(
+                audio=audio,
+                target_texts=target_texts,
+                label_smoothing=0.0,
+            )
+            loss = outputs.get("loss")
+            if loss is not None:
+                total_loss += loss.item()
+                num_batches += 1
 
-        logits = model(audio)
-        loss = criterion(logits, labels)
+        # Generate predictions
+        generated_texts = base_model.generate(
+            audio=audio,
+            max_new_tokens=20,
+            num_beams=1,
+            temperature=1.0,
+            do_sample=False,
+        )
 
-        preds = logits.argmax(dim=-1).cpu().tolist()
-        all_preds.extend(preds)
-        all_labels.extend(labels.cpu().tolist())
+        # Match generated text to labels
+        for gen_text, true_label in zip(generated_texts, labels.tolist()):
+            pred_idx, score = match_generated_to_label(gen_text, label_names)
+            predictions.append((pred_idx, true_label, gen_text))
+            all_generated.append(gen_text)
 
-        total_loss += loss.item()
-        num_batches += 1
+            if pred_idx == true_label:
+                total_correct += 1
+            total_samples += 1
 
-    # Compute metrics
-    metrics = compute_metrics(all_preds, all_labels, num_classes, label_names)
-    metrics["loss"] = total_loss / num_batches if num_batches > 0 else 0
-    metrics["num_samples"] = len(all_labels)
+        # Log some examples
+        if dist_info["is_main"] and batch_idx == 0:
+            print(f"  [Eval Examples]", flush=True)
+            for i in range(min(3, len(generated_texts))):
+                true_label_name = label_names[labels[i].item()]
+                print(f"    True: '{true_label_name}' | Generated: '{generated_texts[i]}'", flush=True)
 
-    return metrics
+    accuracy = total_correct / max(total_samples, 1)
+    avg_loss = total_loss / max(num_batches, 1)
+
+    # Compute per-class accuracy
+    class_correct = defaultdict(int)
+    class_total = defaultdict(int)
+    for pred_idx, true_idx, _ in predictions:
+        class_total[true_idx] += 1
+        if pred_idx == true_idx:
+            class_correct[true_idx] += 1
+
+    # Macro F1 approximation
+    per_class_acc = []
+    for idx in range(len(label_names)):
+        if class_total[idx] > 0:
+            per_class_acc.append(class_correct[idx] / class_total[idx])
+    macro_acc = sum(per_class_acc) / len(per_class_acc) if per_class_acc else 0.0
+
+    return {
+        "loss": avg_loss,
+        "accuracy": accuracy,
+        "macro_accuracy": macro_acc,
+        "total_samples": total_samples,
+    }
 
 
 # ============================================================================
-# SECTION 6: MAIN TRAINING FUNCTION
+# SECTION 6: MAIN
 # ============================================================================
 
-def main(args: argparse.Namespace):
-    """Main training function."""
-    # Setup distributed training
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generative Audio Classification Training")
+
+    # Data
+    parser.add_argument("--data-path", type=str, required=True, help="Path to AVE dataset")
+    parser.add_argument("--output-dir", type=str, default="outputs/ave_generative", help="Output directory")
+
+    # Model
+    parser.add_argument("--model-config", type=str, default="phase1", help="Model config name")
+    parser.add_argument("--fusion-layer-indices", type=str, default=None,
+                        help="Comma-separated fusion layer indices (e.g., '12,24,36')")
+    parser.add_argument("--use-ffn", action="store_true", help="Enable FFN in fusion adapter")
+
+    # Training
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size per GPU")
+    parser.add_argument("--num-epochs", type=int, default=50, help="Number of epochs")
+    parser.add_argument("--learning-rate", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--weight-decay", type=float, default=0.01, help="Weight decay")
+    parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Max gradient norm")
+    parser.add_argument("--warmup-ratio", type=float, default=0.1, help="Warmup ratio")
+    parser.add_argument("--label-smoothing", type=float, default=0.1, help="Label smoothing")
+
+    # Mixed precision
+    parser.add_argument("--fp16", action="store_true", help="Use FP16 mixed precision")
+
+    # Logging
+    parser.add_argument("--wandb", action="store_true", help="Enable WANDB logging")
+    parser.add_argument("--wandb-project", type=str, default="SAFE_2", help="WANDB project")
+    parser.add_argument("--wandb-run-name", type=str, default=None, help="WANDB run name")
+    parser.add_argument("--log-interval", type=int, default=10, help="Log every N batches")
+    parser.add_argument("--save-frequency", type=int, default=10, help="Save every N epochs")
+
+    # Other
+    parser.add_argument("--num-workers", type=int, default=4, help="DataLoader workers")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout (unused in generative)")
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    # Setup distributed
     dist_info = setup_distributed()
     device = torch.device(f"cuda:{dist_info['local_rank']}" if torch.cuda.is_available() else "cpu")
 
+    # Set seed
+    set_seed(args.seed, dist_info["rank"])
+
     if dist_info["is_main"]:
         print("=" * 60)
-        print("Audio Classification Training")
+        print("Generative Audio Classification Training")
         print("=" * 60)
         print(f"Device: {device}")
         print(f"Distributed: {dist_info['distributed']} (world_size={dist_info['world_size']})")
@@ -1150,13 +955,8 @@ def main(args: argparse.Namespace):
         print(f"Output dir: {args.output_dir}")
         print()
 
-    # Set seed
-    set_seed(args.seed, dist_info["rank"])
-
     # Create output directory
-    output_dir = Path(args.output_dir)
-    if dist_info["is_main"]:
-        output_dir.mkdir(parents=True, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
 
     # Load datasets
     if dist_info["is_main"]:
@@ -1171,18 +971,17 @@ def main(args: argparse.Namespace):
 
     val_dataset = AVEDataset(
         data_path=args.data_path,
-        split="test",  # Use test set for validation (cleaner proof of model)
+        split="test",  # Use test set for validation
         sample_rate=48000,
         max_length=10.0,
     )
 
-    num_classes = train_dataset.num_classes
-    label_names = AVE_CATEGORIES if num_classes == 28 else None
+    label_names = AVE_CATEGORIES
 
     if dist_info["is_main"]:
         print(f"[Data] Train samples: {len(train_dataset)}")
-        print(f"[Data] Test samples (used for validation): {len(val_dataset)}")
-        print(f"[Data] Num classes: {num_classes}")
+        print(f"[Data] Val samples: {len(val_dataset)}")
+        print(f"[Data] Num classes: {len(label_names)}")
         print()
 
     # Create data loaders
@@ -1195,7 +994,7 @@ def main(args: argparse.Namespace):
         shuffle=(train_sampler is None),
         sampler=train_sampler,
         num_workers=args.num_workers,
-        collate_fn=collate_classification_batch,
+        collate_fn=collate_batch,
         pin_memory=True,
         drop_last=True,
     )
@@ -1206,26 +1005,24 @@ def main(args: argparse.Namespace):
         shuffle=False,
         sampler=val_sampler,
         num_workers=args.num_workers,
-        collate_fn=collate_classification_batch,
+        collate_fn=collate_batch,
         pin_memory=True,
     )
 
     # Create model
     if dist_info["is_main"]:
-        print("[Model] Creating SAFE classifier (same architecture as train_safe.py)...")
+        print("[Model] Creating SAFE generative classifier...")
 
-    # Parse fusion layer indices if provided
     fusion_layers = None
     if args.fusion_layer_indices:
         fusion_layers = [int(x.strip()) for x in args.fusion_layer_indices.split(",")]
 
-    model = SAFEClassifier(
-        num_classes=num_classes,
+    model = SAFEGenerativeClassifier(
         model_config=args.model_config,
         fusion_layer_indices=fusion_layers,
-        use_ffn=args.use_ffn,
-        dropout=args.dropout,
+        use_ffn=args.use_ffn if args.use_ffn else None,
     )
+
     model = model.to(device)
 
     if dist_info["distributed"]:
@@ -1238,10 +1035,11 @@ def main(args: argparse.Namespace):
         print(f"[Model] Trainable parameters: {trainable_params / 1e6:.2f}M")
         print()
 
-    # Create optimizer (trainable params only + no-decay rules)
-    optimizer = build_optimizer(
-        model=model,
-        learning_rate=args.learning_rate,
+    # Create optimizer
+    base_model = model.module if hasattr(model, "module") else model
+    optimizer = AdamW(
+        base_model.get_trainable_params(),
+        lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
 
@@ -1266,33 +1064,34 @@ def main(args: argparse.Namespace):
         milestones=[warmup_steps],
     )
 
-    # Create gradient scaler for mixed precision
+    # Mixed precision scaler
     scaler = GradScaler() if args.fp16 else None
 
-    # Initialize wandb
-    if wandb is not None and args.wandb and dist_info["is_main"]:
+    # WANDB init
+    if dist_info["is_main"] and args.wandb and wandb is not None:
+        run_name = args.wandb_run_name or f"gen-clf-{args.model_config}"
         wandb.init(
             project=args.wandb_project,
-            name=args.wandb_run_name or f"audio-clf-{time.strftime('%Y%m%d-%H%M%S')}",
+            name=run_name,
             config=vars(args),
         )
 
     # Training loop
-    best_val_acc = 0.0
-    best_epoch = 0
-    global_step = 0
-
     if dist_info["is_main"]:
         print("=" * 60)
         print("Starting Training")
         print("=" * 60)
+        print()
+
+    best_accuracy = 0.0
+    global_step = 0
 
     for epoch in range(1, args.num_epochs + 1):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
         if dist_info["is_main"]:
-            print(f"\nEpoch {epoch}/{args.num_epochs}")
+            print(f"Epoch {epoch}/{args.num_epochs}")
             print("-" * 40)
 
         # Train
@@ -1309,198 +1108,78 @@ def main(args: argparse.Namespace):
             global_step=global_step,
         )
 
-        if dist_info["is_main"]:
-            print(f"  Train Loss: {train_metrics['loss']:.4f} | Train Acc: {train_metrics['accuracy']:.4f}")
-
         # Evaluate
-        if epoch % args.eval_frequency == 0 or epoch == args.num_epochs:
-            val_metrics = evaluate(
-                model=model,
-                dataloader=val_loader,
-                device=device,
-                num_classes=num_classes,
-                label_names=label_names,
-                max_batches=args.max_eval_batches,
-            )
+        val_metrics = evaluate(
+            model=model,
+            dataloader=val_loader,
+            device=device,
+            args=args,
+            dist_info=dist_info,
+            label_names=label_names,
+        )
 
-            if dist_info["is_main"]:
-                print(f"  Val Loss: {val_metrics['loss']:.4f} | Val Acc: {val_metrics['accuracy']:.4f}")
-                print(f"  Val F1 (macro): {val_metrics['macro_f1']:.4f}")
+        if dist_info["is_main"]:
+            print(f"  Train Loss: {train_metrics['loss']:.4f}")
+            print(f"  Val Loss: {val_metrics['loss']:.4f} | Val Acc: {val_metrics['accuracy']:.4f}")
+            print(f"  Val Macro Acc: {val_metrics['macro_accuracy']:.4f}")
 
-                # Log to wandb
-                if wandb is not None and args.wandb:
-                    wandb.log({
-                        "epoch": epoch,
-                        "train/loss": train_metrics["loss"],
-                        "train/accuracy": train_metrics["accuracy"],
-                        "val/loss": val_metrics["loss"],
-                        "val/accuracy": val_metrics["accuracy"],
-                        "val/macro_f1": val_metrics["macro_f1"],
-                        "val/macro_precision": val_metrics["macro_precision"],
-                        "val/macro_recall": val_metrics["macro_recall"],
-                        "learning_rate": optimizer.param_groups[0]["lr"],
-                    })
+            # WANDB epoch logging
+            if args.wandb and wandb is not None:
+                wandb.log({
+                    "epoch": epoch,
+                    "train/loss": train_metrics["loss"],
+                    "val/loss": val_metrics["loss"],
+                    "val/accuracy": val_metrics["accuracy"],
+                    "val/macro_accuracy": val_metrics["macro_accuracy"],
+                }, step=global_step)
 
-                # Save best model
-                if val_metrics["accuracy"] > best_val_acc:
-                    best_val_acc = val_metrics["accuracy"]
-                    best_epoch = epoch
+            # Save best model
+            if val_metrics["accuracy"] > best_accuracy:
+                best_accuracy = val_metrics["accuracy"]
+                save_path = os.path.join(args.output_dir, "best_model.pt")
+                base_model = model.module if hasattr(model, "module") else model
+                torch.save({
+                    "epoch": epoch,
+                    "model_state_dict": {
+                        "audio_projector": base_model.safe_model.audio_projector.state_dict(),
+                        "fusion_adapter": base_model.safe_model.fusion_adapter.state_dict(),
+                    },
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "accuracy": best_accuracy,
+                    "config": args.model_config,
+                    "fusion_layers": fusion_layers,
+                }, save_path)
+                print(f"  Saved best model (acc={best_accuracy:.4f})")
 
-                    checkpoint_path = output_dir / "best_model.pt"
-                    torch.save({
-                        "epoch": epoch,
-                        "model_state_dict": model.module.state_dict() if dist_info["distributed"] else model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "val_accuracy": val_metrics["accuracy"],
-                        "val_metrics": val_metrics,
-                        "args": vars(args),
-                    }, checkpoint_path)
-                    print(f"  Saved best model (acc={best_val_acc:.4f})")
+            # Periodic save
+            if epoch % args.save_frequency == 0:
+                save_path = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch}.pt")
+                base_model = model.module if hasattr(model, "module") else model
+                torch.save({
+                    "epoch": epoch,
+                    "model_state_dict": {
+                        "audio_projector": base_model.safe_model.audio_projector.state_dict(),
+                        "fusion_adapter": base_model.safe_model.fusion_adapter.state_dict(),
+                    },
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "accuracy": val_metrics["accuracy"],
+                }, save_path)
 
-        # Save periodic checkpoint
-        if dist_info["is_main"] and epoch % args.save_frequency == 0:
-            checkpoint_path = output_dir / f"checkpoint_epoch{epoch}.pt"
-            torch.save({
-                "epoch": epoch,
-                "model_state_dict": model.module.state_dict() if dist_info["distributed"] else model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "args": vars(args),
-            }, checkpoint_path)
+        print()
 
     # Final summary
     if dist_info["is_main"]:
-        print("\n" + "=" * 60)
+        print("=" * 60)
         print("Training Complete")
         print("=" * 60)
-        print(f"Best validation accuracy: {best_val_acc:.4f} (epoch {best_epoch})")
-        print(f"Model saved to: {output_dir}")
+        print(f"Best Validation Accuracy: {best_accuracy:.4f}")
+        print(f"Model saved to: {args.output_dir}")
 
-        if wandb is not None and args.wandb:
+        if args.wandb and wandb is not None:
             wandb.finish()
 
     cleanup_distributed()
 
 
-# ============================================================================
-# SECTION 7: ARGUMENT PARSER
-# ============================================================================
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Train audio classification model",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-
-    # Data arguments
-    parser.add_argument(
-        "--data-path", type=str, required=True,
-        help="Path to data directory containing AVE dataset"
-    )
-    parser.add_argument(
-        "--output-dir", type=str, default="./outputs/audio_classification",
-        help="Output directory for checkpoints and logs"
-    )
-
-    # Model arguments (uses same configs as train_safe.py)
-    parser.add_argument(
-        "--model-config", type=str, default="phase1",
-        choices=["demo", "full", "multimodal", "phase1"],
-        help="Model config to use (same as train_safe.py). phase1 = LLaVA 13B + CLAP"
-    )
-    parser.add_argument(
-        "--fusion-layer-indices", type=str, default=None,
-        help="Comma-separated fusion layer indices to override config (e.g., '6,12,24')"
-    )
-    parser.add_argument(
-        "--use-ffn", action="store_true",
-        help="Enable FFN in fusion adapter (disabled by default for original SAFE architecture)"
-    )
-    parser.add_argument(
-        "--dropout", type=float, default=0.1,
-        help="Dropout rate for classification head"
-    )
-
-    # Training arguments
-    parser.add_argument(
-        "--num-epochs", type=int, default=50,
-        help="Number of training epochs"
-    )
-    parser.add_argument(
-        "--batch-size", type=int, default=32,
-        help="Batch size per GPU"
-    )
-    parser.add_argument(
-        "--learning-rate", type=float, default=1e-3,
-        help="Learning rate"
-    )
-    parser.add_argument(
-        "--weight-decay", type=float, default=0.01,
-        help="Weight decay"
-    )
-    parser.add_argument(
-        "--warmup-ratio", type=float, default=0.1,
-        help="Warmup ratio of total steps"
-    )
-    parser.add_argument(
-        "--max-grad-norm", type=float, default=1.0,
-        help="Max gradient norm for clipping (0 to disable)"
-    )
-    parser.add_argument(
-        "--label-smoothing", type=float, default=0.1,
-        help="Label smoothing factor"
-    )
-    parser.add_argument(
-        "--fp16", action="store_true",
-        help="Use mixed precision training"
-    )
-
-    # Evaluation arguments
-    parser.add_argument(
-        "--eval-frequency", type=int, default=1,
-        help="Evaluate every N epochs"
-    )
-    parser.add_argument(
-        "--max-eval-batches", type=int, default=None,
-        help="Max batches for evaluation (for debugging)"
-    )
-
-    # Logging arguments
-    parser.add_argument(
-        "--log-interval", type=int, default=10,
-        help="Log every N batches"
-    )
-    parser.add_argument(
-        "--save-frequency", type=int, default=10,
-        help="Save checkpoint every N epochs"
-    )
-
-    # Wandb arguments
-    parser.add_argument(
-        "--wandb", action="store_true",
-        help="Enable Weights & Biases logging"
-    )
-    parser.add_argument(
-        "--wandb-project", type=str, default="audio-classification",
-        help="W&B project name"
-    )
-    parser.add_argument(
-        "--wandb-run-name", type=str, default=None,
-        help="W&B run name"
-    )
-
-    # Other arguments
-    parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Random seed"
-    )
-    parser.add_argument(
-        "--num-workers", type=int, default=4,
-        help="Number of data loading workers"
-    )
-
-    return parser.parse_args()
-
-
 if __name__ == "__main__":
-    args = parse_args()
-    main(args)
+    main()
