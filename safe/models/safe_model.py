@@ -1879,6 +1879,15 @@ class SAFEModel(nn.Module):
                 and hasattr(self.fusion_adapter, "apply_fusion_at_layer")
             )
 
+            # Debug: log generation fusion state (once)
+            if not hasattr(self, '_gen_fusion_logged'):
+                print(f"[GEN FUSION DEBUG] audio_tokens is not None: {audio_tokens is not None}", flush=True)
+                print(f"[GEN FUSION DEBUG] gate_scalar: {gate_scalar}", flush=True)
+                print(f"[GEN FUSION DEBUG] enable_midlayer_fusion: {self.enable_midlayer_fusion}", flush=True)
+                print(f"[GEN FUSION DEBUG] has apply_fusion_at_layer: {hasattr(self.fusion_adapter, 'apply_fusion_at_layer')}", flush=True)
+                print(f"[GEN FUSION DEBUG] use_midlayer_hooks: {use_midlayer_hooks}", flush=True)
+                self._gen_fusion_logged = True
+
             language_model = None
             fusion_layers = None
             modality_tokens = None
