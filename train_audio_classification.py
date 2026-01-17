@@ -673,7 +673,7 @@ class SAFEGenerativeClassifier(nn.Module):
     def generate(
         self,
         audio: List[Tuple[torch.Tensor, int]],
-        max_new_tokens: int = 20,
+        max_new_tokens: int = 10,  # Short class names
         num_beams: int = 1,
         temperature: float = 1.0,
         do_sample: bool = False,
@@ -731,23 +731,28 @@ class SAFEGenerativeClassifier(nn.Module):
             "eos_token_id": tokenizer.eos_token_id,
         }
 
-        # Suppress EOS for audio batches (same as train_safe.py)
-        if tokenizer.eos_token_id is not None:
-            suppress_tokens = [tokenizer.eos_token_id]
-            if (
-                tokenizer.pad_token_id is not None
-                and tokenizer.pad_token_id != tokenizer.eos_token_id
-            ):
-                suppress_tokens.append(tokenizer.pad_token_id)
-            generation_kwargs["suppress_tokens"] = suppress_tokens
+        # NOTE: Do NOT suppress EOS for classification - we want short answers
+        # (train_safe.py suppresses EOS for captioning which needs longer outputs)
+        # For classification, let the model stop naturally
+        # if tokenizer.eos_token_id is not None:
+        #     suppress_tokens = [tokenizer.eos_token_id]
+        #     if (
+        #         tokenizer.pad_token_id is not None
+        #         and tokenizer.pad_token_id != tokenizer.eos_token_id
+        #     ):
+        #         suppress_tokens.append(tokenizer.pad_token_id)
+        #     generation_kwargs["suppress_tokens"] = suppress_tokens
 
         # Debug: log generation inputs (only once)
         if not hasattr(self, '_gen_debug_logged') or not self._gen_debug_logged:
             print(f"[GEN DEBUG] gen_input_ids shape: {gen_input_ids.shape}", flush=True)
             print(f"[GEN DEBUG] gen_audio_tokens shape: {gen_audio_tokens.shape if gen_audio_tokens is not None else None}", flush=True)
             print(f"[GEN DEBUG] gen_audio_tokens norm: {gen_audio_tokens.norm().item() if gen_audio_tokens is not None else None}", flush=True)
+            print(f"[GEN DEBUG] gen_audio_tokens dtype: {gen_audio_tokens.dtype if gen_audio_tokens is not None else None}", flush=True)
             sample_prompt = tokenizer.decode(gen_input_ids[0], skip_special_tokens=False)
             print(f"[GEN DEBUG] Sample prompt: {sample_prompt}", flush=True)
+            # Enable debug logging on fusion adapter for generation
+            self.safe_model.fusion_adapter.set_debug_logging(True, log_limit=3)
             self._gen_debug_logged = True
 
         # Generate using low-level API (same as train_safe.py)
@@ -997,6 +1002,33 @@ def evaluate(
     model.eval()
     base_model = model.module if hasattr(model, "module") else model
 
+    # CRITICAL: Same setup as train_safe.py for generation
+    # Ensure audio fusion is fully enabled during evaluation
+    if hasattr(base_model, "set_gate"):
+        try:
+            base_model.set_gate(1.0)
+        except Exception:
+            pass
+
+    # Configure generation parameters (from train_safe.py)
+    tokenizer = base_model.safe_model.base_vl.tokenizer
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is not None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        else:
+            tokenizer.pad_token_id = 0
+
+    # Set generation config on the LLM
+    llm = base_model.safe_model.base_vl.llm
+    if hasattr(llm, 'config'):
+        llm.config.pad_token_id = tokenizer.pad_token_id
+        llm.config.eos_token_id = tokenizer.eos_token_id
+
+    if hasattr(llm, 'generation_config'):
+        llm.generation_config.pad_token_id = tokenizer.pad_token_id
+        llm.generation_config.eos_token_id = tokenizer.eos_token_id
+        llm.generation_config.max_length = None  # Respect max_new_tokens
+
     total_correct = 0
     total_samples = 0
     total_loss = 0.0
@@ -1029,7 +1061,7 @@ def evaluate(
         # Generate predictions
         generated_texts = base_model.generate(
             audio=audio,
-            max_new_tokens=20,
+            max_new_tokens=10,
             num_beams=1,
             temperature=1.0,
             do_sample=False,

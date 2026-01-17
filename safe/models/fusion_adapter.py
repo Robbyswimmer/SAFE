@@ -535,6 +535,14 @@ class SimpleFusionAdapter(nn.Module):
         """
         orig_dtype = hidden_states.dtype
 
+        # Debug: log fusion inputs (limited)
+        if self.debug_logging and not hasattr(self, '_fusion_forward_logged'):
+            print(f"[FUSION FWD] hidden_states shape: {hidden_states.shape}, dtype: {hidden_states.dtype}", flush=True)
+            print(f"[FUSION FWD] audio_tokens shape: {audio_tokens.shape}, dtype: {audio_tokens.dtype}", flush=True)
+            print(f"[FUSION FWD] hidden_states norm: {hidden_states.norm().item():.2f}", flush=True)
+            print(f"[FUSION FWD] audio_tokens norm: {audio_tokens.norm().item():.2f}", flush=True)
+            self._fusion_forward_logged = True
+
         # Get cross-attention residual
         delta = self.cross_attention(
             hidden_states=hidden_states,
@@ -542,6 +550,11 @@ class SimpleFusionAdapter(nn.Module):
             attention_mask=attention_mask,
             supervised_mask=supervised_mask,
         )
+
+        # Debug: log delta (limited)
+        if self.debug_logging and not hasattr(self, '_fusion_delta_logged'):
+            print(f"[FUSION FWD] delta norm: {delta.norm().item():.2f}, delta range: [{delta.min().item():.3f}, {delta.max().item():.3f}]", flush=True)
+            self._fusion_delta_logged = True
 
         # Apply gating
         if self.use_tokenwise_gate:
