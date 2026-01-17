@@ -672,7 +672,7 @@ class SAFEGenerativeClassifier(nn.Module):
         batch_size = len(audio)
 
         # Generate using SAFEModel (same as inference in train_safe.py)
-        generated_texts = self.safe_model.generate(
+        generated_ids = self.safe_model.generate(
             text=[self.PROMPT] * batch_size,
             images=None,
             audio=audio,
@@ -682,7 +682,43 @@ class SAFEGenerativeClassifier(nn.Module):
             do_sample=do_sample,
         )
 
-        return generated_texts
+        # Decode generated token IDs to strings
+        tokenizer = self.safe_model.base_vl.tokenizer
+        if tokenizer is None:
+            tokenizer = self.safe_model.base_vl.processor.tokenizer
+
+        # Handle both tensor and list outputs
+        if torch.is_tensor(generated_ids):
+            generated_texts = tokenizer.batch_decode(
+                generated_ids, skip_special_tokens=True
+            )
+        elif isinstance(generated_ids, list):
+            # Could be list of tensors or list of strings
+            if len(generated_ids) > 0 and torch.is_tensor(generated_ids[0]):
+                generated_texts = [
+                    tokenizer.decode(ids, skip_special_tokens=True)
+                    for ids in generated_ids
+                ]
+            else:
+                # Already strings
+                generated_texts = generated_ids
+        else:
+            generated_texts = [str(generated_ids)]
+
+        # Extract only the generated response (after ASSISTANT:)
+        cleaned_texts = []
+        for text in generated_texts:
+            # LLaVA format: "USER: ... ASSISTANT: <response>"
+            if "ASSISTANT:" in text:
+                response = text.split("ASSISTANT:")[-1].strip()
+            elif "assistant:" in text.lower():
+                response = text.lower().split("assistant:")[-1].strip()
+            else:
+                # Just take the text as-is
+                response = text.strip()
+            cleaned_texts.append(response)
+
+        return cleaned_texts
 
     def get_trainable_params(self) -> List[nn.Parameter]:
         """Get trainable parameters (same as train_safe.py)."""
