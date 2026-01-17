@@ -658,6 +658,7 @@ class SAFEGenerativeClassifier(nn.Module):
     ) -> List[str]:
         """
         Generate text predictions for classification.
+        Uses the same low-level API as train_safe.py for consistency.
 
         Args:
             audio: List of (waveform, sample_rate) tuples
@@ -670,40 +671,69 @@ class SAFEGenerativeClassifier(nn.Module):
             List of generated strings
         """
         batch_size = len(audio)
+        device = next(self.safe_model.audio_projector.parameters()).device
 
-        # Generate using SAFEModel (same as inference in train_safe.py)
-        generated_ids = self.safe_model.generate(
-            text=[self.PROMPT] * batch_size,
-            images=None,
-            audio=audio,
-            max_new_tokens=max_new_tokens,
-            num_beams=num_beams,
-            temperature=temperature,
-            do_sample=do_sample,
-        )
-
-        # Decode generated token IDs to strings
+        # Get tokenizer
         tokenizer = self.safe_model.base_vl.tokenizer
         if tokenizer is None:
             tokenizer = self.safe_model.base_vl.processor.tokenizer
 
-        # Handle both tensor and list outputs
-        if torch.is_tensor(generated_ids):
-            generated_texts = tokenizer.batch_decode(
-                generated_ids, skip_special_tokens=True
-            )
-        elif isinstance(generated_ids, list):
-            # Could be list of tensors or list of strings
-            if len(generated_ids) > 0 and torch.is_tensor(generated_ids[0]):
-                generated_texts = [
-                    tokenizer.decode(ids, skip_special_tokens=True)
-                    for ids in generated_ids
-                ]
-            else:
-                # Already strings
-                generated_texts = generated_ids
-        else:
-            generated_texts = [str(generated_ids)]
+        # Prepare inputs using the same method as train_safe.py (training_mode=False for generation)
+        generation_inputs = self.safe_model.prepare_multimodal_inputs(
+            text=[self.PROMPT] * batch_size,
+            images=None,
+            audio=audio,
+            answers=None,  # No answers for generation
+            device=device,
+            training_mode=False,
+        )
+
+        gen_input_ids = generation_inputs["input_ids"].to(device)
+        gen_attention_mask = generation_inputs["attention_mask"].to(device)
+        gen_audio_tokens = generation_inputs.get("audio_tokens")
+        if gen_audio_tokens is not None:
+            gen_audio_tokens = gen_audio_tokens.to(device)
+        gen_audio_attention_mask = generation_inputs.get("audio_attention_mask")
+        if gen_audio_attention_mask is not None:
+            gen_audio_attention_mask = gen_audio_attention_mask.to(device)
+
+        # Build generation kwargs (matching train_safe.py)
+        generation_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "min_new_tokens": 1,
+            "num_beams": num_beams,
+            "repetition_penalty": 1.2,
+            "no_repeat_ngram_size": 3,
+            "do_sample": do_sample,
+            "pad_token_id": tokenizer.pad_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+        }
+
+        # Suppress EOS for audio batches (same as train_safe.py)
+        if tokenizer.eos_token_id is not None:
+            suppress_tokens = [tokenizer.eos_token_id]
+            if (
+                tokenizer.pad_token_id is not None
+                and tokenizer.pad_token_id != tokenizer.eos_token_id
+            ):
+                suppress_tokens.append(tokenizer.pad_token_id)
+            generation_kwargs["suppress_tokens"] = suppress_tokens
+
+        # Generate using low-level API (same as train_safe.py)
+        generated_ids = self.safe_model.generate(
+            input_ids=gen_input_ids,
+            attention_mask=gen_attention_mask,
+            audio_tokens=gen_audio_tokens,
+            audio_attention_mask=gen_audio_attention_mask,
+            **generation_kwargs,
+        )
+
+        # Decode predictions
+        generated_texts = tokenizer.batch_decode(
+            generated_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True
+        )
 
         # Extract only the generated response (after ASSISTANT:)
         cleaned_texts = []
@@ -712,7 +742,9 @@ class SAFEGenerativeClassifier(nn.Module):
             if "ASSISTANT:" in text:
                 response = text.split("ASSISTANT:")[-1].strip()
             elif "assistant:" in text.lower():
-                response = text.lower().split("assistant:")[-1].strip()
+                # Handle lowercase variant
+                parts = text.lower().split("assistant:")
+                response = parts[-1].strip()
             else:
                 # Just take the text as-is
                 response = text.strip()
