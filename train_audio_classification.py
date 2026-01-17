@@ -639,6 +639,28 @@ class SAFEGenerativeClassifier(nn.Module):
             except Exception:
                 pass
 
+        # Debug: log first batch's input/label structure (only once)
+        if not hasattr(self, '_debug_logged') or not self._debug_logged:
+            tokenizer = self.safe_model.base_vl.tokenizer
+            if tokenizer is None:
+                tokenizer = self.safe_model.base_vl.processor.tokenizer
+            print(f"[DEBUG] input_ids shape: {input_ids.shape}", flush=True)
+            print(f"[DEBUG] labels shape: {labels.shape}", flush=True)
+            print(f"[DEBUG] audio_tokens shape: {audio_tokens.shape if audio_tokens is not None else None}", flush=True)
+            # Decode first sample
+            sample_input = tokenizer.decode(input_ids[0], skip_special_tokens=False)
+            supervised_mask = labels[0] != -100
+            if supervised_mask.any():
+                supervised_tokens = labels[0][supervised_mask]
+                sample_label = tokenizer.decode(supervised_tokens, skip_special_tokens=False)
+            else:
+                sample_label = "(no supervised tokens)"
+            print(f"[DEBUG] Sample input: {sample_input[:200]}...", flush=True)
+            print(f"[DEBUG] Sample target label: {sample_label}", flush=True)
+            print(f"[DEBUG] Target text: {target_texts[0]}", flush=True)
+            print(f"[DEBUG] Num supervised tokens: {supervised_mask.sum().item()}", flush=True)
+            self._debug_logged = True
+
         return self.safe_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -718,6 +740,15 @@ class SAFEGenerativeClassifier(nn.Module):
             ):
                 suppress_tokens.append(tokenizer.pad_token_id)
             generation_kwargs["suppress_tokens"] = suppress_tokens
+
+        # Debug: log generation inputs (only once)
+        if not hasattr(self, '_gen_debug_logged') or not self._gen_debug_logged:
+            print(f"[GEN DEBUG] gen_input_ids shape: {gen_input_ids.shape}", flush=True)
+            print(f"[GEN DEBUG] gen_audio_tokens shape: {gen_audio_tokens.shape if gen_audio_tokens is not None else None}", flush=True)
+            print(f"[GEN DEBUG] gen_audio_tokens norm: {gen_audio_tokens.norm().item() if gen_audio_tokens is not None else None}", flush=True)
+            sample_prompt = tokenizer.decode(gen_input_ids[0], skip_special_tokens=False)
+            print(f"[GEN DEBUG] Sample prompt: {sample_prompt}", flush=True)
+            self._gen_debug_logged = True
 
         # Generate using low-level API (same as train_safe.py)
         generated_ids = self.safe_model.generate(
