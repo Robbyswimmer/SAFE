@@ -1342,6 +1342,11 @@ class SAFEModel(nn.Module):
             filtered_kwargs = kwargs
 
             if attention_mask is None:
+                if input_ids is None:
+                    raise ValueError(
+                        "SAFEModel.forward() received input_ids=None. "
+                        "Ensure prepare_multimodal_inputs() was called and returned valid input_ids."
+                    )
                 attention_mask = torch.ones_like(input_ids, dtype=torch.long)
 
             # LLaVA requires <image> tokens to accompany pixel inputs; drop them if missing

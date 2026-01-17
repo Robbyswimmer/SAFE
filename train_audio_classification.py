@@ -123,6 +123,59 @@ def count_parameters(model: nn.Module) -> Tuple[int, int]:
     return total, trainable
 
 
+def build_optimizer(
+    model: nn.Module,
+    learning_rate: float,
+    weight_decay: float,
+) -> AdamW:
+    """
+    AdamW with standard no-decay rules (matches train_safe.py intent).
+
+    Critical: avoid decaying scalar scale parameters (e.g., output_scale/residual_scale)
+    and norms/biases, otherwise the model can suppress audio by driving scales to ~0.
+    """
+
+    base_model = model.module if hasattr(model, "module") else model
+    safe_model = getattr(base_model, "safe_model", None)
+    if safe_model is None:
+        raise RuntimeError("Expected model.safe_model to exist for optimizer building.")
+
+    def _use_weight_decay(param_name: str, param: torch.nn.Parameter) -> bool:
+        if not getattr(param, "requires_grad", False):
+            return False
+        if param.ndim <= 1:
+            return False
+        name = str(param_name).lower()
+        if name.endswith(".bias") or name.endswith("bias"):
+            return False
+        if "layernorm" in name or "layer_norm" in name or ".norm" in name or "norm." in name:
+            return False
+        if name.endswith(("output_scale", "residual_scale")):
+            return False
+        return True
+
+    decay: List[torch.nn.Parameter] = []
+    no_decay: List[torch.nn.Parameter] = []
+    for name, param in safe_model.named_parameters():
+        if not getattr(param, "requires_grad", False):
+            continue
+        if _use_weight_decay(name, param):
+            decay.append(param)
+        else:
+            no_decay.append(param)
+
+    if not decay and not no_decay:
+        raise RuntimeError("No trainable SAFE parameters found for optimizer.")
+
+    param_groups: List[Dict[str, Any]] = []
+    if decay:
+        param_groups.append({"params": decay, "lr": learning_rate, "weight_decay": float(weight_decay), "name": "decay"})
+    if no_decay:
+        param_groups.append({"params": no_decay, "lr": learning_rate, "weight_decay": 0.0, "name": "no_decay"})
+
+    return AdamW(param_groups, lr=learning_rate, weight_decay=0.0)
+
+
 # ============================================================================
 # SECTION 2: AVE DATASET
 # ============================================================================
@@ -506,6 +559,7 @@ class SAFEGenerativeClassifier(nn.Module):
             fusion_config=config.get("fusion_config"),
             freeze_base_vl=True,
             freeze_audio_encoder=True,
+            label_smoothing=float(config.get("label_smoothing", 0.0) or 0.0),
             llm_hidden_size=config.get("llm_hidden_size", 5120),
             audio_embed_dim=config.get("audio_embed_dim", 512),
         )
@@ -546,18 +600,52 @@ class SAFEGenerativeClassifier(nn.Module):
         batch_size = len(audio)
         device = next(self.safe_model.audio_projector.parameters()).device
 
-        # Prepare inputs with answers for training (same as train_safe.py)
-        # This tokenizes prompt + answer and creates labels with -100 on prompt tokens
-        outputs = self.safe_model.forward(
+        # Mirror train_safe.py: build tensors via prepare_multimodal_inputs, then call SAFEModel.forward()
+        # with (input_ids, attention_mask, labels, audio_tokens, audio_attention_mask).
+        inputs = self.safe_model.prepare_multimodal_inputs(
             text=[self.PROMPT] * batch_size,
             images=None,
             audio=audio,
-            answers=target_texts,  # The category names
-            training_mode=True,  # Compute LM loss
-            label_smoothing=label_smoothing,
+            answers=target_texts,
+            device=device,
+            training_mode=True,
         )
 
-        return outputs
+        # Debug: ensure input_ids exists
+        if "input_ids" not in inputs or inputs["input_ids"] is None:
+            raise ValueError(
+                f"prepare_multimodal_inputs returned invalid result. "
+                f"Keys: {list(inputs.keys())}, input_ids: {inputs.get('input_ids')}"
+            )
+
+        input_ids = inputs["input_ids"].to(device)
+        attention_mask = inputs.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
+        labels = inputs.get("labels")
+        if labels is not None:
+            labels = labels.to(device)
+        audio_tokens = inputs.get("audio_tokens")
+        if audio_tokens is not None:
+            audio_tokens = audio_tokens.to(device)
+        audio_attention_mask = inputs.get("audio_attention_mask")
+        if audio_attention_mask is not None:
+            audio_attention_mask = audio_attention_mask.to(device)
+
+        # Set label smoothing on the SAFEModel (SAFEModel.forward uses self.label_smoothing).
+        if label_smoothing is not None:
+            try:
+                self.safe_model.label_smoothing = float(label_smoothing)
+            except Exception:
+                pass
+
+        return self.safe_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            audio_tokens=audio_tokens,
+            audio_attention_mask=audio_attention_mask,
+        )
 
     @torch.no_grad()
     def generate(
@@ -1037,9 +1125,9 @@ def main():
 
     # Create optimizer
     base_model = model.module if hasattr(model, "module") else model
-    optimizer = AdamW(
-        base_model.get_trainable_params(),
-        lr=args.learning_rate,
+    optimizer = build_optimizer(
+        model=model,
+        learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
     )
 
