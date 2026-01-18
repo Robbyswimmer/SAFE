@@ -193,35 +193,36 @@ AVE_LABEL_TO_IDX = {label: idx for idx, label in enumerate(AVE_CATEGORIES)}
 AVE_IDX_TO_LABEL = {idx: label for label, idx in AVE_LABEL_TO_IDX.items()}
 
 # Simplified labels for generation (easier for LLM to produce)
+# Sentence-form labels (matches captioning style better for LLM generation)
 AVE_SIMPLE_LABELS = {
-    "Church bell": "Church bell",
-    "Male speech, man speaking": "Male speech",
-    "Bark": "Dog barking",
-    "Fixed-wing aircraft, airplane": "Airplane",
-    "Race car, auto racing": "Race car",
-    "Female speech, woman speaking": "Female speech",
-    "Helicopter": "Helicopter",
-    "Violin, fiddle": "Violin",
-    "Flute": "Flute",
-    "Ukulele": "Ukulele",
-    "Frying (food)": "Frying",
-    "Truck": "Truck",
-    "Shofar": "Shofar",
-    "Motorcycle": "Motorcycle",
-    "Acoustic guitar": "Guitar",
-    "Train horn": "Train horn",
-    "Clock": "Clock",
-    "Banjo": "Banjo",
-    "Goat": "Goat",
-    "Baby cry, infant cry": "Baby crying",
-    "Bus": "Bus",
-    "Chainsaw": "Chainsaw",
-    "Cat": "Cat",
-    "Horse": "Horse",
-    "Toilet flush": "Toilet flush",
-    "Rodents, rats, mice": "Rodents",
-    "Accordion": "Accordion",
-    "Mandolin": "Mandolin"
+    "Church bell": "A church bell is ringing",
+    "Male speech, man speaking": "A man is speaking",
+    "Bark": "A dog is barking",
+    "Fixed-wing aircraft, airplane": "An airplane is flying",
+    "Race car, auto racing": "A race car is driving",
+    "Female speech, woman speaking": "A woman is speaking",
+    "Helicopter": "A helicopter is flying",
+    "Violin, fiddle": "A violin is being played",
+    "Flute": "A flute is being played",
+    "Ukulele": "A ukulele is being played",
+    "Frying (food)": "Food is frying",
+    "Truck": "A truck is driving",
+    "Shofar": "A shofar is being blown",
+    "Motorcycle": "A motorcycle is running",
+    "Acoustic guitar": "A guitar is being played",
+    "Train horn": "A train horn is sounding",
+    "Clock": "A clock is ticking",
+    "Banjo": "A banjo is being played",
+    "Goat": "A goat is bleating",
+    "Baby cry, infant cry": "A baby is crying",
+    "Bus": "A bus is driving",
+    "Chainsaw": "A chainsaw is running",
+    "Cat": "A cat is meowing",
+    "Horse": "A horse is neighing",
+    "Toilet flush": "A toilet is flushing",
+    "Rodents, rats, mice": "Rodents are squeaking",
+    "Accordion": "An accordion is being played",
+    "Mandolin": "A mandolin is being played"
 }
 
 # Reverse mapping for matching generated text to labels
@@ -517,7 +518,8 @@ class SAFEGenerativeClassifier(nn.Module):
     Trainable: Audio projector, Fusion adapters (SimpleFusionAdapter at each layer)
     """
 
-    PROMPT = "What is in this sound? Answer in a few words."
+    # Use same prompt style as captioning for consistency
+    PROMPT = "What is happening in the audio?"
 
     def __init__(
         self,
@@ -677,6 +679,8 @@ class SAFEGenerativeClassifier(nn.Module):
         num_beams: int = 1,
         temperature: float = 1.0,
         do_sample: bool = False,
+        repetition_penalty: float = 1.0,
+        no_repeat_ngram_size: int = 0,
     ) -> List[str]:
         """
         Generate text predictions for classification.
@@ -724,8 +728,8 @@ class SAFEGenerativeClassifier(nn.Module):
             "max_new_tokens": max_new_tokens,
             "min_new_tokens": 1,
             "num_beams": num_beams,
-            "repetition_penalty": 1.2,
-            "no_repeat_ngram_size": 3,
+            "repetition_penalty": repetition_penalty,
+            "no_repeat_ngram_size": no_repeat_ngram_size,
             "do_sample": do_sample,
             "pad_token_id": tokenizer.pad_token_id,
             "eos_token_id": tokenizer.eos_token_id,
@@ -763,6 +767,10 @@ class SAFEGenerativeClassifier(nn.Module):
             audio_attention_mask=gen_audio_attention_mask,
             **generation_kwargs,
         )
+        try:
+            self.safe_model.fusion_adapter.set_debug_logging(False)
+        except Exception:
+            pass
 
         # Decode predictions
         generated_texts = tokenizer.batch_decode(
@@ -885,6 +893,7 @@ def train_epoch(
 ) -> Tuple[Dict[str, float], int]:
     """Train for one epoch."""
     model.train()
+    base_model = model.module if hasattr(model, "module") else model
 
     total_loss = 0.0
     num_batches = 0
@@ -896,6 +905,17 @@ def train_epoch(
 
         if audio is None or len(audio) == 0:
             continue
+
+        # Gate warmup (enabled by default): ramp fusion gate start→1 over initial optimizer steps.
+        if getattr(args, "gate_warmup_steps", 0) and hasattr(base_model, "safe_model"):
+            try:
+                warmup_steps = max(1, int(args.gate_warmup_steps))
+                start_gate = float(getattr(args, "gate_warmup_start", 0.1))
+                progress = min(1.0, float(global_step) / float(warmup_steps))
+                gate = start_gate + (1.0 - start_gate) * progress
+                base_model.safe_model.set_gate(gate)
+            except Exception:
+                pass
 
         optimizer.zero_grad()
 
@@ -1004,9 +1024,9 @@ def evaluate(
 
     # CRITICAL: Same setup as train_safe.py for generation
     # Ensure audio fusion is fully enabled during evaluation
-    if hasattr(base_model, "set_gate"):
+    if hasattr(base_model, "safe_model") and hasattr(base_model.safe_model, "set_gate"):
         try:
-            base_model.set_gate(1.0)
+            base_model.safe_model.set_gate(1.0)
         except Exception:
             pass
 
@@ -1135,6 +1155,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Max gradient norm")
     parser.add_argument("--warmup-ratio", type=float, default=0.1, help="Warmup ratio")
     parser.add_argument("--label-smoothing", type=float, default=0.1, help="Label smoothing")
+    parser.add_argument(
+        "--gate-warmup-steps",
+        type=int,
+        default=500,
+        help="If >0, ramp SAFE fusion gate start→1 over this many optimizer steps (enabled by default).",
+    )
+    parser.add_argument(
+        "--gate-warmup-start",
+        type=float,
+        default=0.1,
+        help="Initial SAFE fusion gate value during warmup.",
+    )
+    parser.add_argument(
+        "--scale-min-warmup-epochs",
+        type=int,
+        default=5,
+        help="If >0, warm up the minimum clamp for audio scales over these epochs.",
+    )
+    parser.add_argument("--scale-min-start", type=float, default=0.5, help="Initial minimum clamp for audio scales")
+    parser.add_argument("--scale-min-end", type=float, default=1.0, help="Final minimum clamp for audio scales")
+    parser.add_argument(
+        "--residual-warmup-epochs",
+        type=int,
+        default=5,
+        help="If >0, warm up fusion residual scale over these epochs (enabled by default).",
+    )
+    parser.add_argument("--residual-warmup-start", type=float, default=0.1, help="Initial residual scale during warmup")
 
     # Mixed precision
     parser.add_argument("--fp16", action="store_true", help="Use FP16 mixed precision")
@@ -1145,6 +1192,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wandb-run-name", type=str, default=None, help="WANDB run name")
     parser.add_argument("--log-interval", type=int, default=10, help="Log every N batches")
     parser.add_argument("--save-frequency", type=int, default=10, help="Save every N epochs")
+
+    # Checkpoint
+    parser.add_argument("--load-checkpoint", type=str, default=None,
+                        help="Path to pretrained checkpoint (e.g., from train_safe.py captioning)")
+    parser.add_argument("--eval-only", action="store_true",
+                        help="Only run evaluation (no training)")
 
     # Other
     parser.add_argument("--num-workers", type=int, default=4, help="DataLoader workers")
@@ -1244,6 +1297,80 @@ def main():
 
     model = model.to(device)
 
+    # Load checkpoint if provided
+    if args.load_checkpoint:
+        if dist_info["is_main"]:
+            print(f"[Checkpoint] Loading from: {args.load_checkpoint}")
+
+        checkpoint = torch.load(args.load_checkpoint, map_location=device)
+
+        # Handle different checkpoint formats
+        if "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        elif "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        else:
+            state_dict = checkpoint
+
+        # The checkpoint is for SAFEModel, but we have SAFEGenerativeClassifier
+        # which wraps SAFEModel in self.safe_model
+        # Try to load into safe_model directly
+        safe_model = model.safe_model
+
+        # Filter and adapt state dict keys
+        adapted_state_dict = {}
+        skipped_keys = []
+        for key, value in state_dict.items():
+            # Remove 'module.' prefix if present (from DDP)
+            if key.startswith("module."):
+                key = key[7:]
+
+            # Check if key exists in safe_model
+            if key in safe_model.state_dict():
+                adapted_state_dict[key] = value
+            else:
+                skipped_keys.append(key)
+
+        # Load the adapted state dict
+        missing, unexpected = safe_model.load_state_dict(adapted_state_dict, strict=False)
+
+        if dist_info["is_main"]:
+            print(f"[Checkpoint] Loaded {len(adapted_state_dict)} parameters")
+            if skipped_keys:
+                print(f"[Checkpoint] Skipped {len(skipped_keys)} keys from checkpoint: {skipped_keys[:10]}...")
+            if missing:
+                print(f"[Checkpoint] Missing {len(missing)} keys in model: {missing[:10]}...")
+            if unexpected:
+                print(f"[Checkpoint] Unexpected {len(unexpected)} keys: {unexpected[:5]}...")
+
+            # Show what was loaded
+            loaded_components = set()
+            for key in adapted_state_dict.keys():
+                component = key.split(".")[0]
+                loaded_components.add(component)
+            print(f"[Checkpoint] Loaded components: {sorted(loaded_components)}")
+
+            # Verify fusion adapter was loaded
+            fusion_keys = [k for k in adapted_state_dict.keys() if "fusion" in k.lower()]
+            print(f"[Checkpoint] Fusion adapter keys loaded: {len(fusion_keys)}")
+            if fusion_keys:
+                print(f"[Checkpoint] Sample fusion keys: {fusion_keys[:5]}")
+
+            # Check for layer mismatch
+            checkpoint_layers = set()
+            for key in state_dict.keys():
+                if "fusion_adapters" in key:
+                    # Keys like: fusion_adapter.fusion_adapters.audio:1.cross_attention...
+                    parts = key.split(".")
+                    for p in parts:
+                        if ":" in p:
+                            checkpoint_layers.add(p)
+            model_layers = set(safe_model.fusion_adapter.fusion_adapters.keys())
+            print(f"[Checkpoint] Checkpoint fusion layers: {sorted(checkpoint_layers)}")
+            print(f"[Checkpoint] Model fusion layers: {sorted(model_layers)}")
+            if checkpoint_layers and model_layers and checkpoint_layers != model_layers:
+                print(f"[WARNING] Fusion layer MISMATCH! Checkpoint has {checkpoint_layers}, model has {model_layers}")
+
     if dist_info["distributed"]:
         model = DDP(model, device_ids=[dist_info["local_rank"]])
 
@@ -1295,6 +1422,32 @@ def main():
             config=vars(args),
         )
 
+    # Eval-only mode
+    if args.eval_only:
+        if dist_info["is_main"]:
+            print("=" * 60)
+            print("Evaluation Only Mode")
+            print("=" * 60)
+            print()
+
+        val_metrics = evaluate(
+            model=model,
+            dataloader=val_loader,
+            device=device,
+            args=args,
+            dist_info=dist_info,
+            label_names=label_names,
+        )
+
+        if dist_info["is_main"]:
+            print(f"  Val Loss: {val_metrics['loss']:.4f}")
+            print(f"  Val Accuracy: {val_metrics['accuracy']:.4f}")
+            print(f"  Val Macro Accuracy: {val_metrics['macro_accuracy']:.4f}")
+            print()
+            print("Evaluation complete.")
+
+        return
+
     # Training loop
     if dist_info["is_main"]:
         print("=" * 60)
@@ -1312,6 +1465,39 @@ def main():
         if dist_info["is_main"]:
             print(f"Epoch {epoch}/{args.num_epochs}")
             print("-" * 40)
+
+        # Warmups (enabled by default): stabilize early training and prevent scale collapse.
+        base_model = model.module if hasattr(model, "module") else model
+        if hasattr(base_model, "safe_model"):
+            safe_model = base_model.safe_model
+            epoch0 = epoch - 1  # 0-indexed for SAFEModel warmup helpers
+
+            if getattr(args, "scale_min_warmup_epochs", 0) and hasattr(safe_model, "set_scale_minimum_warmup"):
+                try:
+                    safe_model.set_scale_minimum_warmup(
+                        epoch=epoch0,
+                        warmup_epochs=int(args.scale_min_warmup_epochs),
+                        start_min=float(args.scale_min_start),
+                        end_min=float(args.scale_min_end),
+                    )
+                except Exception:
+                    pass
+
+            # Only apply residual warmup during the warmup window; after that, let it train freely.
+            if (
+                getattr(args, "residual_warmup_epochs", 0)
+                and hasattr(safe_model, "set_residual_scale_warmup")
+                and epoch0 < int(args.residual_warmup_epochs)
+            ):
+                try:
+                    safe_model.set_residual_scale_warmup(
+                        epoch=epoch0,
+                        warmup_epochs=int(args.residual_warmup_epochs),
+                        start_scale=float(args.residual_warmup_start),
+                        end_scale=1.0,
+                    )
+                except Exception:
+                    pass
 
         # Train
         train_metrics, global_step = train_epoch(

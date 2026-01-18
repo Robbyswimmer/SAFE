@@ -26,6 +26,10 @@ DROPOUT=${DROPOUT:-0.1}
 MODEL_CONFIG=${MODEL_CONFIG:-"phase1"}  # phase1 = LLaVA 13B + CLAP
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}  # Empty = use config default, or e.g., "6,12,24"
 
+# Checkpoint settings
+LOAD_CHECKPOINT=${LOAD_CHECKPOINT:-""}  # Path to pretrained checkpoint
+EVAL_ONLY=${EVAL_ONLY:-0}  # Set to 1 for evaluation only
+
 # WANDB settings
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-"ave-clf-${SLURM_JOB_ID:-local}"}
 
@@ -46,6 +50,8 @@ echo "Num epochs: $NUM_EPOCHS"
 echo "Learning rate: $LEARNING_RATE"
 echo "Model config: $MODEL_CONFIG (same as train_safe.py)"
 echo "Fusion layers: ${FUSION_LAYER_INDICES:-'(from config)'}"
+echo "Load checkpoint: ${LOAD_CHECKPOINT:-'(none)'}"
+echo "Eval only: $EVAL_ONLY"
 echo "WANDB run name: $WANDB_RUN_NAME"
 echo "========================================"
 
@@ -85,6 +91,16 @@ CMD="$CMD --save-frequency 10"
 # Add fusion layer indices if specified
 if [ -n "$FUSION_LAYER_INDICES" ]; then
     CMD="$CMD --fusion-layer-indices $FUSION_LAYER_INDICES"
+fi
+
+# Add checkpoint if specified
+if [ -n "$LOAD_CHECKPOINT" ]; then
+    CMD="$CMD --load-checkpoint $LOAD_CHECKPOINT"
+fi
+
+# Add eval-only flag if set
+if [ "$EVAL_ONLY" = "1" ]; then
+    CMD="$CMD --eval-only"
 fi
 
 echo "Running: $CMD"
