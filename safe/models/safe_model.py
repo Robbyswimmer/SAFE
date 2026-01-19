@@ -1596,42 +1596,36 @@ class SAFEModel(nn.Module):
             import sys
             sys.stdout.flush()
 
-            # If hidden states are requested, capture the last layer output via a hook.
+            # If hidden states are requested, capture the final hidden states via a hook.
             # This is robust to HF wrappers that ignore output_hidden_states flags.
             wants_hidden = bool(filtered_kwargs.get("output_hidden_states", False))
             hidden_capture: Dict[str, Optional[torch.Tensor]] = {"last": None}
             hook_handle = None
             if wants_hidden:
                 try:
-                    # Ensure we have the resolved language model module.
-                    if language_model is None:
-                        language_model = self._resolve_language_model(self.base_vl.llm)
+                    # Prefer capturing the input to lm_head: this is the final hidden state tensor.
+                    head_module = None
+                    for candidate_owner in [
+                        self.base_vl.llm,
+                        getattr(self.base_vl.llm, "language_model", None),
+                        getattr(self.base_vl.llm, "model", None),
+                        language_model,
+                    ]:
+                        if candidate_owner is None:
+                            continue
+                        head_module = getattr(candidate_owner, "lm_head", None)
+                        if head_module is not None:
+                            break
 
-                    candidate = None
-                    if hasattr(language_model, "model") and hasattr(language_model.model, "layers"):
-                        layers = getattr(language_model.model, "layers", None)
-                        if isinstance(layers, (list, torch.nn.ModuleList)) and len(layers) > 0:
-                            candidate = layers[-1]
-                    if candidate is None and hasattr(language_model, "layers"):
-                        layers = getattr(language_model, "layers", None)
-                        if isinstance(layers, (list, torch.nn.ModuleList)) and len(layers) > 0:
-                            candidate = layers[-1]
-                    if candidate is None and hasattr(language_model, "transformer") and hasattr(language_model.transformer, "h"):
-                        layers = getattr(language_model.transformer, "h", None)
-                        if isinstance(layers, (list, torch.nn.ModuleList)) and len(layers) > 0:
-                            candidate = layers[-1]
-
-                    if candidate is not None:
-                        def _capture_hook(_module, _inputs, output):
+                    if head_module is not None:
+                        def _capture_lm_head_input(_module, inputs):
                             try:
-                                if torch.is_tensor(output):
-                                    hidden_capture["last"] = output
-                                elif isinstance(output, (tuple, list)) and len(output) > 0 and torch.is_tensor(output[0]):
-                                    hidden_capture["last"] = output[0]
+                                if inputs and torch.is_tensor(inputs[0]):
+                                    hidden_capture["last"] = inputs[0]
                             except Exception:
                                 hidden_capture["last"] = None
 
-                        hook_handle = candidate.register_forward_hook(_capture_hook)
+                        hook_handle = head_module.register_forward_pre_hook(_capture_lm_head_input)
                 except Exception:
                     hook_handle = None
 
