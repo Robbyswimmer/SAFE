@@ -176,14 +176,15 @@ class AVEDataset(Dataset):
 
 
 def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-    audio: List[Tuple[str, int]] = []
+    audio: List[str] = []
     labels: List[int] = []
     categories: List[str] = []
 
     for item in batch:
         if not item.get("audio"):
             continue
-        audio.append((item["audio"], 48000))
+        # SAFE/CLAP audio encoder supports raw file paths directly; do not wrap in tuples.
+        audio.append(str(item["audio"]))
         labels.append(int(item["label"]))
         categories.append(str(item["category"]))
 
@@ -236,7 +237,7 @@ class SAFELLMProbe(nn.Module):
 
     def forward(
         self,
-        audio: List[Tuple[str, int]],
+        audio: List[str],
         device: torch.device,
         pooling: str = "last",
     ) -> torch.Tensor:
@@ -566,4 +567,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
