@@ -545,6 +545,14 @@ def train_epoch(
             for group in optimizer.param_groups:
                 if str(group.get("name", "")).startswith("safe_"):
                     group["lr"] = effective_safe_lr
+            # Log once when SAFE LR turns on (crosses warmup boundary)
+            if (
+                effective_safe_lr > 0.0
+                and not hasattr(model, "_safe_lr_on_logged")
+            ):
+                model._safe_lr_on_logged = True
+                lr_by_group = {g.get("name", f"g{idx}"): g.get("lr") for idx, g in enumerate(optimizer.param_groups)}
+                print(f"  [LR] SAFE warmup complete at step={global_step}. lrs={lr_by_group}", flush=True)
 
         with autocast(enabled=args.fp16):
             logits = model(audio=audio, device=device, pooling=args.pooling)
@@ -578,8 +586,15 @@ def train_epoch(
                 flush=True,
             )
 
-            if not hasattr(model, "_grad_logged"):
-                model._grad_logged = True
+            # Log gradients/LRs on first log interval, and once right after SAFE LR turns on.
+            should_log_grads = not hasattr(model, "_grad_logged")
+            if getattr(args, "head_warmup_steps", 0) and hasattr(model, "_safe_lr_on_logged"):
+                should_log_grads = should_log_grads or not hasattr(model, "_grad_after_warmup_logged")
+            if should_log_grads:
+                if hasattr(model, "_grad_logged"):
+                    model._grad_after_warmup_logged = True
+                else:
+                    model._grad_logged = True
                 with torch.no_grad():
                     head_g = 0.0
                     head_n = 0
@@ -597,12 +612,8 @@ def train_epoch(
                             safe_n += 1
                     safe_g = safe_g ** 0.5 if safe_n else 0.0
 
-                # Report current LRs
                 lr_by_group = {g.get("name", f"g{idx}"): g.get("lr") for idx, g in enumerate(optimizer.param_groups)}
-                print(
-                    f"  [Gradients] head={head_g:.4f} ({head_n}) safe={safe_g:.4f} ({safe_n}) lrs={lr_by_group}",
-                    flush=True,
-                )
+                print(f"  [Gradients] head={head_g:.4f} ({head_n}) safe={safe_g:.4f} ({safe_n}) lrs={lr_by_group}", flush=True)
 
             if wandb is not None and args.wandb:
                 wandb.log(
