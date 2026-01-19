@@ -107,6 +107,8 @@ if [ -n "$FUSION_MODE" ]; then
   FUSION_MODE_ARG="--fusion-mode $FUSION_MODE"
 fi
 
+echo "Resolved CLI extras: ${FUSION_INJECTION_ARG} ${FUSION_MODE_ARG} ${CKPT_ARGS} ${HEAD_ONLY_ARG} ${FORCE_GATE_ARG} ${FP16_ARG} ${WANDB_ARGS}"
+
 python train_audio_llm_probe.py \
   --data-path "$DATA_PATH" \
   --output-dir "$OUTPUT_DIR" \

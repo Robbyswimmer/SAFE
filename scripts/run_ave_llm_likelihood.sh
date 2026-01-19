@@ -115,6 +115,9 @@ if [ -n "$LORA_RANK" ]; then
   LORA_RANK_ARG="--lora-rank $LORA_RANK"
 fi
 
+echo "Resolved CLI extras: ${FUSION_INJECTION_ARG} ${FUSION_MODE_ARG} ${BOTTLENECK_ARG} ${BOTTLENECK_DIM_ARG} ${LORA_RANK_ARG} ${CKPT_ARGS} ${FORCE_GATE_ARG} ${FP16_ARG} ${WANDB_ARGS}"
+echo "Running: python train_audio_llm_likelihood.py --data-path \"$DATA_PATH\" --output-dir \"$OUTPUT_DIR\" --batch-size \"$BATCH_SIZE\" --num-epochs \"$NUM_EPOCHS\" --learning-rate \"$LEARNING_RATE\" --model-config \"$MODEL_CONFIG\" --fusion-layer-indices \"$FUSION_LAYER_INDICES\" ${FUSION_INJECTION_ARG} ${FUSION_MODE_ARG} ${BOTTLENECK_ARG} ${BOTTLENECK_DIM_ARG} ${LORA_RANK_ARG} --num-negatives \"$NUM_NEGATIVES\" --template \"$TEMPLATE\" --num-workers 4 --log-interval 10 ${FP16_ARG} ${CKPT_ARGS} ${FORCE_GATE_ARG} ${WANDB_ARGS}"
+
 python train_audio_llm_likelihood.py \
   --data-path "$DATA_PATH" \
   --output-dir "$OUTPUT_DIR" \
