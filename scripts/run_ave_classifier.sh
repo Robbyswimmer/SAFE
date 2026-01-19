@@ -52,6 +52,16 @@ fi
 echo "Python: $(which python)"
 
 # Run training
+# Set WANDB_API_KEY in your ~/.bashrc or pass --no-wandb to disable
+USE_WANDB=${USE_WANDB:-1}
+
+WANDB_ARGS=""
+if [ "$USE_WANDB" = "1" ] && [ -n "$WANDB_API_KEY" ]; then
+    WANDB_ARGS="--wandb --wandb-project AVE-Classification --wandb-run-name clap-mlp-${SLURM_JOB_ID:-local}"
+else
+    echo "WANDB disabled (set WANDB_API_KEY to enable)"
+fi
+
 python train_ave_classifier.py \
     --data-path "$DATA_PATH" \
     --output-dir "$OUTPUT_DIR" \
@@ -61,9 +71,7 @@ python train_ave_classifier.py \
     --dropout "$DROPOUT" \
     --hidden-dim "$HIDDEN_DIM" \
     --num-workers 4 \
-    --wandb \
-    --wandb-project "AVE-Classification" \
-    --wandb-run-name "clap-mlp-${SLURM_JOB_ID:-local}"
+    $WANDB_ARGS
 
 echo "========================================"
 echo "Finished: $(date)"
