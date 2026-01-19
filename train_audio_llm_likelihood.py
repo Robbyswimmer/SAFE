@@ -450,6 +450,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fp16", action="store_true")
     p.add_argument("--max-train-samples", type=int, default=None, help="If set, train on a fixed subset of this many samples.")
     p.add_argument("--max-test-samples", type=int, default=None, help="If set, evaluate on a fixed subset of this many samples.")
+    p.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        help="Enable gradient checkpointing on the frozen LLM to reduce memory (slower).",
+    )
+    p.add_argument(
+        "--offload-vision",
+        action="store_true",
+        help="Move the (unused) vision encoder to CPU to save VRAM.",
+    )
 
     p.add_argument("--template", type=str, default="The sound is: {label}.")
     p.add_argument("--num-negatives", type=int, default=7, help="Negatives per sample during training.")
@@ -627,6 +637,26 @@ def main() -> None:
     )
 
     model = SAFEClosedSetLikelihood(config=config, template=args.template).to(device)
+    if args.gradient_checkpointing:
+        try:
+            llm = model.safe_model.base_vl.llm
+            if hasattr(llm, "gradient_checkpointing_enable"):
+                llm.gradient_checkpointing_enable()
+            if hasattr(llm, "config"):
+                llm.config.use_cache = False
+            print("[Config] gradient_checkpointing=on (llm.config.use_cache=False)", flush=True)
+        except Exception as e:
+            print(f"[Config] gradient_checkpointing requested but failed: {e}", flush=True)
+
+    if args.offload_vision:
+        try:
+            ve = getattr(model.safe_model.base_vl, "vision_encoder", None)
+            if ve is not None:
+                ve.to("cpu")
+                print("[Config] offload_vision=on (vision_encoder moved to CPU)", flush=True)
+        except Exception as e:
+            print(f"[Config] offload_vision requested but failed: {e}", flush=True)
+
     if args.load_checkpoint:
         print(f"[Checkpoint] Loading: {args.load_checkpoint}", flush=True)
         _load_safe_checkpoint_into(model, args.load_checkpoint, device=device)

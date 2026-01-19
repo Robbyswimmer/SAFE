@@ -28,6 +28,8 @@ TEMPLATE=${TEMPLATE:-"The sound is: {label}."}
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 MAX_TEST_SAMPLES=${MAX_TEST_SAMPLES:-""}
 FP16=${FP16:-1}
+GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-0}
+OFFLOAD_VISION=${OFFLOAD_VISION:-0}
 USE_WANDB=${USE_WANDB:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-"SAFE"}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-"ave-llm-like-${SLURM_JOB_ID:-local}"}
@@ -60,6 +62,8 @@ echo "Template: $TEMPLATE"
 echo "Max train samples: ${MAX_TRAIN_SAMPLES:-'(none)'}"
 echo "Max test samples: ${MAX_TEST_SAMPLES:-'(none)'}"
 echo "FP16: $FP16"
+echo "Gradient checkpointing: $GRADIENT_CHECKPOINTING"
+echo "Offload vision: $OFFLOAD_VISION"
 echo "Load checkpoint: ${LOAD_CHECKPOINT:-'(none)'}"
 echo "Force gate: ${FORCE_GATE:-'(unset)'}"
 echo "========================================"
@@ -80,6 +84,16 @@ fi
 FP16_ARG=""
 if [ "$FP16" = "1" ]; then
   FP16_ARG="--fp16"
+fi
+
+GC_ARG=""
+if [ "$GRADIENT_CHECKPOINTING" = "1" ]; then
+  GC_ARG="--gradient-checkpointing"
+fi
+
+OFFLOAD_VISION_ARG=""
+if [ "$OFFLOAD_VISION" = "1" ]; then
+  OFFLOAD_VISION_ARG="--offload-vision"
 fi
 
 CKPT_ARGS=""
@@ -129,8 +143,8 @@ if [ -n "$MAX_TEST_SAMPLES" ]; then
   MAX_TEST_ARG="--max-test-samples $MAX_TEST_SAMPLES"
 fi
 
-echo "Resolved CLI extras: ${FUSION_INJECTION_ARG} ${FUSION_MODE_ARG} ${BOTTLENECK_ARG} ${BOTTLENECK_DIM_ARG} ${LORA_RANK_ARG} ${CKPT_ARGS} ${FORCE_GATE_ARG} ${FP16_ARG} ${WANDB_ARGS}"
-echo "Running: python train_audio_llm_likelihood.py --data-path \"$DATA_PATH\" --output-dir \"$OUTPUT_DIR\" --batch-size \"$BATCH_SIZE\" --num-epochs \"$NUM_EPOCHS\" --learning-rate \"$LEARNING_RATE\" --model-config \"$MODEL_CONFIG\" --fusion-layer-indices \"$FUSION_LAYER_INDICES\" ${FUSION_INJECTION_ARG} ${FUSION_MODE_ARG} ${BOTTLENECK_ARG} ${BOTTLENECK_DIM_ARG} ${LORA_RANK_ARG} --num-negatives \"$NUM_NEGATIVES\" --template \"$TEMPLATE\" --num-workers 4 --log-interval 10 ${FP16_ARG} ${CKPT_ARGS} ${FORCE_GATE_ARG} ${WANDB_ARGS}"
+echo "Resolved CLI extras: ${FUSION_INJECTION_ARG} ${FUSION_MODE_ARG} ${BOTTLENECK_ARG} ${BOTTLENECK_DIM_ARG} ${LORA_RANK_ARG} ${MAX_TRAIN_ARG} ${MAX_TEST_ARG} ${GC_ARG} ${OFFLOAD_VISION_ARG} ${CKPT_ARGS} ${FORCE_GATE_ARG} ${FP16_ARG} ${WANDB_ARGS}"
+echo "Running: python train_audio_llm_likelihood.py --data-path \"$DATA_PATH\" --output-dir \"$OUTPUT_DIR\" --batch-size \"$BATCH_SIZE\" --num-epochs \"$NUM_EPOCHS\" --learning-rate \"$LEARNING_RATE\" --model-config \"$MODEL_CONFIG\" --fusion-layer-indices \"$FUSION_LAYER_INDICES\" ${FUSION_INJECTION_ARG} ${FUSION_MODE_ARG} ${BOTTLENECK_ARG} ${BOTTLENECK_DIM_ARG} ${LORA_RANK_ARG} --num-negatives \"$NUM_NEGATIVES\" --template \"$TEMPLATE\" ${MAX_TRAIN_ARG} ${MAX_TEST_ARG} ${GC_ARG} ${OFFLOAD_VISION_ARG} --num-workers 4 --log-interval 10 ${FP16_ARG} ${CKPT_ARGS} ${FORCE_GATE_ARG} ${WANDB_ARGS}"
 
 python train_audio_llm_likelihood.py \
   --data-path "$DATA_PATH" \
@@ -149,6 +163,8 @@ python train_audio_llm_likelihood.py \
   --template "$TEMPLATE" \
   $MAX_TRAIN_ARG \
   $MAX_TEST_ARG \
+  $GC_ARG \
+  $OFFLOAD_VISION_ARG \
   --num-workers 4 \
   --log-interval 10 \
   $FP16_ARG \
