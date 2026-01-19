@@ -231,9 +231,7 @@ class SAFEClosedSetLikelihood(torch.nn.Module):
         if audio_attention_mask is not None:
             audio_attention_mask = audio_attention_mask.to(device)
 
-        # Candidate scores
-        scores = torch.empty((batch_size, num_cand), device=device, dtype=torch.float32)
-
+        score_cols: List[torch.Tensor] = []
         for j in range(num_cand):
             cand = candidate_class_indices[:, j].tolist()
             answers = self._answers_from_class_indices(cand)
@@ -269,10 +267,11 @@ class SAFEClosedSetLikelihood(torch.nn.Module):
             mask = shift_labels != -100
             token_lp = token_lp * mask.to(token_lp.dtype)
             denom = mask.sum(dim=-1).clamp_min(1)
-            mean_nll = -(token_lp.sum(dim=-1) / denom.to(token_lp.dtype))
-            scores[:, j] = -mean_nll
+            mean_nll = -(token_lp.sum(dim=-1) / denom.to(token_lp.dtype))  # (B,)
+            score_cols.append((-mean_nll).to(torch.float32))
 
-        return scores
+        # Stack to preserve autograd graph (avoid in-place assignment into a preallocated tensor).
+        return torch.stack(score_cols, dim=1)
 
 
 def _sample_negatives(labels: torch.Tensor, num_classes: int, num_neg: int) -> torch.Tensor:
