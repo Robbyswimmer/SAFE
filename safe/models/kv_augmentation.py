@@ -108,6 +108,10 @@ class KVAugmentationAdapter(nn.Module):
             audio_keys: (batch_size, num_audio_tokens, total_head_size)
             audio_values: (batch_size, num_audio_tokens, total_head_size)
         """
+        # Cast audio tokens to match projection weights dtype
+        input_dtype = audio_tokens.dtype
+        audio_tokens = audio_tokens.to(self.audio_k_proj[0].weight.dtype if self.use_bottleneck else self.audio_k_proj.weight.dtype)
+
         # Clamp scale to reasonable range
         scale = torch.clamp(self.audio_scale, self.scale_min, self.scale_max)
         effective_scale = scale * gate
@@ -115,6 +119,10 @@ class KVAugmentationAdapter(nn.Module):
         # Project to K,V space
         audio_keys = self.audio_k_proj(audio_tokens) * effective_scale
         audio_values = self.audio_v_proj(audio_tokens) * effective_scale
+
+        # Cast back to input dtype for compatibility with attention
+        audio_keys = audio_keys.to(input_dtype)
+        audio_values = audio_values.to(input_dtype)
 
         return audio_keys, audio_values
 
