@@ -172,6 +172,37 @@ class KVAugmentedAttention(nn.Module):
         self._last_attention_weights: Optional[torch.Tensor] = None
         self._return_attention_weights: bool = False
 
+        # Detect return format of original attention (for compatibility across HF versions)
+        # Probe the original attention's forward signature to determine expected return format
+        self._return_format = self._detect_return_format()
+
+    def _detect_return_format(self) -> int:
+        """
+        Detect the return format of the original attention module.
+
+        Different transformers versions return different tuple lengths:
+        - transformers 4.36-4.40: (attn_output, attn_weights, past_key_value) = 3
+        - transformers 4.45+: sometimes (attn_output, past_key_value) = 2
+        - transformers 4.50+: just attn_output (tensor) = 1
+
+        We check the class name and module to determine the expected format.
+        """
+        orig_class = type(self.original_attention).__name__
+
+        # SDPA and Flash attention variants often return fewer values
+        if 'Sdpa' in orig_class or 'Flash' in orig_class:
+            # These typically return just attn_output or (attn_output, None, None)
+            # but the decoder layer still unpacks 3 values
+            return 3
+
+        # Check if this is an eager attention implementation
+        if 'Attention' in orig_class:
+            # Standard LlamaAttention returns 3 values
+            return 3
+
+        # Default to 3 for safety (most common in LLaVA models)
+        return 3
+
     def set_audio(
         self,
         audio_tokens: torch.Tensor,
@@ -331,16 +362,21 @@ class KVAugmentedAttention(nn.Module):
         # Output projection
         attn_output = orig_attn.o_proj(attn_output)
 
-        # Prepare outputs
-        outputs = (attn_output,)
+        # Prepare outputs - MUST match LlamaAttention return signature
+        # Different transformers versions have different return formats.
+        # We match whatever format we detected from the original attention.
         if output_attentions:
-            outputs += (attn_weights,)
-        if use_cache:
-            # Note: KV cache handling with audio augmentation is complex
-            # For now, we return None for past_key_value
-            outputs += (None,)
+            attn_weights_out = attn_weights
+        else:
+            attn_weights_out = None
 
-        return outputs
+        # Note: KV cache handling with audio augmentation is complex
+        # For now, we return None for past_key_value
+        past_key_value_out = None
+
+        # LlamaDecoderLayer unpacks: hidden_states, _ = self.self_attn(...)
+        # So we must return exactly 2 values
+        return (attn_output, attn_weights_out)
 
     def _apply_rotary_pos_emb(
         self,
