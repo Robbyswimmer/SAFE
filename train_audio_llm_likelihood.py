@@ -475,20 +475,70 @@ def _load_safe_checkpoint_into(model: SAFEClosedSetLikelihood, checkpoint_path: 
     else:
         state_dict = ckpt
 
+    def _normalize_key(raw_key: str) -> List[str]:
+        """
+        Generate candidate keys by stripping common wrapper prefixes.
+        We try multiple variants because different trainers save different roots.
+        """
+        key = str(raw_key)
+        candidates = [key]
+        prefixes = [
+            "module.",
+            "model.",
+            "base_model.",
+            "safe_model.",
+            "model.safe_model.",
+            "module.safe_model.",
+            "module.model.",
+            "module.base_model.",
+        ]
+        for _ in range(3):
+            expanded: List[str] = []
+            for cand in candidates:
+                expanded.append(cand)
+                for p in prefixes:
+                    if cand.startswith(p):
+                        expanded.append(cand[len(p) :])
+            # de-dup but keep order
+            seen = set()
+            candidates = [c for c in expanded if not (c in seen or seen.add(c))]
+        return candidates
+
     adapted: Dict[str, torch.Tensor] = {}
     safe_sd = model.safe_model.state_dict()
     shape_mismatch = 0
+    matched = 0
+    tried = 0
     for k, v in state_dict.items():
-        key = k[len("module.") :] if str(k).startswith("module.") else k
-        target = safe_sd.get(key)
-        if target is None:
-            continue
-        if hasattr(target, "shape") and hasattr(v, "shape") and tuple(target.shape) != tuple(v.shape):
-            shape_mismatch += 1
-            continue
-        adapted[key] = v
+        tried += 1
+        for cand in _normalize_key(k):
+            target = safe_sd.get(cand)
+            if target is None:
+                continue
+            if hasattr(target, "shape") and hasattr(v, "shape") and tuple(target.shape) != tuple(v.shape):
+                shape_mismatch += 1
+                continue
+            adapted[cand] = v
+            matched += 1
+            break
+
     missing, unexpected = model.safe_model.load_state_dict(adapted, strict=False)
-    print(f"[Checkpoint] Loaded {len(adapted)} tensors into SAFEModel (skipped {shape_mismatch} shape mismatches)", flush=True)
+
+    # Summarize loaded components
+    counts: Dict[str, int] = {"audio_projector": 0, "fusion_adapter": 0, "audio_token_embeddings": 0, "other": 0}
+    for key in adapted.keys():
+        root = key.split(".", 1)[0]
+        if root in counts:
+            counts[root] += 1
+        else:
+            counts["other"] += 1
+
+    print(
+        f"[Checkpoint] Loaded {len(adapted)} tensors into SAFEModel "
+        f"(matched {matched}/{tried}, skipped {shape_mismatch} shape mismatches).",
+        flush=True,
+    )
+    print(f"[Checkpoint] Loaded counts: {counts}", flush=True)
     if missing:
         print(f"[Checkpoint] Missing {len(missing)} keys (first 5): {missing[:5]}", flush=True)
     if unexpected:
