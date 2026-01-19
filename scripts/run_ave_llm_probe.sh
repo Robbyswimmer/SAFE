@@ -19,6 +19,7 @@ NUM_EPOCHS=${NUM_EPOCHS:-20}
 LEARNING_RATE=${LEARNING_RATE:-6e-5}
 MODEL_CONFIG=${MODEL_CONFIG:-"phase1"}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-"1"}  # requested: layer 1 to start
+FUSION_INJECTION_POINT=${FUSION_INJECTION_POINT:-""}  # optional: pre_ffn or post_layer
 POOLING=${POOLING:-"last"}
 FP16=${FP16:-1}
 USE_WANDB=${USE_WANDB:-1}
@@ -44,6 +45,7 @@ echo "Epochs: $NUM_EPOCHS"
 echo "Learning rate: $LEARNING_RATE"
 echo "Model config: $MODEL_CONFIG"
 echo "Fusion layers: $FUSION_LAYER_INDICES"
+echo "Fusion injection point: ${FUSION_INJECTION_POINT:-'(default)'}"
 echo "Pooling: $POOLING"
 echo "FP16: $FP16"
 echo "Load checkpoint: ${LOAD_CHECKPOINT:-'(none)'}"
@@ -87,6 +89,11 @@ if [ -n "$FORCE_GATE" ]; then
   FORCE_GATE_ARG="--force-gate $FORCE_GATE"
 fi
 
+FUSION_INJECTION_ARG=""
+if [ -n "$FUSION_INJECTION_POINT" ]; then
+  FUSION_INJECTION_ARG="--fusion-injection-point $FUSION_INJECTION_POINT"
+fi
+
 python train_audio_llm_probe.py \
   --data-path "$DATA_PATH" \
   --output-dir "$OUTPUT_DIR" \
@@ -95,6 +102,7 @@ python train_audio_llm_probe.py \
   --learning-rate "$LEARNING_RATE" \
   --model-config "$MODEL_CONFIG" \
   --fusion-layer-indices "$FUSION_LAYER_INDICES" \
+  $FUSION_INJECTION_ARG \
   --pooling "$POOLING" \
   --num-workers 4 \
   --log-interval 10 \

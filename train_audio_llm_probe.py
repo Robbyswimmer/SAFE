@@ -378,6 +378,23 @@ class SAFELLMProbe(nn.Module):
                 lengths = attention_mask.long().sum(dim=1).clamp_min(1) - 1
                 pooled = hidden[torch.arange(hidden.size(0), device=hidden.device), lengths]
 
+        # Lightweight sanity checks (printed once)
+        if not hasattr(self, "_probe_stats_logged"):
+            self._probe_stats_logged = True
+            with torch.no_grad():
+                pooled_var = float(pooled.float().var(dim=0).mean().item())
+                pooled_norm = float(pooled.float().norm(dim=-1).mean().item())
+            attn_summary = None
+            try:
+                attn_summary = self.safe_model.get_last_attention_summary()
+            except Exception:
+                attn_summary = None
+            print(
+                f"[LLMProbe] pooled_norm={pooled_norm:.3f} pooled_var={pooled_var:.6e} "
+                f"attn_summary={'yes' if attn_summary is not None else 'no'}",
+                flush=True,
+            )
+
         logits = self.head(pooled.float())
         return logits
 
@@ -583,6 +600,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", type=str, default="outputs/ave_llm_probe")
     p.add_argument("--model-config", type=str, default="phase1")
     p.add_argument("--fusion-layer-indices", type=str, default="1", help="Comma-separated fusion layers (default: 1)")
+    p.add_argument(
+        "--fusion-injection-point",
+        type=str,
+        default=None,
+        choices=["pre_ffn", "post_layer"],
+        help="Override fusion injection point for hooks (debugging).",
+    )
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--num-epochs", type=int, default=20)
     p.add_argument("--learning-rate", type=float, default=6e-5)
@@ -633,6 +657,10 @@ def main() -> None:
     if args.fusion_layer_indices:
         layers = [int(x.strip()) for x in str(args.fusion_layer_indices).split(",") if x.strip()]
         config["fusion_layer_indices"] = layers
+    if args.fusion_injection_point is not None:
+        config.setdefault("fusion_config", {})
+        config["fusion_config"]["injection_point"] = str(args.fusion_injection_point)
+        print(f"[Config] fusion_injection_point={args.fusion_injection_point}", flush=True)
 
     train_ds = AVEDataset(args.data_path, split="train")
     test_ds = AVEDataset(args.data_path, split="test")
