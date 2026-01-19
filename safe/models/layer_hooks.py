@@ -213,25 +213,63 @@ class LayerHookManager:
         self._handles.clear()
 
     def _discover_layer_modules(self, model: nn.Module) -> Dict[int, nn.Module]:
-        # Common HuggingFace decoder layouts
-        candidates = [
+        """
+        Locate the decoder layer ModuleList for a variety of HF model wrappers.
+
+        LLaVA (and other multimodal wrappers) can nest the actual language model
+        several levels deep (e.g., `.model.language_model.model.layers`), so we
+        do a bounded graph walk over common attribute names.
+        """
+
+        def _try_extract(candidate: Any) -> Optional[Dict[int, nn.Module]]:
+            if candidate is None:
+                return None
+            if hasattr(candidate, "layers") and _is_module_list(getattr(candidate, "layers")):
+                layers = getattr(candidate, "layers")
+                return {i: layer for i, layer in enumerate(layers)}
+            if hasattr(candidate, "h") and _is_module_list(getattr(candidate, "h")):
+                layers = getattr(candidate, "h")
+                return {i: layer for i, layer in enumerate(layers)}
+            return None
+
+        # Seed with typical top-level containers.
+        seeds: List[Any] = [
+            model,
             getattr(model, "model", None),
+            getattr(model, "language_model", None),
             getattr(model, "decoder", None),
             getattr(model, "transformer", None),
-            model,
         ]
 
-        for candidate in candidates:
-            if candidate is None:
+        seen: set = set()
+        queue: List[Any] = [s for s in seeds if s is not None]
+        max_visits = 50  # bounded to avoid pathological graphs
+
+        # Walk down common wrapper attributes.
+        expand_attrs = ("model", "language_model", "decoder", "transformer")
+
+        visits = 0
+        while queue and visits < max_visits:
+            candidate = queue.pop(0)
+            visits += 1
+            key = id(candidate)
+            if key in seen:
                 continue
+            seen.add(key)
 
-            if hasattr(candidate, "layers") and _is_module_list(candidate.layers):
-                return {i: layer for i, layer in enumerate(candidate.layers)}
+            extracted = _try_extract(candidate)
+            if extracted is not None:
+                return extracted
 
-            if hasattr(candidate, "h") and _is_module_list(candidate.h):
-                return {i: layer for i, layer in enumerate(candidate.h)}
+            for attr in expand_attrs:
+                child = getattr(candidate, attr, None)
+                if child is not None and id(child) not in seen:
+                    queue.append(child)
 
-        raise ValueError("Unable to locate decoder layers for fusion hooks")
+        raise ValueError(
+            "Unable to locate decoder layers for fusion hooks. "
+            f"Tried {visits} candidates starting from type={type(model).__name__}."
+        )
 
     @staticmethod
     def _invert_layer_mapping(mapping: Dict[str, List[int]]) -> Dict[int, List[str]]:
