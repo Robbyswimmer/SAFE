@@ -526,12 +526,19 @@ def _load_safe_checkpoint_into(model: SAFEClosedSetLikelihood, checkpoint_path: 
 
     # Summarize loaded components
     counts: Dict[str, int] = {"audio_projector": 0, "fusion_adapter": 0, "audio_token_embeddings": 0, "other": 0}
+    fusion_layer_counts: Dict[str, int] = {}
     for key in adapted.keys():
         root = key.split(".", 1)[0]
         if root in counts:
             counts[root] += 1
         else:
             counts["other"] += 1
+        if key.startswith("fusion_adapter.fusion_adapters."):
+            # Example key: fusion_adapter.fusion_adapters.audio:24.cross_attention....
+            parts = key.split(".")
+            if len(parts) > 2:
+                adapter_key = parts[2]
+                fusion_layer_counts[adapter_key] = fusion_layer_counts.get(adapter_key, 0) + 1
 
     print(
         f"[Checkpoint] Loaded {len(adapted)} tensors into SAFEModel "
@@ -539,6 +546,10 @@ def _load_safe_checkpoint_into(model: SAFEClosedSetLikelihood, checkpoint_path: 
         flush=True,
     )
     print(f"[Checkpoint] Loaded counts: {counts}", flush=True)
+    if fusion_layer_counts:
+        top = sorted(fusion_layer_counts.items(), key=lambda x: (-x[1], x[0]))
+        preview = ", ".join([f\"{k}={v}\" for k, v in top[:8]])
+        print(f\"[Checkpoint] Loaded fusion adapters: {preview}\", flush=True)
     if missing:
         print(f"[Checkpoint] Missing {len(missing)} keys (first 5): {missing[:5]}", flush=True)
     if unexpected:
