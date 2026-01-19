@@ -1417,7 +1417,20 @@ class SAFEModel(nn.Module):
                 outputs = self.base_vl.llm(**base_inputs)
                 logits = outputs.logits
                 loss = outputs.loss if labels is not None else None
-                return {"logits": logits, "loss": loss, "hidden_states": None}
+                # If the caller requested hidden states, return the last hidden state as well.
+                hidden_state_out = None
+                try:
+                    hs = getattr(outputs, "hidden_states", None)
+                    if isinstance(hs, (list, tuple)) and len(hs) > 0 and torch.is_tensor(hs[-1]):
+                        hidden_state_out = hs[-1]
+                    else:
+                        lhs = getattr(outputs, "last_hidden_state", None)
+                        if torch.is_tensor(lhs):
+                            hidden_state_out = lhs
+                except Exception:
+                    hidden_state_out = None
+
+                return {"logits": logits, "loss": loss, "hidden_states": hidden_state_out}
             # ==================== END VL PASSTHROUGH ====================
 
             # FUSION PATH: Convert to inputs_embeds only when audio fusion is needed
@@ -1492,6 +1505,11 @@ class SAFEModel(nn.Module):
                 "labels": labels,
                 **filtered_kwargs,
             }
+
+            # Ensure hidden states are returned when requested by caller.
+            # Some wrappers/configurations can drop hidden states unless explicitly enabled.
+            if bool(filtered_kwargs.get("output_hidden_states", False)):
+                model_inputs["output_hidden_states"] = True
 
             if pixel_values is not None:
                 model_inputs["pixel_values"] = pixel_values
