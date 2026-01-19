@@ -586,10 +586,14 @@ class SAFEGenerativeClassifier(nn.Module):
         print(f"[SAFEGenerativeClassifier] Prompt: '{self.PROMPT}'", flush=True)
 
         # Debug info
-        if hasattr(self.safe_model.fusion_adapter, 'fusion_adapters'):
+        if self.safe_model.fusion_adapter is not None and hasattr(self.safe_model.fusion_adapter, 'fusion_adapters'):
             adapter_keys = list(self.safe_model.fusion_adapter.fusion_adapters.keys())
             print(f"[SAFEGenerativeClassifier] Fusion adapter keys: {adapter_keys}", flush=True)
             print(f"[SAFEGenerativeClassifier] enable_midlayer_fusion: {self.safe_model.enable_midlayer_fusion}", flush=True)
+        elif self.safe_model.kv_adapters is not None:
+            kv_keys = list(self.safe_model.kv_adapters.keys())
+            print(f"[SAFEGenerativeClassifier] KV Augmentation adapter layers: {kv_keys}", flush=True)
+            print(f"[SAFEGenerativeClassifier] enable_kv_augmentation: {self.safe_model.enable_kv_augmentation}", flush=True)
 
     def forward(
         self,
@@ -765,7 +769,8 @@ class SAFEGenerativeClassifier(nn.Module):
             sample_prompt = tokenizer.decode(gen_input_ids[0], skip_special_tokens=False)
             print(f"[GEN DEBUG] Sample prompt: {sample_prompt}", flush=True)
             # Enable debug logging on fusion adapter for generation
-            self.safe_model.fusion_adapter.set_debug_logging(True, log_limit=3)
+            if self.safe_model.fusion_adapter is not None:
+                self.safe_model.fusion_adapter.set_debug_logging(True, log_limit=3)
             self._gen_debug_logged = True
 
         # Generate using low-level API (same as train_safe.py)
@@ -777,7 +782,8 @@ class SAFEGenerativeClassifier(nn.Module):
             **generation_kwargs,
         )
         try:
-            self.safe_model.fusion_adapter.set_debug_logging(False)
+            if self.safe_model.fusion_adapter is not None:
+                self.safe_model.fusion_adapter.set_debug_logging(False)
         except Exception:
             pass
 
@@ -992,15 +998,22 @@ def train_epoch(
 
                 fusion_grad_norm = 0.0
                 fusion_count = 0
-                for p in base_model.safe_model.fusion_adapter.parameters():
-                    if p.grad is not None:
-                        fusion_grad_norm += p.grad.norm().item() ** 2
-                        fusion_count += 1
+                # Check for fusion_adapter (residual fusion) or kv_adapters (KV augmentation)
+                if base_model.safe_model.fusion_adapter is not None:
+                    for p in base_model.safe_model.fusion_adapter.parameters():
+                        if p.grad is not None:
+                            fusion_grad_norm += p.grad.norm().item() ** 2
+                            fusion_count += 1
+                elif base_model.safe_model.kv_adapters is not None:
+                    for p in base_model.safe_model.kv_adapters.parameters():
+                        if p.grad is not None:
+                            fusion_grad_norm += p.grad.norm().item() ** 2
+                            fusion_count += 1
                 fusion_grad_norm = fusion_grad_norm ** 0.5 if fusion_count > 0 else 0.0
 
                 print(
                     f"  [Gradients] Projector: {proj_grad_norm:.4f} ({proj_count} tensors) | "
-                    f"Fusion: {fusion_grad_norm:.4f} ({fusion_count} tensors)",
+                    f"Fusion/KV: {fusion_grad_norm:.4f} ({fusion_count} tensors)",
                     flush=True,
                 )
 
@@ -1368,20 +1381,24 @@ def main():
             if fusion_keys:
                 print(f"[Checkpoint] Sample fusion keys: {fusion_keys[:5]}")
 
-            # Check for layer mismatch
-            checkpoint_layers = set()
-            for key in state_dict.keys():
-                if "fusion_adapters" in key:
-                    # Keys like: fusion_adapter.fusion_adapters.audio:1.cross_attention...
-                    parts = key.split(".")
-                    for p in parts:
-                        if ":" in p:
-                            checkpoint_layers.add(p)
-            model_layers = set(safe_model.fusion_adapter.fusion_adapters.keys())
-            print(f"[Checkpoint] Checkpoint fusion layers: {sorted(checkpoint_layers)}")
-            print(f"[Checkpoint] Model fusion layers: {sorted(model_layers)}")
-            if checkpoint_layers and model_layers and checkpoint_layers != model_layers:
-                print(f"[WARNING] Fusion layer MISMATCH! Checkpoint has {checkpoint_layers}, model has {model_layers}")
+            # Check for layer mismatch (only for residual fusion, not KV augmentation)
+            if safe_model.fusion_adapter is not None and hasattr(safe_model.fusion_adapter, 'fusion_adapters'):
+                checkpoint_layers = set()
+                for key in state_dict.keys():
+                    if "fusion_adapters" in key:
+                        # Keys like: fusion_adapter.fusion_adapters.audio:1.cross_attention...
+                        parts = key.split(".")
+                        for p in parts:
+                            if ":" in p:
+                                checkpoint_layers.add(p)
+                model_layers = set(safe_model.fusion_adapter.fusion_adapters.keys())
+                print(f"[Checkpoint] Checkpoint fusion layers: {sorted(checkpoint_layers)}")
+                print(f"[Checkpoint] Model fusion layers: {sorted(model_layers)}")
+                if checkpoint_layers and model_layers and checkpoint_layers != model_layers:
+                    print(f"[WARNING] Fusion layer MISMATCH! Checkpoint has {checkpoint_layers}, model has {model_layers}")
+            elif safe_model.kv_adapters is not None:
+                kv_layers = list(safe_model.kv_adapters.keys())
+                print(f"[Checkpoint] Using KV augmentation with layers: {kv_layers}")
 
     if dist_info["distributed"]:
         model = DDP(model, device_ids=[dist_info["local_rank"]])
@@ -1555,12 +1572,17 @@ def main():
                 best_accuracy = val_metrics["accuracy"]
                 save_path = os.path.join(args.output_dir, "best_model.pt")
                 base_model = model.module if hasattr(model, "module") else model
+                # Build model state dict based on fusion type
+                model_state = {
+                    "audio_projector": base_model.safe_model.audio_projector.state_dict(),
+                }
+                if base_model.safe_model.fusion_adapter is not None:
+                    model_state["fusion_adapter"] = base_model.safe_model.fusion_adapter.state_dict()
+                if base_model.safe_model.kv_adapters is not None:
+                    model_state["kv_adapters"] = base_model.safe_model.kv_adapters.state_dict()
                 torch.save({
                     "epoch": epoch,
-                    "model_state_dict": {
-                        "audio_projector": base_model.safe_model.audio_projector.state_dict(),
-                        "fusion_adapter": base_model.safe_model.fusion_adapter.state_dict(),
-                    },
+                    "model_state_dict": model_state,
                     "optimizer_state_dict": optimizer.state_dict(),
                     "accuracy": best_accuracy,
                     "config": args.model_config,
@@ -1572,12 +1594,17 @@ def main():
             if epoch % args.save_frequency == 0:
                 save_path = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch}.pt")
                 base_model = model.module if hasattr(model, "module") else model
+                # Build model state dict based on fusion type
+                model_state = {
+                    "audio_projector": base_model.safe_model.audio_projector.state_dict(),
+                }
+                if base_model.safe_model.fusion_adapter is not None:
+                    model_state["fusion_adapter"] = base_model.safe_model.fusion_adapter.state_dict()
+                if base_model.safe_model.kv_adapters is not None:
+                    model_state["kv_adapters"] = base_model.safe_model.kv_adapters.state_dict()
                 torch.save({
                     "epoch": epoch,
-                    "model_state_dict": {
-                        "audio_projector": base_model.safe_model.audio_projector.state_dict(),
-                        "fusion_adapter": base_model.safe_model.fusion_adapter.state_dict(),
-                    },
+                    "model_state_dict": model_state,
                     "optimizer_state_dict": optimizer.state_dict(),
                     "accuracy": val_metrics["accuracy"],
                 }, save_path)
