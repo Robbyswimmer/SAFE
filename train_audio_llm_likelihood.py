@@ -548,8 +548,8 @@ def _load_safe_checkpoint_into(model: SAFEClosedSetLikelihood, checkpoint_path: 
     print(f"[Checkpoint] Loaded counts: {counts}", flush=True)
     if fusion_layer_counts:
         top = sorted(fusion_layer_counts.items(), key=lambda x: (-x[1], x[0]))
-        preview = ", ".join([f\"{k}={v}\" for k, v in top[:8]])
-        print(f\"[Checkpoint] Loaded fusion adapters: {preview}\", flush=True)
+        preview = ", ".join([f"{k}={v}" for k, v in top[:8]])
+        print(f"[Checkpoint] Loaded fusion adapters: {preview}", flush=True)
     if missing:
         print(f"[Checkpoint] Missing {len(missing)} keys (first 5): {missing[:5]}", flush=True)
     if unexpected:
