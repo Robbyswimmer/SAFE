@@ -525,6 +525,7 @@ class SAFEGenerativeClassifier(nn.Module):
         self,
         model_config: str = "phase1",
         fusion_layer_indices: Optional[List[int]] = None,
+        num_audio_tokens: Optional[int] = None,
         use_ffn: Optional[bool] = None,
     ):
         super().__init__()
@@ -539,11 +540,19 @@ class SAFEGenerativeClassifier(nn.Module):
             if "fusion_config" in config and "modalities" in config["fusion_config"]:
                 config["fusion_config"]["modalities"]["audio"]["layer_indices"] = fusion_layer_indices
 
+        # Override num_audio_tokens if specified
+        if num_audio_tokens is not None:
+            config["num_audio_tokens"] = num_audio_tokens
+            if "fusion_config" in config and "modalities" in config["fusion_config"]:
+                config["fusion_config"]["modalities"]["audio"]["num_tokens"] = num_audio_tokens
+
         # Optional FFN override
         if "fusion_config" in config and isinstance(config["fusion_config"], dict):
             if use_ffn is not None:
                 config["fusion_config"]["use_ffn"] = bool(use_ffn)
             print(f"[SAFEGenerativeClassifier] Fusion FFN: {config['fusion_config'].get('use_ffn', True)}", flush=True)
+
+        print(f"[SAFEGenerativeClassifier] Num audio tokens: {config.get('num_audio_tokens', 8)}", flush=True)
 
         # 2. Initialize SAFEModel (EXACT same as train_safe.py)
         print("[SAFEGenerativeClassifier] Initializing SAFEModel...", flush=True)
@@ -1145,6 +1154,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-config", type=str, default="phase1", help="Model config name")
     parser.add_argument("--fusion-layer-indices", type=str, default=None,
                         help="Comma-separated fusion layer indices (e.g., '12,24,36')")
+    parser.add_argument("--num-audio-tokens", type=int, default=None,
+                        help="Number of audio tokens (default: from config)")
     parser.add_argument("--use-ffn", action="store_true", help="Enable FFN in fusion adapter")
 
     # Training
@@ -1292,6 +1303,7 @@ def main():
     model = SAFEGenerativeClassifier(
         model_config=args.model_config,
         fusion_layer_indices=fusion_layers,
+        num_audio_tokens=args.num_audio_tokens,
         use_ffn=args.use_ffn if args.use_ffn else None,
     )
 

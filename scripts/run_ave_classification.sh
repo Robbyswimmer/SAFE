@@ -25,6 +25,7 @@ DROPOUT=${DROPOUT:-0.1}
 # SAFE Architecture settings (uses same configs as train_safe.py)
 MODEL_CONFIG=${MODEL_CONFIG:-"phase1"}  # phase1 = LLaVA 13B + CLAP
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}  # Empty = use config default, or e.g., "6,12,24"
+NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-""}  # Empty = use config default (8 for phase1)
 
 # Checkpoint settings
 LOAD_CHECKPOINT=${LOAD_CHECKPOINT:-""}  # Path to pretrained checkpoint
@@ -91,6 +92,11 @@ CMD="$CMD --save-frequency 10"
 # Add fusion layer indices if specified
 if [ -n "$FUSION_LAYER_INDICES" ]; then
     CMD="$CMD --fusion-layer-indices $FUSION_LAYER_INDICES"
+fi
+
+# Add num audio tokens if specified
+if [ -n "$NUM_AUDIO_TOKENS" ]; then
+    CMD="$CMD --num-audio-tokens $NUM_AUDIO_TOKENS"
 fi
 
 # Add checkpoint if specified
