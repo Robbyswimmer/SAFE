@@ -1733,11 +1733,29 @@ class SAFEModel(nn.Module):
             
             loss_fct = nn.CrossEntropyLoss(label_smoothing=self.label_smoothing)
             loss = loss_fct(flat_logits, flat_labels)
-        
+
+        # Expose last hidden state for downstream probes/classifiers.
+        # - When using HF models (e.g., LLaVA), `outputs` may contain `hidden_states` or `last_hidden_state`.
+        # - When using the manual transformer path above, `hidden_states` is already a tensor.
+        hidden_state_out = None
+        try:
+            if "hidden_states" in locals() and torch.is_tensor(hidden_states):
+                hidden_state_out = hidden_states
+            elif "outputs" in locals():
+                hs = getattr(outputs, "hidden_states", None)
+                if isinstance(hs, (list, tuple)) and len(hs) > 0 and torch.is_tensor(hs[-1]):
+                    hidden_state_out = hs[-1]
+                else:
+                    lhs = getattr(outputs, "last_hidden_state", None)
+                    if torch.is_tensor(lhs):
+                        hidden_state_out = lhs
+        except Exception:
+            hidden_state_out = None
+
         return {
             "logits": logits,
             "loss": loss,
-            "hidden_states": hidden_states if 'hidden_states' in locals() else None
+            "hidden_states": hidden_state_out,
         }
 
     def _resolve_language_model(self, llm: nn.Module) -> nn.Module:

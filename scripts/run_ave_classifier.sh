@@ -7,6 +7,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1
 #SBATCH -p gpu
+#SBATCH --export=ALL
 
 # AVE Audio Classification - Simple CLAP + MLP approach
 # Clean research baseline: frozen CLAP encoder -> MLP classifier -> 28 classes
@@ -40,6 +41,15 @@ echo "========================================"
 mkdir -p logs
 mkdir -p "$OUTPUT_DIR"
 
+# WANDB env diagnostics (helps debug missing uploads)
+echo "WANDB_MODE: ${WANDB_MODE:-'(unset)'}"
+echo "WANDB_DISABLED: ${WANDB_DISABLED:-'(unset)'}"
+if [ -n "$WANDB_API_KEY" ]; then
+    echo "WANDB_API_KEY: set"
+else
+    echo "WANDB_API_KEY: NOT set"
+fi
+
 # Activate conda if available
 if [ -f ~/miniconda3/etc/profile.d/conda.sh ]; then
     source ~/miniconda3/etc/profile.d/conda.sh
@@ -54,12 +64,16 @@ echo "Python: $(which python)"
 # Run training
 # Set WANDB_API_KEY in your ~/.bashrc or pass --no-wandb to disable
 USE_WANDB=${USE_WANDB:-1}
+WANDB_MODE=${WANDB_MODE:-online}
 
 WANDB_ARGS=""
-if [ "$USE_WANDB" = "1" ] && [ -n "$WANDB_API_KEY" ]; then
+if [ "$USE_WANDB" = "1" ]; then
+    export WANDB_MODE
     WANDB_ARGS="--wandb --wandb-project AVE-Classification --wandb-run-name clap-mlp-${SLURM_JOB_ID:-local}"
+    echo "WANDB enabled (mode=$WANDB_MODE)"
+    python -c "import wandb; print('wandb version:', wandb.__version__)" || echo "wandb import failed in this env"
 else
-    echo "WANDB disabled (set WANDB_API_KEY to enable)"
+    echo "WANDB disabled (USE_WANDB=0)"
 fi
 
 python train_ave_classifier.py \

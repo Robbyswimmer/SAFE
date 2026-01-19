@@ -416,7 +416,13 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Wandb
+    if args.wandb and wandb is None:
+        print("[WANDB] --wandb set but wandb is not installed; skipping logging.", flush=True)
     if args.wandb and wandb is not None:
+        # Helpful diagnostics for cluster runs
+        print(f"[WANDB] mode={os.environ.get('WANDB_MODE', '(unset)')}", flush=True)
+        print(f"[WANDB] disabled={os.environ.get('WANDB_DISABLED', '(unset)')}", flush=True)
+        print(f"[WANDB] api_key={'set' if os.environ.get('WANDB_API_KEY') else 'not set'}", flush=True)
         wandb.init(
             project=args.wandb_project,
             name=args.wandb_run_name or f"ave-clf-{time.strftime('%Y%m%d-%H%M%S')}",
