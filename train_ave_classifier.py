@@ -198,14 +198,10 @@ class AudioClassifier(nn.Module):
 
         # Load CLAP encoder
         print("[Model] Loading CLAP encoder...")
-        from safe.models.audio_encoder import AudioEncoder
-        self.encoder = AudioEncoder(encoder_type="clap")
+        from safe.models.audio_encoders import CLAPAudioEncoder
+        self.encoder = CLAPAudioEncoder(freeze=freeze_encoder)
         self.encoder_dim = 512  # CLAP output dimension
-
-        if freeze_encoder:
-            for param in self.encoder.parameters():
-                param.requires_grad = False
-            print("[Model] CLAP encoder frozen")
+        print(f"[Model] CLAP encoder frozen: {freeze_encoder}")
 
         # Classification head
         self.classifier = nn.Sequential(
@@ -241,12 +237,12 @@ class AudioClassifier(nn.Module):
             logits: (batch, num_classes)
         """
         # Encode audio with CLAP
-        # CLAP expects list of (waveform, sr) tuples
-        batch_size = waveform.shape[0]
-        audio_list = [(waveform[i], sample_rate) for i in range(batch_size)]
-
+        # CLAPAudioEncoder.forward() accepts (batch, samples) tensor directly
         with torch.no_grad():
-            embeddings = self.encoder(audio_list)  # (batch, 512)
+            embeddings = self.encoder(waveform)  # (batch, 512)
+
+        # Move embeddings to same device as classifier and ensure float
+        embeddings = embeddings.to(waveform.device).float()
 
         # Classify
         logits = self.classifier(embeddings)
@@ -254,13 +250,10 @@ class AudioClassifier(nn.Module):
 
     def get_embeddings(self, waveform: torch.Tensor, sample_rate: int = 48000) -> torch.Tensor:
         """Get CLAP embeddings without classification."""
-        batch_size = waveform.shape[0]
-        audio_list = [(waveform[i], sample_rate) for i in range(batch_size)]
-
         with torch.no_grad():
-            embeddings = self.encoder(audio_list)
+            embeddings = self.encoder(waveform)
 
-        return embeddings
+        return embeddings.to(waveform.device).float()
 
 
 # ============================================================================
