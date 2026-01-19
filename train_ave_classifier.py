@@ -76,8 +76,18 @@ class AVEDataset(Dataset):
         self.examples = self._load_data(data_file)
         print(f"[AVEDataset] {split}: {len(self.examples)} samples")
 
+        # Quick existence check to catch path/filename mismatches early
+        check_n = min(50, len(self.examples))
+        found = 0
+        for i in range(check_n):
+            audio_path = self._find_audio(self.examples[i].get("audio_name") or "")
+            if audio_path is not None:
+                found += 1
+        if check_n > 0:
+            print(f"[AVEDataset] {split}: audio found for {found}/{check_n} sample check", flush=True)
+
     def _load_data(self, data_file: Path) -> List[Dict]:
-        """Load AVE data file (format: category&video_id&quality)."""
+        """Load AVE data file (format: category&video_id&quality&start&end)."""
         examples = []
         with open(data_file, "r") as f:
             for line in f:
@@ -88,21 +98,31 @@ class AVEDataset(Dataset):
                 if len(parts) >= 2:
                     category, video_id = parts[0], parts[1]
                     if category in AVE_LABEL_TO_IDX:
+                        start = parts[3] if len(parts) > 3 else "0"
+                        end = parts[4] if len(parts) > 4 else "10"
                         examples.append({
                             "category": category,
                             "video_id": video_id,
+                            "start": start,
+                            "end": end,
+                            "audio_name": f"{video_id}_{start}_{end}.wav",
                             "label_idx": AVE_LABEL_TO_IDX[category],
                         })
         return examples
 
-    def _find_audio(self, video_id: str) -> Optional[Path]:
-        """Find audio file for video ID."""
-        # Try different locations
+    def _find_audio(self, audio_name: str) -> Optional[Path]:
+        """Find audio file for this example."""
+        # AVE uses train/audio and test/audio folders (not necessarily {split}/audio).
         candidates = [
-            self.data_path / f"{self.split}/audio/{video_id}.wav",
-            self.data_path / f"audio/{video_id}.wav",
-            self.data_path / f"{video_id}.wav",
-            self.data_path / "ave" / f"{self.split}/audio/{video_id}.wav",
+            self.data_path / "train" / "audio" / audio_name,
+            self.data_path / "test" / "audio" / audio_name,
+            self.data_path / "val" / "audio" / audio_name,
+            self.data_path / "audio" / audio_name,
+            self.data_path / audio_name,
+            self.data_path / "AVE" / audio_name,
+            self.data_path / "ave" / audio_name,
+            self.data_path / "AVE" / self.split / "audio" / audio_name,
+            self.data_path / "ave" / self.split / "audio" / audio_name,
         ]
         for path in candidates:
             if path.exists():
@@ -111,6 +131,8 @@ class AVEDataset(Dataset):
 
     def _load_audio(self, path: Path) -> torch.Tensor:
         """Load and preprocess audio."""
+        if torchaudio is None:
+            raise RuntimeError("torchaudio is required for train_ave_classifier.py but is not installed.")
         waveform, sr = torchaudio.load(str(path))
 
         # Resample if needed
@@ -137,7 +159,7 @@ class AVEDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict:
         ex = self.examples[idx]
-        audio_path = self._find_audio(ex["video_id"])
+        audio_path = self._find_audio(ex.get("audio_name") or f"{ex['video_id']}.wav")
 
         if audio_path is None:
             # Return zeros if audio not found (will be filtered in training)
@@ -164,7 +186,12 @@ def collate_fn(batch: List[Dict]) -> Dict:
     """Collate batch, filtering invalid samples."""
     valid_batch = [b for b in batch if b["valid"]]
     if not valid_batch:
-        valid_batch = batch[:1]  # Keep at least one
+        return {
+            "waveform": None,
+            "sample_rate": batch[0]["sample_rate"] if batch else 48000,
+            "label": None,
+            "category": [],
+        }
 
     return {
         "waveform": torch.stack([b["waveform"] for b in valid_batch]),
@@ -242,7 +269,7 @@ class AudioClassifier(nn.Module):
             embeddings = self.encoder(waveform)  # (batch, 512)
 
         # Move embeddings to same device as classifier and ensure float
-        embeddings = embeddings.to(waveform.device).float()
+        embeddings = embeddings.to(next(self.classifier.parameters()).device).float()
 
         # Classify
         logits = self.classifier(embeddings)
@@ -253,7 +280,7 @@ class AudioClassifier(nn.Module):
         with torch.no_grad():
             embeddings = self.encoder(waveform)
 
-        return embeddings.to(waveform.device).float()
+        return embeddings.to(next(self.classifier.parameters()).device).float()
 
 
 # ============================================================================
@@ -275,8 +302,12 @@ def train_epoch(
     total_samples = 0
 
     for batch_idx, batch in enumerate(loader):
-        waveform = batch["waveform"].to(device)
-        labels = batch["label"].to(device)
+        waveform = batch["waveform"]
+        labels = batch["label"]
+        if waveform is None or labels is None or labels.numel() == 0:
+            continue
+        # Keep waveform on CPU (CLAP encoder converts to numpy internally); only labels/logits on GPU.
+        labels = labels.to(device)
         sr = batch["sample_rate"]
 
         optimizer.zero_grad()
@@ -322,8 +353,11 @@ def evaluate(
     all_labels = []
 
     for batch in loader:
-        waveform = batch["waveform"].to(device)
-        labels = batch["label"].to(device)
+        waveform = batch["waveform"]
+        labels = batch["label"]
+        if waveform is None or labels is None or labels.numel() == 0:
+            continue
+        labels = labels.to(device)
         sr = batch["sample_rate"]
 
         logits = model(waveform, sr)
