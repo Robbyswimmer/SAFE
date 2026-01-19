@@ -1536,7 +1536,10 @@ class SAFEModel(nn.Module):
                 if audio_attention_mask is not None:
                     audio_attention_mask = audio_attention_mask.to(inputs_embeds.device)
 
-                language_model = self._resolve_language_model(self.base_vl.llm)
+                # NOTE: Do NOT resolve to a submodule here. We intentionally register hooks
+                # on the top-level HF model (`self.base_vl.llm`) so they fire regardless of
+                # whether the forward path uses `.model` or `.language_model` internally.
+                language_model = self.base_vl.llm
                 fusion_layers = self._resolve_fusion_layers()
                 if not any(fusion_layers.values()):
                     use_midlayer_hooks = False
@@ -1559,7 +1562,7 @@ class SAFEModel(nn.Module):
 
             def run_with_hooks(run_inputs: Dict[str, torch.Tensor]) -> Any:
                 hook_manager = LayerHookManager(
-                    model=language_model,
+                    model=self.base_vl.llm,
                     fusion_adapter=self.fusion_adapter,
                     fusion_layers=fusion_layers,
                     injection_point=self.fusion_injection_point,
