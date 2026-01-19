@@ -25,6 +25,8 @@ BOTTLENECK_DIM=${BOTTLENECK_DIM:-""}
 LORA_RANK=${LORA_RANK:-""}
 NUM_NEGATIVES=${NUM_NEGATIVES:-7}
 TEMPLATE=${TEMPLATE:-"The sound is: {label}."}
+MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
+MAX_TEST_SAMPLES=${MAX_TEST_SAMPLES:-""}
 FP16=${FP16:-1}
 USE_WANDB=${USE_WANDB:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-"SAFE"}
@@ -55,6 +57,8 @@ echo "Bottleneck dim: ${BOTTLENECK_DIM:-'(default)'}"
 echo "LoRA rank: ${LORA_RANK:-'(default)'}"
 echo "Negatives per sample: $NUM_NEGATIVES"
 echo "Template: $TEMPLATE"
+echo "Max train samples: ${MAX_TRAIN_SAMPLES:-'(none)'}"
+echo "Max test samples: ${MAX_TEST_SAMPLES:-'(none)'}"
 echo "FP16: $FP16"
 echo "Load checkpoint: ${LOAD_CHECKPOINT:-'(none)'}"
 echo "Force gate: ${FORCE_GATE:-'(unset)'}"
@@ -115,6 +119,16 @@ if [ -n "$LORA_RANK" ]; then
   LORA_RANK_ARG="--lora-rank $LORA_RANK"
 fi
 
+MAX_TRAIN_ARG=""
+if [ -n "$MAX_TRAIN_SAMPLES" ]; then
+  MAX_TRAIN_ARG="--max-train-samples $MAX_TRAIN_SAMPLES"
+fi
+
+MAX_TEST_ARG=""
+if [ -n "$MAX_TEST_SAMPLES" ]; then
+  MAX_TEST_ARG="--max-test-samples $MAX_TEST_SAMPLES"
+fi
+
 echo "Resolved CLI extras: ${FUSION_INJECTION_ARG} ${FUSION_MODE_ARG} ${BOTTLENECK_ARG} ${BOTTLENECK_DIM_ARG} ${LORA_RANK_ARG} ${CKPT_ARGS} ${FORCE_GATE_ARG} ${FP16_ARG} ${WANDB_ARGS}"
 echo "Running: python train_audio_llm_likelihood.py --data-path \"$DATA_PATH\" --output-dir \"$OUTPUT_DIR\" --batch-size \"$BATCH_SIZE\" --num-epochs \"$NUM_EPOCHS\" --learning-rate \"$LEARNING_RATE\" --model-config \"$MODEL_CONFIG\" --fusion-layer-indices \"$FUSION_LAYER_INDICES\" ${FUSION_INJECTION_ARG} ${FUSION_MODE_ARG} ${BOTTLENECK_ARG} ${BOTTLENECK_DIM_ARG} ${LORA_RANK_ARG} --num-negatives \"$NUM_NEGATIVES\" --template \"$TEMPLATE\" --num-workers 4 --log-interval 10 ${FP16_ARG} ${CKPT_ARGS} ${FORCE_GATE_ARG} ${WANDB_ARGS}"
 
@@ -133,6 +147,8 @@ python train_audio_llm_likelihood.py \
   $LORA_RANK_ARG \
   --num-negatives "$NUM_NEGATIVES" \
   --template "$TEMPLATE" \
+  $MAX_TRAIN_ARG \
+  $MAX_TEST_ARG \
   --num-workers 4 \
   --log-interval 10 \
   $FP16_ARG \

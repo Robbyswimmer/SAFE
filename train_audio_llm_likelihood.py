@@ -448,6 +448,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log-interval", type=int, default=10)
     p.add_argument("--fp16", action="store_true")
+    p.add_argument("--max-train-samples", type=int, default=None, help="If set, train on a fixed subset of this many samples.")
+    p.add_argument("--max-test-samples", type=int, default=None, help="If set, evaluate on a fixed subset of this many samples.")
 
     p.add_argument("--template", type=str, default="The sound is: {label}.")
     p.add_argument("--num-negatives", type=int, default=7, help="Negatives per sample during training.")
@@ -589,6 +591,24 @@ def main() -> None:
 
     train_ds = AVEDataset(args.data_path, split="train")
     test_ds = AVEDataset(args.data_path, split="test")
+    if args.max_train_samples is not None:
+        n = int(args.max_train_samples)
+        n = max(1, min(n, len(train_ds)))
+        rng = random.Random(int(args.seed))
+        indices = list(range(len(train_ds)))
+        rng.shuffle(indices)
+        indices = sorted(indices[:n])
+        train_ds = torch.utils.data.Subset(train_ds, indices)
+        print(f"[Data] Using max_train_samples={n}", flush=True)
+    if args.max_test_samples is not None:
+        n = int(args.max_test_samples)
+        n = max(1, min(n, len(test_ds)))
+        rng = random.Random(int(args.seed) + 1)
+        indices = list(range(len(test_ds)))
+        rng.shuffle(indices)
+        indices = sorted(indices[:n])
+        test_ds = torch.utils.data.Subset(test_ds, indices)
+        print(f"[Data] Using max_test_samples={n}", flush=True)
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
