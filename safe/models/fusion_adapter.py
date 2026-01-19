@@ -482,6 +482,9 @@ class SimpleFusionAdapter(nn.Module):
         num_attention_heads: int = 4,
         attention_dropout: float = 0.1,
         use_tokenwise_gate: bool = False,
+        fusion_mode: str = "residual",
+        film_alpha_scale: float = 0.1,
+        film_beta_scale: float = 0.1,
         use_ffn: bool = True,
         ffn_expansion: float = 2.0,
         use_pre_norm: bool = False,
@@ -492,6 +495,11 @@ class SimpleFusionAdapter(nn.Module):
         self.bottleneck_dim = bottleneck_dim
         self.use_tokenwise_gate = bool(use_tokenwise_gate)
         self.debug_logging = False
+        self.fusion_mode = str(fusion_mode)
+        self.film_alpha_scale = float(film_alpha_scale)
+        self.film_beta_scale = float(film_beta_scale)
+        if self.fusion_mode not in {"residual", "film"}:
+            raise ValueError(f"Unsupported fusion_mode: {self.fusion_mode}")
 
         # Bottleneck cross-attention with optional FFN and pre-norm
         self.cross_attention = BottleneckCrossAttentionBlock(
@@ -507,6 +515,16 @@ class SimpleFusionAdapter(nn.Module):
         # Optional token-wise gating
         if self.use_tokenwise_gate:
             self.token_gate = nn.Linear(hidden_size * 2, 1)
+
+        if self.fusion_mode == "film":
+            # Audio-conditioned affine modulation (FiLM): alpha/beta from pooled audio.
+            self.film_alpha = nn.Linear(hidden_size, hidden_size)
+            self.film_beta = nn.Linear(hidden_size, hidden_size)
+            # Start near identity/no-bias; still yields gradients because tanh'(0)=1.
+            nn.init.zeros_(self.film_alpha.weight)
+            nn.init.zeros_(self.film_alpha.bias)
+            nn.init.zeros_(self.film_beta.weight)
+            nn.init.zeros_(self.film_beta.bias)
 
     def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
         self.debug_logging = bool(enabled)
@@ -543,6 +561,41 @@ class SimpleFusionAdapter(nn.Module):
             print(f"[FUSION FWD] audio_tokens norm: {audio_tokens.norm().item():.2f}", flush=True)
             self._fusion_forward_logged = True
 
+        # Compute per-token gate tensor (B, T, 1) in orig_dtype
+        if self.use_tokenwise_gate:
+            batch_size, seq_len, _ = hidden_states.size()
+            pooled_audio_tok = audio_tokens.mean(dim=1, keepdim=True).expand(-1, seq_len, -1)
+            gate_input = torch.cat([hidden_states, pooled_audio_tok], dim=-1)
+            gate_input = gate_input.to(self.token_gate.weight.dtype)
+            gate_tensor = torch.sigmoid(self.token_gate(gate_input)).to(orig_dtype)
+            if isinstance(gate, torch.Tensor):
+                gate_factor = gate.to(device=gate_tensor.device, dtype=gate_tensor.dtype)
+                while gate_factor.dim() < gate_tensor.dim():
+                    gate_factor = gate_factor.unsqueeze(-1)
+                gate_tensor = gate_tensor * gate_factor
+            else:
+                gate_tensor = gate_tensor * float(gate)
+        else:
+            if isinstance(gate, torch.Tensor):
+                gate_tensor = gate.to(device=hidden_states.device, dtype=orig_dtype)
+                while gate_tensor.dim() < hidden_states.dim():
+                    gate_tensor = gate_tensor.unsqueeze(-1)
+                if gate_tensor.size(-1) != 1:
+                    gate_tensor = gate_tensor[..., :1]
+            else:
+                gate_tensor = torch.tensor(float(gate), device=hidden_states.device, dtype=orig_dtype).view(1, 1, 1)
+                gate_tensor = gate_tensor.expand(hidden_states.size(0), hidden_states.size(1), 1)
+
+        if self.fusion_mode == "film":
+            pooled_audio = audio_tokens.mean(dim=1)  # (B, H)
+            pooled_audio_f = pooled_audio.float()
+            alpha = torch.tanh(self.film_alpha(pooled_audio_f)) * self.film_alpha_scale  # (B, H)
+            beta = self.film_beta(pooled_audio_f) * self.film_beta_scale  # (B, H)
+            alpha = alpha.to(device=hidden_states.device, dtype=orig_dtype).unsqueeze(1)
+            beta = beta.to(device=hidden_states.device, dtype=orig_dtype).unsqueeze(1)
+            output = (1.0 + gate_tensor * alpha) * hidden_states + gate_tensor * beta
+            return output.to(orig_dtype)
+
         # Get cross-attention residual
         delta = self.cross_attention(
             hidden_states=hidden_states,
@@ -556,30 +609,7 @@ class SimpleFusionAdapter(nn.Module):
             print(f"[FUSION FWD] delta norm: {delta.norm().item():.2f}, delta range: [{delta.min().item():.3f}, {delta.max().item():.3f}]", flush=True)
             self._fusion_delta_logged = True
 
-        # Apply gating
-        if self.use_tokenwise_gate:
-            batch_size, seq_len, _ = hidden_states.size()
-            pooled_audio = audio_tokens.mean(dim=1, keepdim=True).expand(-1, seq_len, -1)
-            gate_input = torch.cat([hidden_states, pooled_audio], dim=-1)
-            # Cast to token_gate weight dtype (may be fp32 while input is fp16)
-            gate_input = gate_input.to(self.token_gate.weight.dtype)
-            g = torch.sigmoid(self.token_gate(gate_input))
-            # Cast gate back to original dtype for multiplication
-            g = g.to(orig_dtype)
-            if isinstance(gate, torch.Tensor):
-                g = g * gate.to(g.device, g.dtype).view(-1, 1, 1)
-            else:
-                g = g * float(gate)
-            output = hidden_states + g * delta
-        else:
-            if isinstance(gate, torch.Tensor):
-                gate_tensor = gate.to(hidden_states.device, hidden_states.dtype)
-                while gate_tensor.dim() < delta.dim():
-                    gate_tensor = gate_tensor.unsqueeze(-1)
-                output = hidden_states + gate_tensor * delta
-            else:
-                output = hidden_states + float(gate) * delta
-
+        output = hidden_states + gate_tensor * delta.to(orig_dtype)
         return output.to(orig_dtype)
 
 
@@ -807,6 +837,9 @@ class MultiLayerFusionAdapter(nn.Module):
         use_tokenwise_gate: bool = False,
         use_bottleneck: bool = False,
         bottleneck_dim: int = 32,
+        fusion_mode: str = "residual",
+        film_alpha_scale: float = 0.1,
+        film_beta_scale: float = 0.1,
         use_ffn: bool = True,
         ffn_expansion: float = 2.0,
         use_pre_norm: bool = False,
@@ -819,6 +852,9 @@ class MultiLayerFusionAdapter(nn.Module):
         self.use_tokenwise_gate = bool(use_tokenwise_gate)
         self.use_bottleneck = bool(use_bottleneck)
         self.bottleneck_dim = bottleneck_dim
+        self.fusion_mode = str(fusion_mode)
+        self.film_alpha_scale = float(film_alpha_scale)
+        self.film_beta_scale = float(film_beta_scale)
         self.use_ffn = use_ffn
         self.ffn_expansion = ffn_expansion
         self.use_pre_norm = use_pre_norm
@@ -847,6 +883,9 @@ class MultiLayerFusionAdapter(nn.Module):
                         num_attention_heads=min(num_attention_heads, bottleneck_dim),
                         attention_dropout=attention_dropout,
                         use_tokenwise_gate=self.use_tokenwise_gate,
+                        fusion_mode=self.fusion_mode,
+                        film_alpha_scale=self.film_alpha_scale,
+                        film_beta_scale=self.film_beta_scale,
                         use_ffn=use_ffn,
                         ffn_expansion=ffn_expansion,
                         use_pre_norm=use_pre_norm,

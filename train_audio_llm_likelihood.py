@@ -433,6 +433,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-config", type=str, default="phase1")
     p.add_argument("--fusion-layer-indices", type=str, default="12", help="Comma-separated fusion layers")
     p.add_argument("--fusion-injection-point", type=str, default=None, choices=["pre_ffn", "post_layer"])
+    p.add_argument("--fusion-mode", type=str, default=None, choices=["residual", "film"], help="Fusion update type (bottleneck only).")
     p.add_argument("--use-bottleneck", dest="use_bottleneck", action="store_true", help="Force bottleneck fusion adapters")
     p.add_argument("--no-bottleneck", dest="use_bottleneck", action="store_false", help="Force non-bottleneck (LoRA) fusion adapters")
     p.set_defaults(use_bottleneck=None)
@@ -570,6 +571,10 @@ def main() -> None:
         config.setdefault("fusion_config", {})
         config["fusion_config"]["injection_point"] = str(args.fusion_injection_point)
         print(f"[Config] fusion_injection_point={args.fusion_injection_point}", flush=True)
+    if args.fusion_mode is not None:
+        config.setdefault("fusion_config", {})
+        config["fusion_config"]["fusion_mode"] = str(args.fusion_mode)
+        print(f"[Config] fusion_mode={args.fusion_mode}", flush=True)
     if args.use_bottleneck is not None:
         config.setdefault("fusion_config", {})
         config["fusion_config"]["use_bottleneck"] = bool(args.use_bottleneck)

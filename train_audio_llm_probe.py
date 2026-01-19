@@ -676,6 +676,13 @@ def parse_args() -> argparse.Namespace:
         choices=["pre_ffn", "post_layer"],
         help="Override fusion injection point for hooks (debugging).",
     )
+    p.add_argument(
+        "--fusion-mode",
+        type=str,
+        default=None,
+        choices=["residual", "film"],
+        help="Fusion update type (bottleneck only).",
+    )
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--num-epochs", type=int, default=20)
     p.add_argument("--safe-learning-rate", type=float, default=6e-5, help="LR for projector+fusion")
@@ -738,6 +745,10 @@ def main() -> None:
         config.setdefault("fusion_config", {})
         config["fusion_config"]["injection_point"] = str(args.fusion_injection_point)
         print(f"[Config] fusion_injection_point={args.fusion_injection_point}", flush=True)
+    if args.fusion_mode is not None:
+        config.setdefault("fusion_config", {})
+        config["fusion_config"]["fusion_mode"] = str(args.fusion_mode)
+        print(f"[Config] fusion_mode={args.fusion_mode}", flush=True)
 
     train_ds = AVEDataset(args.data_path, split="train")
     test_ds = AVEDataset(args.data_path, split="test")

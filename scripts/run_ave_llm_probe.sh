@@ -22,6 +22,7 @@ HEAD_LR=${HEAD_LR:-1e-3}
 MODEL_CONFIG=${MODEL_CONFIG:-"phase1"}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-"1"}  # requested: layer 1 to start
 FUSION_INJECTION_POINT=${FUSION_INJECTION_POINT:-""}  # optional: pre_ffn or post_layer
+FUSION_MODE=${FUSION_MODE:-""}  # optional: residual or film
 POOLING=${POOLING:-"last"}
 FP16=${FP16:-1}
 USE_WANDB=${USE_WANDB:-1}
@@ -51,6 +52,7 @@ echo "Head LR: $HEAD_LR"
 echo "Model config: $MODEL_CONFIG"
 echo "Fusion layers: $FUSION_LAYER_INDICES"
 echo "Fusion injection point: ${FUSION_INJECTION_POINT:-'(default)'}"
+echo "Fusion mode: ${FUSION_MODE:-'(default)'}"
 echo "Pooling: $POOLING"
 echo "FP16: $FP16"
 echo "Load checkpoint: ${LOAD_CHECKPOINT:-'(none)'}"
@@ -100,6 +102,11 @@ if [ -n "$FUSION_INJECTION_POINT" ]; then
   FUSION_INJECTION_ARG="--fusion-injection-point $FUSION_INJECTION_POINT"
 fi
 
+FUSION_MODE_ARG=""
+if [ -n "$FUSION_MODE" ]; then
+  FUSION_MODE_ARG="--fusion-mode $FUSION_MODE"
+fi
+
 python train_audio_llm_probe.py \
   --data-path "$DATA_PATH" \
   --output-dir "$OUTPUT_DIR" \
@@ -110,6 +117,7 @@ python train_audio_llm_probe.py \
   --model-config "$MODEL_CONFIG" \
   --fusion-layer-indices "$FUSION_LAYER_INDICES" \
   $FUSION_INJECTION_ARG \
+  $FUSION_MODE_ARG \
   --pooling "$POOLING" \
   --num-workers 4 \
   --log-interval 10 \

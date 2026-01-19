@@ -148,6 +148,9 @@ class SAFEModel(nn.Module):
                 use_tokenwise_gate=fusion_config.get("use_tokenwise_gate", False),
                 use_bottleneck=fusion_config.get("use_bottleneck", False),
                 bottleneck_dim=fusion_config.get("bottleneck_dim", 32),
+                fusion_mode=fusion_config.get("fusion_mode", "residual"),
+                film_alpha_scale=fusion_config.get("film_alpha_scale", 0.1),
+                film_beta_scale=fusion_config.get("film_beta_scale", 0.1),
                 # New architectural options for better gradient flow
                 use_ffn=fusion_config.get("use_ffn", True),
                 ffn_expansion=fusion_config.get("ffn_expansion", 2.0),

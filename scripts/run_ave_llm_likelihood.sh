@@ -19,6 +19,7 @@ LEARNING_RATE=${LEARNING_RATE:-2e-4}
 MODEL_CONFIG=${MODEL_CONFIG:-"phase1"}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-"12"}
 FUSION_INJECTION_POINT=${FUSION_INJECTION_POINT:-""}
+FUSION_MODE=${FUSION_MODE:-""}  # optional: residual or film
 USE_BOTTLENECK=${USE_BOTTLENECK:-""}  # 1/0 to override
 BOTTLENECK_DIM=${BOTTLENECK_DIM:-""}
 LORA_RANK=${LORA_RANK:-""}
@@ -48,6 +49,7 @@ echo "Learning rate: $LEARNING_RATE"
 echo "Model config: $MODEL_CONFIG"
 echo "Fusion layers: $FUSION_LAYER_INDICES"
 echo "Fusion injection point: ${FUSION_INJECTION_POINT:-'(default)'}"
+echo "Fusion mode: ${FUSION_MODE:-'(default)'}"
 echo "Use bottleneck: ${USE_BOTTLENECK:-'(default)'}"
 echo "Bottleneck dim: ${BOTTLENECK_DIM:-'(default)'}"
 echo "LoRA rank: ${LORA_RANK:-'(default)'}"
@@ -91,6 +93,11 @@ if [ -n "$FUSION_INJECTION_POINT" ]; then
   FUSION_INJECTION_ARG="--fusion-injection-point $FUSION_INJECTION_POINT"
 fi
 
+FUSION_MODE_ARG=""
+if [ -n "$FUSION_MODE" ]; then
+  FUSION_MODE_ARG="--fusion-mode $FUSION_MODE"
+fi
+
 BOTTLENECK_ARG=""
 if [ "$USE_BOTTLENECK" = "1" ]; then
   BOTTLENECK_ARG="--use-bottleneck"
@@ -117,6 +124,7 @@ python train_audio_llm_likelihood.py \
   --model-config "$MODEL_CONFIG" \
   --fusion-layer-indices "$FUSION_LAYER_INDICES" \
   $FUSION_INJECTION_ARG \
+  $FUSION_MODE_ARG \
   $BOTTLENECK_ARG \
   $BOTTLENECK_DIM_ARG \
   $LORA_RANK_ARG \
