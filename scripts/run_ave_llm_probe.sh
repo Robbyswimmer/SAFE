@@ -17,6 +17,8 @@ OUTPUT_DIR=${OUTPUT_DIR:-"outputs/ave_llm_probe"}
 BATCH_SIZE=${BATCH_SIZE:-16}
 NUM_EPOCHS=${NUM_EPOCHS:-20}
 LEARNING_RATE=${LEARNING_RATE:-6e-5}
+SAFE_LR=${SAFE_LR:-$LEARNING_RATE}
+HEAD_LR=${HEAD_LR:-1e-3}
 MODEL_CONFIG=${MODEL_CONFIG:-"phase1"}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-"1"}  # requested: layer 1 to start
 FUSION_INJECTION_POINT=${FUSION_INJECTION_POINT:-""}  # optional: pre_ffn or post_layer
@@ -28,6 +30,7 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-"ave-llm-probe-${SLURM_JOB_ID:-local}"}
 LOAD_CHECKPOINT=${LOAD_CHECKPOINT:-""}
 HEAD_ONLY=${HEAD_ONLY:-0}
 FORCE_GATE=${FORCE_GATE:-""}
+HEAD_WARMUP_STEPS=${HEAD_WARMUP_STEPS:-0}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_DIR"
@@ -43,6 +46,8 @@ echo "Output dir: $OUTPUT_DIR"
 echo "Batch size: $BATCH_SIZE"
 echo "Epochs: $NUM_EPOCHS"
 echo "Learning rate: $LEARNING_RATE"
+echo "Safe LR: $SAFE_LR"
+echo "Head LR: $HEAD_LR"
 echo "Model config: $MODEL_CONFIG"
 echo "Fusion layers: $FUSION_LAYER_INDICES"
 echo "Fusion injection point: ${FUSION_INJECTION_POINT:-'(default)'}"
@@ -51,6 +56,7 @@ echo "FP16: $FP16"
 echo "Load checkpoint: ${LOAD_CHECKPOINT:-'(none)'}"
 echo "Head only: $HEAD_ONLY"
 echo "Force gate: ${FORCE_GATE:-'(unset)'}"
+echo "Head warmup steps: $HEAD_WARMUP_STEPS"
 echo "========================================"
 
 # Activate conda if available
@@ -99,7 +105,8 @@ python train_audio_llm_probe.py \
   --output-dir "$OUTPUT_DIR" \
   --batch-size "$BATCH_SIZE" \
   --num-epochs "$NUM_EPOCHS" \
-  --learning-rate "$LEARNING_RATE" \
+  --safe-learning-rate "$SAFE_LR" \
+  --head-learning-rate "$HEAD_LR" \
   --model-config "$MODEL_CONFIG" \
   --fusion-layer-indices "$FUSION_LAYER_INDICES" \
   $FUSION_INJECTION_ARG \
@@ -110,6 +117,7 @@ python train_audio_llm_probe.py \
   $CKPT_ARGS \
   $HEAD_ONLY_ARG \
   $FORCE_GATE_ARG \
+  --head-warmup-steps "$HEAD_WARMUP_STEPS" \
   $WANDB_ARGS
 
 echo "========================================"

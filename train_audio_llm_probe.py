@@ -258,6 +258,12 @@ class SAFELLMProbe(nn.Module):
         params.extend(list(self.head.parameters()))
         return params
 
+    def get_safe_params(self) -> List[nn.Parameter]:
+        return list(self.safe_model.get_trainable_parameters())
+
+    def get_head_params(self) -> List[nn.Parameter]:
+        return list(self.head.parameters())
+
     def forward(
         self,
         audio: List[str],
@@ -399,7 +405,7 @@ class SAFELLMProbe(nn.Module):
         return logits
 
 
-def build_optimizer(params: List[nn.Parameter], lr: float, weight_decay: float) -> torch.optim.Optimizer:
+def _split_decay(params: List[nn.Parameter]) -> Tuple[List[nn.Parameter], List[nn.Parameter]]:
     decay: List[nn.Parameter] = []
     no_decay: List[nn.Parameter] = []
     for p in params:
@@ -409,11 +415,28 @@ def build_optimizer(params: List[nn.Parameter], lr: float, weight_decay: float) 
             no_decay.append(p)
         else:
             decay.append(p)
-    return torch.optim.AdamW(
-        [{"params": decay, "weight_decay": weight_decay}, {"params": no_decay, "weight_decay": 0.0}],
-        lr=lr,
-        betas=(0.9, 0.999),
-    )
+    return decay, no_decay
+
+
+def build_optimizer(
+    model: SAFELLMProbe,
+    safe_lr: float,
+    head_lr: float,
+    safe_weight_decay: float,
+    head_weight_decay: float,
+) -> torch.optim.Optimizer:
+    safe_decay, safe_no_decay = _split_decay(model.get_safe_params())
+    head_decay, head_no_decay = _split_decay(model.get_head_params())
+
+    param_groups = [
+        {"name": "safe_decay", "params": safe_decay, "lr": safe_lr, "weight_decay": safe_weight_decay},
+        {"name": "safe_no_decay", "params": safe_no_decay, "lr": safe_lr, "weight_decay": 0.0},
+        {"name": "head_decay", "params": head_decay, "lr": head_lr, "weight_decay": head_weight_decay},
+        {"name": "head_no_decay", "params": head_no_decay, "lr": head_lr, "weight_decay": 0.0},
+    ]
+    param_groups = [g for g in param_groups if g["params"]]
+
+    return torch.optim.AdamW(param_groups, betas=(0.9, 0.999))
 
 
 def load_safe_checkpoint_into(model: SAFELLMProbe, checkpoint_path: str, device: torch.device) -> None:
@@ -514,6 +537,15 @@ def train_epoch(
         labels = labels.to(device)
         optimizer.zero_grad(set_to_none=True)
 
+        # Optional head-only warmup: freeze SAFE LR for early steps, then restore.
+        if getattr(args, "head_warmup_steps", 0):
+            warmup_steps = int(args.head_warmup_steps)
+            safe_lr = float(args.safe_learning_rate)
+            effective_safe_lr = 0.0 if global_step < warmup_steps else safe_lr
+            for group in optimizer.param_groups:
+                if str(group.get("name", "")).startswith("safe_"):
+                    group["lr"] = effective_safe_lr
+
         with autocast(enabled=args.fp16):
             logits = model(audio=audio, device=device, pooling=args.pooling)
             loss = F.cross_entropy(logits, labels)
@@ -545,6 +577,32 @@ def train_epoch(
                 f"Acc: {total_correct / max(total_seen, 1):.4f} | {sps:.1f} samples/s",
                 flush=True,
             )
+
+            if not hasattr(model, "_grad_logged"):
+                model._grad_logged = True
+                with torch.no_grad():
+                    head_g = 0.0
+                    head_n = 0
+                    for p in model.get_head_params():
+                        if p.grad is not None:
+                            head_g += float(p.grad.float().norm().item()) ** 2
+                            head_n += 1
+                    head_g = head_g ** 0.5 if head_n else 0.0
+
+                    safe_g = 0.0
+                    safe_n = 0
+                    for p in model.get_safe_params():
+                        if p.grad is not None:
+                            safe_g += float(p.grad.float().norm().item()) ** 2
+                            safe_n += 1
+                    safe_g = safe_g ** 0.5 if safe_n else 0.0
+
+                # Report current LRs
+                lr_by_group = {g.get("name", f"g{idx}"): g.get("lr") for idx, g in enumerate(optimizer.param_groups)}
+                print(
+                    f"  [Gradients] head={head_g:.4f} ({head_n}) safe={safe_g:.4f} ({safe_n}) lrs={lr_by_group}",
+                    flush=True,
+                )
 
             if wandb is not None and args.wandb:
                 wandb.log(
@@ -609,8 +667,10 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--num-epochs", type=int, default=20)
-    p.add_argument("--learning-rate", type=float, default=6e-5)
-    p.add_argument("--weight-decay", type=float, default=0.01)
+    p.add_argument("--safe-learning-rate", type=float, default=6e-5, help="LR for projector+fusion")
+    p.add_argument("--head-learning-rate", type=float, default=1e-3, help="LR for linear probe head")
+    p.add_argument("--safe-weight-decay", type=float, default=0.01)
+    p.add_argument("--head-weight-decay", type=float, default=0.0)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
     p.add_argument("--pooling", type=str, default="last", choices=["last", "mean"])
     p.add_argument("--fp16", action="store_true")
@@ -642,6 +702,12 @@ def parse_args() -> argparse.Namespace:
         "--head-only",
         action="store_true",
         help="Freeze projector+fusion and train only the linear head.",
+    )
+    p.add_argument(
+        "--head-warmup-steps",
+        type=int,
+        default=0,
+        help="If >0, train head-only for this many optimizer steps (SAFE LR=0), then unfreeze SAFE LR.",
     )
     return p.parse_args()
 
@@ -691,7 +757,13 @@ def main() -> None:
         print("[Mode] head-only: freezing SAFE trainables (projector+fusion)", flush=True)
         model.freeze_safe(True)
 
-    optimizer = build_optimizer(model.get_trainable_params(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    optimizer = build_optimizer(
+        model=model,
+        safe_lr=float(args.safe_learning_rate),
+        head_lr=float(args.head_learning_rate),
+        safe_weight_decay=float(args.safe_weight_decay),
+        head_weight_decay=float(args.head_weight_decay),
+    )
     scaler = GradScaler() if args.fp16 else None
 
     if args.wandb and wandb is not None:
