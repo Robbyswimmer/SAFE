@@ -127,56 +127,64 @@ class SAFEModel(nn.Module):
         sys.stdout.flush()
         
         # Initialize fusion adapter
-        print(f"[SAFE] Initializing fusion adapter ({fusion_type})...", flush=True)
-        sys.stdout.flush()
+        # Check if using KV augmentation mode (handled separately)
         fusion_config = fusion_config or {}
-        if fusion_type == "lora":
-            self.fusion_adapter = LoRAFusionAdapter(
-                hidden_size=llm_hidden_size,
-                num_attention_heads=fusion_config.get("num_attention_heads", 8),
-                lora_rank=lora_rank,
-                lora_alpha=fusion_config.get("lora_alpha", 16.0),
-                lora_dropout=fusion_config.get("lora_dropout", 0.0),
-                attention_dropout=fusion_config.get("attention_dropout", 0.1),
-                target_modules=fusion_config.get("target_modules", None),
-            )
-        elif fusion_type == "multilayer":
-            self.fusion_adapter = MultiLayerFusionAdapter(
-                hidden_size=llm_hidden_size,
-                fusion_layer_indices=fusion_layer_indices,
-                lora_rank=lora_rank,
-                num_attention_heads=fusion_config.get("num_attention_heads", 8),
-                lora_alpha=fusion_config.get("lora_alpha", 16.0),
-                lora_dropout=fusion_config.get("lora_dropout", 0.1),
-                attention_dropout=fusion_config.get("attention_dropout", 0.1),
-                modalities=fusion_config.get("modalities", None),
-                use_tokenwise_gate=fusion_config.get("use_tokenwise_gate", False),
-                use_bottleneck=fusion_config.get("use_bottleneck", False),
-                bottleneck_dim=fusion_config.get("bottleneck_dim", 32),
-                fusion_mode=fusion_config.get("fusion_mode", "residual"),
-                film_alpha_scale=fusion_config.get("film_alpha_scale", 0.1),
-                film_beta_scale=fusion_config.get("film_beta_scale", 0.1),
-                # New architectural options for better gradient flow
-                use_ffn=fusion_config.get("use_ffn", True),
-                ffn_expansion=fusion_config.get("ffn_expansion", 2.0),
-                use_pre_norm=fusion_config.get("use_pre_norm", False),
-            )
-        elif fusion_type == "gated":
-            self.fusion_adapter = GatedFusionAdapter(
-                hidden_size=llm_hidden_size,
-                num_attention_heads=fusion_config.get("num_attention_heads", 8),
-                lora_rank=lora_rank,
-                lora_alpha=fusion_config.get("lora_alpha", 16.0),
-                lora_dropout=fusion_config.get("lora_dropout", 0.1),
-                attention_dropout=fusion_config.get("attention_dropout", 0.1),
-                target_modules=fusion_config.get("target_modules", None),
-            )
-        else:
-            raise ValueError(f"Unsupported fusion type: {fusion_type}")
-        print(f"[SAFE] ✓ Fusion adapter initialized", flush=True)
-        sys.stdout.flush()
+        is_kv_augment = fusion_config.get("fusion_mode") == "kv_augment"
 
-        self.enable_midlayer_fusion = (fusion_type == "multilayer")
+        if is_kv_augment:
+            # KV augmentation uses its own adapters, create a dummy fusion_adapter for compatibility
+            print(f"[SAFE] Using KV Augmentation mode - skipping traditional fusion adapter", flush=True)
+            self.fusion_adapter = None
+        else:
+            print(f"[SAFE] Initializing fusion adapter ({fusion_type})...", flush=True)
+            sys.stdout.flush()
+            if fusion_type == "lora":
+                self.fusion_adapter = LoRAFusionAdapter(
+                    hidden_size=llm_hidden_size,
+                    num_attention_heads=fusion_config.get("num_attention_heads", 8),
+                    lora_rank=lora_rank,
+                    lora_alpha=fusion_config.get("lora_alpha", 16.0),
+                    lora_dropout=fusion_config.get("lora_dropout", 0.0),
+                    attention_dropout=fusion_config.get("attention_dropout", 0.1),
+                    target_modules=fusion_config.get("target_modules", None),
+                )
+            elif fusion_type == "multilayer":
+                self.fusion_adapter = MultiLayerFusionAdapter(
+                    hidden_size=llm_hidden_size,
+                    fusion_layer_indices=fusion_layer_indices,
+                    lora_rank=lora_rank,
+                    num_attention_heads=fusion_config.get("num_attention_heads", 8),
+                    lora_alpha=fusion_config.get("lora_alpha", 16.0),
+                    lora_dropout=fusion_config.get("lora_dropout", 0.1),
+                    attention_dropout=fusion_config.get("attention_dropout", 0.1),
+                    modalities=fusion_config.get("modalities", None),
+                    use_tokenwise_gate=fusion_config.get("use_tokenwise_gate", False),
+                    use_bottleneck=fusion_config.get("use_bottleneck", False),
+                    bottleneck_dim=fusion_config.get("bottleneck_dim", 32),
+                    fusion_mode=fusion_config.get("fusion_mode", "residual"),
+                    film_alpha_scale=fusion_config.get("film_alpha_scale", 0.1),
+                    film_beta_scale=fusion_config.get("film_beta_scale", 0.1),
+                    # New architectural options for better gradient flow
+                    use_ffn=fusion_config.get("use_ffn", True),
+                    ffn_expansion=fusion_config.get("ffn_expansion", 2.0),
+                    use_pre_norm=fusion_config.get("use_pre_norm", False),
+                )
+            elif fusion_type == "gated":
+                self.fusion_adapter = GatedFusionAdapter(
+                    hidden_size=llm_hidden_size,
+                    num_attention_heads=fusion_config.get("num_attention_heads", 8),
+                    lora_rank=lora_rank,
+                    lora_alpha=fusion_config.get("lora_alpha", 16.0),
+                    lora_dropout=fusion_config.get("lora_dropout", 0.1),
+                    attention_dropout=fusion_config.get("attention_dropout", 0.1),
+                    target_modules=fusion_config.get("target_modules", None),
+                )
+            else:
+                raise ValueError(f"Unsupported fusion type: {fusion_type}")
+            print(f"[SAFE] ✓ Fusion adapter initialized", flush=True)
+            sys.stdout.flush()
+
+        self.enable_midlayer_fusion = (fusion_type == "multilayer") and not is_kv_augment
 
         # Fusion injection point: "post_layer" (layer output, default) or
         # "pre_ffn" (before FFN within each decoder layer).
@@ -1581,6 +1589,7 @@ class SAFEModel(nn.Module):
                 audio_tokens is not None
                 and gate_scalar > 0.0
                 and self.enable_midlayer_fusion
+                and self.fusion_adapter is not None
                 and hasattr(self.fusion_adapter, "apply_fusion_at_layer")
             )
 
@@ -2094,7 +2103,15 @@ class SAFEModel(nn.Module):
                 audio_tokens is not None
                 and gate_scalar > 0.0
                 and self.enable_midlayer_fusion
+                and self.fusion_adapter is not None
                 and hasattr(self.fusion_adapter, "apply_fusion_at_layer")
+            )
+
+            # Check for KV augmentation mode in generate
+            use_kv_augmentation_gen = (
+                self.enable_kv_augmentation
+                and audio_tokens is not None
+                and gate_scalar > 0.0
             )
 
             # Debug: log generation fusion state (once)
@@ -2102,7 +2119,8 @@ class SAFEModel(nn.Module):
                 print(f"[GEN FUSION DEBUG] audio_tokens is not None: {audio_tokens is not None}", flush=True)
                 print(f"[GEN FUSION DEBUG] gate_scalar: {gate_scalar}", flush=True)
                 print(f"[GEN FUSION DEBUG] enable_midlayer_fusion: {self.enable_midlayer_fusion}", flush=True)
-                print(f"[GEN FUSION DEBUG] has apply_fusion_at_layer: {hasattr(self.fusion_adapter, 'apply_fusion_at_layer')}", flush=True)
+                print(f"[GEN FUSION DEBUG] enable_kv_augmentation: {self.enable_kv_augmentation}", flush=True)
+                print(f"[GEN FUSION DEBUG] has apply_fusion_at_layer: {self.fusion_adapter is not None and hasattr(self.fusion_adapter, 'apply_fusion_at_layer')}", flush=True)
                 print(f"[GEN FUSION DEBUG] use_midlayer_hooks: {use_midlayer_hooks}", flush=True)
                 self._gen_fusion_logged = True
 
@@ -2136,6 +2154,33 @@ class SAFEModel(nn.Module):
                 if audio_attention_mask is not None:
                     audio_attention_mask = audio_attention_mask.to(embeds.device)
 
+            # KV Augmentation path for generate
+            if use_kv_augmentation_gen:
+                # Create hook manager if not exists
+                if self.kv_hook_manager is None:
+                    self.kv_hook_manager = KVAugmentationHookManager(
+                        model=self.base_vl.llm,
+                        kv_adapters=self.kv_adapters,
+                        fusion_layer_indices=self._kv_fusion_layers,
+                    )
+
+                # Ensure audio tokens are on correct device
+                audio_tokens = audio_tokens.to(device=embeds.device, dtype=base_dtype)
+                audio_attn = audio_attention_mask.to(embeds.device) if audio_attention_mask is not None else None
+
+                # Wrap attention modules
+                self.kv_hook_manager.wrap_attention_modules()
+                self.kv_hook_manager.inject_audio(
+                    audio_tokens=audio_tokens,
+                    audio_mask=audio_attn,
+                    gate=float(effective_gate) if not torch.is_tensor(effective_gate) else effective_gate.mean().item(),
+                )
+                try:
+                    return self.base_vl.llm.generate(**base_inputs)
+                finally:
+                    self.kv_hook_manager.clear_audio()
+                    self.kv_hook_manager.unwrap_attention_modules()
+
             if use_midlayer_hooks:
                 hook_manager = LayerHookManager(
                     model=language_model,
@@ -2153,7 +2198,7 @@ class SAFEModel(nn.Module):
                 finally:
                     hook_manager.remove_hooks()
 
-            if audio_tokens is not None and gate_scalar > 0.0 and not self.enable_midlayer_fusion:
+            if audio_tokens is not None and gate_scalar > 0.0 and not self.enable_midlayer_fusion and self.fusion_adapter is not None:
                 fused_embeds = self.fusion_adapter(
                     hidden_states=embeds,
                     audio_tokens=audio_tokens,
