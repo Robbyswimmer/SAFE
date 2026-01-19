@@ -7,6 +7,11 @@ from .audio_encoders import CLAPAudioEncoder, WhisperAudioEncoder, MultiModalAud
 from .projectors import AudioProjector, AdaptiveAudioProjector
 from .fusion_adapter import LoRAFusionAdapter, MultiLayerFusionAdapter, GatedFusionAdapter
 from .layer_hooks import LayerHookManager
+from .kv_augmentation import (
+    KVAugmentationAdapter,
+    KVAugmentationHookManager,
+    MinAudioAttentionLoss,
+)
 
 
 class SAFEModel(nn.Module):
@@ -176,6 +181,45 @@ class SAFEModel(nn.Module):
         # Fusion injection point: "post_layer" (layer output, default) or
         # "pre_ffn" (before FFN within each decoder layer).
         self.fusion_injection_point = fusion_config.get("injection_point", "post_layer")
+
+        # KV Augmentation: inject audio as additional K,V in self-attention
+        # This makes audio "un-ignorable" by the frozen LLM
+        self.fusion_mode = fusion_config.get("fusion_mode", "residual")
+        self.enable_kv_augmentation = (self.fusion_mode == "kv_augment")
+        self.kv_adapters = None
+        self.kv_hook_manager = None
+        self.min_audio_attention_loss = None
+
+        if self.enable_kv_augmentation:
+            print(f"[SAFE] Initializing KV Augmentation adapters...", flush=True)
+            # Get fusion layer indices
+            kv_fusion_layers = fusion_layer_indices or [12, 24, 36]
+
+            # Create per-layer KV adapters
+            self.kv_adapters = nn.ModuleDict({
+                str(idx): KVAugmentationAdapter(
+                    hidden_size=llm_hidden_size,
+                    num_heads=fusion_config.get("num_attention_heads", 40),
+                    head_dim=fusion_config.get("head_dim", 128),
+                    bottleneck_dim=fusion_config.get("bottleneck_dim", 64),
+                    dropout=fusion_config.get("dropout", 0.1),
+                    use_bottleneck=fusion_config.get("use_bottleneck", True),
+                )
+                for idx in kv_fusion_layers
+            })
+            self._kv_fusion_layers = kv_fusion_layers
+
+            # Minimum attention regularization
+            min_audio_attn = fusion_config.get("min_audio_attention", 0.0)
+            if min_audio_attn > 0:
+                self.min_audio_attention_loss = MinAudioAttentionLoss(
+                    min_attention=min_audio_attn,
+                    loss_weight=fusion_config.get("min_audio_attention_weight", 0.1),
+                )
+                print(f"[SAFE] ✓ Min audio attention regularization enabled (ε={min_audio_attn})", flush=True)
+
+            print(f"[SAFE] ✓ KV Augmentation adapters initialized at layers {kv_fusion_layers}", flush=True)
+            sys.stdout.flush()
 
         # Special tokens for audio
         self.audio_start_token = "<audio>"
@@ -1445,6 +1489,22 @@ class SAFEModel(nn.Module):
             # Ensure inputs_embeds matches base dtype
             inputs_embeds = inputs_embeds.to(base_dtype)
 
+            # IMPORTANT: HuggingFace gradient checkpointing requires at least one input
+            # tensor with requires_grad=True; otherwise it will skip building an autograd
+            # graph and downstream trainable modules (e.g., fusion adapters injected via
+            # hooks) will not receive gradients.
+            #
+            # When the base LLM and embeddings are frozen, inputs_embeds will not require
+            # grad by default, so we force it on when gradient checkpointing is enabled.
+            try:
+                llm_gc = getattr(self.base_vl.llm, "is_gradient_checkpointing", False) or getattr(
+                    self.base_vl.llm, "gradient_checkpointing", False
+                )
+                if self.training and llm_gc and not inputs_embeds.requires_grad:
+                    inputs_embeds.requires_grad_(True)
+            except Exception:
+                pass
+
             # If audio_attention_mask marks a sample as silent, we must ensure
             # audio fusion is a true bypass for that sample. We do this by
             # zeroing the fusion gate for silent rows (all audio tokens masked).
@@ -1599,6 +1659,69 @@ class SAFEModel(nn.Module):
                     run_inputs = updated_inputs
                 return self.base_vl.llm(**run_inputs)
 
+            def run_with_kv_augmentation(run_inputs: Dict[str, torch.Tensor]) -> Tuple[Any, Optional[torch.Tensor]]:
+                """
+                Run forward pass with KV augmentation.
+
+                Audio tokens are injected as additional K,V in self-attention
+                at the specified fusion layers.
+                """
+                # Create hook manager if not exists
+                if self.kv_hook_manager is None:
+                    self.kv_hook_manager = KVAugmentationHookManager(
+                        model=self.base_vl.llm,
+                        kv_adapters=self.kv_adapters,
+                        fusion_layer_indices=self._kv_fusion_layers,
+                    )
+
+                # Wrap attention modules
+                self.kv_hook_manager.wrap_attention_modules()
+
+                # Inject audio tokens
+                self.kv_hook_manager.inject_audio(
+                    audio_tokens=audio_tokens,
+                    audio_mask=audio_attention_mask,
+                    gate=float(effective_gate) if not torch.is_tensor(effective_gate) else effective_gate.mean().item(),
+                )
+
+                # Enable attention weight capture if regularization is active
+                compute_attn_loss = (
+                    self.training
+                    and self.min_audio_attention_loss is not None
+                )
+                if compute_attn_loss:
+                    self.kv_hook_manager.set_return_attention_weights(True)
+
+                try:
+                    outputs = self.base_vl.llm(**run_inputs)
+
+                    # Compute attention regularization loss if enabled
+                    attn_reg_loss = None
+                    if compute_attn_loss:
+                        attn_weights = self.kv_hook_manager.get_attention_weights()
+                        if attn_weights:
+                            n_audio = audio_tokens.size(1)
+                            attn_reg_loss = self.min_audio_attention_loss(
+                                attention_weights=attn_weights,
+                                n_audio=n_audio,
+                                supervised_mask=supervised_mask,
+                            )
+
+                    return outputs, attn_reg_loss
+                finally:
+                    # Always clean up
+                    self.kv_hook_manager.clear_audio()
+                    self.kv_hook_manager.unwrap_attention_modules()
+                    if compute_attn_loss:
+                        self.kv_hook_manager.set_return_attention_weights(False)
+
+            # Determine which fusion mode to use
+            use_kv_augmentation = (
+                self.enable_kv_augmentation
+                and audio_tokens is not None
+                and gate_scalar > 0.0
+            )
+
             import sys
             sys.stdout.flush()
 
@@ -1635,8 +1758,12 @@ class SAFEModel(nn.Module):
                 except Exception:
                     hook_handle = None
 
+            attn_reg_loss = None
             try:
-                if use_midlayer_hooks:
+                if use_kv_augmentation:
+                    # KV Augmentation path: inject audio as additional K,V
+                    outputs, attn_reg_loss = run_with_kv_augmentation(model_inputs)
+                elif use_midlayer_hooks:
                     outputs = run_with_hooks(model_inputs)
                 else:
                     outputs = run_without_hooks(model_inputs)
@@ -1652,7 +1779,9 @@ class SAFEModel(nn.Module):
                     )
                     retry_inputs = dict(model_inputs)
                     retry_inputs.pop("pixel_values", None)
-                    if use_midlayer_hooks:
+                    if use_kv_augmentation:
+                        outputs, attn_reg_loss = run_with_kv_augmentation(retry_inputs)
+                    elif use_midlayer_hooks:
                         outputs = run_with_hooks(retry_inputs)
                     else:
                         outputs = run_without_hooks(retry_inputs)
@@ -1661,12 +1790,16 @@ class SAFEModel(nn.Module):
             logits = outputs.logits
             loss = outputs.loss if labels is not None else None
 
+            # Add attention regularization loss if computed
+            if attn_reg_loss is not None and loss is not None:
+                loss = loss + attn_reg_loss
+
             if hook_handle is not None:
                 try:
                     hook_handle.remove()
                 except Exception:
                     pass
-            return {"logits": logits, "loss": loss, "hidden_states": None}
+            return {"logits": logits, "loss": loss, "hidden_states": None, "attn_reg_loss": attn_reg_loss}
         
         resolved_input_ids = input_ids if input_ids is not None else kwargs.pop("input_ids", None)
         inputs_embeds_kw = kwargs.pop("inputs_embeds", None)

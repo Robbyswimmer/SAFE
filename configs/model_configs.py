@@ -261,12 +261,88 @@ PHASE1_CONFIG = {
     "gradient_accumulation_steps": 16  # Target effective batch size of 128
 }
 
+# KV Augmentation Configuration
+# Audio tokens are injected as additional K,V in LLM self-attention
+# This makes audio "un-ignorable" by the frozen LLM
+KV_AUGMENT_CONFIG = {
+    "name": "kv_augment",
+    "description": "KV Augmentation - audio injected into LLM self-attention as additional K,V",
+
+    # Base VL Model - LLaVA 13B
+    "llm_model_name": "llava-hf/llava-1.5-13b-hf",
+    "vision_model_name": "openai/clip-vit-large-patch14",
+
+    # Audio configuration
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0
+    },
+
+    # Model dimensions
+    "llm_hidden_size": 5120,
+    "audio_embed_dim": 512,
+    "vision_embed_dim": 1024,
+
+    # Projector configuration
+    "projector_type": "standard",
+    "num_audio_tokens": 8,  # Fewer tokens for classification
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    # Fusion configuration - KV AUGMENTATION MODE
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [12, 24, 36],  # Mid/late layers
+    "lora_rank": 8,  # Not used in kv_augment mode but kept for compatibility
+    "fusion_config": {
+        # KEY: Enable KV augmentation mode
+        "fusion_mode": "kv_augment",
+
+        # LLaVA 13B attention configuration
+        "num_attention_heads": 40,
+        "head_dim": 128,
+
+        # Bottleneck for K,V projections (reduces params)
+        "bottleneck_dim": 64,
+        "use_bottleneck": True,
+        "dropout": 0.1,
+
+        # Minimum attention regularization (ensures audio is attended to)
+        "min_audio_attention": 0.01,  # Answer tokens must attend to audio ≥1%
+        "min_audio_attention_weight": 0.1,  # Weight of regularization loss
+
+        # Modality configuration (for compatibility with existing code)
+        "modalities": {
+            "audio": {
+                "layer_indices": [12, 24, 36],
+                "num_tokens": 8
+            }
+        },
+    },
+
+    # Training configuration
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+
+    # Memory and compute
+    "expected_vram_gb": 35,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 8
+}
+
 # Available configurations
 CONFIGS = {
     "demo": DEMO_CONFIG,
     "full": FULL_CONFIG,
     "multimodal": MULTIMODAL_CONFIG,
-    "phase1": PHASE1_CONFIG
+    "phase1": PHASE1_CONFIG,
+    "kv_augment": KV_AUGMENT_CONFIG,
 }
 
 def get_config(config_name: str):
