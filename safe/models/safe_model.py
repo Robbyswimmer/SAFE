@@ -1596,6 +1596,45 @@ class SAFEModel(nn.Module):
             import sys
             sys.stdout.flush()
 
+            # If hidden states are requested, capture the last layer output via a hook.
+            # This is robust to HF wrappers that ignore output_hidden_states flags.
+            wants_hidden = bool(filtered_kwargs.get("output_hidden_states", False))
+            hidden_capture: Dict[str, Optional[torch.Tensor]] = {"last": None}
+            hook_handle = None
+            if wants_hidden:
+                try:
+                    # Ensure we have the resolved language model module.
+                    if language_model is None:
+                        language_model = self._resolve_language_model(self.base_vl.llm)
+
+                    candidate = None
+                    if hasattr(language_model, "model") and hasattr(language_model.model, "layers"):
+                        layers = getattr(language_model.model, "layers", None)
+                        if isinstance(layers, (list, torch.nn.ModuleList)) and len(layers) > 0:
+                            candidate = layers[-1]
+                    if candidate is None and hasattr(language_model, "layers"):
+                        layers = getattr(language_model, "layers", None)
+                        if isinstance(layers, (list, torch.nn.ModuleList)) and len(layers) > 0:
+                            candidate = layers[-1]
+                    if candidate is None and hasattr(language_model, "transformer") and hasattr(language_model.transformer, "h"):
+                        layers = getattr(language_model.transformer, "h", None)
+                        if isinstance(layers, (list, torch.nn.ModuleList)) and len(layers) > 0:
+                            candidate = layers[-1]
+
+                    if candidate is not None:
+                        def _capture_hook(_module, _inputs, output):
+                            try:
+                                if torch.is_tensor(output):
+                                    hidden_capture["last"] = output
+                                elif isinstance(output, (tuple, list)) and len(output) > 0 and torch.is_tensor(output[0]):
+                                    hidden_capture["last"] = output[0]
+                            except Exception:
+                                hidden_capture["last"] = None
+
+                        hook_handle = candidate.register_forward_hook(_capture_hook)
+                except Exception:
+                    hook_handle = None
+
             try:
                 if use_midlayer_hooks:
                     outputs = run_with_hooks(model_inputs)
@@ -1621,6 +1660,12 @@ class SAFEModel(nn.Module):
                     raise
             logits = outputs.logits
             loss = outputs.loss if labels is not None else None
+
+            if hook_handle is not None:
+                try:
+                    hook_handle.remove()
+                except Exception:
+                    pass
             return {"logits": logits, "loss": loss, "hidden_states": None}
         
         resolved_input_ids = input_ids if input_ids is not None else kwargs.pop("input_ids", None)
@@ -1767,6 +1812,10 @@ class SAFEModel(nn.Module):
                     lhs = getattr(outputs, "last_hidden_state", None)
                     if torch.is_tensor(lhs):
                         hidden_state_out = lhs
+            if hidden_state_out is None and 'hidden_capture' in locals():
+                cap = hidden_capture.get("last")
+                if torch.is_tensor(cap):
+                    hidden_state_out = cap
         except Exception:
             hidden_state_out = None
 
