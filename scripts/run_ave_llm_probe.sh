@@ -24,6 +24,9 @@ FP16=${FP16:-1}
 USE_WANDB=${USE_WANDB:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-"SAFE"}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-"ave-llm-probe-${SLURM_JOB_ID:-local}"}
+LOAD_CHECKPOINT=${LOAD_CHECKPOINT:-""}
+HEAD_ONLY=${HEAD_ONLY:-0}
+FORCE_GATE=${FORCE_GATE:-""}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_DIR"
@@ -43,6 +46,9 @@ echo "Model config: $MODEL_CONFIG"
 echo "Fusion layers: $FUSION_LAYER_INDICES"
 echo "Pooling: $POOLING"
 echo "FP16: $FP16"
+echo "Load checkpoint: ${LOAD_CHECKPOINT:-'(none)'}"
+echo "Head only: $HEAD_ONLY"
+echo "Force gate: ${FORCE_GATE:-'(unset)'}"
 echo "========================================"
 
 # Activate conda if available
@@ -66,6 +72,21 @@ if [ "$FP16" = "1" ]; then
   FP16_ARG="--fp16"
 fi
 
+CKPT_ARGS=""
+if [ -n "$LOAD_CHECKPOINT" ]; then
+  CKPT_ARGS="--load-checkpoint $LOAD_CHECKPOINT"
+fi
+
+HEAD_ONLY_ARG=""
+if [ "$HEAD_ONLY" = "1" ]; then
+  HEAD_ONLY_ARG="--head-only"
+fi
+
+FORCE_GATE_ARG=""
+if [ -n "$FORCE_GATE" ]; then
+  FORCE_GATE_ARG="--force-gate $FORCE_GATE"
+fi
+
 python train_audio_llm_probe.py \
   --data-path "$DATA_PATH" \
   --output-dir "$OUTPUT_DIR" \
@@ -78,9 +99,11 @@ python train_audio_llm_probe.py \
   --num-workers 4 \
   --log-interval 10 \
   $FP16_ARG \
+  $CKPT_ARGS \
+  $HEAD_ONLY_ARG \
+  $FORCE_GATE_ARG \
   $WANDB_ARGS
 
 echo "========================================"
 echo "Finished: $(date)"
 echo "========================================"
-

@@ -248,6 +248,11 @@ class SAFELLMProbe(nn.Module):
         except Exception:
             pass
 
+    def freeze_safe(self, freeze: bool = True) -> None:
+        """Freeze/unfreeze SAFE trainable components (projector + fusion)."""
+        for p in self.safe_model.get_trainable_parameters():
+            p.requires_grad = not freeze
+
     def get_trainable_params(self) -> List[nn.Parameter]:
         params = list(self.safe_model.get_trainable_parameters())
         params.extend(list(self.head.parameters()))
@@ -394,6 +399,41 @@ def build_optimizer(params: List[nn.Parameter], lr: float, weight_decay: float) 
     )
 
 
+def load_safe_checkpoint_into(model: SAFELLMProbe, checkpoint_path: str, device: torch.device) -> None:
+    ckpt = torch.load(checkpoint_path, map_location=device)
+    if isinstance(ckpt, dict):
+        if "model_state_dict" in ckpt:
+            state_dict = ckpt["model_state_dict"]
+        elif "state_dict" in ckpt:
+            state_dict = ckpt["state_dict"]
+        else:
+            state_dict = ckpt
+    else:
+        state_dict = ckpt
+
+    # Try loading directly into SAFEModel inside the probe.
+    adapted: Dict[str, torch.Tensor] = {}
+    skipped = 0
+    safe_sd = model.safe_model.state_dict()
+    for k, v in state_dict.items():
+        key = k
+        if key.startswith("module."):
+            key = key[len("module.") :]
+        if key in safe_sd:
+            adapted[key] = v
+        else:
+            skipped += 1
+
+    missing, unexpected = model.safe_model.load_state_dict(adapted, strict=False)
+    print(f"[Checkpoint] Loaded {len(adapted)} tensors into SAFEModel", flush=True)
+    if skipped:
+        print(f"[Checkpoint] Skipped {skipped} tensors (not in SAFEModel)", flush=True)
+    if missing:
+        print(f"[Checkpoint] Missing {len(missing)} keys (first 5): {missing[:5]}", flush=True)
+    if unexpected:
+        print(f"[Checkpoint] Unexpected {len(unexpected)} keys (first 5): {unexpected[:5]}", flush=True)
+
+
 def train_epoch(
     model: SAFELLMProbe,
     loader: DataLoader,
@@ -418,7 +458,12 @@ def train_epoch(
             continue
 
         # Warmups
-        if args.gate_warmup_steps > 0:
+        if args.force_gate is not None:
+            try:
+                model.safe_model.set_gate(float(args.force_gate))
+            except Exception:
+                pass
+        elif args.gate_warmup_steps > 0:
             warmup_steps = max(1, int(args.gate_warmup_steps))
             progress = min(1.0, float(global_step) / float(warmup_steps))
             gate = float(args.gate_warmup_start) + (1.0 - float(args.gate_warmup_start)) * progress
@@ -506,7 +551,10 @@ def evaluate(
     args: argparse.Namespace,
 ) -> Dict[str, float]:
     model.eval()
-    model.safe_model.set_gate(1.0)
+    if args.force_gate is not None:
+        model.safe_model.set_gate(float(args.force_gate))
+    else:
+        model.safe_model.set_gate(1.0)
 
     total_loss = 0.0
     total_correct = 0
@@ -545,6 +593,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log-interval", type=int, default=10)
+    p.add_argument(
+        "--force-gate",
+        type=float,
+        default=None,
+        help="If set, override SAFE fusion gate to this constant (disables gate warmup).",
+    )
 
     # Warmups (enabled by default)
     p.add_argument("--gate-warmup-steps", type=int, default=500)
@@ -559,6 +613,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", type=str, default="SAFE")
     p.add_argument("--wandb-run-name", type=str, default=None)
+    p.add_argument("--load-checkpoint", type=str, default=None, help="Load a SAFE checkpoint (e.g., from train_safe.py)")
+    p.add_argument(
+        "--head-only",
+        action="store_true",
+        help="Freeze projector+fusion and train only the linear head.",
+    )
     return p.parse_args()
 
 
@@ -594,6 +654,15 @@ def main() -> None:
     )
 
     model = SAFELLMProbe(config=config, num_classes=len(AVE_CATEGORIES)).to(device)
+
+    if args.load_checkpoint:
+        print(f"[Checkpoint] Loading: {args.load_checkpoint}", flush=True)
+        load_safe_checkpoint_into(model, args.load_checkpoint, device=device)
+
+    if args.head_only:
+        print("[Mode] head-only: freezing SAFE trainables (projector+fusion)", flush=True)
+        model.freeze_safe(True)
+
     optimizer = build_optimizer(model.get_trainable_params(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scaler = GradScaler() if args.fp16 else None
 
