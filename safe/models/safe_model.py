@@ -302,26 +302,27 @@ class SAFEModel(nn.Module):
             progress = epoch / warmup_epochs
             target_scale = start_scale + (end_scale - start_scale) * progress
 
-        # Apply to fusion adapter's cross-attention blocks
-        if hasattr(self.fusion_adapter, 'fusion_adapters'):
-            # MultiLayerFusionAdapter
-            for adapter in self.fusion_adapter.fusion_adapters.values():
-                if hasattr(adapter, 'cross_attention'):
-                    ca = adapter.cross_attention
-                    # Handle PEFT-wrapped models
-                    if hasattr(ca, 'base_model'):
-                        ca = ca.base_model
-                    if hasattr(ca, 'residual_scale'):
-                        with torch.no_grad():
-                            ca.residual_scale.fill_(target_scale)
-        elif hasattr(self.fusion_adapter, 'cross_attention'):
-            # Single adapter (LoRAFusionAdapter or SimpleFusionAdapter)
-            ca = self.fusion_adapter.cross_attention
-            if hasattr(ca, 'base_model'):
-                ca = ca.base_model
-            if hasattr(ca, 'residual_scale'):
-                with torch.no_grad():
-                    ca.residual_scale.fill_(target_scale)
+        # Apply to fusion adapter's cross-attention blocks (skip if using KV augmentation)
+        if self.fusion_adapter is not None:
+            if hasattr(self.fusion_adapter, 'fusion_adapters'):
+                # MultiLayerFusionAdapter
+                for adapter in self.fusion_adapter.fusion_adapters.values():
+                    if hasattr(adapter, 'cross_attention'):
+                        ca = adapter.cross_attention
+                        # Handle PEFT-wrapped models
+                        if hasattr(ca, 'base_model'):
+                            ca = ca.base_model
+                        if hasattr(ca, 'residual_scale'):
+                            with torch.no_grad():
+                                ca.residual_scale.fill_(target_scale)
+            elif hasattr(self.fusion_adapter, 'cross_attention'):
+                # Single adapter (LoRAFusionAdapter or SimpleFusionAdapter)
+                ca = self.fusion_adapter.cross_attention
+                if hasattr(ca, 'base_model'):
+                    ca = ca.base_model
+                if hasattr(ca, 'residual_scale'):
+                    with torch.no_grad():
+                        ca.residual_scale.fill_(target_scale)
 
         if self.debug_logging:
             print(f"[ResidualWarmup] epoch={epoch}, target_scale={target_scale:.3f}", flush=True)
@@ -352,15 +353,16 @@ class SAFEModel(nn.Module):
         else:
             self.audio_projector._scale_min = min_scale
 
-        # Set on fusion adapter's cross-attention blocks
-        if hasattr(self.fusion_adapter, 'fusion_adapters'):
-            # MultiLayerFusionAdapter
-            for adapter in self.fusion_adapter.fusion_adapters.values():
-                if hasattr(adapter, 'cross_attention'):
-                    adapter.cross_attention._scale_min = min_scale
-        elif hasattr(self.fusion_adapter, 'cross_attention'):
-            # Single adapter
-            self.fusion_adapter.cross_attention._scale_min = min_scale
+        # Set on fusion adapter's cross-attention blocks (skip if using KV augmentation)
+        if self.fusion_adapter is not None:
+            if hasattr(self.fusion_adapter, 'fusion_adapters'):
+                # MultiLayerFusionAdapter
+                for adapter in self.fusion_adapter.fusion_adapters.values():
+                    if hasattr(adapter, 'cross_attention'):
+                        adapter.cross_attention._scale_min = min_scale
+            elif hasattr(self.fusion_adapter, 'cross_attention'):
+                # Single adapter
+                self.fusion_adapter.cross_attention._scale_min = min_scale
 
         if self.debug_logging:
             print(f"[ScaleMinWarmup] epoch={epoch}, min_scale={min_scale:.3f}", flush=True)
@@ -380,7 +382,7 @@ class SAFEModel(nn.Module):
             # Reset waveform logging counter when disabling global debug
             self.audio_encoder.set_debug_logging(False)
 
-        if hasattr(self.fusion_adapter, "set_debug_logging"):
+        if self.fusion_adapter is not None and hasattr(self.fusion_adapter, "set_debug_logging"):
             self.fusion_adapter.set_debug_logging(self.debug_logging)
 
     def configure_audio_debug(
@@ -394,10 +396,12 @@ class SAFEModel(nn.Module):
             self.audio_encoder.set_debug_logging(waveform_stats, waveform_log_limit)
 
     def configure_attention_probe(self, enabled: bool, log_limit: int = 5) -> None:
-        if hasattr(self.fusion_adapter, "configure_attention_probe"):
+        if self.fusion_adapter is not None and hasattr(self.fusion_adapter, "configure_attention_probe"):
             self.fusion_adapter.configure_attention_probe(enabled, log_limit)
 
     def get_last_attention_summary(self) -> Optional[dict]:
+        if self.fusion_adapter is None:
+            return None
         return getattr(self.fusion_adapter, "last_attention_summary", None)
     
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -457,18 +461,24 @@ class SAFEModel(nn.Module):
     def get_trainable_parameters(self):
         """
         Get trainable parameters for Stage A training.
-        
+
         Returns:
             Iterator of trainable parameters
         """
         # Audio projector parameters
         for param in self.audio_projector.parameters():
             yield param
-        
-        # Fusion adapter parameters
-        for param in self.fusion_adapter.parameters():
-            yield param
-        
+
+        # Fusion adapter parameters (if not using KV augmentation)
+        if self.fusion_adapter is not None:
+            for param in self.fusion_adapter.parameters():
+                yield param
+
+        # KV augmentation adapters
+        if self.kv_adapters is not None:
+            for param in self.kv_adapters.parameters():
+                yield param
+
         # Audio token embeddings (new addition)
         if hasattr(self, 'audio_token_embeddings'):
             for param in self.audio_token_embeddings.parameters():
@@ -478,7 +488,11 @@ class SAFEModel(nn.Module):
         """Enable training mode for audio components while keeping base VL frozen."""
         # Set audio components to training mode
         self.audio_projector.train()
-        self.fusion_adapter.train()
+        if self.fusion_adapter is not None:
+            self.fusion_adapter.train()
+        # KV augmentation adapters
+        if self.kv_adapters is not None:
+            self.kv_adapters.train()
         if hasattr(self, 'audio_token_embeddings'):
             self.audio_token_embeddings.train()
         
@@ -1981,6 +1995,12 @@ class SAFEModel(nn.Module):
         return llm
 
     def _resolve_fusion_layers(self) -> Dict[str, List[int]]:
+        # KV augmentation uses its own layer tracking
+        if self.fusion_adapter is None:
+            if hasattr(self, '_kv_fusion_layers') and self._kv_fusion_layers:
+                return {"audio": list(self._kv_fusion_layers)}
+            return {"audio": []}
+
         if hasattr(self.fusion_adapter, "fusion_layers"):
             return {
                 modality: list(indices)
@@ -2310,6 +2330,10 @@ class SAFEModel(nn.Module):
         
         if hasattr(self, 'fusion_adapter') and self.fusion_adapter is not None:
             self.fusion_adapter = self.fusion_adapter.to(device=device)  # Device only, keep fp32
+
+        # KV augmentation adapters
+        if hasattr(self, 'kv_adapters') and self.kv_adapters is not None:
+            self.kv_adapters = self.kv_adapters.to(device=device)
 
         if hasattr(self, 'audio_token_embeddings') and self.audio_token_embeddings is not None:
             # Ensure audio token embeddings match base model dtype
