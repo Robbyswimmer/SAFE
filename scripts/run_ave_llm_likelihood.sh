@@ -19,6 +19,9 @@ LEARNING_RATE=${LEARNING_RATE:-2e-4}
 MODEL_CONFIG=${MODEL_CONFIG:-"phase1"}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-"12"}
 FUSION_INJECTION_POINT=${FUSION_INJECTION_POINT:-""}
+USE_BOTTLENECK=${USE_BOTTLENECK:-""}  # 1/0 to override
+BOTTLENECK_DIM=${BOTTLENECK_DIM:-""}
+LORA_RANK=${LORA_RANK:-""}
 NUM_NEGATIVES=${NUM_NEGATIVES:-7}
 TEMPLATE=${TEMPLATE:-"The sound is: {label}."}
 FP16=${FP16:-1}
@@ -45,6 +48,9 @@ echo "Learning rate: $LEARNING_RATE"
 echo "Model config: $MODEL_CONFIG"
 echo "Fusion layers: $FUSION_LAYER_INDICES"
 echo "Fusion injection point: ${FUSION_INJECTION_POINT:-'(default)'}"
+echo "Use bottleneck: ${USE_BOTTLENECK:-'(default)'}"
+echo "Bottleneck dim: ${BOTTLENECK_DIM:-'(default)'}"
+echo "LoRA rank: ${LORA_RANK:-'(default)'}"
 echo "Negatives per sample: $NUM_NEGATIVES"
 echo "Template: $TEMPLATE"
 echo "FP16: $FP16"
@@ -85,6 +91,23 @@ if [ -n "$FUSION_INJECTION_POINT" ]; then
   FUSION_INJECTION_ARG="--fusion-injection-point $FUSION_INJECTION_POINT"
 fi
 
+BOTTLENECK_ARG=""
+if [ "$USE_BOTTLENECK" = "1" ]; then
+  BOTTLENECK_ARG="--use-bottleneck"
+elif [ "$USE_BOTTLENECK" = "0" ]; then
+  BOTTLENECK_ARG="--no-bottleneck"
+fi
+
+BOTTLENECK_DIM_ARG=""
+if [ -n "$BOTTLENECK_DIM" ]; then
+  BOTTLENECK_DIM_ARG="--bottleneck-dim $BOTTLENECK_DIM"
+fi
+
+LORA_RANK_ARG=""
+if [ -n "$LORA_RANK" ]; then
+  LORA_RANK_ARG="--lora-rank $LORA_RANK"
+fi
+
 python train_audio_llm_likelihood.py \
   --data-path "$DATA_PATH" \
   --output-dir "$OUTPUT_DIR" \
@@ -94,6 +117,9 @@ python train_audio_llm_likelihood.py \
   --model-config "$MODEL_CONFIG" \
   --fusion-layer-indices "$FUSION_LAYER_INDICES" \
   $FUSION_INJECTION_ARG \
+  $BOTTLENECK_ARG \
+  $BOTTLENECK_DIM_ARG \
+  $LORA_RANK_ARG \
   --num-negatives "$NUM_NEGATIVES" \
   --template "$TEMPLATE" \
   --num-workers 4 \
@@ -106,4 +132,3 @@ python train_audio_llm_likelihood.py \
 echo "========================================"
 echo "Finished: $(date)"
 echo "========================================"
-

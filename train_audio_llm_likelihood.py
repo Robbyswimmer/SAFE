@@ -433,6 +433,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-config", type=str, default="phase1")
     p.add_argument("--fusion-layer-indices", type=str, default="12", help="Comma-separated fusion layers")
     p.add_argument("--fusion-injection-point", type=str, default=None, choices=["pre_ffn", "post_layer"])
+    p.add_argument("--use-bottleneck", dest="use_bottleneck", action="store_true", help="Force bottleneck fusion adapters")
+    p.add_argument("--no-bottleneck", dest="use_bottleneck", action="store_false", help="Force non-bottleneck (LoRA) fusion adapters")
+    p.set_defaults(use_bottleneck=None)
+    p.add_argument("--bottleneck-dim", type=int, default=None, help="Override fusion bottleneck_dim (when using bottleneck)")
+    p.add_argument("--lora-rank", type=int, default=None, help="Override fusion LoRA rank (when not bottleneck)")
     p.add_argument("--batch-size", type=int, default=8, help="Batch size (lower is safer; scoring is heavier).")
     p.add_argument("--num-epochs", type=int, default=10)
     p.add_argument("--learning-rate", type=float, default=2e-4)
@@ -472,12 +477,18 @@ def _load_safe_checkpoint_into(model: SAFEClosedSetLikelihood, checkpoint_path: 
 
     adapted: Dict[str, torch.Tensor] = {}
     safe_sd = model.safe_model.state_dict()
+    shape_mismatch = 0
     for k, v in state_dict.items():
         key = k[len("module.") :] if str(k).startswith("module.") else k
-        if key in safe_sd:
-            adapted[key] = v
+        target = safe_sd.get(key)
+        if target is None:
+            continue
+        if hasattr(target, "shape") and hasattr(v, "shape") and tuple(target.shape) != tuple(v.shape):
+            shape_mismatch += 1
+            continue
+        adapted[key] = v
     missing, unexpected = model.safe_model.load_state_dict(adapted, strict=False)
-    print(f"[Checkpoint] Loaded {len(adapted)} tensors into SAFEModel", flush=True)
+    print(f"[Checkpoint] Loaded {len(adapted)} tensors into SAFEModel (skipped {shape_mismatch} shape mismatches)", flush=True)
     if missing:
         print(f"[Checkpoint] Missing {len(missing)} keys (first 5): {missing[:5]}", flush=True)
     if unexpected:
@@ -498,6 +509,17 @@ def main() -> None:
         config.setdefault("fusion_config", {})
         config["fusion_config"]["injection_point"] = str(args.fusion_injection_point)
         print(f"[Config] fusion_injection_point={args.fusion_injection_point}", flush=True)
+    if args.use_bottleneck is not None:
+        config.setdefault("fusion_config", {})
+        config["fusion_config"]["use_bottleneck"] = bool(args.use_bottleneck)
+        print(f"[Config] use_bottleneck={args.use_bottleneck}", flush=True)
+    if args.bottleneck_dim is not None:
+        config.setdefault("fusion_config", {})
+        config["fusion_config"]["bottleneck_dim"] = int(args.bottleneck_dim)
+        print(f"[Config] bottleneck_dim={args.bottleneck_dim}", flush=True)
+    if args.lora_rank is not None:
+        config["lora_rank"] = int(args.lora_rank)
+        print(f"[Config] lora_rank={args.lora_rank}", flush=True)
 
     train_ds = AVEDataset(args.data_path, split="train")
     test_ds = AVEDataset(args.data_path, split="test")
@@ -582,4 +604,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
