@@ -280,6 +280,44 @@ class SAFELLMProbe(nn.Module):
         if audio_attention_mask is not None:
             audio_attention_mask = audio_attention_mask.to(device)
 
+        # Fallback: capture the final hidden states via a pre-hook on the output embedding
+        # module (often `lm_head`). This is robust when HF wrappers ignore hidden-state flags.
+        hidden_capture: Dict[str, Optional[torch.Tensor]] = {"last": None}
+        hook_handle = None
+        try:
+            llm = self.safe_model.base_vl.llm
+            head_module = None
+            for candidate_owner in [
+                llm,
+                getattr(llm, "language_model", None),
+                getattr(llm, "model", None),
+            ]:
+                if candidate_owner is None:
+                    continue
+                try:
+                    get_out = getattr(candidate_owner, "get_output_embeddings", None)
+                    if callable(get_out):
+                        head_module = get_out()
+                except Exception:
+                    head_module = None
+                if head_module is not None:
+                    break
+                head_module = getattr(candidate_owner, "lm_head", None)
+                if head_module is not None:
+                    break
+
+            if head_module is not None:
+                def _capture_head_input(_module, inputs):
+                    try:
+                        if inputs and torch.is_tensor(inputs[0]):
+                            hidden_capture["last"] = inputs[0]
+                    except Exception:
+                        hidden_capture["last"] = None
+
+                hook_handle = head_module.register_forward_pre_hook(_capture_head_input)
+        except Exception:
+            hook_handle = None
+
         outputs = self.safe_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -289,7 +327,15 @@ class SAFELLMProbe(nn.Module):
             output_hidden_states=True,
             return_dict=True,
         )
+        if hook_handle is not None:
+            try:
+                hook_handle.remove()
+            except Exception:
+                pass
+
         hidden = outputs.get("hidden_states")
+        if hidden is None:
+            hidden = hidden_capture.get("last")
         if hidden is None:
             if not hasattr(self, "_hidden_debug_logged"):
                 self._hidden_debug_logged = True
