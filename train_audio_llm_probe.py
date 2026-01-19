@@ -230,6 +230,24 @@ class SAFELLMProbe(nn.Module):
         hidden_size = int(config.get("llm_hidden_size", 5120))
         self.head = nn.Linear(hidden_size, num_classes)
 
+        # Ensure the underlying HF model actually returns hidden states when requested.
+        # Some configurations ignore call-time flags unless config is set.
+        try:
+            llm = self.safe_model.base_vl.llm
+            for candidate in [llm, getattr(llm, "language_model", None), getattr(llm, "model", None)]:
+                if candidate is None or not hasattr(candidate, "config"):
+                    continue
+                try:
+                    candidate.config.output_hidden_states = True
+                except Exception:
+                    pass
+                try:
+                    candidate.config.return_dict = True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def get_trainable_params(self) -> List[nn.Parameter]:
         params = list(self.safe_model.get_trainable_parameters())
         params.extend(list(self.head.parameters()))
@@ -273,6 +291,27 @@ class SAFELLMProbe(nn.Module):
         )
         hidden = outputs.get("hidden_states")
         if hidden is None:
+            if not hasattr(self, "_hidden_debug_logged"):
+                self._hidden_debug_logged = True
+                try:
+                    llm = self.safe_model.base_vl.llm
+                    cfg = getattr(llm, "config", None)
+                    cfg_hs = getattr(cfg, "output_hidden_states", None) if cfg is not None else None
+                    cfg_rd = getattr(cfg, "return_dict", None) if cfg is not None else None
+                except Exception:
+                    cfg_hs = None
+                    cfg_rd = None
+                print(
+                    "[LLMProbeDebug] hidden_states missing. "
+                    f"input_ids={tuple(input_ids.shape)} "
+                    f"attn_sum={int(attention_mask.sum().item()) if attention_mask is not None else 'None'} "
+                    f"audio_tokens={tuple(audio_tokens.shape) if audio_tokens is not None else None} "
+                    f"audio_numel={int(audio_tokens.numel()) if audio_tokens is not None else 0} "
+                    f"enable_midlayer_fusion={getattr(self.safe_model, 'enable_midlayer_fusion', None)} "
+                    f"llm.config.output_hidden_states={cfg_hs} "
+                    f"llm.config.return_dict={cfg_rd}",
+                    flush=True,
+                )
             raise RuntimeError("SAFEModel did not return hidden_states; expected last hidden state tensor.")
 
         if pooling == "mean":
