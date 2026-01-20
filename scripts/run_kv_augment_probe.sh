@@ -31,6 +31,11 @@ HEAD_WARMUP_STEPS=${HEAD_WARMUP_STEPS:-500}
 # audio_attn pools at positions with highest audio attention mass
 # This is the most sensitive pooling for detecting if audio affects the LLM
 POOLING=${POOLING:-"audio_attn"}
+# Head type: "linear" or "mlp" (2-layer MLP may capture nonlinear mappings better)
+HEAD_TYPE=${HEAD_TYPE:-"mlp"}
+# Pool layers: concatenate hidden states from these layers (e.g., "16,24,32")
+# Leave empty for last layer only
+POOL_LAYERS=${POOL_LAYERS:-""}
 
 echo "========================================"
 echo "KV Augmentation Linear Probe Training"
@@ -47,6 +52,8 @@ echo "Head LR: $HEAD_LR"
 echo "ΔQ LR: $DELTA_Q_LR (query adapter - should be highest for fast attention learning)"
 echo "Head warmup steps: $HEAD_WARMUP_STEPS (head frozen during warmup)"
 echo "Pooling: $POOLING"
+echo "Head type: $HEAD_TYPE"
+echo "Pool layers: ${POOL_LAYERS:-'(last layer only)'}"
 echo "========================================"
 
 mkdir -p logs
@@ -68,6 +75,12 @@ export WANDB_PROJECT="SAFE_2"
 WANDB_RUN_NAME="kv-augment-probe-${SLURM_JOB_ID:-local}"
 
 # Run training with kv_augment config
+# Build optional args
+POOL_LAYERS_ARG=""
+if [ -n "$POOL_LAYERS" ]; then
+    POOL_LAYERS_ARG="--pool-layers $POOL_LAYERS"
+fi
+
 python train_audio_llm_probe.py \
     --data-path "$DATA_PATH" \
     --output-dir "$OUTPUT_DIR" \
@@ -80,6 +93,8 @@ python train_audio_llm_probe.py \
     --model-config kv_augment \
     --fusion-layer-indices "16,24,32" \
     --pooling "$POOLING" \
+    --head-type "$HEAD_TYPE" \
+    $POOL_LAYERS_ARG \
     --fp16 \
     --wandb \
     --wandb-project SAFE_2 \

@@ -205,7 +205,13 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 class SAFELLMProbe(nn.Module):
     PROMPT = "What is happening in the audio?"
 
-    def __init__(self, config: Dict[str, Any], num_classes: int):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        num_classes: int,
+        head_type: str = "linear",  # "linear" or "mlp"
+        pool_layers: Optional[List[int]] = None,  # None = last layer, or list like [16, 24, 32]
+    ):
         super().__init__()
 
         constructor_keys = {
@@ -232,7 +238,31 @@ class SAFELLMProbe(nn.Module):
         # Ensure only audio components train
         self.safe_model.enable_audio_training()
         hidden_size = int(config.get("llm_hidden_size", 5120))
-        self.head = nn.Linear(hidden_size, num_classes)
+
+        # Multi-layer pooling: concat hidden states from multiple layers
+        self.pool_layers = pool_layers
+        if pool_layers is not None and len(pool_layers) > 0:
+            input_size = hidden_size * len(pool_layers)
+            print(f"[Probe] Multi-layer pooling from layers {pool_layers}, input_size={input_size}", flush=True)
+        else:
+            input_size = hidden_size
+            print(f"[Probe] Single-layer pooling (last layer), input_size={input_size}", flush=True)
+
+        # Head type: linear or 2-layer MLP
+        self.head_type = head_type
+        if head_type == "mlp":
+            # 2-layer MLP: input -> hidden -> output
+            mlp_hidden = min(1024, input_size // 4)
+            self.head = nn.Sequential(
+                nn.Linear(input_size, mlp_hidden),
+                nn.GELU(),
+                nn.Dropout(0.1),
+                nn.Linear(mlp_hidden, num_classes),
+            )
+            print(f"[Probe] Using MLP head: {input_size} -> {mlp_hidden} -> {num_classes}", flush=True)
+        else:
+            self.head = nn.Linear(input_size, num_classes)
+            print(f"[Probe] Using linear head: {input_size} -> {num_classes}", flush=True)
 
         # Ensure the underlying HF model actually returns hidden states when requested.
         # Some configurations ignore call-time flags unless config is set.
@@ -499,7 +529,8 @@ class SAFELLMProbe(nn.Module):
             except Exception:
                 pass
 
-        hidden = outputs.get("hidden_states")
+        all_hidden_states = outputs.get("all_hidden_states")  # Tuple of all layers if available
+        hidden = outputs.get("hidden_states")  # Last layer
         if hidden is None:
             hidden = hidden_capture.get("last")
         if hidden is None:
@@ -525,6 +556,31 @@ class SAFELLMProbe(nn.Module):
                     flush=True,
                 )
             raise RuntimeError("SAFEModel did not return hidden_states; expected last hidden state tensor.")
+
+        # Multi-layer pooling: concatenate hidden states from specified layers
+        if self.pool_layers is not None and len(self.pool_layers) > 0:
+            if all_hidden_states is not None and isinstance(all_hidden_states, (tuple, list)):
+                # We have all layer hidden states - extract the ones we need
+                layer_hiddens = []
+                for layer_idx in self.pool_layers:
+                    if layer_idx < len(all_hidden_states):
+                        layer_hiddens.append(all_hidden_states[layer_idx])
+                    else:
+                        # Fallback: use last layer if requested layer not available
+                        if not hasattr(self, "_layer_fallback_warned"):
+                            self._layer_fallback_warned = True
+                            print(f"[Probe] Warning: layer {layer_idx} not available (only {len(all_hidden_states)} layers), using last", flush=True)
+                        layer_hiddens.append(hidden)
+                # Concatenate along feature dimension
+                hidden = torch.cat(layer_hiddens, dim=-1)
+                if not hasattr(self, "_multilayer_logged"):
+                    self._multilayer_logged = True
+                    print(f"[Probe] Multi-layer pooling: concatenated {len(layer_hiddens)} layers, hidden shape={tuple(hidden.shape)}", flush=True)
+            else:
+                # No all_hidden_states available, fall back to single layer
+                if not hasattr(self, "_no_all_hidden_warned"):
+                    self._no_all_hidden_warned = True
+                    print(f"[Probe] Warning: all_hidden_states not available, falling back to last layer only", flush=True)
 
         if pooling == "mean":
             # Mean over all tokens (dilutes signal)
@@ -926,6 +982,11 @@ def parse_args() -> argparse.Namespace:
                    choices=["last", "prompt_last", "mean", "audio_attn"],
                    help="Pooling strategy: 'last'/'prompt_last' (last token), "
                         "'mean' (all tokens), 'audio_attn' (top-k by audio attention)")
+    p.add_argument("--head-type", type=str, default="linear", choices=["linear", "mlp"],
+                   help="Probe head type: 'linear' (single layer) or 'mlp' (2-layer with GELU)")
+    p.add_argument("--pool-layers", type=str, default=None,
+                   help="Comma-separated layer indices to pool from (e.g., '16,24,32'). "
+                        "If set, concatenates hidden states from these layers. Default: last layer only.")
     p.add_argument("--fp16", action="store_true")
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)
@@ -1027,7 +1088,18 @@ def main() -> None:
         collate_fn=collate_fn,
     )
 
-    model = SAFELLMProbe(config=config, num_classes=len(AVE_CATEGORIES)).to(device)
+    # Parse pool_layers if specified
+    pool_layers = None
+    if args.pool_layers:
+        pool_layers = [int(x.strip()) for x in args.pool_layers.split(",") if x.strip()]
+        print(f"[Config] Multi-layer pooling from layers: {pool_layers}", flush=True)
+
+    model = SAFELLMProbe(
+        config=config,
+        num_classes=len(AVE_CATEGORIES),
+        head_type=args.head_type,
+        pool_layers=pool_layers,
+    ).to(device)
 
     # === Verify KV augmentation is set up if using audio_attn pooling ===
     if args.pooling == "audio_attn":
@@ -1146,22 +1218,31 @@ def main() -> None:
         if len(param_names) > 5:
             print(f"    ... and {len(param_names) - 5} more", flush=True)
 
-    # Check for ΔQ params specifically
+    # Check for ΔQ params specifically (can be in safe_ or delta_q_ groups)
     all_safe_param_names = []
+    all_delta_q_param_names = []
     for group in optimizer.param_groups:
-        if str(group.get("name", "")).startswith("safe_"):
-            for n, p in model.named_parameters():
-                if any(p is pg for pg in group["params"]):
+        group_name = str(group.get("name", ""))
+        for n, p in model.named_parameters():
+            if any(p is pg for pg in group["params"]):
+                if group_name.startswith("safe_"):
                     all_safe_param_names.append(n)
+                elif group_name.startswith("delta_q_"):
+                    all_delta_q_param_names.append(n)
 
-    has_query_adapter = any("query_adapter" in n for n in all_safe_param_names)
+    # ΔQ params can be in either safe_ groups OR dedicated delta_q_ groups
+    has_query_adapter_in_safe = any("query_adapter" in n for n in all_safe_param_names)
+    has_query_adapter_in_delta_q = any("query_adapter" in n for n in all_delta_q_param_names)
+    has_query_adapter = has_query_adapter_in_safe or has_query_adapter_in_delta_q
     has_kv_adapter = any("kv_adapter" in n.lower() for n in all_safe_param_names)
     has_projector = any("projector" in n.lower() for n in all_safe_param_names)
 
-    if has_query_adapter:
+    if has_query_adapter_in_delta_q:
+        print(f"✓ Query adapter (ΔQ) params in dedicated delta_q group ({len(all_delta_q_param_names)} params)", flush=True)
+    elif has_query_adapter_in_safe:
         print("✓ Query adapter (ΔQ) params found in SAFE group", flush=True)
     else:
-        print("⚠️  WARNING: No query_adapter params in SAFE group - ΔQ won't train!", flush=True)
+        print("⚠️  WARNING: No query_adapter params found - ΔQ won't train!", flush=True)
     if has_kv_adapter or has_projector:
         print(f"✓ KV/projector params found in SAFE group", flush=True)
     print("=" * 60 + "\n", flush=True)

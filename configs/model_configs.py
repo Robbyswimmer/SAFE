@@ -320,12 +320,12 @@ KV_AUGMENT_CONFIG = {
         # This allows frozen queries to attend to audio K,V
         "query_adapter_rank": 16,
 
-        # Minimum attention regularization (WARM-START: strong early, decay later)
-        # Forces model to explore audio path so gradients can shape ΔQ
-        # Start with ε=0.1 (10%) and weight=1.0 for first ~1000 steps, then decay
-        "min_audio_attention": 0.1,  # Answer tokens must attend to audio ≥10% (strong)
-        "min_audio_attention_weight": 1.0,  # High weight for warm-start
-        # After warm-start: decay these values via training script or scheduler
+        # Minimum attention regularization - DISABLED
+        # Previous: ε=0.1, weight=1.0 forced attention but didn't help classification
+        # ΔQ/Q can reach 3.7% and entropy 0.84 without it, proving mechanism works
+        # Keeping it on may steer learning into useless regime (attention != useful attention)
+        "min_audio_attention": 0.0,  # DISABLED - let model learn naturally
+        "min_audio_attention_weight": 0.0,  # DISABLED
 
         # Modality configuration (for compatibility with existing code)
         "modalities": {
