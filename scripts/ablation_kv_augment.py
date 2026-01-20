@@ -32,7 +32,9 @@ import math
 
 from configs.model_configs import get_config
 from safe.models.safe_model import SAFEModel
-from safe.data.ave_dataset import AVEDataset
+
+# Import AVEDataset from the probe training script where it's defined
+from train_audio_llm_probe import AVEDataset
 
 
 def compute_normalized_entropy(attn_weights, n_audio_tokens):
