@@ -775,6 +775,28 @@ def _extract_answer_from_generation(generated_text: str) -> str:
     return answer.strip()
 
 
+def _strip_generation_artifacts(text: str) -> str:
+    """
+    Remove common boilerplate artifacts that occasionally appear in generations and
+    poison caption metrics (e.g., translation templates like '번역결과').
+    """
+    if not text:
+        return text
+
+    cleaned = str(text).strip()
+
+    # Korean "번역결과" ("translation result") template sometimes appears after a newline.
+    for marker in ("번역결과", "번역 결과", "Translation result", "translation result"):
+        idx = cleaned.find(marker)
+        if idx != -1:
+            cleaned = cleaned[:idx].strip()
+            break
+
+    # Collapse whitespace/newlines after stripping.
+    cleaned = " ".join(cleaned.split())
+    return cleaned.strip()
+
+
 def _normalize_references(answer: Any) -> List[str]:
     """
     Normalize dataset answer payloads into a list of non-empty reference strings.
@@ -1211,11 +1233,13 @@ def evaluate(
             except Exception:
                 pass
             eval_prompt_preview = (eval_prompt.strip() if isinstance(eval_prompt, str) else None)
+            eos_suppression_will_apply = bool(suppress_eos_for_audio and tokenizer.eos_token_id is not None)
             print(
                 "[EvalConfig] "
                 f"ablate_audio={bool(ablate_audio)} "
                 f"max_new_tokens={max_new_tokens} num_beams={num_beams} "
                 f"suppress_eos_for_audio={bool(suppress_eos_for_audio)} "
+                f"eos_suppression_will_apply={bool(eos_suppression_will_apply)} "
                 f"repetition_penalty={float(repetition_penalty)} no_repeat_ngram_size={int(no_repeat_ngram_size)} "
                 f"eval_prompt={repr(eval_prompt_preview) if eval_prompt_preview else '(dataset)'} "
                 f"min_audio_attn={min_attn} min_audio_attn_weight={min_attn_w}",
@@ -1411,6 +1435,7 @@ def evaluate(
                     print(f"[CleanDebug] After question removal: {repr(pred[:200])}", flush=True)
             pred_answer = _extract_answer_from_generation(pred)
             cleaned_pred = pred_answer if pred_answer else pred.strip()
+            cleaned_pred = _strip_generation_artifacts(cleaned_pred)
             if batch_idx == 0 and i == 0:
                 print(f"[CleanDebug] After _extract_answer: {repr(pred_answer[:200] if pred_answer else 'EMPTY')}", flush=True)
                 print(f"[CleanDebug] Final cleaned_pred: {repr(cleaned_pred[:200])}", flush=True)
@@ -2266,6 +2291,7 @@ def train_epoch(
                         no_repeat_ngram_size=int(config.get("eval_no_repeat_ngram_size", 3) or 3),
                         light_metrics=True,
                         eval_prompt=config.get("eval_prompt"),
+                        suppress_eos_for_audio=False,
                     )
                     train_eval_log = {
                         "train_acc/cider": train_eval_metrics.get("cider", 0.0),
@@ -2290,6 +2316,7 @@ def train_epoch(
                             light_metrics=True,
                             eval_prompt=config.get("eval_prompt"),
                             ablate_audio=True,
+                            suppress_eos_for_audio=False,
                         )
                         train_eval_log.update(
                             {
