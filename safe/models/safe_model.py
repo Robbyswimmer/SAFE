@@ -228,6 +228,15 @@ class SAFEModel(nn.Module):
                 print(f"[SAFE] ✓ Min audio attention regularization enabled (ε={min_audio_attn})", flush=True)
 
             print(f"[SAFE] ✓ KV Augmentation adapters initialized at layers {kv_fusion_layers}", flush=True)
+
+            # Eagerly initialize hook manager (needed for audio_attn pooling checks)
+            self.kv_hook_manager = KVAugmentationHookManager(
+                model=self.base_vl.llm,
+                kv_adapters=self.kv_adapters,
+                fusion_layer_indices=self._kv_fusion_layers,
+            )
+            self.kv_hook_manager.wrap_attention_modules()
+            print(f"[SAFE] ✓ KV hook manager initialized and attention modules wrapped", flush=True)
             sys.stdout.flush()
 
         # Special tokens for audio
