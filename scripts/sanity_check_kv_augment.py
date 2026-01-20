@@ -80,8 +80,20 @@ def run_sanity_check(args):
         max_length=10.0,
     )
 
-    # Get first sample (AVEDataset returns audio as path string)
-    sample = dataset[0]
+    # Find a sample with valid audio path
+    sample = None
+    for i in range(min(100, len(dataset))):
+        s = dataset[i]
+        if s["audio"] is not None:
+            sample = s
+            print(f"Found valid sample at index {i}")
+            break
+
+    if sample is None:
+        print("❌ ERROR: No valid audio files found in first 100 samples!")
+        print("   Check that audio files exist in the dataset directory.")
+        return {"passed": False, "checks": {}}
+
     audio_path = sample["audio"]
     label = sample["label"]
     class_name = sample["category"]

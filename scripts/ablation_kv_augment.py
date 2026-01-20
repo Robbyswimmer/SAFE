@@ -243,8 +243,20 @@ def forward_check(model, tokenizer, device, dataset, config):
 
     n_audio_tokens = config["num_audio_tokens"]
 
-    # Get one sample
-    sample = dataset[0]
+    # Find a sample with valid audio path
+    sample = None
+    for i in range(min(100, len(dataset))):
+        s = dataset[i]
+        if s["audio"] is not None:
+            sample = s
+            print(f"Found valid sample at index {i}")
+            break
+
+    if sample is None:
+        print("❌ ERROR: No valid audio files found in first 100 samples!")
+        print("   Check that audio files exist in the dataset directory.")
+        return False
+
     audio = sample["audio"]
     label = sample.get("label", "unknown")
 
@@ -413,9 +425,16 @@ def run_ablation(model, tokenizer, device, dataset, config, num_samples=10):
 
     print(f"\nRunning ablation on {num_samples} samples...")
 
-    for i in range(num_samples):
-        sample = dataset[i]
+    processed = 0
+    idx = 0
+    while processed < num_samples and idx < len(dataset):
+        sample = dataset[idx]
         audio = sample["audio"]
+        idx += 1
+
+        # Skip samples without valid audio
+        if audio is None:
+            continue
 
         with torch.no_grad():
             # Get audio features
@@ -463,13 +482,18 @@ def run_ablation(model, tokenizer, device, dataset, config, num_samples=10):
             results["C"]["entropy"].append(diag_C['normalized_entropy'])
             results["C"]["dq_ratio"].append(diag_C['delta_q_ratio'])
 
-        if (i + 1) % 5 == 0:
-            print(f"  Processed {i + 1}/{num_samples} samples")
+        processed += 1
+        if processed % 5 == 0:
+            print(f"  Processed {processed}/{num_samples} samples")
 
     # === AGGREGATE RESULTS ===
     print("\n" + "=" * 60)
-    print("ABLATION RESULTS (averaged over samples)")
+    print(f"ABLATION RESULTS (over {processed} samples)")
     print("=" * 60)
+
+    if processed == 0:
+        print("❌ ERROR: No valid audio samples were processed!")
+        return False
 
     # Stack logits
     logits_A = torch.cat(results["A"]["logits"], dim=0)
