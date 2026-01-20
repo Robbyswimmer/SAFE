@@ -156,6 +156,10 @@ class AVEDataset(Dataset):
             self.data_path / audio_name,
             self.data_path / "AVE" / audio_name,
             self.data_path / "ave" / audio_name,
+            # Split-specific paths (matches train_ave_classifier.py)
+            self.data_path / "AVE" / self.split / "audio" / audio_name,
+            self.data_path / "ave" / self.split / "audio" / audio_name,
+            self.data_path / self.split / "audio" / audio_name,
         ]
         for path in candidates:
             if path.exists():
