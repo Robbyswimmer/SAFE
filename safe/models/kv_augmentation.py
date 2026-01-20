@@ -465,17 +465,21 @@ class KVAugmentedAttention(nn.Module):
 
         # Audio K, V (no RoPE - position agnostic, no gate - applied at combine step)
         audio_keys, audio_values = self.kv_adapter(self._audio_tokens)
-        audio_keys = audio_keys.view(bsz, n_audio, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        audio_values = audio_values.view(bsz, n_audio, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        # Use adapter's num_key_value_heads (may differ from LLM's for GQA)
+        adapter_num_kv_heads = self.kv_adapter.num_key_value_heads
+        audio_keys = audio_keys.view(bsz, n_audio, adapter_num_kv_heads, self.head_dim).transpose(1, 2)
+        audio_values = audio_values.view(bsz, n_audio, adapter_num_kv_heads, self.head_dim).transpose(1, 2)
 
         # Cast audio K,V to match query dtype (handles fp16/bf16 models)
         audio_keys = audio_keys.to(query_for_audio.dtype)
         audio_values = audio_values.to(query_for_audio.dtype)
 
         # GQA expansion for audio K, V
-        if self.num_key_value_groups > 1:
-            audio_keys = self._repeat_kv(audio_keys, self.num_key_value_groups)
-            audio_values = self._repeat_kv(audio_values, self.num_key_value_groups)
+        # Compute groups based on adapter's num_kv_heads (not LLM's)
+        adapter_kv_groups = self.num_heads // adapter_num_kv_heads
+        if adapter_kv_groups > 1:
+            audio_keys = self._repeat_kv(audio_keys, adapter_kv_groups)
+            audio_values = self._repeat_kv(audio_values, adapter_kv_groups)
 
         # Audio attention (non-causal, all positions can attend to all audio)
         audio_attn_weights = torch.matmul(query_for_audio, audio_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
