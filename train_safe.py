@@ -1105,6 +1105,7 @@ def evaluate(
     light_metrics: bool = False,
     suppress_eos_for_audio: bool = True,
     eval_prompt: Optional[str] = None,
+    ablate_audio: bool = False,
     sample_output: Optional[List[Dict[str, Any]]] = None,
     sample_limit: int = 0,
 ) -> Dict[str, float]:
@@ -1127,6 +1128,7 @@ def evaluate(
 
     # Handle DDP wrapper - get underlying model for attribute access
     base_model = model.module if hasattr(model, 'module') else model
+    is_main = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
 
     # Ensure audio fusion is fully enabled during evaluation
     if hasattr(base_model, "set_gate"):
@@ -1176,6 +1178,7 @@ def evaluate(
     start_time = time.time()
     skipped_batches = 0
     last_skip_log_time = start_time
+    printed_eval_config = False
 
     for batch_idx, batch in enumerate(dataloader):
         if max_batches is not None and batch_idx >= max_batches:
@@ -1189,6 +1192,35 @@ def evaluate(
         sample_ids = batch.get("sample_ids", None)
         audio_paths = batch.get("audio_paths", None)
         subsets = batch.get("subsets", None)
+        if (
+            is_main
+            and not printed_eval_config
+            and batch_idx == 0
+        ):
+            # Print a single eval-config line to catch "step X flips a switch" issues.
+            min_attn = None
+            min_attn_w = None
+            try:
+                loss_obj = getattr(base_model, "min_audio_attention_loss", None)
+                if loss_obj is not None and hasattr(loss_obj, "get_current_params"):
+                    params = loss_obj.get_current_params()
+                    min_attn = params.get("min_audio_attention")
+                    min_attn_w = params.get("min_audio_attention_weight")
+            except Exception:
+                pass
+            eval_prompt_preview = (eval_prompt.strip() if isinstance(eval_prompt, str) else None)
+            print(
+                "[EvalConfig] "
+                f"ablate_audio={bool(ablate_audio)} "
+                f"max_new_tokens={max_new_tokens} num_beams={num_beams} "
+                f"suppress_eos_for_audio={bool(suppress_eos_for_audio)} "
+                f"eval_prompt={repr(eval_prompt_preview) if eval_prompt_preview else '(dataset)'} "
+                f"min_audio_attn={min_attn} min_audio_attn_weight={min_attn_w}",
+                flush=True,
+            )
+            if isinstance(sample_ids, list) and sample_ids:
+                print(f"[EvalSet] sample_ids[:5]={sample_ids[:5]}", flush=True)
+            printed_eval_config = True
 
         # Filter out samples with missing audio OR missing caption references.
         # - Missing audio can cause generation to hang (zero-filled audio tokens).
@@ -1234,10 +1266,12 @@ def evaluate(
             if isinstance(subsets, list):
                 subsets = [subsets[i] for i in valid_indices]
 
+        audio_for_model = None if ablate_audio else audio
+
         # Prepare inputs (ensure correct device)
         inputs = base_model.prepare_multimodal_inputs(
             text=questions,
-            audio=audio,
+            audio=audio_for_model,
             answers=answers,
             device=device,
             training_mode=True,  # For loss computation
@@ -1289,7 +1323,7 @@ def evaluate(
             gen_questions = [eval_prompt.strip()] * len(questions)
         generation_inputs = base_model.prepare_multimodal_inputs(
             text=gen_questions,
-            audio=audio,
+            audio=audio_for_model,
             answers=None,  # No answers for generation
             device=device,
             training_mode=False,
@@ -2227,6 +2261,32 @@ def train_epoch(
                         "train_acc/bleu4": train_eval_metrics.get("bleu4", 0.0),
                         "train_acc/rouge_l": train_eval_metrics.get("rouge_l", 0.0),
                     }
+                    # Optional A/B diagnostic: compute metrics with audio disabled.
+                    if bool(config.get("train_eval_ablate_audio", False)):
+                        ablate_max_batches = config.get("train_eval_ablate_max_batches", 10)
+                        if ablate_max_batches is not None and int(ablate_max_batches) <= 0:
+                            ablate_max_batches = None
+                        train_eval_metrics_no_audio = evaluate(
+                            model=model,
+                            dataloader=train_eval_loader,
+                            device=device,
+                            max_batches=ablate_max_batches,
+                            max_new_tokens=config.get("max_new_tokens", 20),
+                            num_beams=1,
+                            light_metrics=True,
+                            eval_prompt=config.get("eval_prompt"),
+                            ablate_audio=True,
+                        )
+                        train_eval_log.update(
+                            {
+                                "train_acc_no_audio/cider": train_eval_metrics_no_audio.get("cider", 0.0),
+                                "train_acc_no_audio/meteor": train_eval_metrics_no_audio.get("meteor", 0.0),
+                                "train_acc_delta/cider": train_eval_metrics.get("cider", 0.0)
+                                - train_eval_metrics_no_audio.get("cider", 0.0),
+                                "train_acc_delta/meteor": train_eval_metrics.get("meteor", 0.0)
+                                - train_eval_metrics_no_audio.get("meteor", 0.0),
+                            }
+                        )
                     _wandb_log(wandb_run, train_eval_log, step=optimizer_step)
                     print(f"[TrainEval] CIDEr={train_eval_metrics.get('cider', 0.0):.2f} "
                           f"METEOR={train_eval_metrics.get('meteor', 0.0):.4f}", flush=True)
@@ -2689,6 +2749,34 @@ def train(
         sample_limit=wandb_sample_count,
     )
     print(f"[InitEval] CIDEr={init_metrics.get('cider', 0.0):.2f} BLEU-4={init_metrics.get('bleu4', 0.0):.4f}", flush=True)
+    if bool(config.get("eval_ablate_audio", False)):
+        init_metrics_no_audio = evaluate(
+            model,
+            val_loader,
+            device,
+            max_batches=initial_max_eval,
+            max_new_tokens=config.get("max_new_tokens", 20),
+            num_beams=config.get("num_beams", 1),
+            compute_bertscore=False,
+            light_metrics=True,
+            suppress_eos_for_audio=suppress_eos_for_audio,
+            eval_prompt=config.get("eval_prompt"),
+            ablate_audio=True,
+            sample_output=None,
+            sample_limit=0,
+        )
+        print(
+            f"[InitEval A/B] CIDEr audio={init_metrics.get('cider', 0.0):.2f} "
+            f"no_audio={init_metrics_no_audio.get('cider', 0.0):.2f} "
+            f"delta={init_metrics.get('cider', 0.0) - init_metrics_no_audio.get('cider', 0.0):.2f}",
+            flush=True,
+        )
+        if wandb_run is not None:
+            ablate_log = {"train/optimizer_step": optimizer_step, "epoch": 0}
+            ablate_log.update({f"val_no_audio/{k}": v for k, v in init_metrics_no_audio.items() if isinstance(v, (int, float))})
+            ablate_log["val_delta/cider"] = float(init_metrics.get("cider", 0.0) - init_metrics_no_audio.get("cider", 0.0))
+            ablate_log["val_delta/meteor"] = float(init_metrics.get("meteor", 0.0) - init_metrics_no_audio.get("meteor", 0.0))
+            _wandb_log(wandb_run, ablate_log, step=optimizer_step)
     if wandb_run is not None:
         init_log = {"train/optimizer_step": optimizer_step, "epoch": 0}
         init_log.update({f"val/{k}": v for k, v in init_metrics.items() if isinstance(v, (int, float))})
@@ -2865,6 +2953,35 @@ def train(
                 sample_output=val_samples,
                 sample_limit=wandb_sample_count,
             )
+            if bool(config.get("eval_ablate_audio", False)):
+                val_metrics_no_audio = evaluate(
+                    model,
+                    val_loader,
+                    device,
+                    max_batches=config.get("max_eval_batches"),
+                    max_new_tokens=config.get("max_new_tokens", 20),
+                    num_beams=config.get("num_beams", 1),
+                    compute_bertscore=False,
+                    light_metrics=True,
+                    suppress_eos_for_audio=suppress_eos_for_audio,
+                    eval_prompt=config.get("eval_prompt"),
+                    ablate_audio=True,
+                    sample_output=None,
+                    sample_limit=0,
+                )
+                if is_main:
+                    print(
+                        f"[Val A/B] CIDEr audio={val_metrics.get('cider', 0.0):.2f} "
+                        f"no_audio={val_metrics_no_audio.get('cider', 0.0):.2f} "
+                        f"delta={val_metrics.get('cider', 0.0) - val_metrics_no_audio.get('cider', 0.0):.2f}",
+                        flush=True,
+                    )
+                if wandb_run is not None:
+                    ablate_log = {"train/optimizer_step": optimizer_step, "epoch": epoch}
+                    ablate_log.update({f"val_no_audio/{k}": v for k, v in val_metrics_no_audio.items() if isinstance(v, (int, float))})
+                    ablate_log["val_delta/cider"] = float(val_metrics.get("cider", 0.0) - val_metrics_no_audio.get("cider", 0.0))
+                    ablate_log["val_delta/meteor"] = float(val_metrics.get("meteor", 0.0) - val_metrics_no_audio.get("meteor", 0.0))
+                    _wandb_log(wandb_run, ablate_log, step=optimizer_step)
             if val_samples and bool(config.get("export_eval_samples", False)):
                 _export_eval_samples(
                     output_dir,
@@ -3244,6 +3361,29 @@ def main():
                         help="Compute CIDEr/METEOR on training subset every N optimizer steps (0=disabled)")
     parser.add_argument("--train-eval-samples", type=int, default=50,
                         help="Number of training samples to use for training accuracy eval")
+    parser.add_argument(
+        "--train-eval-split",
+        type=str,
+        default="val",
+        choices=["train", "val"],
+        help="Which split to use for periodic train-eval metrics (val is multi-ref for AudioCaps).",
+    )
+    parser.add_argument(
+        "--eval-ablate-audio",
+        action="store_true",
+        help="Also run evaluation with audio disabled (A/B diagnostic).",
+    )
+    parser.add_argument(
+        "--train-eval-ablate-audio",
+        action="store_true",
+        help="Also run periodic train-eval with audio disabled (A/B diagnostic; can be expensive).",
+    )
+    parser.add_argument(
+        "--train-eval-ablate-max-batches",
+        type=int,
+        default=10,
+        help="Max batches for ablated-audio train-eval (keeps A/B diagnostic cheap).",
+    )
     parser.add_argument("--max-eval-batches", type=int, default=None,
                         help="Max batches for validation (None = all)")
     parser.add_argument("--max-new-tokens", type=int, default=20,
@@ -3591,9 +3731,12 @@ def main():
     # Create training accuracy eval loader (small fixed subset of training data)
     train_eval_loader = None
     if args.train_eval_steps > 0 and args.train_eval_samples > 0:
-        # Use a fixed subset of training data for consistent training accuracy measurement
-        train_eval_indices = list(range(min(len(audiocaps_train), args.train_eval_samples)))
-        train_eval_subset = torch.utils.data.Subset(audiocaps_train, train_eval_indices)
+        # Use a fixed subset for consistent measurement.
+        # AudioCaps train samples typically have 1 caption each; AudioCaps val is multi-ref and yields
+        # much more meaningful CIDEr trends, so default to val.
+        train_eval_source = val_dataset if args.train_eval_split == "val" else audiocaps_train
+        train_eval_indices = list(range(min(len(train_eval_source), args.train_eval_samples)))
+        train_eval_subset = torch.utils.data.Subset(train_eval_source, train_eval_indices)
         train_eval_loader = create_safe_dataloader(
             train_eval_subset,
             batch_size=args.val_batch_size,
@@ -3601,7 +3744,16 @@ def main():
             num_workers=0,  # Keep it lightweight
         )
         if is_main:
-            print(f"  Train eval: {len(train_eval_subset)} samples (every {args.train_eval_steps} steps)")
+            print(
+                f"  Train eval ({args.train_eval_split}): {len(train_eval_subset)} samples "
+                f"(every {args.train_eval_steps} steps)"
+            )
+            # Helpful for diagnosing "metrics jump then die" due to eval-set changes.
+            try:
+                preview_indices = train_eval_indices[:5]
+                print(f"  Train eval indices[:5]: {preview_indices}", flush=True)
+            except Exception:
+                pass
 
     # Training config
     resolved_max_eval_batches = args.max_eval_batches
@@ -3642,6 +3794,9 @@ def main():
     # min-audio-attention scheduling, while the model constructor uses `model_config`.)
     config["eval_prompt"] = model_config.get("eval_prompt")
     config["fusion_config"] = model_config.get("fusion_config", {})
+    config["eval_ablate_audio"] = bool(args.eval_ablate_audio)
+    config["train_eval_ablate_audio"] = bool(args.train_eval_ablate_audio)
+    config["train_eval_ablate_max_batches"] = args.train_eval_ablate_max_batches
 
     # Optional W&B init (after model + data are available so config is complete)
     wandb_run = _maybe_init_wandb(
