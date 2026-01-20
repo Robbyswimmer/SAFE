@@ -72,21 +72,21 @@ def run_sanity_check(args):
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
 
-    # Load one batch
+    # Load one sample
     print(f"\nLoading dataset from: {args.data_path}")
     dataset = AVEDataset(
         data_path=args.data_path,
         split="val",
-        max_audio_length=10.0,
+        max_length=10.0,
     )
-    loader = DataLoader(dataset, batch_size=1, shuffle=False)
-    batch = next(iter(loader))
 
-    audio = batch["audio"].to(device)
-    label = batch["label"].to(device)
-    class_name = dataset.idx_to_class.get(label.item(), "unknown")
-    print(f"Sample class: {class_name} (idx={label.item()})")
-    print(f"Audio shape: {audio.shape}")
+    # Get first sample (AVEDataset returns audio as path string)
+    sample = dataset[0]
+    audio_path = sample["audio"]
+    label = sample["label"]
+    class_name = sample["category"]
+    print(f"Sample class: {class_name} (idx={label})")
+    print(f"Audio path: {audio_path}")
 
     # =========================================================================
     # SETUP: Forward pass to collect diagnostics
@@ -101,9 +101,11 @@ def run_sanity_check(args):
 
     # Forward pass with audio
     with torch.no_grad():
-        # Get audio tokens
-        audio_features = model.audio_encoder(audio)
+        # Load and encode audio (AVEDataset returns file path)
+        audio_tensor = model.audio_encoder.load_audio(audio_path).unsqueeze(0).to(device)
+        audio_features = model.audio_encoder(audio_tensor)
         audio_tokens = model.audio_projector(audio_features)
+        print(f"Audio tensor shape: {audio_tensor.shape}")
         print(f"Audio tokens shape: {audio_tokens.shape}")
         print(f"Audio tokens RMS (before norm): {compute_rms(audio_tokens):.4f}")
 

@@ -635,7 +635,7 @@ def main():
         dataset = AVEDataset(
             data_path=args.data_path,
             split="val",
-            max_audio_length=10.0,
+            max_length=10.0,
         )
 
     # Run tests based on mode
