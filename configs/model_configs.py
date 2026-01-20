@@ -267,9 +267,8 @@ PHASE1_CONFIG = {
 KV_AUGMENT_CONFIG = {
     "name": "kv_augment",
     "description": "KV Augmentation - audio injected into LLM self-attention as additional K,V",
-    # Eval prompt: keep it direct and "caption-like" to avoid refusal templates and
-    # meta-explanations (e.g., defining "sound source").
-    "eval_prompt": "Audio caption (one short sentence; no opinions; no definitions):",
+    # Eval prompt: keep it direct and avoid meta-explanations.
+    "eval_prompt": "Describe what you hear in one short sentence.",
 
     # Base VL Model - LLaVA 13B
     "llm_model_name": "llava-hf/llava-1.5-13b-hf",
