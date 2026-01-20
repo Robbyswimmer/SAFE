@@ -99,15 +99,25 @@ class SAFEModel(nn.Module):
         print(f"[SAFE] ✓ Audio encoder initialized (embed_dim={audio_embed_dim})", flush=True)
         sys.stdout.flush()
         
+        # Check if using KV augmentation mode (affects projector output size)
+        fusion_config = fusion_config or {}
+        is_kv_augment = fusion_config.get("fusion_mode") == "kv_augment"
+
         # Initialize audio projector
         print(f"[SAFE] Initializing audio projector ({projector_type})...", flush=True)
         sys.stdout.flush()
         projector_config = projector_config or {}
+
+        # For KV augmentation, projector outputs in audio_embed_dim space (not llm_hidden_size)
+        # This reduces projector params from ~44M to ~4M (512*8 vs 5120*8 output)
+        projector_output_dim = audio_embed_dim if is_kv_augment else None
+
         if projector_type == "standard":
             self.audio_projector = AudioProjector(
                 audio_embed_dim=audio_embed_dim,
                 llm_hidden_size=llm_hidden_size,
                 num_audio_tokens=num_audio_tokens,
+                output_dim=projector_output_dim,
                 **projector_config
             )
         elif projector_type == "adaptive":
@@ -123,13 +133,11 @@ class SAFEModel(nn.Module):
         # Enable debug logging for projector norms
         self.audio_projector.debug_logging = True
 
-        print(f"[SAFE] ✓ Audio projector initialized", flush=True)
+        actual_output_dim = getattr(self.audio_projector, 'output_dim', llm_hidden_size)
+        print(f"[SAFE] ✓ Audio projector initialized (output_dim={actual_output_dim})", flush=True)
         sys.stdout.flush()
-        
+
         # Initialize fusion adapter
-        # Check if using KV augmentation mode (handled separately)
-        fusion_config = fusion_config or {}
-        is_kv_augment = fusion_config.get("fusion_mode") == "kv_augment"
 
         if is_kv_augment:
             # KV augmentation uses its own adapters, create a dummy fusion_adapter for compatibility
@@ -239,6 +247,8 @@ class SAFEModel(nn.Module):
             print(f"[SAFE] LLM attention config: num_heads={num_attention_heads}, num_kv_heads={num_key_value_heads}, head_dim={head_dim}", flush=True)
 
             # Create per-layer KV adapters
+            # input_dim=audio_embed_dim because projector outputs in audio space (not llm_hidden_size)
+            # This significantly reduces adapter params while KV projection expands to LLM space
             self.kv_adapters = nn.ModuleDict({
                 str(idx): KVAugmentationAdapter(
                     hidden_size=llm_hidden_size,
@@ -249,6 +259,7 @@ class SAFEModel(nn.Module):
                     dropout=fusion_config.get("dropout", 0.1),
                     use_bottleneck=fusion_config.get("use_bottleneck", True),
                     query_adapter_rank=fusion_config.get("query_adapter_rank", 16),
+                    input_dim=audio_embed_dim,  # Audio tokens are in audio_embed_dim space
                 )
                 for idx in kv_fusion_layers
             })

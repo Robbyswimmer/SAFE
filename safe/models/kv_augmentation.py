@@ -113,6 +113,7 @@ class KVAugmentationAdapter(nn.Module):
         dropout: float = 0.1,
         use_bottleneck: bool = True,
         query_adapter_rank: int = 16,
+        input_dim: Optional[int] = None,  # Audio token input dim (if smaller than hidden_size)
     ):
         super().__init__()
 
@@ -126,24 +127,27 @@ class KVAugmentationAdapter(nn.Module):
         self.use_bottleneck = use_bottleneck
         self.query_adapter_rank = query_adapter_rank
 
+        # Input dimension for audio tokens (can be smaller than hidden_size for param efficiency)
+        self.input_dim = input_dim if input_dim is not None else hidden_size
+
         if use_bottleneck:
-            # Bottleneck projection: hidden_size → bottleneck → kv_size (for GQA)
+            # Bottleneck projection: input_dim → bottleneck → kv_size
             self.audio_k_proj = nn.Sequential(
-                nn.Linear(hidden_size, bottleneck_dim),
+                nn.Linear(self.input_dim, bottleneck_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
                 nn.Linear(bottleneck_dim, self.total_kv_size),
             )
             self.audio_v_proj = nn.Sequential(
-                nn.Linear(hidden_size, bottleneck_dim),
+                nn.Linear(self.input_dim, bottleneck_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
                 nn.Linear(bottleneck_dim, self.total_kv_size),
             )
         else:
             # Direct projection (more parameters)
-            self.audio_k_proj = nn.Linear(hidden_size, self.total_kv_size)
-            self.audio_v_proj = nn.Linear(hidden_size, self.total_kv_size)
+            self.audio_k_proj = nn.Linear(self.input_dim, self.total_kv_size)
+            self.audio_v_proj = nn.Linear(self.input_dim, self.total_kv_size)
 
         # Learnable scaling factor for audio K,V (no gate here - gate applied at combine step only)
         # Start at 0.5 for meaningful gradients
@@ -153,7 +157,8 @@ class KVAugmentationAdapter(nn.Module):
 
         # LayerNorm for audio tokens BEFORE K,V projection
         # Critical: audio token norms can be huge (~500+), causing softmax saturation
-        self.audio_norm = nn.LayerNorm(hidden_size)
+        # Use input_dim (not hidden_size) since audio tokens may be in smaller space
+        self.audio_norm = nn.LayerNorm(self.input_dim)
 
         # Audio Query Adapter: produces ΔQ for audio attention
         # This allows frozen queries to attend to audio K,V

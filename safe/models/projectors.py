@@ -44,6 +44,7 @@ class AudioProjector(nn.Module):
         bottleneck_dim: Optional[int] = None,
         use_swiglu: bool = False,
         use_positional_embedding: bool = False,
+        output_dim: Optional[int] = None,  # If set, output in this dim instead of llm_hidden_size
     ):
         super().__init__()
 
@@ -53,12 +54,17 @@ class AudioProjector(nn.Module):
         self.use_swiglu = use_swiglu
         self.use_positional_embedding = use_positional_embedding
 
+        # Output dimension: use output_dim if specified, otherwise llm_hidden_size
+        # For KV-augment mode, output_dim=audio_embed_dim keeps tokens small (~4M vs 42M params)
+        self.output_dim = output_dim if output_dim is not None else llm_hidden_size
+        output_size = self.output_dim * num_audio_tokens
+
         # Default bottleneck to 2048 if not specified.
         # Previous 1024 was too aggressive (5x compression for LLaVA's 5120 hidden size),
         # creating an information bottleneck that choked gradient flow.
         # 2048 provides better capacity while still reducing parameters.
         if bottleneck_dim is None:
-            bottleneck_dim = min(2048, llm_hidden_size // 2)
+            bottleneck_dim = min(2048, self.output_dim // 2) if self.output_dim > 1024 else min(512, self.output_dim)
         self.bottleneck_dim = bottleneck_dim
 
         # Input normalization for stability
@@ -66,11 +72,10 @@ class AudioProjector(nn.Module):
 
         if use_swiglu:
             # SwiGLU-based projector (better gradient flow, used in LLaMA/PaLM)
-            # Architecture: audio_embed_dim → SwiGLU(bottleneck_dim) → llm_hidden_size * num_audio_tokens
             self.projector = nn.Sequential(
                 SwiGLU(audio_embed_dim, bottleneck_dim, bottleneck_dim),
                 nn.Dropout(dropout),
-                nn.Linear(bottleneck_dim, llm_hidden_size * num_audio_tokens),
+                nn.Linear(bottleneck_dim, output_size),
             )
         else:
             # Standard MLP projector
@@ -86,28 +91,26 @@ class AudioProjector(nn.Module):
             self.activation = act_fn
 
             # 2-layer MLP with bottleneck for parameter efficiency
-            # Architecture: audio_embed_dim → bottleneck_dim → llm_hidden_size * num_audio_tokens
-            # NOTE: No Tanh - LayerNorm provides sufficient normalization without gradient compression
             self.projector = nn.Sequential(
                 nn.Linear(audio_embed_dim, bottleneck_dim),
                 act_fn,
                 nn.Dropout(dropout),
-                nn.Linear(bottleneck_dim, llm_hidden_size * num_audio_tokens),
+                nn.Linear(bottleneck_dim, output_size),
             )
 
         # Learnable positional embeddings for audio tokens
         # Helps the model understand temporal structure in audio
         if use_positional_embedding:
             self.pos_embedding = nn.Parameter(
-                torch.zeros(1, num_audio_tokens, llm_hidden_size)
+                torch.zeros(1, num_audio_tokens, self.output_dim)
             )
             # Initialize with small values for stability
             nn.init.normal_(self.pos_embedding, mean=0.0, std=0.02)
         else:
             self.pos_embedding = None
 
-        # Output normalization
-        self.output_norm = nn.LayerNorm(llm_hidden_size, eps=1e-6)
+        # Output normalization (use output_dim, not llm_hidden_size)
+        self.output_norm = nn.LayerNorm(self.output_dim, eps=1e-6)
 
         # Trainable scale applied after LayerNorm.
         # With LayerNorm, per-token L2 norm is typically ~sqrt(hidden_size), so
@@ -118,7 +121,7 @@ class AudioProjector(nn.Module):
         self.debug_logging = False
         self._projector_log_limit = 5
         self._projector_logs_emitted = 0
-        
+
         # Initialize weights
         self._init_weights()
     
@@ -154,7 +157,7 @@ class AudioProjector(nn.Module):
         text_embeds_for_calib: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Project audio features to LLM token space.
+        Project audio features to token space.
 
         Args:
             audio_features: (batch_size, audio_embed_dim) audio embeddings
@@ -162,30 +165,26 @@ class AudioProjector(nn.Module):
             text_embeds_for_calib: (batch_size, seq_len, hidden_size) text embeddings for norm calibration
 
         Returns:
-            audio_tokens: (batch_size, num_audio_tokens, llm_hidden_size)
+            audio_tokens: (batch_size, num_audio_tokens, output_dim)
         """
         batch_size = audio_features.shape[0]
-        
+
         # Sanitize inputs and compute in fp32 for numerical stability
         x = torch.nan_to_num(audio_features, nan=0.0, posinf=0.0, neginf=0.0)
         if x.dtype != torch.float32:
             x = x.float()
-        
+
         # Normalize input for stability
         normalized_input = self.input_norm(x)
-        
-        
-        # Project through MLP with soft bounding
-        projected = self.projector(normalized_input)  # (batch_size, llm_hidden_size * num_audio_tokens)
 
-        # Phase 1.5 fix: Remove tanh*10.0 saturation, use LayerNorm instead
-        # The projector already has tanh in the Sequential, adding clean normalization here
+        # Project through MLP
+        projected = self.projector(normalized_input)  # (batch_size, output_dim * num_audio_tokens)
 
         # Reshape to token format
         audio_tokens = projected.view(
             batch_size,
             self.num_audio_tokens,
-            self.llm_hidden_size
+            self.output_dim
         )
 
         # Add positional embeddings if enabled
