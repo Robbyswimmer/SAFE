@@ -19,8 +19,12 @@ DATA_PATH=${DATA_PATH:-"/data/SalmanAsif/AVE_Dataset"}
 OUTPUT_DIR=${OUTPUT_DIR:-"outputs/kv_augment_probe"}
 BATCH_SIZE=${BATCH_SIZE:-16}
 NUM_EPOCHS=${NUM_EPOCHS:-30}
-SAFE_LR=${SAFE_LR:-5e-4}
-HEAD_LR=${HEAD_LR:-1e-3}
+# CRITICAL: SAFE LR > Head LR to force SAFE to learn (not head)
+# Default was backwards (head=1e-3, safe=5e-4) which let head dominate
+SAFE_LR=${SAFE_LR:-1e-3}
+HEAD_LR=${HEAD_LR:-1e-4}
+# Freeze head for first N steps to force SAFE to learn discriminative features
+HEAD_WARMUP_STEPS=${HEAD_WARMUP_STEPS:-500}
 # audio_attn pools at positions with highest audio attention mass
 # This is the most sensitive pooling for detecting if audio affects the LLM
 POOLING=${POOLING:-"audio_attn"}
@@ -35,8 +39,9 @@ echo "Data path: $DATA_PATH"
 echo "Output dir: $OUTPUT_DIR"
 echo "Batch size: $BATCH_SIZE"
 echo "Epochs: $NUM_EPOCHS"
-echo "SAFE LR: $SAFE_LR"
+echo "SAFE LR: $SAFE_LR (should be > Head LR)"
 echo "Head LR: $HEAD_LR"
+echo "Head warmup steps: $HEAD_WARMUP_STEPS (head frozen during warmup)"
 echo "Pooling: $POOLING"
 echo "========================================"
 
@@ -66,6 +71,7 @@ python train_audio_llm_probe.py \
     --num-epochs "$NUM_EPOCHS" \
     --safe-learning-rate "$SAFE_LR" \
     --head-learning-rate "$HEAD_LR" \
+    --head-warmup-steps "$HEAD_WARMUP_STEPS" \
     --model-config kv_augment \
     --fusion-layer-indices "16,24,32" \
     --pooling "$POOLING" \

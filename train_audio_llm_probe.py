@@ -690,22 +690,24 @@ def train_epoch(
         labels = labels.to(device)
         optimizer.zero_grad(set_to_none=True)
 
-        # Optional head-only warmup: freeze SAFE LR for early steps, then restore.
-        if getattr(args, "head_warmup_steps", 0):
+        # Head warmup: freeze HEAD LR for early steps so SAFE learns first
+        # This is CRITICAL: without this, head dominates and SAFE never learns
+        if getattr(args, "head_warmup_steps", 0) > 0:
             warmup_steps = int(args.head_warmup_steps)
-            safe_lr = float(args.safe_learning_rate)
-            effective_safe_lr = 0.0 if global_step < warmup_steps else safe_lr
+            head_lr = float(args.head_learning_rate)
+            # Freeze head during warmup, unfreeze after
+            effective_head_lr = 0.0 if global_step < warmup_steps else head_lr
             for group in optimizer.param_groups:
-                if str(group.get("name", "")).startswith("safe_"):
-                    group["lr"] = effective_safe_lr
-            # Log once when SAFE LR turns on (crosses warmup boundary)
+                if str(group.get("name", "")).startswith("head_"):
+                    group["lr"] = effective_head_lr
+            # Log once when HEAD LR turns on (warmup complete)
             if (
-                effective_safe_lr > 0.0
-                and not hasattr(model, "_safe_lr_on_logged")
+                global_step == warmup_steps
+                and not hasattr(model, "_head_warmup_complete_logged")
             ):
-                model._safe_lr_on_logged = True
+                model._head_warmup_complete_logged = True
                 lr_by_group = {g.get("name", f"g{idx}"): g.get("lr") for idx, g in enumerate(optimizer.param_groups)}
-                print(f"  [LR] SAFE warmup complete at step={global_step}. lrs={lr_by_group}", flush=True)
+                print(f"\n  [LR] HEAD warmup complete at step={global_step}. Head unfrozen. lrs={lr_by_group}\n", flush=True)
 
         with autocast(enabled=args.fp16):
             logits = model(audio=audio, device=device, pooling=args.pooling)
@@ -739,9 +741,9 @@ def train_epoch(
                 flush=True,
             )
 
-            # Log gradients/LRs on first log interval, and once right after SAFE LR turns on.
+            # Log gradients/LRs on first log interval, and once right after HEAD warmup completes.
             should_log_grads = not hasattr(model, "_grad_logged")
-            if getattr(args, "head_warmup_steps", 0) and hasattr(model, "_safe_lr_on_logged"):
+            if getattr(args, "head_warmup_steps", 0) and hasattr(model, "_head_warmup_complete_logged"):
                 should_log_grads = should_log_grads or not hasattr(model, "_grad_after_warmup_logged")
             if should_log_grads:
                 if hasattr(model, "_grad_logged"):
@@ -766,7 +768,30 @@ def train_epoch(
                     safe_g = safe_g ** 0.5 if safe_n else 0.0
 
                 lr_by_group = {g.get("name", f"g{idx}"): g.get("lr") for idx, g in enumerate(optimizer.param_groups)}
-                print(f"  [Gradients] head={head_g:.4f} ({head_n}) safe={safe_g:.4f} ({safe_n}) lrs={lr_by_group}", flush=True)
+
+                # Log ΔQ/Q ratio from KV augmentation (key diagnostic for training progress)
+                dq_q_str = ""
+                entropy_str = ""
+                if hasattr(model.safe_model, 'kv_hook_manager') and model.safe_model.kv_hook_manager is not None:
+                    diag = model.safe_model.kv_hook_manager.get_diagnostics()
+                    if diag:
+                        dq_ratios = []
+                        entropies = []
+                        for layer_idx, layer_diag in diag.items():
+                            if 'delta_q_rms' in layer_diag and 'q_rms' in layer_diag:
+                                q_rms = max(layer_diag['q_rms'], 1e-8)
+                                ratio = layer_diag['delta_q_rms'] / q_rms
+                                dq_ratios.append(ratio)
+                            if 'normalized_entropy' in layer_diag:
+                                entropies.append(layer_diag['normalized_entropy'])
+                        if dq_ratios:
+                            avg_dq_q = sum(dq_ratios) / len(dq_ratios)
+                            dq_q_str = f" ΔQ/Q={avg_dq_q*100:.4f}%"
+                        if entropies:
+                            avg_ent = sum(entropies) / len(entropies)
+                            entropy_str = f" entropy={avg_ent:.3f}"
+
+                print(f"  [Gradients] head={head_g:.4f} ({head_n}) safe={safe_g:.4f} ({safe_n}){dq_q_str}{entropy_str} lrs={lr_by_group}", flush=True)
 
             if wandb is not None and args.wandb:
                 wandb.log(
@@ -866,6 +891,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scale-min-end", type=float, default=1.0)
     p.add_argument("--residual-warmup-epochs", type=int, default=5)
     p.add_argument("--residual-warmup-start", type=float, default=0.1)
+
+    # Head warmup: freeze head for N steps to force SAFE to learn first
+    p.add_argument("--head-warmup-steps", type=int, default=0,
+                   help="Freeze classifier head for first N steps to force SAFE learning")
 
     # Logging
     p.add_argument("--wandb", action="store_true")
