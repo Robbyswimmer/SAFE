@@ -486,7 +486,19 @@ class KVAugmentedAttention(nn.Module):
             text_rms = torch.sqrt(torch.mean(text_output.float() ** 2)).item()
             audio_rms = torch.sqrt(torch.mean(gated_audio_output.float() ** 2)).item()
             rms_ratio = audio_rms / (text_rms + 1e-8)
-            audio_attn_mass = audio_attn_weights.sum(dim=-1).mean().item()
+
+            # NOTE: In separate-branch architecture, audio attention always sums to 1.0
+            # (softmax over audio tokens). This is meaningless as a metric.
+            # Instead, use ENTROPY (should decrease with training) and ΔQ/Q ratio.
+
+            # Audio attention entropy (H/log(n) normalized)
+            # ~1.0 = uniform (bad if stays), <1.0 = focused (good)
+            attn_dist = audio_attn_weights.mean(dim=(0, 1))  # Average over batch, heads -> (seq, n_audio)
+            attn_dist = attn_dist.clamp(min=1e-10)
+            entropy_per_pos = -(attn_dist * attn_dist.log()).sum(dim=-1)  # (seq,)
+            mean_entropy = entropy_per_pos.mean().item()
+            max_entropy = math.log(n_audio) if n_audio > 1 else 1.0
+            normalized_entropy = mean_entropy / max_entropy
 
             # ΔQ/Q ratio for checking if query adapter is meaningful
             delta_q_rms = torch.sqrt(torch.mean(delta_q.float() ** 2)).item()
@@ -497,12 +509,12 @@ class KVAugmentedAttention(nn.Module):
                 "text_rms": text_rms,
                 "audio_rms": audio_rms,
                 "rms_ratio": rms_ratio,
-                "audio_attn_mass": audio_attn_mass,
+                "normalized_entropy": normalized_entropy,  # Replaces meaningless audio_attn_mass
                 "gate": self._gate,
-                # New: ΔQ/Q diagnostics
+                # ΔQ/Q diagnostics
                 "delta_q_rms": delta_q_rms,
                 "q_rms": q_rms,
-                # New: Store attention weights for entropy calculation
+                # Store attention weights for external entropy calculation if needed
                 "audio_attn_weights": audio_attn_weights.detach().clone(),
             }
 
@@ -796,10 +808,10 @@ class KVAugmentationHookManager:
 
         Returns dict with keys like:
         - {prefix}layer_12/rms_ratio
-        - {prefix}layer_12/audio_attn_mass
+        - {prefix}layer_12/normalized_entropy
         - {prefix}layer_12/delta_q_ratio
         - {prefix}mean/rms_ratio
-        - {prefix}mean/audio_attn_mass
+        - {prefix}mean/normalized_entropy
         - {prefix}mean/delta_q_ratio
         """
         all_diag = self.get_diagnostics()
@@ -808,7 +820,7 @@ class KVAugmentationHookManager:
 
         log_dict = {}
         rms_ratios = []
-        attn_masses = []
+        entropies = []
         dq_ratios = []
 
         for layer_idx, diag in sorted(all_diag.items()):
@@ -816,9 +828,12 @@ class KVAugmentationHookManager:
             log_dict[f"{layer_prefix}text_rms"] = diag["text_rms"]
             log_dict[f"{layer_prefix}audio_rms"] = diag["audio_rms"]
             log_dict[f"{layer_prefix}rms_ratio"] = diag["rms_ratio"]
-            log_dict[f"{layer_prefix}audio_attn_mass"] = diag["audio_attn_mass"]
             rms_ratios.append(diag["rms_ratio"])
-            attn_masses.append(diag["audio_attn_mass"])
+
+            # Normalized entropy (replaces meaningless audio_attn_mass)
+            if "normalized_entropy" in diag:
+                log_dict[f"{layer_prefix}normalized_entropy"] = diag["normalized_entropy"]
+                entropies.append(diag["normalized_entropy"])
 
             # ΔQ/Q ratio
             if "delta_q_rms" in diag and "q_rms" in diag:
@@ -830,7 +845,8 @@ class KVAugmentationHookManager:
         # Averages across layers
         if rms_ratios:
             log_dict[f"{prefix}mean/rms_ratio"] = sum(rms_ratios) / len(rms_ratios)
-            log_dict[f"{prefix}mean/audio_attn_mass"] = sum(attn_masses) / len(attn_masses)
+        if entropies:
+            log_dict[f"{prefix}mean/normalized_entropy"] = sum(entropies) / len(entropies)
         if dq_ratios:
             log_dict[f"{prefix}mean/delta_q_ratio"] = sum(dq_ratios) / len(dq_ratios)
 
