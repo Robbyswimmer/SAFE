@@ -1950,6 +1950,7 @@ def train_epoch(
         if epoch <= 3 and batch_idx % 50 == 0:
             proj_grad_norm = 0.0
             fuse_grad_norm = 0.0
+            kv_grad_norm = 0.0
             for name, param in model.named_parameters():
                 if param.grad is not None:
                     grad_norm = param.grad.norm().item()
@@ -1957,7 +1958,9 @@ def train_epoch(
                         proj_grad_norm += grad_norm
                     if "fusion_adapter" in name:
                         fuse_grad_norm += grad_norm
-            print(f"[GradCheck] epoch={epoch} batch={batch_idx} proj={proj_grad_norm:.6f} fuse={fuse_grad_norm:.6f}", flush=True)
+                    if "kv_adapter" in name or "kv_augmentation" in name:
+                        kv_grad_norm += grad_norm
+            print(f"[GradCheck] epoch={epoch} batch={batch_idx} proj={proj_grad_norm:.6f} fuse={fuse_grad_norm:.6f} kv={kv_grad_norm:.6f}", flush=True)
             last_proj_grad_norm = float(proj_grad_norm)
             last_fuse_grad_norm = float(fuse_grad_norm)
 
