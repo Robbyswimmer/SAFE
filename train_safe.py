@@ -1298,10 +1298,18 @@ def evaluate(
         # Clean predictions (remove question prompt and extract answer content) + collect references
         for i, pred in enumerate(batch_predictions):
             question = questions[i]
+            # Debug: show cleaning steps for first sample of first batch
+            if batch_idx == 0 and i == 0:
+                print(f"[CleanDebug] Raw batch_decode: {repr(pred[:200])}", flush=True)
             if question and question in pred:
                 pred = pred.replace(question, "").strip()
+                if batch_idx == 0 and i == 0:
+                    print(f"[CleanDebug] After question removal: {repr(pred[:200])}", flush=True)
             pred_answer = _extract_answer_from_generation(pred)
             cleaned_pred = pred_answer if pred_answer else pred.strip()
+            if batch_idx == 0 and i == 0:
+                print(f"[CleanDebug] After _extract_answer: {repr(pred_answer[:200] if pred_answer else 'EMPTY')}", flush=True)
+                print(f"[CleanDebug] Final cleaned_pred: {repr(cleaned_pred[:200])}", flush=True)
             all_predictions.append(cleaned_pred)
 
             answer = answers[i]

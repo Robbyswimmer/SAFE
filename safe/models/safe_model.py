@@ -2267,6 +2267,9 @@ class SAFEModel(nn.Module):
                 # which breaks BPE decoding (corrupted subwords like "gar gar gar").
                 # KV augmentation injects audio via attention K,V, not via embeddings,
                 # so we just need input_ids (sanitized to replace audio tokens with pad).
+                if not hasattr(self, '_kv_gen_fix_logged'):
+                    print(f"[KV_GEN_FIX] Using fixed KV augmentation generate path (no inputs_embeds)", flush=True)
+                    self._kv_gen_fix_logged = True
                 kv_gen_inputs = {k: v for k, v in base_inputs.items() if k != "inputs_embeds"}
                 # Ensure we have the sanitized input_ids (audio tokens -> pad)
                 if sanitized_ids is not None:
