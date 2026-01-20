@@ -258,7 +258,7 @@ def forward_check(model, tokenizer, device, dataset, config):
 
     with torch.no_grad():
         # Get audio features
-        audio_tensor = model.audio_encoder.load_audio(audio).unsqueeze(0).to(device)
+        audio_tensor = model.audio_encoder.preprocess_audio(audio).to(device)
         audio_features = model.audio_encoder(audio_tensor)
         audio_tokens = model.audio_projector(audio_features)
         null_audio = torch.zeros_like(audio_tokens)
@@ -419,7 +419,7 @@ def run_ablation(model, tokenizer, device, dataset, config, num_samples=10):
 
         with torch.no_grad():
             # Get audio features
-            audio_tensor = model.audio_encoder.load_audio(audio).unsqueeze(0).to(device)
+            audio_tensor = model.audio_encoder.preprocess_audio(audio).to(device)
             audio_features = model.audio_encoder(audio_tensor)
             audio_tokens = model.audio_projector(audio_features)
             null_audio = torch.zeros_like(audio_tokens)

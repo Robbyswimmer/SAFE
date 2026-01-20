@@ -102,7 +102,7 @@ def run_sanity_check(args):
     # Forward pass with audio
     with torch.no_grad():
         # Load and encode audio (AVEDataset returns file path)
-        audio_tensor = model.audio_encoder.load_audio(audio_path).unsqueeze(0).to(device)
+        audio_tensor = model.audio_encoder.preprocess_audio(audio_path).to(device)
         audio_features = model.audio_encoder(audio_tensor)
         audio_tokens = model.audio_projector(audio_features)
         print(f"Audio tensor shape: {audio_tensor.shape}")
