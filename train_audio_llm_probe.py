@@ -264,6 +264,125 @@ class SAFELLMProbe(nn.Module):
     def get_head_params(self) -> List[nn.Parameter]:
         return list(self.head.parameters())
 
+    def _pool_by_audio_attention(
+        self,
+        hidden: torch.Tensor,
+        top_k: int = 8,
+        candidate_span: int = 16,  # Only consider last N positions (answer-decision span)
+    ) -> torch.Tensor:
+        """
+        Pool hidden states at positions with highest audio attention mass.
+
+        IMPROVEMENTS over naive top-k:
+        1. Restricts to last `candidate_span` positions (answer-decision tokens)
+           - Avoids picking junk like early prompt tokens or punctuation
+        2. Aggregates attention across ALL fusion layers (max per position)
+           - Ensures we don't miss signal from any injection site
+        3. Logs attention entropy to detect uniform (non-discriminative) attention
+
+        Args:
+            hidden: (batch, seq_len, hidden_size)
+            top_k: number of top positions to pool
+            candidate_span: only consider last N positions as candidates
+
+        Returns:
+            pooled: (batch, hidden_size)
+        """
+        batch_size, seq_len, hidden_size = hidden.shape
+
+        # Restrict to answer-decision span (last N positions)
+        span = min(candidate_span, seq_len)
+        hidden_span = hidden[:, -span:, :]  # (batch, span, hidden_size)
+
+        # Try to get audio attention weights from ALL fusion layers
+        audio_attn_per_pos = None
+        layer_contributions = {}
+        try:
+            if hasattr(self.safe_model, 'kv_hook_manager') and self.safe_model.kv_hook_manager is not None:
+                attn_weights = self.safe_model.kv_hook_manager.get_attention_weights()
+                if attn_weights:
+                    # Aggregate across ALL layers using MAX (captures strongest signal)
+                    layer_attn_list = []
+                    for layer_idx, weights in sorted(attn_weights.items()):
+                        # weights: (batch, heads, q_len, n_audio)
+                        # Sum attention to audio, average over heads: (batch, q_len)
+                        layer_attn = weights.sum(dim=-1).mean(dim=1)
+                        # Only take the last `span` positions
+                        layer_attn = layer_attn[:, -span:]
+                        layer_attn_list.append(layer_attn)
+                        layer_contributions[layer_idx] = layer_attn.mean().item()
+
+                    # Stack and take MAX across layers per position
+                    stacked = torch.stack(layer_attn_list, dim=0)  # (n_layers, batch, span)
+                    audio_attn_per_pos, max_layer_idx = stacked.max(dim=0)  # (batch, span)
+
+                    # Compute entropy of attention distribution (non-uniform = good)
+                    # Entropy over audio tokens, averaged over positions
+                    with torch.no_grad():
+                        # Use last layer's full attention for entropy
+                        last_layer_idx = max(attn_weights.keys())
+                        last_weights = attn_weights[last_layer_idx][:, :, -span:, :]  # (B, H, span, n_audio)
+                        # Normalize to get distribution over audio tokens
+                        attn_dist = last_weights.mean(dim=1)  # (B, span, n_audio)
+                        attn_dist = attn_dist / (attn_dist.sum(dim=-1, keepdim=True) + 1e-8)
+                        # Entropy: -sum(p * log(p))
+                        entropy = -(attn_dist * (attn_dist + 1e-8).log()).sum(dim=-1).mean()
+                        n_audio = last_weights.shape[-1]
+                        max_entropy = float(torch.tensor(n_audio).float().log())
+                        self._last_attn_entropy = entropy.item()
+                        self._last_max_entropy = max_entropy
+        except Exception as e:
+            if not hasattr(self, "_audio_attn_error_logged"):
+                self._audio_attn_error_logged = True
+                print(f"[LLMProbe] Warning: Error getting attention: {e}", flush=True)
+
+        if audio_attn_per_pos is None:
+            # Fallback: use last top_k positions within span
+            if not hasattr(self, "_audio_attn_fallback_warned"):
+                self._audio_attn_fallback_warned = True
+                print("[LLMProbe] Warning: No audio attention weights available, "
+                      f"falling back to last-{top_k} of span-{span}", flush=True)
+            pooled = hidden_span[:, -top_k:, :].mean(dim=1)
+        else:
+            # Pool top-k positions by audio attention (within restricted span)
+            k = min(top_k, span)
+            _, top_indices = audio_attn_per_pos.topk(k, dim=1)  # (batch, k)
+
+            # Gather hidden states at top positions
+            top_indices_expanded = top_indices.unsqueeze(-1).expand(-1, -1, hidden_size)
+            top_hidden = hidden_span.gather(1, top_indices_expanded)  # (batch, k, hidden_size)
+
+            # Mean pool the top-k
+            pooled = top_hidden.mean(dim=1)
+
+            # Log detailed stats once
+            if not hasattr(self, "_audio_attn_stats_logged"):
+                self._audio_attn_stats_logged = True
+                with torch.no_grad():
+                    mean_attn = audio_attn_per_pos.mean().item()
+                    max_attn = audio_attn_per_pos.max().item()
+                    top_k_mean = audio_attn_per_pos.gather(1, top_indices).mean().item()
+
+                    # Find which layer contributes most
+                    if layer_contributions:
+                        max_layer = max(layer_contributions, key=layer_contributions.get)
+                        max_layer_val = layer_contributions[max_layer]
+                    else:
+                        max_layer, max_layer_val = "?", 0
+
+                    entropy_info = ""
+                    if hasattr(self, '_last_attn_entropy'):
+                        entropy_ratio = self._last_attn_entropy / self._last_max_entropy
+                        entropy_info = f" entropy={self._last_attn_entropy:.3f}/{self._last_max_entropy:.3f}={entropy_ratio:.2f}"
+                        if entropy_ratio > 0.95:
+                            entropy_info += " ⚠️UNIFORM"
+
+                print(f"[LLMProbe] audio_attn pooling: span={span} top-{k} "
+                      f"mean={mean_attn:.4f} max={max_attn:.4f} top_mean={top_k_mean:.4f} "
+                      f"max_layer={max_layer}({max_layer_val:.4f}){entropy_info}", flush=True)
+
+        return pooled
+
     def forward(
         self,
         audio: List[str],
@@ -372,17 +491,29 @@ class SAFELLMProbe(nn.Module):
             raise RuntimeError("SAFEModel did not return hidden_states; expected last hidden state tensor.")
 
         if pooling == "mean":
+            # Mean over all tokens (dilutes signal)
             if attention_mask is None:
                 pooled = hidden.mean(dim=1)
             else:
                 mask = attention_mask.to(hidden.dtype).unsqueeze(-1)  # (B, T, 1)
                 pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
-        else:
+
+        elif pooling == "audio_attn":
+            # Pool positions with highest audio attention mass (top-k)
+            # This targets tokens that are actually using audio information
+            pooled = self._pool_by_audio_attention(hidden, top_k=8)
+
+        elif pooling == "last" or pooling == "prompt_last":
+            # Last prompt token - where model "decides" the answer
+            # This is the most informative position for classification
             if attention_mask is None:
                 pooled = hidden[:, -1, :]
             else:
                 lengths = attention_mask.long().sum(dim=1).clamp_min(1) - 1
                 pooled = hidden[torch.arange(hidden.size(0), device=hidden.device), lengths]
+
+        else:
+            raise ValueError(f"Unknown pooling mode: {pooling}")
 
         # Lightweight sanity checks (printed once)
         if not hasattr(self, "_probe_stats_logged"):
@@ -690,7 +821,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--safe-weight-decay", type=float, default=0.01)
     p.add_argument("--head-weight-decay", type=float, default=0.0)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
-    p.add_argument("--pooling", type=str, default="last", choices=["last", "mean"])
+    p.add_argument("--pooling", type=str, default="last",
+                   choices=["last", "prompt_last", "mean", "audio_attn"],
+                   help="Pooling strategy: 'last'/'prompt_last' (last token), "
+                        "'mean' (all tokens), 'audio_attn' (top-k by audio attention)")
     p.add_argument("--fp16", action="store_true")
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)

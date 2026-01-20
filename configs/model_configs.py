@@ -297,7 +297,11 @@ KV_AUGMENT_CONFIG = {
 
     # Fusion configuration - KV AUGMENTATION MODE
     "fusion_type": "multilayer",
-    "fusion_layer_indices": [12, 24, 36],  # Mid/late layers
+    # Layer indices for LLaVA-13B (40 layers total):
+    # Try {16, 24, 32} first - mid layers where classification info forms
+    # Alternative: {12, 20, 28} if above doesn't work
+    # Avoid ultra-late layers (36+) until traction is seen
+    "fusion_layer_indices": [16, 24, 32],
     "lora_rank": 8,  # Not used in kv_augment mode but kept for compatibility
     "fusion_config": {
         # KEY: Enable KV augmentation mode
@@ -326,7 +330,7 @@ KV_AUGMENT_CONFIG = {
         # Modality configuration (for compatibility with existing code)
         "modalities": {
             "audio": {
-                "layer_indices": [12, 24, 36],
+                "layer_indices": [16, 24, 32],  # Match fusion_layer_indices
                 "num_tokens": 8
             }
         },

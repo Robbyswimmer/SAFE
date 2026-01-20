@@ -278,6 +278,134 @@ def run_sanity_check(args):
             print("    ⚠️  Too similar - audio not influencing output")
 
     # =========================================================================
+    # CHECK 4: ΔQ on/off test (query adapter must matter)
+    # =========================================================================
+    print("\n" + "=" * 60)
+    print("CHECK 4: ΔQ On/Off Test (Query Adapter Effect)")
+    print("=" * 60)
+
+    with torch.no_grad():
+        # Forward with ΔQ enabled (normal)
+        if hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None:
+            model.kv_hook_manager.inject_audio(audio_tokens, gate=1.0)
+        outputs_dq_on = model.vl_model.language_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        hidden_dq_on = outputs_dq_on.hidden_states[-1][:, -8:, :]  # Last 8 positions
+        logits_dq_on = outputs_dq_on.logits[:, -1, :]
+        if hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None:
+            model.kv_hook_manager.clear_audio()
+
+        # Temporarily zero out query adapter
+        original_scales = {}
+        if hasattr(model, 'kv_adapters'):
+            for layer_idx, adapter in model.kv_adapters.items():
+                if hasattr(adapter, 'audio_query_adapter'):
+                    original_scales[layer_idx] = adapter.audio_query_adapter.scale.data.clone()
+                    adapter.audio_query_adapter.scale.data.zero_()
+
+        # Forward with ΔQ disabled (zeroed)
+        if hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None:
+            model.kv_hook_manager.inject_audio(audio_tokens, gate=1.0)
+        outputs_dq_off = model.vl_model.language_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        hidden_dq_off = outputs_dq_off.hidden_states[-1][:, -8:, :]
+        logits_dq_off = outputs_dq_off.logits[:, -1, :]
+        if hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None:
+            model.kv_hook_manager.clear_audio()
+
+        # Restore query adapter
+        if hasattr(model, 'kv_adapters'):
+            for layer_idx, scale in original_scales.items():
+                model.kv_adapters[layer_idx].audio_query_adapter.scale.data = scale
+
+        # Compare
+        delta_logits_dq = (logits_dq_on - logits_dq_off).abs().mean().item()
+        delta_hidden_dq = (hidden_dq_on - hidden_dq_off).abs().mean().item()
+        cos_hidden_dq = F.cosine_similarity(
+            hidden_dq_on.flatten().unsqueeze(0),
+            hidden_dq_off.flatten().unsqueeze(0)
+        ).item()
+
+        print(f"\nΔQ enabled vs ΔQ=0 comparison:")
+        print(f"  |logits_on - logits_off|: {delta_logits_dq:.6f}")
+        print(f"  |hidden_on - hidden_off|: {delta_hidden_dq:.6f}")
+        print(f"  cosine(hidden_on, hidden_off): {cos_hidden_dq:.6f}")
+
+        if delta_logits_dq < 1e-6 and cos_hidden_dq > 0.9999:
+            print("\n  ⚠️  CRITICAL: ΔQ has NO effect!")
+            print("      Query adapter is not wired correctly.")
+            dq_works = False
+        elif delta_logits_dq < 0.001:
+            print("\n  ⚠️  WARNING: ΔQ effect is very small.")
+            dq_works = False
+        else:
+            print("\n  ✓ ΔQ affects output - query adapter is working.")
+            dq_works = True
+
+    # =========================================================================
+    # CHECK 5: Attention Entropy (non-uniform = learning alignment)
+    # =========================================================================
+    print("\n" + "=" * 60)
+    print("CHECK 5: Attention Entropy (Uniformity Check)")
+    print("=" * 60)
+
+    with torch.no_grad():
+        if hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None:
+            model.kv_hook_manager.set_return_attention_weights(True)
+            model.kv_hook_manager.inject_audio(audio_tokens, gate=1.0)
+
+            _ = model.vl_model.language_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
+
+            attn_weights = model.kv_hook_manager.get_attention_weights()
+            model.kv_hook_manager.clear_audio()
+
+            if attn_weights:
+                print("\nAttention entropy per layer:")
+                print("  (High ratio = uniform/forced, Low ratio = learned alignment)")
+                uniform_layers = 0
+                for layer_idx, weights in sorted(attn_weights.items()):
+                    # weights: (batch, heads, q_len, n_audio)
+                    n_audio = weights.shape[-1]
+                    max_entropy = float(torch.tensor(n_audio).float().log())
+
+                    # Normalize to distribution over audio tokens
+                    attn_dist = weights.mean(dim=1)  # (batch, q_len, n_audio)
+                    attn_dist = attn_dist / (attn_dist.sum(dim=-1, keepdim=True) + 1e-8)
+
+                    # Compute entropy
+                    entropy = -(attn_dist * (attn_dist + 1e-8).log()).sum(dim=-1).mean()
+                    entropy_ratio = entropy.item() / max_entropy
+
+                    status = ""
+                    if entropy_ratio > 0.95:
+                        status = "⚠️ UNIFORM (forced by reg?)"
+                        uniform_layers += 1
+                    elif entropy_ratio > 0.8:
+                        status = "~ somewhat uniform"
+                    else:
+                        status = "✓ non-uniform (good)"
+
+                    print(f"  Layer {layer_idx}: H={entropy.item():.3f} / {max_entropy:.3f} = {entropy_ratio:.2f} {status}")
+
+                if uniform_layers == len(attn_weights):
+                    print("\n  ⚠️  All layers have uniform attention!")
+                    print("      Min-attn reg may be forcing mass without learning.")
+            else:
+                print("  ⚠️  No attention weights available")
+
+    # =========================================================================
     # SUMMARY
     # =========================================================================
     print("\n" + "=" * 60)
@@ -328,6 +456,10 @@ def run_sanity_check(args):
         issues.append("Audio has NO effect on logits - branch disconnected")
     elif delta_audio_vs_null < 0.01:
         warnings.append(f"Audio effect small: {delta_audio_vs_null:.6f}")
+
+    # Check ΔQ effect
+    if not dq_works:
+        issues.append("ΔQ has no effect - query adapter not wired correctly")
 
     if issues:
         print("\n❌ CRITICAL ISSUES FOUND:")

@@ -484,6 +484,10 @@ class KVAugmentedAttention(nn.Module):
             rms_ratio = audio_rms / (text_rms + 1e-8)
             audio_attn_mass = audio_attn_weights.sum(dim=-1).mean().item()
 
+            # ΔQ/Q ratio for checking if query adapter is meaningful
+            delta_q_rms = torch.sqrt(torch.mean(delta_q.float() ** 2)).item()
+            q_rms = torch.sqrt(torch.mean(query_states.float() ** 2)).item()
+
             # Store for external access
             self._last_diagnostics = {
                 "text_rms": text_rms,
@@ -491,6 +495,11 @@ class KVAugmentedAttention(nn.Module):
                 "rms_ratio": rms_ratio,
                 "audio_attn_mass": audio_attn_mass,
                 "gate": self._gate,
+                # New: ΔQ/Q diagnostics
+                "delta_q_rms": delta_q_rms,
+                "q_rms": q_rms,
+                # New: Store attention weights for entropy calculation
+                "audio_attn_weights": audio_attn_weights.detach().clone(),
             }
 
         # Reshape and output projection (frozen)
@@ -784,8 +793,10 @@ class KVAugmentationHookManager:
         Returns dict with keys like:
         - {prefix}layer_12/rms_ratio
         - {prefix}layer_12/audio_attn_mass
+        - {prefix}layer_12/delta_q_ratio
         - {prefix}mean/rms_ratio
         - {prefix}mean/audio_attn_mass
+        - {prefix}mean/delta_q_ratio
         """
         all_diag = self.get_diagnostics()
         if not all_diag:
@@ -794,6 +805,7 @@ class KVAugmentationHookManager:
         log_dict = {}
         rms_ratios = []
         attn_masses = []
+        dq_ratios = []
 
         for layer_idx, diag in sorted(all_diag.items()):
             layer_prefix = f"{prefix}layer_{layer_idx}/"
@@ -804,30 +816,72 @@ class KVAugmentationHookManager:
             rms_ratios.append(diag["rms_ratio"])
             attn_masses.append(diag["audio_attn_mass"])
 
+            # ΔQ/Q ratio
+            if "delta_q_rms" in diag and "q_rms" in diag:
+                q_rms = max(diag["q_rms"], 1e-8)
+                dq_ratio = diag["delta_q_rms"] / q_rms
+                log_dict[f"{layer_prefix}delta_q_ratio"] = dq_ratio
+                dq_ratios.append(dq_ratio)
+
         # Averages across layers
         if rms_ratios:
             log_dict[f"{prefix}mean/rms_ratio"] = sum(rms_ratios) / len(rms_ratios)
             log_dict[f"{prefix}mean/audio_attn_mass"] = sum(attn_masses) / len(attn_masses)
+        if dq_ratios:
+            log_dict[f"{prefix}mean/delta_q_ratio"] = sum(dq_ratios) / len(dq_ratios)
 
         return log_dict
 
 
 class MinAudioAttentionLoss(nn.Module):
     """
-    Regularization loss that ensures answer tokens attend to audio.
+    Regularization loss that ensures answer-decision tokens attend to audio.
 
     This prevents the model from learning to ignore audio entirely.
     Uses hinge loss: penalizes if attention to audio is below threshold.
+
+    Key improvements:
+    - Only applies to last-k tokens (answer-decision positions) by default
+    - Supports curriculum: strong early, decay later
     """
 
     def __init__(
         self,
-        min_attention: float = 0.01,
-        loss_weight: float = 0.1,
+        min_attention: float = 0.1,
+        loss_weight: float = 1.0,
+        answer_tokens_k: int = 8,  # Only apply to last k tokens (answer-decision)
     ):
         super().__init__()
         self.min_attention = min_attention
         self.loss_weight = loss_weight
+        self.answer_tokens_k = answer_tokens_k
+
+        # For curriculum scheduling
+        self._initial_min_attention = min_attention
+        self._initial_loss_weight = loss_weight
+
+    def update_curriculum(self, step: int, warmup_steps: int = 1000, decay_steps: int = 2000):
+        """
+        Update min_attention and loss_weight based on training step.
+
+        Curriculum:
+        - steps 0 to warmup_steps: full strength (0.1 / 1.0)
+        - steps warmup_steps to decay_steps: linear decay to (0.01 / 0.1)
+        - steps > decay_steps: stay at (0.01 / 0.1)
+        """
+        if step < warmup_steps:
+            # Full strength during warm-up
+            self.min_attention = self._initial_min_attention
+            self.loss_weight = self._initial_loss_weight
+        elif step < decay_steps:
+            # Linear decay
+            progress = (step - warmup_steps) / (decay_steps - warmup_steps)
+            self.min_attention = self._initial_min_attention * (1 - 0.9 * progress)  # 0.1 -> 0.01
+            self.loss_weight = self._initial_loss_weight * (1 - 0.9 * progress)  # 1.0 -> 0.1
+        else:
+            # Final values
+            self.min_attention = 0.01
+            self.loss_weight = 0.1
 
     def forward(
         self,
@@ -843,6 +897,7 @@ class MinAudioAttentionLoss(nn.Module):
                               Each tensor is (bsz, heads, q_len, k_len)
             n_audio: Number of audio tokens (last n_audio positions in K)
             supervised_mask: (bsz, q_len) mask where 1 = supervised token (answer)
+                           If None, uses last answer_tokens_k positions
 
         Returns:
             Scalar loss tensor
@@ -854,21 +909,29 @@ class MinAudioAttentionLoss(nn.Module):
         count = 0
 
         for layer_idx, attn in attention_weights.items():
-            # Extract attention to audio positions (last n_audio columns)
-            audio_attn = attn[:, :, :, -n_audio:]  # (bsz, heads, q_len, n_audio)
+            bsz, heads, q_len, k_len = attn.shape
 
-            # Average attention to audio per query position
-            avg_audio_attn = audio_attn.mean(dim=-1)  # (bsz, heads, q_len)
+            # Extract attention to audio positions
+            # Note: with separate branches, audio attention is over n_audio tokens only
+            # so we take all of it, not last n_audio
+            audio_attn = attn  # (bsz, heads, q_len, n_audio) - already just audio attention
 
-            # Only penalize on supervised (answer) tokens if mask provided
+            # Sum attention to audio per query position (should sum to ~1.0 per position)
+            # Use sum not mean since softmax sums to 1
+            sum_audio_attn = audio_attn.sum(dim=-1)  # (bsz, heads, q_len)
+
+            # Create mask for answer-decision tokens (last k positions)
             if supervised_mask is not None:
-                # supervised_mask: (bsz, q_len)
                 mask = supervised_mask.unsqueeze(1).float()  # (bsz, 1, q_len)
-                masked_attn = avg_audio_attn * mask
-                denom = mask.sum() * attn.size(1)  # num supervised positions * heads
             else:
-                masked_attn = avg_audio_attn
-                denom = avg_audio_attn.numel()
+                # Default: last answer_tokens_k positions
+                mask = torch.zeros(bsz, 1, q_len, device=attn.device, dtype=attn.dtype)
+                k = min(self.answer_tokens_k, q_len)
+                mask[:, :, -k:] = 1.0
+
+            # Apply mask - only penalize on answer-decision tokens
+            masked_attn = sum_audio_attn * mask
+            denom = mask.sum() * heads  # num answer positions * heads
 
             # Hinge loss: penalize if below minimum
             deficit = F.relu(self.min_attention - masked_attn)
@@ -881,3 +944,10 @@ class MinAudioAttentionLoss(nn.Module):
             return torch.tensor(0.0, device=next(iter(attention_weights.values())).device)
 
         return self.loss_weight * (total_loss / count)
+
+    def get_current_params(self) -> Dict[str, float]:
+        """Get current curriculum parameters for logging."""
+        return {
+            "min_audio_attention": self.min_attention,
+            "min_audio_attention_weight": self.loss_weight,
+        }

@@ -21,7 +21,9 @@ BATCH_SIZE=${BATCH_SIZE:-16}
 NUM_EPOCHS=${NUM_EPOCHS:-30}
 SAFE_LR=${SAFE_LR:-5e-4}
 HEAD_LR=${HEAD_LR:-1e-3}
-POOLING=${POOLING:-"last"}
+# audio_attn pools at positions with highest audio attention mass
+# This is the most sensitive pooling for detecting if audio affects the LLM
+POOLING=${POOLING:-"audio_attn"}
 
 echo "========================================"
 echo "KV Augmentation Linear Probe Training"
