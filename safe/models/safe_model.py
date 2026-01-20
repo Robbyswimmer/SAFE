@@ -203,12 +203,48 @@ class SAFEModel(nn.Module):
             # Get fusion layer indices
             kv_fusion_layers = fusion_layer_indices or [12, 24, 36]
 
+            # Get num_key_value_heads from actual attention layer for GQA support
+            # This is more reliable than reading from config (which may be nested or missing)
+            first_layer_idx = kv_fusion_layers[0]
+            language_model = self.base_vl.llm
+            # Try to get the actual decoder layers
+            if hasattr(language_model, 'model') and hasattr(language_model.model, 'layers'):
+                layers = language_model.model.layers
+            elif hasattr(language_model, 'layers'):
+                layers = language_model.layers
+            else:
+                layers = None
+
+            if layers is not None and len(layers) > first_layer_idx:
+                attn = getattr(layers[first_layer_idx], 'self_attn', None)
+                if attn is not None:
+                    num_attention_heads = getattr(attn, 'num_heads', 40)
+                    num_key_value_heads = getattr(attn, 'num_key_value_heads', num_attention_heads)
+                    head_dim = getattr(attn, 'head_dim', llm_hidden_size // num_attention_heads)
+                else:
+                    # Fallback to config
+                    llm_config = language_model.config
+                    text_config = getattr(llm_config, 'text_config', llm_config)
+                    num_attention_heads = getattr(text_config, 'num_attention_heads', 40)
+                    num_key_value_heads = getattr(text_config, 'num_key_value_heads', num_attention_heads)
+                    head_dim = llm_hidden_size // num_attention_heads
+            else:
+                # Fallback to config
+                llm_config = language_model.config
+                text_config = getattr(llm_config, 'text_config', llm_config)
+                num_attention_heads = getattr(text_config, 'num_attention_heads', 40)
+                num_key_value_heads = getattr(text_config, 'num_key_value_heads', num_attention_heads)
+                head_dim = llm_hidden_size // num_attention_heads
+
+            print(f"[SAFE] LLM attention config: num_heads={num_attention_heads}, num_kv_heads={num_key_value_heads}, head_dim={head_dim}", flush=True)
+
             # Create per-layer KV adapters
             self.kv_adapters = nn.ModuleDict({
                 str(idx): KVAugmentationAdapter(
                     hidden_size=llm_hidden_size,
-                    num_heads=fusion_config.get("num_attention_heads", 40),
-                    head_dim=fusion_config.get("head_dim", 128),
+                    num_heads=num_attention_heads,
+                    head_dim=head_dim,
+                    num_key_value_heads=num_key_value_heads,  # For GQA models
                     bottleneck_dim=fusion_config.get("bottleneck_dim", 64),
                     dropout=fusion_config.get("dropout", 0.1),
                     use_bottleneck=fusion_config.get("use_bottleneck", True),

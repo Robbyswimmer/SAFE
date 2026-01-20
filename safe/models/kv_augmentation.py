@@ -223,18 +223,21 @@ class KVAugmentationAdapter(nn.Module):
     def reshape_for_attention(
         self,
         tensor: torch.Tensor,
+        for_kv: bool = True,
     ) -> torch.Tensor:
         """
         Reshape projected tensor for multi-head attention.
 
         Args:
-            tensor: (batch_size, seq_len, total_head_size)
+            tensor: (batch_size, seq_len, total_size)
+            for_kv: If True, use num_key_value_heads (for K,V). If False, use num_heads (for Q).
 
         Returns:
             reshaped: (batch_size, num_heads, seq_len, head_dim)
         """
         batch_size, seq_len, _ = tensor.shape
-        tensor = tensor.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        num_heads = self.num_key_value_heads if for_kv else self.num_heads
+        tensor = tensor.view(batch_size, seq_len, num_heads, self.head_dim)
         return tensor.transpose(1, 2)  # (batch, heads, seq, head_dim)
 
 
