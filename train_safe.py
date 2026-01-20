@@ -1101,6 +1101,8 @@ def evaluate(
     max_batches: Optional[int] = None,
     max_new_tokens: int = 20,
     num_beams: int = 1,
+    repetition_penalty: float = 1.1,
+    no_repeat_ngram_size: int = 3,
     compute_bertscore: bool = False,
     light_metrics: bool = False,
     suppress_eos_for_audio: bool = True,
@@ -1214,6 +1216,7 @@ def evaluate(
                 f"ablate_audio={bool(ablate_audio)} "
                 f"max_new_tokens={max_new_tokens} num_beams={num_beams} "
                 f"suppress_eos_for_audio={bool(suppress_eos_for_audio)} "
+                f"repetition_penalty={float(repetition_penalty)} no_repeat_ngram_size={int(no_repeat_ngram_size)} "
                 f"eval_prompt={repr(eval_prompt_preview) if eval_prompt_preview else '(dataset)'} "
                 f"min_audio_attn={min_attn} min_audio_attn_weight={min_attn_w}",
                 flush=True,
@@ -1346,12 +1349,19 @@ def evaluate(
             "max_new_tokens": max_new_tokens,
             "min_new_tokens": 1,
             "num_beams": num_beams,
-            "repetition_penalty": 1.2,
-            "no_repeat_ngram_size": 3,
+            "repetition_penalty": float(repetition_penalty),
+            "no_repeat_ngram_size": int(no_repeat_ngram_size),
             "do_sample": False,
             "pad_token_id": tokenizer.pad_token_id,
             "eos_token_id": tokenizer.eos_token_id,
         }
+
+        # Optional EOS suppression (disabled by default; only enable explicitly).
+        if suppress_eos_for_audio and tokenizer.eos_token_id is not None:
+            suppress_tokens = [tokenizer.eos_token_id]
+            if tokenizer.pad_token_id is not None and tokenizer.pad_token_id != tokenizer.eos_token_id:
+                suppress_tokens.append(tokenizer.pad_token_id)
+            generation_kwargs["suppress_tokens"] = suppress_tokens
 
         # Generate captions (use base_model for generate method)
         generated_ids = base_model.generate(
@@ -2252,6 +2262,8 @@ def train_epoch(
                         max_batches=None,  # Use all samples in the small loader
                         max_new_tokens=config.get("max_new_tokens", 20),
                         num_beams=1,  # Greedy for speed
+                        repetition_penalty=float(config.get("eval_repetition_penalty", 1.1) or 1.1),
+                        no_repeat_ngram_size=int(config.get("eval_no_repeat_ngram_size", 3) or 3),
                         light_metrics=True,
                         eval_prompt=config.get("eval_prompt"),
                     )
@@ -2273,6 +2285,8 @@ def train_epoch(
                             max_batches=ablate_max_batches,
                             max_new_tokens=config.get("max_new_tokens", 20),
                             num_beams=1,
+                            repetition_penalty=float(config.get("eval_repetition_penalty", 1.1) or 1.1),
+                            no_repeat_ngram_size=int(config.get("eval_no_repeat_ngram_size", 3) or 3),
                             light_metrics=True,
                             eval_prompt=config.get("eval_prompt"),
                             ablate_audio=True,
@@ -2740,6 +2754,8 @@ def train(
         max_batches=initial_max_eval,
         max_new_tokens=config.get("max_new_tokens", 20),
         num_beams=config.get("num_beams", 1),
+        repetition_penalty=float(config.get("eval_repetition_penalty", 1.1) or 1.1),
+        no_repeat_ngram_size=int(config.get("eval_no_repeat_ngram_size", 3) or 3),
         # Training-time eval: use light metrics (BLEU, METEOR, ROUGE, CIDEr), skip SPICE/BERTScore
         compute_bertscore=False,
         light_metrics=True,
@@ -2757,6 +2773,8 @@ def train(
             max_batches=initial_max_eval,
             max_new_tokens=config.get("max_new_tokens", 20),
             num_beams=config.get("num_beams", 1),
+            repetition_penalty=float(config.get("eval_repetition_penalty", 1.1) or 1.1),
+            no_repeat_ngram_size=int(config.get("eval_no_repeat_ngram_size", 3) or 3),
             compute_bertscore=False,
             light_metrics=True,
             suppress_eos_for_audio=suppress_eos_for_audio,
@@ -2945,6 +2963,8 @@ def train(
                 max_batches=config.get("max_eval_batches"),
                 max_new_tokens=config.get("max_new_tokens", 20),
                 num_beams=config.get("num_beams", 1),
+                repetition_penalty=float(config.get("eval_repetition_penalty", 1.1) or 1.1),
+                no_repeat_ngram_size=int(config.get("eval_no_repeat_ngram_size", 3) or 3),
                 # Training-time eval: light metrics (no SPICE/BERTScore).
                 compute_bertscore=False,
                 light_metrics=True,
@@ -2961,6 +2981,8 @@ def train(
                     max_batches=config.get("max_eval_batches"),
                     max_new_tokens=config.get("max_new_tokens", 20),
                     num_beams=config.get("num_beams", 1),
+                    repetition_penalty=float(config.get("eval_repetition_penalty", 1.1) or 1.1),
+                    no_repeat_ngram_size=int(config.get("eval_no_repeat_ngram_size", 3) or 3),
                     compute_bertscore=False,
                     light_metrics=True,
                     suppress_eos_for_audio=suppress_eos_for_audio,
@@ -3391,9 +3413,21 @@ def main():
     parser.add_argument("--num-beams", type=int, default=1,
                         help="Beam search size")
     parser.add_argument(
+        "--eval-repetition-penalty",
+        type=float,
+        default=1.1,
+        help="Repetition penalty used during evaluation generation.",
+    )
+    parser.add_argument(
+        "--eval-no-repeat-ngram-size",
+        type=int,
+        default=3,
+        help="No-repeat ngram size used during evaluation generation.",
+    )
+    parser.add_argument(
         "--suppress-eos-for-audio-early-steps",
         type=int,
-        default=500,
+        default=0,
         help=(
             "Suppress EOS/PAD during audio generation for the first N optimizer steps "
             "(helps avoid empty captions early; 0 disables)."
@@ -3776,6 +3810,8 @@ def main():
         "max_eval_batches": resolved_max_eval_batches,
         "max_new_tokens": args.max_new_tokens,
         "num_beams": args.num_beams,
+        "eval_repetition_penalty": args.eval_repetition_penalty,
+        "eval_no_repeat_ngram_size": args.eval_no_repeat_ngram_size,
         "suppress_eos_for_audio_early_steps": args.suppress_eos_for_audio_early_steps,
         "early_stopping_patience": args.early_stopping_patience,
         "save_full_checkpoint": args.save_full_checkpoint,

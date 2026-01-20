@@ -267,8 +267,9 @@ PHASE1_CONFIG = {
 KV_AUGMENT_CONFIG = {
     "name": "kv_augment",
     "description": "KV Augmentation - audio injected into LLM self-attention as additional K,V",
-    # Use a non-chatty prompt at eval time to reduce LLaVA refusal-template prior.
-    "eval_prompt": "Describe the audio in one short sentence.",
+    # Use a non-chatty prompt at eval time to reduce LLaVA refusal-template prior,
+    # and avoid opinion/quality boilerplate ("clear and easy to understand").
+    "eval_prompt": "Describe the sound source and action in one short sentence. No opinions.",
 
     # Base VL Model - LLaVA 13B
     "llm_model_name": "llava-hf/llava-1.5-13b-hf",
