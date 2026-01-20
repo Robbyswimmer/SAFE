@@ -72,6 +72,13 @@ LORA_RANK=${LORA_RANK:-""}                        # e.g., "8" - overrides config
 LABEL_SMOOTHING=${LABEL_SMOOTHING:-""}            # e.g., "0.1" - overrides config default
 TRAIN_EVAL_STEPS=${TRAIN_EVAL_STEPS:-30}          # Compute train CIDEr/METEOR every N steps
 TRAIN_EVAL_SAMPLES=${TRAIN_EVAL_SAMPLES:-300}     # Number of train samples for accuracy eval
+TRAIN_EVAL_SPLIT=${TRAIN_EVAL_SPLIT:-"val"}       # Use val by default (multi-ref AudioCaps)
+TRAIN_EVAL_ABLATE_AUDIO=${TRAIN_EVAL_ABLATE_AUDIO:-0}
+TRAIN_EVAL_ABLATE_MAX_BATCHES=${TRAIN_EVAL_ABLATE_MAX_BATCHES:-10}
+EVAL_ABLATE_AUDIO=${EVAL_ABLATE_AUDIO:-0}
+SUPPRESS_EOS_FOR_AUDIO_EARLY_STEPS=${SUPPRESS_EOS_FOR_AUDIO_EARLY_STEPS:-0}
+EVAL_REPETITION_PENALTY=${EVAL_REPETITION_PENALTY:-1.1}
+EVAL_NO_REPEAT_NGRAM_SIZE=${EVAL_NO_REPEAT_NGRAM_SIZE:-3}
 AUDIO_AUGMENT=${AUDIO_AUGMENT:-0}                 # Audio augmentation (SpecAugment + waveform), off by default
 AUDIO_AUGMENT_PROB=${AUDIO_AUGMENT_PROB:-0.5}     # Probability of applying augmentation per sample
 EXTRA_ARGS=${EXTRA_ARGS:-""}
@@ -180,6 +187,12 @@ echo "Gradient checkpointing: ${GRADIENT_CHECKPOINTING}"
 echo "Num workers: ${NUM_WORKERS}"
 echo "Max eval batches: ${MAX_EVAL_BATCHES}"
 echo "Num GPUs: ${NUM_GPUS}"
+echo "Train eval split: ${TRAIN_EVAL_SPLIT}"
+echo "Eval ablate audio: ${EVAL_ABLATE_AUDIO}"
+echo "Train eval ablate audio: ${TRAIN_EVAL_ABLATE_AUDIO} (max_batches=${TRAIN_EVAL_ABLATE_MAX_BATCHES})"
+echo "Suppress EOS for audio early steps: ${SUPPRESS_EOS_FOR_AUDIO_EARLY_STEPS}"
+echo "Eval repetition penalty: ${EVAL_REPETITION_PENALTY}"
+echo "Eval no-repeat ngram size: ${EVAL_NO_REPEAT_NGRAM_SIZE}"
 if [[ -n "${FUSION_LAYER_INDICES}" ]]; then
   echo "Fusion layer indices: ${FUSION_LAYER_INDICES}"
 fi
@@ -236,8 +249,15 @@ ${LAUNCHER} train_safe.py \
     --gate-warmup-steps "${GATE_WARMUP_STEPS}" \
     --num-workers "${NUM_WORKERS}" \
     --max-eval-batches "${MAX_EVAL_BATCHES}" \
+    --suppress-eos-for-audio-early-steps "${SUPPRESS_EOS_FOR_AUDIO_EARLY_STEPS}" \
     --train-eval-steps "${TRAIN_EVAL_STEPS}" \
     --train-eval-samples "${TRAIN_EVAL_SAMPLES}" \
+    --train-eval-split "${TRAIN_EVAL_SPLIT}" \
+    --eval-repetition-penalty "${EVAL_REPETITION_PENALTY}" \
+    --eval-no-repeat-ngram-size "${EVAL_NO_REPEAT_NGRAM_SIZE}" \
+    $( [[ "${EVAL_ABLATE_AUDIO}" != "0" ]] && echo --eval-ablate-audio ) \
+    $( [[ "${TRAIN_EVAL_ABLATE_AUDIO}" != "0" ]] && echo --train-eval-ablate-audio ) \
+    --train-eval-ablate-max-batches "${TRAIN_EVAL_ABLATE_MAX_BATCHES}" \
     $( [[ "${GRADIENT_CHECKPOINTING}" != "0" ]] && echo --gradient-checkpointing ) \
     ${FP16} \
     "${MAX_TRAIN_ARGS[@]}" \
