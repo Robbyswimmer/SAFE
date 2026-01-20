@@ -182,10 +182,23 @@ def get_attention_diagnostics(model, audio_tokens, input_ids, attention_mask, de
     - delta_q_ratio: ||ΔQ|| / ||Q||
     - logits: output logits
     """
-    diagnostics = {}
+    # Default values in case kv_hook_manager isn't available
+    diagnostics = {
+        'audio_attn_mass': 0.0,
+        'normalized_entropy': 1.0,
+        'delta_q_ratio': 0.0,
+        'logits': None,
+    }
 
-    # Inject audio
-    if hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None:
+    # Check if KV augmentation is set up
+    has_kv_manager = hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None
+
+    if not has_kv_manager:
+        print("⚠️  WARNING: model.kv_hook_manager is not set up!")
+        print("   KV augmentation may not be initialized. Check SAFEModel setup.")
+
+    # Inject audio if manager exists
+    if has_kv_manager:
         model.kv_hook_manager.inject_audio(audio_tokens, gate=1.0)
 
     # Forward pass
@@ -199,33 +212,37 @@ def get_attention_diagnostics(model, audio_tokens, input_ids, attention_mask, de
     diagnostics['logits'] = outputs.logits[:, -1, :].clone()
 
     # Get diagnostics from hook manager
-    if hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None:
+    if has_kv_manager:
         hook_diag = model.kv_hook_manager.get_diagnostics()
 
-        # Audio attention mass (average across layers)
-        masses = []
-        entropies = []
-        dq_ratios = []
+        if not hook_diag:
+            print("⚠️  WARNING: kv_hook_manager.get_diagnostics() returned empty!")
+            print("   Attention modules may not be wrapped.")
+        else:
+            # Audio attention mass (average across layers)
+            masses = []
+            entropies = []
+            dq_ratios = []
 
-        for layer_idx, layer_diag in hook_diag.items():
-            if 'audio_attn_mass' in layer_diag:
-                masses.append(layer_diag['audio_attn_mass'])
+            for layer_idx, layer_diag in hook_diag.items():
+                if 'audio_attn_mass' in layer_diag:
+                    masses.append(layer_diag['audio_attn_mass'])
 
-            # Get attention weights for entropy calculation
-            if 'audio_attn_weights' in layer_diag:
-                attn_w = layer_diag['audio_attn_weights']
-                norm_ent, _ = compute_normalized_entropy(attn_w, n_audio_tokens)
-                entropies.append(norm_ent)
+                # Get attention weights for entropy calculation
+                if 'audio_attn_weights' in layer_diag:
+                    attn_w = layer_diag['audio_attn_weights']
+                    norm_ent, _ = compute_normalized_entropy(attn_w, n_audio_tokens)
+                    entropies.append(norm_ent)
 
-            # Get ΔQ/Q ratio
-            if 'delta_q_rms' in layer_diag and 'q_rms' in layer_diag:
-                q_rms = max(layer_diag['q_rms'], 1e-8)
-                ratio = layer_diag['delta_q_rms'] / q_rms
-                dq_ratios.append(ratio)
+                # Get ΔQ/Q ratio
+                if 'delta_q_rms' in layer_diag and 'q_rms' in layer_diag:
+                    q_rms = max(layer_diag['q_rms'], 1e-8)
+                    ratio = layer_diag['delta_q_rms'] / q_rms
+                    dq_ratios.append(ratio)
 
-        diagnostics['audio_attn_mass'] = sum(masses) / len(masses) if masses else 0.0
-        diagnostics['normalized_entropy'] = sum(entropies) / len(entropies) if entropies else 1.0
-        diagnostics['delta_q_ratio'] = sum(dq_ratios) / len(dq_ratios) if dq_ratios else 0.0
+            diagnostics['audio_attn_mass'] = sum(masses) / len(masses) if masses else 0.0
+            diagnostics['normalized_entropy'] = sum(entropies) / len(entropies) if entropies else 1.0
+            diagnostics['delta_q_ratio'] = sum(dq_ratios) / len(dq_ratios) if dq_ratios else 0.0
 
         model.kv_hook_manager.clear_audio()
 
@@ -646,6 +663,24 @@ def main():
     )
     model = model.to(device)
     model.eval()
+
+    # Initialize KV hook manager if kv_adapters exist
+    if hasattr(model, 'kv_adapters') and model.kv_adapters is not None:
+        from safe.models.kv_augmentation import KVAugmentationHookManager
+        fusion_layers = config["fusion_layer_indices"]
+        print(f"Initializing KV augmentation at layers: {fusion_layers}")
+
+        if model.kv_hook_manager is None:
+            model.kv_hook_manager = KVAugmentationHookManager(
+                model=model.base_vl.llm,
+                kv_adapters=model.kv_adapters,
+                fusion_layer_indices=fusion_layers,
+            )
+        model.kv_hook_manager.wrap_attention_modules()
+        print("✓ KV hook manager initialized and attention modules wrapped")
+    else:
+        print("⚠️  WARNING: model.kv_adapters is None - KV augmentation not set up!")
+        print("   Check that fusion_config has 'fusion_mode': 'kv_augment'")
 
     # Get tokenizer
     from transformers import AutoProcessor
