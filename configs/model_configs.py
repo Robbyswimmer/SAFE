@@ -267,6 +267,8 @@ PHASE1_CONFIG = {
 KV_AUGMENT_CONFIG = {
     "name": "kv_augment",
     "description": "KV Augmentation - audio injected into LLM self-attention as additional K,V",
+    # Use a non-chatty prompt at eval time to reduce LLaVA refusal-template prior.
+    "eval_prompt": "Describe the audio in one short sentence.",
 
     # Base VL Model - LLaVA 13B
     "llm_model_name": "llava-hf/llava-1.5-13b-hf",
@@ -322,14 +324,16 @@ KV_AUGMENT_CONFIG = {
 
         # Minimum attention regularization - ENABLED for captioning
         # Forces audio attention early to prevent language-prior shortcuts
-        # Decays over training to let model refine naturally
-        # Start: 5% attention mass, weight=0.5 (aggressive early)
-        # End: 0.5% attention mass, weight=0.05 (light pressure late)
-        "min_audio_attention": 0.05,
-        "min_audio_attention_weight": 0.5,
-        # Curriculum decay settings (used by MinAudioAttentionLoss.update_curriculum)
-        "min_audio_attention_decay_target": 0.005,
-        "min_audio_attention_weight_decay_target": 0.05,
+        # Use a step-based curriculum:
+        # - steps < warmup: disabled (weight=0, min_attention=0)
+        # - warmup → warmup+ramp: linearly ramp to targets
+        # This avoids early training being dominated by the regularizer.
+        "min_audio_attention_start": 0.0,
+        "min_audio_attention_weight_start": 0.0,
+        "min_audio_attention": 0.02,
+        "min_audio_attention_weight": 0.05,
+        "min_audio_attention_warmup_steps": 1000,
+        "min_audio_attention_ramp_steps": 4000,
 
         # Modality configuration (for compatibility with existing code)
         "modalities": {

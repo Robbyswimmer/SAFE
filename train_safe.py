@@ -1104,6 +1104,7 @@ def evaluate(
     compute_bertscore: bool = False,
     light_metrics: bool = False,
     suppress_eos_for_audio: bool = True,
+    eval_prompt: Optional[str] = None,
     sample_output: Optional[List[Dict[str, Any]]] = None,
     sample_limit: int = 0,
 ) -> Dict[str, float]:
@@ -1281,9 +1282,13 @@ def evaluate(
             except Exception:
                 pass
 
-        # Generate predictions (reuse same device)
+        # Generate predictions (reuse same device).
+        # Use a non-chatty evaluation prompt (if provided) to reduce refusal-template prior.
+        gen_questions = questions
+        if isinstance(eval_prompt, str) and eval_prompt.strip():
+            gen_questions = [eval_prompt.strip()] * len(questions)
         generation_inputs = base_model.prepare_multimodal_inputs(
-            text=questions,
+            text=gen_questions,
             audio=audio,
             answers=None,  # No answers for generation
             device=device,
@@ -1349,7 +1354,7 @@ def evaluate(
 
         # Clean predictions (remove question prompt and extract answer content) + collect references
         for i, pred in enumerate(batch_predictions):
-            question = questions[i]
+            question = gen_questions[i]
             # Debug: show cleaning steps for first sample of first batch
             if batch_idx == 0 and i == 0:
                 print(f"[CleanDebug] Raw batch_decode: {repr(pred[:200])}", flush=True)
@@ -1727,6 +1732,7 @@ def train_epoch(
     """
     # Handle DDP wrapper - get underlying model for attribute access
     base_model = model.module if hasattr(model, 'module') else model
+    is_main = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
 
     # Ensure audio components are in training mode while keeping base VL frozen
     if hasattr(base_model, "enable_audio_training"):
@@ -1762,6 +1768,49 @@ def train_epoch(
     token_correct = 0
     token_total = 0
 
+    def _update_min_audio_attention_schedule(step: int) -> None:
+        """
+        Step-based curriculum for KV-augment min-audio-attention regularization.
+        Disables the regularizer early to avoid dominating learning dynamics.
+        """
+        if not (hasattr(base_model, "min_audio_attention_loss") and base_model.min_audio_attention_loss is not None):
+            return
+
+        fusion_cfg = config.get("fusion_config", {})
+        warmup = int(fusion_cfg.get("min_audio_attention_warmup_steps", 0) or 0)
+        ramp = int(fusion_cfg.get("min_audio_attention_ramp_steps", 0) or 0)
+
+        start_attn = float(fusion_cfg.get("min_audio_attention_start", 0.0) or 0.0)
+        start_weight = float(fusion_cfg.get("min_audio_attention_weight_start", 0.0) or 0.0)
+        target_attn = float(fusion_cfg.get("min_audio_attention", 0.0) or 0.0)
+        target_weight = float(fusion_cfg.get("min_audio_attention_weight", 0.0) or 0.0)
+
+        if warmup <= 0 and ramp <= 0:
+            current_attn = target_attn
+            current_weight = target_weight
+        elif step < warmup:
+            current_attn = start_attn
+            current_weight = start_weight
+        elif ramp <= 0:
+            current_attn = target_attn
+            current_weight = target_weight
+        else:
+            progress = float(step - warmup) / float(max(ramp, 1))
+            progress = max(0.0, min(1.0, progress))
+            current_attn = start_attn + (target_attn - start_attn) * progress
+            current_weight = start_weight + (target_weight - start_weight) * progress
+
+        base_model.min_audio_attention_loss.min_attention = current_attn
+        base_model.min_audio_attention_loss.loss_weight = current_weight
+
+        # Log phase boundaries for debugging.
+        if is_main and step in {0, warmup, warmup + ramp}:
+            print(
+                f"[MinAudioAttnSchedule] step={step} min_attention={current_attn:.4f} weight={current_weight:.4f} "
+                f"(warmup={warmup}, ramp={ramp})",
+                flush=True,
+            )
+
     def _ddp_noop_loss() -> torch.Tensor:
         """
         Create a zero-valued loss that still touches every trainable parameter.
@@ -1782,6 +1831,7 @@ def train_epoch(
     ddp_enabled = bool(world_size and int(world_size) > 1 and dist.is_available() and dist.is_initialized())
 
     for batch_idx, batch in enumerate(dataloader):
+        _update_min_audio_attention_schedule(optimizer_step)
         # Move batch to device
         questions = batch["questions"]
         answers = batch["answers"]
@@ -2159,6 +2209,7 @@ def train_epoch(
                         max_new_tokens=config.get("max_new_tokens", 20),
                         num_beams=1,  # Greedy for speed
                         light_metrics=True,
+                        eval_prompt=config.get("eval_prompt"),
                     )
                     train_eval_log = {
                         "train_acc/cider": train_eval_metrics.get("cider", 0.0),
@@ -2623,6 +2674,7 @@ def train(
         compute_bertscore=False,
         light_metrics=True,
         suppress_eos_for_audio=suppress_eos_for_audio,
+        eval_prompt=config.get("eval_prompt"),
         sample_output=init_samples,
         sample_limit=wandb_sample_count,
     )
@@ -2729,25 +2781,7 @@ def train(
                 end_min=1.0,
             )
 
-        # Update min_audio_attention curriculum (decay from aggressive early to light late)
-        # This prevents language-prior shortcuts while allowing refinement in late training
-        if hasattr(base_model, 'min_audio_attention_loss') and base_model.min_audio_attention_loss is not None:
-            fusion_cfg = config.get("fusion_config", {})
-            # Linear decay: epoch 1 = start values, epoch num_epochs = decay targets
-            progress = (epoch - 1) / max(num_epochs - 1, 1)  # 0 at epoch 1, 1 at last epoch
-            start_attn = fusion_cfg.get("min_audio_attention", 0.05)
-            end_attn = fusion_cfg.get("min_audio_attention_decay_target", 0.005)
-            start_weight = fusion_cfg.get("min_audio_attention_weight", 0.5)
-            end_weight = fusion_cfg.get("min_audio_attention_weight_decay_target", 0.05)
-
-            current_attn = start_attn + (end_attn - start_attn) * progress
-            current_weight = start_weight + (end_weight - start_weight) * progress
-
-            base_model.min_audio_attention_loss.min_attention = current_attn
-            base_model.min_audio_attention_loss.loss_weight = current_weight
-
-            if is_main:
-                print(f"[MinAudioAttn] epoch={epoch}, min_attention={current_attn:.4f}, weight={current_weight:.3f}")
+        # min_audio_attention curriculum is step-based (handled inside train_epoch).
 
         # Set epoch on DistributedSampler for proper shuffling across epochs
         if train_sampler is not None:
@@ -2817,6 +2851,7 @@ def train(
                 compute_bertscore=False,
                 light_metrics=True,
                 suppress_eos_for_audio=suppress_eos_for_audio,
+                eval_prompt=config.get("eval_prompt"),
                 sample_output=val_samples,
                 sample_limit=wandb_sample_count,
             )
@@ -3629,6 +3664,7 @@ def main():
             compute_bertscore=True,   # Full metrics in eval-only mode
             light_metrics=False,
             suppress_eos_for_audio=False,
+            eval_prompt=config.get("eval_prompt"),
             sample_output=eval_samples,
             sample_limit=args.wandb_sample_count,
         )
