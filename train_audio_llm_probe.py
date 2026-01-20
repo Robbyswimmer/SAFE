@@ -341,11 +341,24 @@ class SAFELLMProbe(nn.Module):
                 print(f"[LLMProbe] Warning: Error getting attention: {e}", flush=True)
 
         if audio_attn_per_pos is None:
-            # Fallback: use last top_k positions within span
-            if not hasattr(self, "_audio_attn_fallback_warned"):
-                self._audio_attn_fallback_warned = True
-                print("[LLMProbe] Warning: No audio attention weights available, "
-                      f"falling back to last-{top_k} of span-{span}", flush=True)
+            # HARD FAIL: audio_attn pooling requires attention weights
+            # If we get here, something is broken in the KV augmentation pipeline
+            if not hasattr(self, "_audio_attn_fallback_count"):
+                self._audio_attn_fallback_count = 0
+            self._audio_attn_fallback_count += 1
+
+            if self._audio_attn_fallback_count == 1:
+                print("\n" + "!" * 60, flush=True)
+                print("CRITICAL ERROR: No audio attention weights available!", flush=True)
+                print("  This means KV augmentation is NOT working correctly.", flush=True)
+                print("  Possible causes:", flush=True)
+                print("    1. kv_hook_manager.set_return_attention_weights(True) not called", flush=True)
+                print("    2. Attention modules not wrapped", flush=True)
+                print("    3. Audio tokens not injected", flush=True)
+                print("  Falling back to last-k pooling but results will be INVALID.", flush=True)
+                print("!" * 60 + "\n", flush=True)
+
+            # Still fall back but results will be garbage
             pooled = hidden_span[:, -top_k:, :].mean(dim=1)
         else:
             # Pool top-k positions by audio attention (within restricted span)
@@ -451,6 +464,11 @@ class SAFELLMProbe(nn.Module):
                 hook_handle = head_module.register_forward_pre_hook(_capture_head_input)
         except Exception:
             hook_handle = None
+
+        # Enable attention weight capture for audio_attn pooling
+        # This MUST be set BEFORE the forward pass
+        if hasattr(self.safe_model, 'kv_hook_manager') and self.safe_model.kv_hook_manager is not None:
+            self.safe_model.kv_hook_manager.set_return_attention_weights(True)
 
         outputs = self.safe_model(
             input_ids=input_ids,
@@ -888,6 +906,24 @@ def main() -> None:
         config["fusion_config"]["fusion_mode"] = str(args.fusion_mode)
         print(f"[Config] fusion_mode={args.fusion_mode}", flush=True)
 
+    # === CRITICAL: Print and verify config at startup ===
+    print("\n" + "=" * 60, flush=True)
+    print("ACTIVE CONFIGURATION (verify these match your intent!):", flush=True)
+    print(f"  model_config: {args.model_config}", flush=True)
+    print(f"  fusion_layer_indices: {config['fusion_layer_indices']}", flush=True)
+    print(f"  pooling: {args.pooling}", flush=True)
+    fusion_mode = config.get("fusion_config", {}).get("fusion_mode", "additive")
+    print(f"  fusion_mode: {fusion_mode}", flush=True)
+    print("=" * 60 + "\n", flush=True)
+
+    # Hard assertion for kv_augment mode
+    if args.model_config == "kv_augment":
+        expected_layers = [16, 24, 32]
+        actual_layers = config["fusion_layer_indices"]
+        if actual_layers != expected_layers:
+            print(f"⚠️  WARNING: kv_augment expected layers {expected_layers}, got {actual_layers}", flush=True)
+            print(f"   This may be intentional if testing different configs.", flush=True)
+
     train_ds = AVEDataset(args.data_path, split="train")
     test_ds = AVEDataset(args.data_path, split="test")
     train_loader = DataLoader(
@@ -908,6 +944,19 @@ def main() -> None:
     )
 
     model = SAFELLMProbe(config=config, num_classes=len(AVE_CATEGORIES)).to(device)
+
+    # === Verify KV augmentation is set up if using audio_attn pooling ===
+    if args.pooling == "audio_attn":
+        has_kv_manager = (
+            hasattr(model.safe_model, 'kv_hook_manager')
+            and model.safe_model.kv_hook_manager is not None
+        )
+        if not has_kv_manager:
+            raise RuntimeError(
+                "FATAL: pooling='audio_attn' requires kv_hook_manager but it's not initialized!\n"
+                "Check that fusion_mode='kv_augment' is set in config."
+            )
+        print(f"✓ KV hook manager verified for audio_attn pooling", flush=True)
 
     if args.load_checkpoint:
         print(f"[Checkpoint] Loading: {args.load_checkpoint}", flush=True)

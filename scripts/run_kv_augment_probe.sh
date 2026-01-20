@@ -67,7 +67,7 @@ python train_audio_llm_probe.py \
     --safe-learning-rate "$SAFE_LR" \
     --head-learning-rate "$HEAD_LR" \
     --model-config kv_augment \
-    --fusion-layer-indices "12,24,36" \
+    --fusion-layer-indices "16,24,32" \
     --pooling "$POOLING" \
     --fp16 \
     --wandb \

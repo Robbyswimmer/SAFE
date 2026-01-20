@@ -25,6 +25,7 @@ set -e
 DATA_PATH=${DATA_PATH:-"/data/SalmanAsif/AVE_Dataset"}
 MODE=${MODE:-"all"}  # verify_text, forward_check, ablation, both, or all
 NUM_SAMPLES=${NUM_SAMPLES:-10}
+CHECKPOINT=${CHECKPOINT:-""}  # Path to trained checkpoint (optional)
 
 echo "========================================"
 echo "KV Augmentation Ablation Study"
@@ -35,6 +36,7 @@ echo "Started: $(date)"
 echo "Data path: $DATA_PATH"
 echo "Mode: $MODE"
 echo "Num samples: $NUM_SAMPLES"
+echo "Checkpoint: ${CHECKPOINT:-'(none - untrained model)'}"
 echo "========================================"
 
 mkdir -p logs
@@ -52,7 +54,11 @@ echo "Python: $(which python)"
 nvidia-smi
 
 # Run ablation
-python scripts/ablation_kv_augment.py --data-path "$DATA_PATH" --mode "$MODE" --num-samples "$NUM_SAMPLES"
+CKPT_ARG=""
+if [ -n "$CHECKPOINT" ]; then
+    CKPT_ARG="--checkpoint $CHECKPOINT"
+fi
+python scripts/ablation_kv_augment.py --data-path "$DATA_PATH" --mode "$MODE" --num-samples "$NUM_SAMPLES" $CKPT_ARG
 
 EXIT_CODE=$?
 

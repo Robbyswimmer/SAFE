@@ -645,6 +645,8 @@ def run_ablation(model, tokenizer, device, dataset, config, num_samples=10):
 def main():
     parser = argparse.ArgumentParser(description="Ablation study for KV augmentation")
     parser.add_argument("--data-path", type=str, required=True, help="Path to AVE dataset")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to trained checkpoint (e.g., outputs/kv_ablation_short/best_model.pt)")
     parser.add_argument("--mode", type=str, default="both",
                         choices=["verify_text", "forward_check", "ablation", "both", "all"],
                         help="Which test to run")
@@ -672,6 +674,35 @@ def main():
     )
     model = model.to(device)
     model.eval()
+
+    # Load checkpoint if provided
+    if args.checkpoint:
+        print(f"\nLoading checkpoint: {args.checkpoint}")
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+
+        # Handle different checkpoint formats
+        if "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        elif "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        else:
+            state_dict = checkpoint
+
+        # Load with strict=False to handle missing/extra keys
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        print(f"  Loaded checkpoint: {len(state_dict)} keys")
+        if missing:
+            print(f"  Missing keys: {len(missing)} (e.g., {missing[:3]})")
+        if unexpected:
+            print(f"  Unexpected keys: {len(unexpected)} (e.g., {unexpected[:3]})")
+
+        # Show training info if available
+        if "epoch" in checkpoint:
+            print(f"  Epoch: {checkpoint['epoch']}")
+        if "step" in checkpoint:
+            print(f"  Step: {checkpoint['step']}")
+        if "best_acc" in checkpoint:
+            print(f"  Best accuracy: {checkpoint['best_acc']:.2%}")
 
     # Initialize KV hook manager if kv_adapters exist
     if hasattr(model, 'kv_adapters') and model.kv_adapters is not None:
