@@ -933,10 +933,17 @@ def main() -> None:
     print("\n" + "=" * 60, flush=True)
     print("ACTIVE CONFIGURATION (verify these match your intent!):", flush=True)
     print(f"  model_config: {args.model_config}", flush=True)
-    print(f"  fusion_layer_indices: {config['fusion_layer_indices']}", flush=True)
+    print(f"  fusion_layer_indices: {config.get('fusion_layer_indices', 'NOT SET')}", flush=True)
     print(f"  pooling: {args.pooling}", flush=True)
-    fusion_mode = config.get("fusion_config", {}).get("fusion_mode", "additive")
+    fusion_cfg = config.get("fusion_config", {})
+    fusion_mode = fusion_cfg.get("fusion_mode", "additive")
     print(f"  fusion_mode: {fusion_mode}", flush=True)
+    print(f"  fusion_config keys: {list(fusion_cfg.keys())}", flush=True)
+    if fusion_mode == "kv_augment":
+        print(f"  ✓ KV Augmentation mode detected", flush=True)
+        print(f"    query_adapter_rank: {fusion_cfg.get('query_adapter_rank', 'NOT SET')}", flush=True)
+        print(f"    num_attention_heads: {fusion_cfg.get('num_attention_heads', 'NOT SET')}", flush=True)
+        print(f"    head_dim: {fusion_cfg.get('head_dim', 'NOT SET')}", flush=True)
     print("=" * 60 + "\n", flush=True)
 
     # Hard assertion for kv_augment mode
@@ -989,6 +996,78 @@ def main() -> None:
         print("[Mode] head-only: freezing SAFE trainables (projector+fusion)", flush=True)
         model.freeze_safe(True)
 
+    # === DEBUG: Comprehensive check BEFORE optimizer creation ===
+    print("\n" + "=" * 70, flush=True)
+    print("DEBUG: Checking kv_adapters and param collection BEFORE optimizer...", flush=True)
+    print("=" * 70, flush=True)
+
+    # 1. Check kv_adapters exists
+    print("\n1. KV_ADAPTERS CHECK:", flush=True)
+    if hasattr(model.safe_model, 'kv_adapters'):
+        if model.safe_model.kv_adapters is not None:
+            print(f"   ✓ kv_adapters exists, type={type(model.safe_model.kv_adapters)}", flush=True)
+            print(f"   ✓ Keys: {list(model.safe_model.kv_adapters.keys())}", flush=True)
+            kv_param_count = sum(1 for _ in model.safe_model.kv_adapters.parameters())
+            kv_trainable_count = sum(1 for p in model.safe_model.kv_adapters.parameters() if p.requires_grad)
+            print(f"   ✓ Total params: {kv_param_count}, Trainable: {kv_trainable_count}", flush=True)
+            print("\n   Named parameters:", flush=True)
+            for name, p in model.safe_model.kv_adapters.named_parameters():
+                status = "✓" if p.requires_grad else "❌FROZEN"
+                print(f"      {status} {name}: {tuple(p.shape)}", flush=True)
+        else:
+            print("   ❌ kv_adapters is None - KV augmentation not initialized!", flush=True)
+            print("      Check: fusion_config.fusion_mode == 'kv_augment'?", flush=True)
+    else:
+        print("   ❌ model.safe_model has no kv_adapters attribute!", flush=True)
+
+    # 2. Check enable_kv_augmentation flag
+    print("\n2. ENABLE FLAGS:", flush=True)
+    print(f"   enable_kv_augmentation: {getattr(model.safe_model, 'enable_kv_augmentation', 'NOT SET')}", flush=True)
+    print(f"   fusion_mode: {getattr(model.safe_model, 'fusion_mode', 'NOT SET')}", flush=True)
+
+    # 3. Trace get_safe_params()
+    print("\n3. GET_SAFE_PARAMS() OUTPUT:", flush=True)
+    safe_params = model.get_safe_params()
+    print(f"   Total params from get_safe_params(): {len(safe_params)}", flush=True)
+
+    # Try to identify each param
+    param_sources = []
+    for param in safe_params:
+        found = False
+        for name, p in model.named_parameters():
+            if p is param:
+                param_sources.append(name)
+                found = True
+                break
+        if not found:
+            param_sources.append("(unknown)")
+
+    # Count by source
+    projector_count = sum(1 for n in param_sources if "projector" in n.lower())
+    kv_count = sum(1 for n in param_sources if "kv_adapter" in n.lower())
+    query_count = sum(1 for n in param_sources if "query_adapter" in n.lower())
+    other_count = len(param_sources) - projector_count - kv_count - query_count
+
+    print(f"   - From audio_projector: {projector_count}", flush=True)
+    print(f"   - From kv_adapters (K,V): {kv_count}", flush=True)
+    print(f"   - From query_adapter (ΔQ): {query_count}", flush=True)
+    print(f"   - Other: {other_count}", flush=True)
+
+    if query_count == 0 and hasattr(model.safe_model, 'kv_adapters') and model.safe_model.kv_adapters is not None:
+        print("\n   ⚠️ PROBLEM: kv_adapters exists but query_adapter params NOT in get_safe_params()!", flush=True)
+        print("   Let me check get_trainable_parameters directly...", flush=True)
+        direct_params = list(model.safe_model.get_trainable_parameters())
+        direct_count = sum(1 for n, p in model.safe_model.named_parameters() if any(p is dp for dp in direct_params) and "query_adapter" in n)
+        print(f"   Direct query_adapter count from get_trainable_parameters: {direct_count}", flush=True)
+
+    print("\n   First 10 param names:", flush=True)
+    for n in param_sources[:10]:
+        print(f"      - {n}", flush=True)
+    if len(param_sources) > 10:
+        print(f"      ... and {len(param_sources) - 10} more", flush=True)
+
+    print("=" * 70 + "\n", flush=True)
+
     optimizer = build_optimizer(
         model=model,
         safe_lr=float(args.safe_learning_rate),
@@ -1031,6 +1110,24 @@ def main() -> None:
     if has_kv_adapter or has_projector:
         print(f"✓ KV/projector params found in SAFE group", flush=True)
     print("=" * 60 + "\n", flush=True)
+
+    # FAIL-FAST: If using kv_augment mode, query_adapter params MUST be present
+    if args.model_config == "kv_augment" and not has_query_adapter:
+        print("\n" + "!" * 70, flush=True)
+        print("FATAL ERROR: kv_augment config but query_adapter params NOT in optimizer!", flush=True)
+        print("This means the model CANNOT learn to attend to audio.", flush=True)
+        print("", flush=True)
+        print("Debug info:", flush=True)
+        print(f"  kv_adapters exists: {model.safe_model.kv_adapters is not None}", flush=True)
+        print(f"  enable_kv_augmentation: {getattr(model.safe_model, 'enable_kv_augmentation', False)}", flush=True)
+        print(f"  fusion_mode: {getattr(model.safe_model, 'fusion_mode', 'unknown')}", flush=True)
+        if model.safe_model.kv_adapters is not None:
+            kv_params = list(model.safe_model.kv_adapters.parameters())
+            print(f"  kv_adapters has {len(kv_params)} params", flush=True)
+            trainable = sum(1 for p in kv_params if p.requires_grad)
+            print(f"  kv_adapters trainable: {trainable}", flush=True)
+        print("!" * 70 + "\n", flush=True)
+        raise RuntimeError("kv_augment mode requires query_adapter params in optimizer. See debug output above.")
 
     if args.wandb and wandb is not None:
         wandb.init(
