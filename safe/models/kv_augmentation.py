@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 KV Augmentation for SAFE Audio-Visual Model
 
@@ -279,7 +280,8 @@ class KVAugmentedAttention(nn.Module):
         self._gate: float = 1.0
 
         # For returning attention weights (used in regularization)
-        self._last_attention_weights: Optional[torch.Tensor] = None
+        self._last_attention_weights: Optional[torch.Tensor] = None  # Detached, for logging
+        self._live_attention_weights: Optional[torch.Tensor] = None  # With gradients, for reg loss
         self._return_attention_weights: bool = False
 
         # Diagnostics storage (RMS ratios, attention mass, etc.)
@@ -336,6 +338,8 @@ class KVAugmentedAttention(nn.Module):
         self._audio_tokens = None
         self._audio_mask = None
         self._gate = 1.0
+        # Always clear live weights (they should only exist for one forward pass)
+        self._live_attention_weights = None
         if not preserve_attention_weights:
             self._last_attention_weights = None
 
@@ -344,8 +348,18 @@ class KVAugmentedAttention(nn.Module):
         self._return_attention_weights = return_weights
 
     def get_last_attention_weights(self) -> Optional[torch.Tensor]:
-        """Get attention weights from last forward pass."""
+        """Get detached attention weights from last forward pass (for logging/pooling)."""
         return self._last_attention_weights
+
+    def get_live_attention_weights(self) -> Optional[torch.Tensor]:
+        """Get live attention weights with gradients for reg loss computation.
+
+        IMPORTANT: This returns the tensor and clears it immediately to prevent
+        graph retention across steps. Call this only once per forward pass.
+        """
+        weights = self._live_attention_weights
+        self._live_attention_weights = None  # Clear immediately to prevent memory leak
+        return weights
 
     def get_diagnostics(self) -> Optional[Dict[str, float]]:
         """Get diagnostics from last forward pass (RMS ratios, attention mass, etc.)."""
@@ -502,9 +516,12 @@ class KVAugmentedAttention(nn.Module):
         audio_attn_weights = F.softmax(audio_attn_weights, dim=-1, dtype=torch.float32).to(query_for_audio.dtype)
         audio_output = torch.matmul(audio_attn_weights, audio_values)
 
-        # Store audio attention weights for regularization if needed
+        # Store audio attention weights for regularization and logging
+        # - Detached copy for logging/pooling (safe, no graph retention)
+        # - Live copy for reg loss computation (cleared immediately after use)
         if self._return_attention_weights:
-            self._last_attention_weights = audio_attn_weights.detach()
+            self._last_attention_weights = audio_attn_weights.detach()  # For logging
+            self._live_attention_weights = audio_attn_weights  # For reg loss (has gradients)
 
         # ============================================================
         # 3. COMBINE: text_output + gate * audio_output
@@ -813,10 +830,27 @@ class KVAugmentationHookManager:
             wrapped.set_return_attention_weights(return_weights)
 
     def get_attention_weights(self) -> Dict[int, torch.Tensor]:
-        """Get attention weights from all layers for regularization."""
+        """Get detached attention weights from all layers (for logging/pooling)."""
         weights = {}
         for idx, wrapped in self.wrapped_attentions.items():
             w = wrapped.get_last_attention_weights()
+            if w is not None:
+                weights[idx] = w
+        return weights
+
+    def get_live_attention_weights(self) -> Dict[int, torch.Tensor]:
+        """Get live attention weights with gradients for reg loss computation.
+
+        IMPORTANT: This returns the tensors and clears them immediately to prevent
+        graph retention across steps. Call this only once per forward pass, right
+        before computing the regularization loss.
+
+        Returns:
+            Dict mapping layer_idx to attention weight tensors (with gradients)
+        """
+        weights = {}
+        for idx, wrapped in self.wrapped_attentions.items():
+            w = wrapped.get_live_attention_weights()  # Gets and clears
             if w is not None:
                 weights[idx] = w
         return weights

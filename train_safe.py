@@ -1113,6 +1113,11 @@ def evaluate(
     all_predictions = []
     all_references = []
 
+    # One-time tokenizer verification (helps diagnose decoding bugs)
+    print(f"[TokenizerCheck] name={type(tokenizer).__name__}, vocab_size={len(tokenizer)}, "
+          f"pad_id={tokenizer.pad_token_id}, eos_id={tokenizer.eos_token_id}, "
+          f"bos_id={getattr(tokenizer, 'bos_token_id', 'N/A')}", flush=True)
+
     print(f"Running evaluation (max_batches={max_batches})...", flush=True)
     start_time = time.time()
     skipped_batches = 0
@@ -1274,6 +1279,14 @@ def evaluate(
             audio_attention_mask=gen_audio_attention_mask,
             **generation_kwargs,
         )
+
+        # Debug: Print raw token info for first batch to diagnose decoding issues
+        if batch_idx == 0:
+            print(f"[DecodeDebug] input_ids shape: {gen_input_ids.shape}, generated_ids shape: {generated_ids.shape}", flush=True)
+            print(f"[DecodeDebug] First 30 generated token IDs: {generated_ids[0, :30].tolist()}", flush=True)
+            # Decode first 30 tokens without skip_special_tokens to see raw output
+            raw_decode = tokenizer.decode(generated_ids[0, :30], skip_special_tokens=False)
+            print(f"[DecodeDebug] Raw decode (first 30 tokens): {repr(raw_decode)}", flush=True)
 
         # Decode predictions (tokenizer already set from base_model above)
         batch_predictions = tokenizer.batch_decode(
@@ -1900,8 +1913,9 @@ def train_epoch(
             hasattr(base_model, 'kv_hook_manager') and
             base_model.kv_hook_manager is not None):
             try:
-                # Get attention weights from KV-augmented layers
-                attn_weights = base_model.kv_hook_manager.get_attention_weights()
+                # Get LIVE attention weights (with gradients) for reg loss computation
+                # This gets and clears the live weights to prevent graph retention
+                attn_weights = base_model.kv_hook_manager.get_live_attention_weights()
                 if attn_weights:
                     n_audio = base_model.num_audio_tokens
                     min_attn_loss = base_model.min_audio_attention_loss(
@@ -1912,9 +1926,17 @@ def train_epoch(
                     if min_attn_loss.requires_grad:
                         loss = loss + min_attn_loss
                         min_attn_loss_value = min_attn_loss.detach().item()
-            except Exception:
+
+                    # DEBUG: Log min_attn_loss gradient info (first 3 batches per epoch)
+                    if batch_idx < 3 and epoch <= 2:
+                        print(f"[MinAttnDebug] batch={batch_idx} "
+                              f"requires_grad={min_attn_loss.requires_grad} "
+                              f"grad_fn={type(min_attn_loss.grad_fn).__name__ if min_attn_loss.grad_fn else None} "
+                              f"value={min_attn_loss_value:.6f}", flush=True)
+            except Exception as e:
                 # Fail-safe: ignore min attention errors to keep training running
-                pass
+                if batch_idx < 3:
+                    print(f"[MinAttnDebug] ERROR: {e}", flush=True)
 
         # If loss has no gradient path (e.g., SAFE gate effectively off),
         # skip this batch to avoid autograd errors.

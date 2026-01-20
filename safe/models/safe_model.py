@@ -1789,9 +1789,10 @@ class SAFEModel(nn.Module):
                     outputs = self.base_vl.llm(**run_inputs)
 
                     # Compute attention regularization loss if enabled
+                    # Use LIVE attention weights (with gradients) for proper backprop
                     attn_reg_loss = None
                     if compute_attn_loss:
-                        attn_weights = self.kv_hook_manager.get_attention_weights()
+                        attn_weights = self.kv_hook_manager.get_live_attention_weights()
                         if attn_weights:
                             n_audio = audio_tokens.size(1)
                             attn_reg_loss = self.min_audio_attention_loss(
@@ -2261,6 +2262,18 @@ class SAFEModel(nn.Module):
                 audio_tokens = audio_tokens.to(device=embeds.device, dtype=base_dtype)
                 audio_attn = audio_attention_mask.to(embeds.device) if audio_attention_mask is not None else None
 
+                # CRITICAL FIX: For KV augmentation, DON'T use inputs_embeds!
+                # Using inputs_embeds causes HF generate to return ONLY new tokens,
+                # which breaks BPE decoding (corrupted subwords like "gar gar gar").
+                # KV augmentation injects audio via attention K,V, not via embeddings,
+                # so we just need input_ids (sanitized to replace audio tokens with pad).
+                kv_gen_inputs = {k: v for k, v in base_inputs.items() if k != "inputs_embeds"}
+                # Ensure we have the sanitized input_ids (audio tokens -> pad)
+                if sanitized_ids is not None:
+                    kv_gen_inputs["input_ids"] = sanitized_ids
+                else:
+                    kv_gen_inputs["input_ids"] = input_ids
+
                 # Wrap attention modules
                 self.kv_hook_manager.wrap_attention_modules()
                 self.kv_hook_manager.inject_audio(
@@ -2269,7 +2282,7 @@ class SAFEModel(nn.Module):
                     gate=float(effective_gate) if not torch.is_tensor(effective_gate) else effective_gate.mean().item(),
                 )
                 try:
-                    return self.base_vl.llm.generate(**base_inputs)
+                    return self.base_vl.llm.generate(**kv_gen_inputs)
                 finally:
                     self.kv_hook_manager.clear_audio()
                     self.kv_hook_manager.unwrap_attention_modules()
