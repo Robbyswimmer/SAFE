@@ -505,11 +505,21 @@ class SAFEModel(nn.Module):
             self.kv_adapters.train()
         if hasattr(self, 'audio_token_embeddings'):
             self.audio_token_embeddings.train()
-        
+
         # Ensure base VL model stays frozen and in eval mode
         self.base_vl.eval()
         for param in self.base_vl.parameters():
             param.requires_grad = False
+
+        # CRITICAL FIX: KV adapters get attached to LLM layers during wrapping
+        # (KVAugmentedAttention stores kv_adapter as a submodule, and wrapped
+        # attention replaces layer.self_attn). This means the above freeze loop
+        # will incorrectly freeze kv_adapters too since they're now part of
+        # base_vl.llm's module hierarchy.
+        # We MUST explicitly unfreeze kv_adapters AFTER freezing base_vl.
+        if self.kv_adapters is not None:
+            for param in self.kv_adapters.parameters():
+                param.requires_grad = True
     
     def eval(self):
         """Override eval to handle both base VL and audio components."""
