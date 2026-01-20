@@ -1786,6 +1786,11 @@ class SAFEModel(nn.Module):
                     self.kv_hook_manager.set_return_attention_weights(True)
 
                 try:
+                    # KV augmentation wrapper does not support caching in forward.
+                    # Ensure the underlying model does not attempt to use past_key_values.
+                    if "use_cache" not in run_inputs:
+                        run_inputs = dict(run_inputs)
+                        run_inputs["use_cache"] = False
                     outputs = self.base_vl.llm(**run_inputs)
 
                     # Compute attention regularization loss if enabled

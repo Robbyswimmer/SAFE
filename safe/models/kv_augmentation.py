@@ -512,6 +512,16 @@ class KVAugmentedAttention(nn.Module):
 
         # Audio attention (non-causal, all positions can attend to all audio)
         audio_attn_weights = torch.matmul(query_for_audio, audio_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+        # Apply audio mask if provided: 1=attend, 0=mask.
+        if self._audio_mask is not None:
+            audio_mask = self._audio_mask.to(device=audio_attn_weights.device)
+            # Handle beam expansion (same logic as K/V expansion)
+            if audio_mask.dim() == 2:
+                if audio_mask.size(0) != bsz and bsz % audio_mask.size(0) == 0:
+                    num_beams = bsz // audio_mask.size(0)
+                    audio_mask = audio_mask.unsqueeze(1).expand(-1, num_beams, -1).reshape(bsz, -1)
+                audio_mask_expanded = audio_mask.unsqueeze(1).unsqueeze(2)  # (B,1,1,Ta)
+                audio_attn_weights = audio_attn_weights.masked_fill(audio_mask_expanded <= 0.5, float("-inf"))
         audio_attn_weights = torch.clamp(audio_attn_weights, min=-50.0, max=50.0)
         audio_attn_weights = F.softmax(audio_attn_weights, dim=-1, dtype=torch.float32).to(query_for_audio.dtype)
         audio_output = torch.matmul(audio_attn_weights, audio_values)
@@ -579,8 +589,13 @@ class KVAugmentedAttention(nn.Module):
         else:
             attn_weights_out = None
 
-        # LlamaDecoderLayer unpacks: hidden_states, _ = self.self_attn(...)
-        return (attn_output, attn_weights_out)
+        # Match original attention return format expected by the decoder.
+        if self._return_format == 1:
+            return attn_output
+        if self._return_format == 2:
+            return (attn_output, None)
+        # Default: 3-tuple (attn_output, attn_weights, past_key_value)
+        return (attn_output, attn_weights_out, None)
 
     def _apply_rotary_pos_emb(
         self,

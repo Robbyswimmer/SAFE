@@ -774,6 +774,56 @@ def _extract_answer_from_generation(generated_text: str) -> str:
 
     return answer.strip()
 
+
+def _normalize_references(answer: Any) -> List[str]:
+    """
+    Normalize dataset answer payloads into a list of non-empty reference strings.
+
+    Datasets may store captions as:
+    - str
+    - list[str]
+    - list[dict] with keys like "answer"/"caption"
+    - dict with "answers"/"captions"
+    """
+    refs: List[str] = []
+    if answer is None:
+        return refs
+
+    if isinstance(answer, str):
+        s = answer.strip()
+        return [s] if s else []
+
+    if isinstance(answer, dict):
+        candidate = answer.get("answers") or answer.get("captions") or answer.get("answer") or answer.get("caption")
+        return _normalize_references(candidate)
+
+    if isinstance(answer, (list, tuple)):
+        for item in answer:
+            if item is None:
+                continue
+            if isinstance(item, str):
+                s = item.strip()
+                if s:
+                    refs.append(s)
+                continue
+            if isinstance(item, dict):
+                candidate = item.get("answer") or item.get("caption") or item.get("text")
+                if candidate is None:
+                    # fall back to stringifying dict if it has nothing useful
+                    continue
+                refs.extend(_normalize_references(candidate))
+                continue
+            s = str(item).strip()
+            if s:
+                refs.append(s)
+        # de-dup preserve order
+        seen = set()
+        refs = [r for r in refs if not (r in seen or seen.add(r))]
+        return refs
+
+    s = str(answer).strip()
+    return [s] if s else []
+
 # ============================================================================
 # SECTION 2: METRICS
 # ============================================================================
@@ -1246,7 +1296,9 @@ def evaluate(
         if gen_audio_attention_mask is not None:
             gen_audio_attention_mask = gen_audio_attention_mask.to(device)
 
-        # Build generation kwargs and optionally suppress EOS for audio batches
+        # Build generation kwargs.
+        # NOTE: Do NOT suppress EOS during evaluation; it can force rambling generations
+        # and makes metrics/qualitative samples much harder to interpret.
         generation_kwargs = {
             "max_new_tokens": max_new_tokens,
             "min_new_tokens": 1,
@@ -1257,19 +1309,6 @@ def evaluate(
             "pad_token_id": tokenizer.pad_token_id,
             "eos_token_id": tokenizer.eos_token_id,
         }
-        if suppress_eos_for_audio and has_audio_flags is not None:
-            if torch.is_tensor(has_audio_flags):
-                has_audio_any = bool(has_audio_flags.any().item())
-            else:
-                has_audio_any = any(bool(x) for x in has_audio_flags)
-            if has_audio_any and tokenizer.eos_token_id is not None:
-                suppress_tokens = [tokenizer.eos_token_id]
-                if (
-                    tokenizer.pad_token_id is not None
-                    and tokenizer.pad_token_id != tokenizer.eos_token_id
-                ):
-                    suppress_tokens.append(tokenizer.pad_token_id)
-                generation_kwargs["suppress_tokens"] = suppress_tokens
 
         # Generate captions (use base_model for generate method)
         generated_ids = base_model.generate(
@@ -1288,11 +1327,19 @@ def evaluate(
             raw_decode = tokenizer.decode(generated_ids[0, :30], skip_special_tokens=False)
             print(f"[DecodeDebug] Raw decode (first 30 tokens): {repr(raw_decode)}", flush=True)
 
-        # Decode predictions (tokenizer already set from base_model above)
+        # Decode predictions.
+        # HF generate may return either:
+        # - full sequence (prompt + new tokens), or
+        # - only new tokens (especially when inputs_embeds is used).
+        prompt_len = int(gen_input_ids.shape[1])
+        if generated_ids.dim() == 2 and generated_ids.size(1) > prompt_len:
+            decoded_ids = generated_ids[:, prompt_len:]
+        else:
+            decoded_ids = generated_ids
         batch_predictions = tokenizer.batch_decode(
-            generated_ids,
+            decoded_ids,
             skip_special_tokens=True,
-            clean_up_tokenization_spaces=True
+            clean_up_tokenization_spaces=True,
         )
 
         # Clean predictions (remove question prompt and extract answer content) + collect references
@@ -1312,13 +1359,7 @@ def evaluate(
                 print(f"[CleanDebug] Final cleaned_pred: {repr(cleaned_pred[:200])}", flush=True)
             all_predictions.append(cleaned_pred)
 
-            answer = answers[i]
-            if isinstance(answer, str):
-                refs = [answer]
-            elif isinstance(answer, list):
-                refs = [str(a) for a in answer]
-            else:
-                refs = [str(answer)]
+            refs = _normalize_references(answers[i])
             all_references.append(refs)
 
             if sample_output is not None and sample_limit > 0 and len(sample_output) < sample_limit:
