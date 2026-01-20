@@ -287,36 +287,10 @@ class KVAugmentedAttention(nn.Module):
         # Diagnostics storage (RMS ratios, attention mass, etc.)
         self._last_diagnostics: Optional[Dict[str, float]] = None
 
-        # Detect return format of original attention (for compatibility across HF versions)
-        # Probe the original attention's forward signature to determine expected return format
-        self._return_format = self._detect_return_format()
-
-    def _detect_return_format(self) -> int:
-        """
-        Detect the return format of the original attention module.
-
-        Different transformers versions return different tuple lengths:
-        - transformers 4.36-4.40: (attn_output, attn_weights, past_key_value) = 3
-        - transformers 4.45+: sometimes (attn_output, past_key_value) = 2
-        - transformers 4.50+: just attn_output (tensor) = 1
-
-        We check the class name and module to determine the expected format.
-        """
-        orig_class = type(self.original_attention).__name__
-
-        # SDPA and Flash attention variants often return fewer values
-        if 'Sdpa' in orig_class or 'Flash' in orig_class:
-            # These typically return just attn_output or (attn_output, None, None)
-            # but the decoder layer still unpacks 3 values
-            return 3
-
-        # Check if this is an eager attention implementation
-        if 'Attention' in orig_class:
-            # Standard LlamaAttention returns 3 values
-            return 3
-
-        # Default to 3 for safety (most common in LLaVA models)
-        return 3
+        # Return format expected by the downstream decoder layer.
+        # This varies across HF/transformers versions (some layers unpack 2 values, some 3).
+        # We detect it lazily by calling the original attention once on first augmented forward.
+        self._return_format: Optional[int] = None
 
     def set_audio(
         self,
@@ -431,6 +405,29 @@ class KVAugmentedAttention(nn.Module):
         bsz, q_len, _ = hidden_states.size()
         n_audio = self._audio_tokens.size(1)
         orig_attn = self.original_attention
+
+        # Lazily determine how many values the original attention returns so we can
+        # match what the decoder layer expects to unpack.
+        if self._return_format is None:
+            try:
+                with torch.no_grad():
+                    probe = orig_attn(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_value,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        **kwargs,
+                    )
+                if isinstance(probe, tuple):
+                    self._return_format = len(probe)
+                else:
+                    self._return_format = 1
+            except Exception:
+                # Most modern LLaMA decoder layers unpack 2 values.
+                self._return_format = 2
 
         # ============================================================
         # 1. TEXT ATTENTION (frozen, identical to original LlamaAttention)
@@ -593,7 +590,7 @@ class KVAugmentedAttention(nn.Module):
         if self._return_format == 1:
             return attn_output
         if self._return_format == 2:
-            return (attn_output, None)
+            return (attn_output, attn_weights_out)
         # Default: 3-tuple (attn_output, attn_weights, past_key_value)
         return (attn_output, attn_weights_out, None)
 
