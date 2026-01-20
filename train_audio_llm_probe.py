@@ -906,12 +906,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Freeze projector+fusion and train only the linear head.",
     )
-    p.add_argument(
-        "--head-warmup-steps",
-        type=int,
-        default=0,
-        help="If >0, train head-only for this many optimizer steps (SAFE LR=0), then unfreeze SAFE LR.",
-    )
     return p.parse_args()
 
 
@@ -1003,6 +997,40 @@ def main() -> None:
         head_weight_decay=float(args.head_weight_decay),
     )
     scaler = GradScaler() if args.fp16 else None
+
+    # === CRITICAL: Verify ΔQ/KV params are in optimizer ===
+    print("\n" + "=" * 60, flush=True)
+    print("OPTIMIZER PARAM GROUPS (verify ΔQ params are included!):", flush=True)
+    for group in optimizer.param_groups:
+        group_name = group.get("name", "unnamed")
+        lr = group.get("lr", 0)
+        param_names = [n for n, p in model.named_parameters() if any(p is pg for pg in group["params"])]
+        print(f"  {group_name}: lr={lr}, {len(group['params'])} params", flush=True)
+        # Print first few param names to verify
+        for pn in param_names[:5]:
+            print(f"    - {pn}", flush=True)
+        if len(param_names) > 5:
+            print(f"    ... and {len(param_names) - 5} more", flush=True)
+
+    # Check for ΔQ params specifically
+    all_safe_param_names = []
+    for group in optimizer.param_groups:
+        if str(group.get("name", "")).startswith("safe_"):
+            for n, p in model.named_parameters():
+                if any(p is pg for pg in group["params"]):
+                    all_safe_param_names.append(n)
+
+    has_query_adapter = any("query_adapter" in n for n in all_safe_param_names)
+    has_kv_adapter = any("kv_adapter" in n.lower() for n in all_safe_param_names)
+    has_projector = any("projector" in n.lower() for n in all_safe_param_names)
+
+    if has_query_adapter:
+        print("✓ Query adapter (ΔQ) params found in SAFE group", flush=True)
+    else:
+        print("⚠️  WARNING: No query_adapter params in SAFE group - ΔQ won't train!", flush=True)
+    if has_kv_adapter or has_projector:
+        print(f"✓ KV/projector params found in SAFE group", flush=True)
+    print("=" * 60 + "\n", flush=True)
 
     if args.wandb and wandb is not None:
         wandb.init(
