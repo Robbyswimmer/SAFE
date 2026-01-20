@@ -123,7 +123,7 @@ def run_sanity_check(args):
 
         # Prepare prompt
         prompt = "What sound is in this audio?"
-        tokenizer = model.vl_model.language_model.tokenizer if hasattr(model.vl_model, 'language_model') else None
+        tokenizer = model.base_vl.tokenizer if hasattr(model, 'base_vl') else None
         if tokenizer is None:
             # Try to get tokenizer from processor
             from transformers import AutoProcessor
@@ -141,7 +141,7 @@ def run_sanity_check(args):
             model.kv_hook_manager.inject_audio(audio_tokens, gate=1.0)
 
         # Get hidden states through the model
-        outputs = model.vl_model.language_model(
+        outputs = model.base_vl.llm(
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=True,
@@ -181,7 +181,7 @@ def run_sanity_check(args):
         # Re-run with audio to get fresh diagnostics
         model.kv_hook_manager.inject_audio(audio_tokens, gate=1.0)
         with torch.no_grad():
-            _ = model.vl_model.language_model(
+            _ = model.base_vl.llm(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 return_dict=True,
@@ -232,7 +232,7 @@ def run_sanity_check(args):
         if hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None:
             model.kv_hook_manager.inject_audio(audio_tokens, gate=1.0)
 
-        outputs_with_audio = model.vl_model.language_model(
+        outputs_with_audio = model.base_vl.llm(
             input_ids=input_ids,
             attention_mask=attention_mask,
             return_dict=True,
@@ -247,7 +247,7 @@ def run_sanity_check(args):
         if hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None:
             model.kv_hook_manager.inject_audio(null_audio, gate=1.0)
 
-        outputs_null_audio = model.vl_model.language_model(
+        outputs_null_audio = model.base_vl.llm(
             input_ids=input_ids,
             attention_mask=attention_mask,
             return_dict=True,
@@ -258,7 +258,7 @@ def run_sanity_check(args):
             model.kv_hook_manager.clear_audio()
 
         # Forward with NO audio injection at all (baseline)
-        outputs_no_injection = model.vl_model.language_model(
+        outputs_no_injection = model.base_vl.llm(
             input_ids=input_ids,
             attention_mask=attention_mask,
             return_dict=True,
@@ -304,7 +304,7 @@ def run_sanity_check(args):
         # Forward with ΔQ enabled (normal)
         if hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None:
             model.kv_hook_manager.inject_audio(audio_tokens, gate=1.0)
-        outputs_dq_on = model.vl_model.language_model(
+        outputs_dq_on = model.base_vl.llm(
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=True,
@@ -326,7 +326,7 @@ def run_sanity_check(args):
         # Forward with ΔQ disabled (zeroed)
         if hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None:
             model.kv_hook_manager.inject_audio(audio_tokens, gate=1.0)
-        outputs_dq_off = model.vl_model.language_model(
+        outputs_dq_off = model.base_vl.llm(
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=True,
@@ -378,7 +378,7 @@ def run_sanity_check(args):
             model.kv_hook_manager.set_return_attention_weights(True)
             model.kv_hook_manager.inject_audio(audio_tokens, gate=1.0)
 
-            _ = model.vl_model.language_model(
+            _ = model.base_vl.llm(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 return_dict=True,
@@ -436,7 +436,7 @@ def run_sanity_check(args):
         # Re-run to get fresh diagnostics
         model.kv_hook_manager.inject_audio(audio_tokens, gate=1.0)
         with torch.no_grad():
-            _ = model.vl_model.language_model(
+            _ = model.base_vl.llm(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 return_dict=True,

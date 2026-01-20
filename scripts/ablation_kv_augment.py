@@ -104,7 +104,7 @@ def verify_text_path_identical(model, tokenizer, device, prompts=None):
             if hasattr(model, 'kv_hook_manager') and model.kv_hook_manager is not None:
                 model.kv_hook_manager.unwrap_attention_modules()
 
-            outputs_original = model.vl_model.language_model(
+            outputs_original = model.base_vl.llm(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=True,
@@ -117,7 +117,7 @@ def verify_text_path_identical(model, tokenizer, device, prompts=None):
                 model.kv_hook_manager.wrap_attention_modules()
 
             # Run 2: Augmented attention but NO audio injected
-            outputs_wrapped = model.vl_model.language_model(
+            outputs_wrapped = model.base_vl.llm(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=True,
@@ -189,7 +189,7 @@ def get_attention_diagnostics(model, audio_tokens, input_ids, attention_mask, de
         model.kv_hook_manager.inject_audio(audio_tokens, gate=1.0)
 
     # Forward pass
-    outputs = model.vl_model.language_model(
+    outputs = model.base_vl.llm(
         input_ids=input_ids,
         attention_mask=attention_mask,
         output_hidden_states=True,
@@ -526,7 +526,7 @@ def run_ablation(model, tokenizer, device, dataset, config, num_samples=10):
 
     # Per-sample logits differences (for variance)
     per_sample_diff_AB = [(results["A"]["logits"][i] - results["B"]["logits"][i]).abs().mean().item()
-                          for i in range(num_samples)]
+                          for i in range(processed)]
     std_diff_AB = torch.tensor(per_sample_diff_AB).std().item()
 
     # Mass differences
