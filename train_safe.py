@@ -2972,7 +2972,7 @@ def main():
 
     # Model configuration
     parser.add_argument("--model-config", type=str, default="phase1",
-                        choices=["demo", "full", "multimodal", "phase1"],
+                        choices=["demo", "full", "multimodal", "phase1", "kv_augment"],
                         help="Model configuration name")
     parser.add_argument("--fusion-layer-indices", type=str, default=None,
                         help="Comma-separated layer indices for fusion injection (e.g., '8,16,24'). "
