@@ -2137,6 +2137,10 @@ class SAFEModel(nn.Module):
                 return self.base_vl.llm.generate(**base_inputs)
 
             # AUDIO PATH: Use custom embeddings and fusion (existing logic)
+            # KV augmentation does not currently implement past_key_values caching.
+            # For correctness/stability during generation, force no-cache unless user overrides.
+            if self.enable_kv_augmentation and "use_cache" not in generation_kwargs:
+                generation_kwargs["use_cache"] = False
             base_inputs = {**generation_kwargs}
             sanitized_ids = self.sanitize_input_ids_for_base(input_ids)
             if sanitized_ids is not None:
@@ -2271,6 +2275,8 @@ class SAFEModel(nn.Module):
                     print(f"[KV_GEN_FIX] Using fixed KV augmentation generate path (no inputs_embeds)", flush=True)
                     self._kv_gen_fix_logged = True
                 kv_gen_inputs = {k: v for k, v in base_inputs.items() if k != "inputs_embeds"}
+                # Force no-cache for KV augmentation generation (no past_key_values support).
+                kv_gen_inputs["use_cache"] = False
                 # Ensure we have the sanitized input_ids (audio tokens -> pad)
                 if sanitized_ids is not None:
                     kv_gen_inputs["input_ids"] = sanitized_ids
