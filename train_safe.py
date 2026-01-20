@@ -156,9 +156,26 @@ def summarize_trainable_parameters(model: nn.Module) -> Dict[str, int]:
             bucket = "fusion_adapter"
         elif name.startswith("audio_token_embeddings."):
             bucket = "audio_token_embeddings"
+        elif "kv_adapter" in name or "kv_augmentation" in name:
+            bucket = "kv_adapter"
         else:
             bucket = "other_trainable"
         totals[bucket] = totals.get(bucket, 0) + n
+
+        # KV adapter detailed breakdown
+        if bucket == "kv_adapter":
+            lower = name.lower()
+            if "audio_query_adapter" in lower or "query_adapter" in lower:
+                sub = "kv_adapter/query_adapter"
+            elif "key_proj" in lower or "k_proj" in lower:
+                sub = "kv_adapter/key_proj"
+            elif "value_proj" in lower or "v_proj" in lower:
+                sub = "kv_adapter/value_proj"
+            elif "scale" in lower:
+                sub = "kv_adapter/scale"
+            else:
+                sub = "kv_adapter/other"
+            totals[sub] = totals.get(sub, 0) + n
 
         # More detailed fusion breakdown (helps explain big parameter drops)
         if bucket == "fusion_adapter":
@@ -1421,8 +1438,17 @@ def create_model(config: Dict[str, Any]) -> SAFEModel:
     print(f"  LLM: {constructor_config.get('llm_model_name', 'N/A')}")
     print(f"  Vision: {constructor_config.get('vision_model_name', 'N/A')}")
     print(f"  Audio: {constructor_config.get('audio_encoder_type', 'N/A')}")
+    print(f"  Fusion type: {constructor_config.get('fusion_type', 'N/A')}")
     print(f"  Fusion layers: {constructor_config.get('fusion_layer_indices', 'N/A')}")
     print(f"  LoRA rank: {constructor_config.get('lora_rank', 'N/A')}")
+
+    # Log KV augmentation specific config if present
+    fusion_config = constructor_config.get('fusion_config', {})
+    if fusion_config.get('fusion_mode') == 'kv_augment':
+        print(f"  [KV Augment Mode]")
+        print(f"    Query adapter rank: {fusion_config.get('query_adapter_rank', 'N/A')}")
+        print(f"    Bottleneck dim: {fusion_config.get('bottleneck_dim', 'N/A')}")
+        print(f"    Min audio attention: {fusion_config.get('min_audio_attention', 0.0)}")
 
     model = SAFEModel(**constructor_config)
     return model
@@ -1497,6 +1523,49 @@ def _extract_fusion_residual_scales(model: Any) -> Dict[str, float]:
         residuals[safe_key] = value
 
     return residuals
+
+
+def _extract_kv_adapter_metrics(model: Any) -> Dict[str, float]:
+    """
+    Extract KV adapter metrics (scales, ΔQ/Q ratio) for logging.
+    Returns empty dict if model doesn't use KV augmentation.
+    """
+    kv_adapters = getattr(model, "kv_adapters", None)
+    if kv_adapters is None:
+        return {}
+
+    metrics: Dict[str, float] = {}
+
+    for name, adapter in kv_adapters.named_modules():
+        # Extract audio scale
+        if hasattr(adapter, "audio_scale"):
+            try:
+                scale = adapter.audio_scale
+                if torch.is_tensor(scale):
+                    val = float(scale.detach().cpu().float().item())
+                else:
+                    val = float(scale)
+                safe_name = name.replace(".", "_") if name else "root"
+                metrics[f"audio_scale/{safe_name}"] = val
+            except Exception:
+                pass
+
+        # Extract query adapter scale (ΔQ scale)
+        if hasattr(adapter, "audio_query_adapter"):
+            query_adapter = adapter.audio_query_adapter
+            if hasattr(query_adapter, "scale"):
+                try:
+                    scale = query_adapter.scale
+                    if torch.is_tensor(scale):
+                        val = float(scale.detach().cpu().float().item())
+                    else:
+                        val = float(scale)
+                    safe_name = name.replace(".", "_") if name else "root"
+                    metrics[f"delta_q_scale/{safe_name}"] = val
+                except Exception:
+                    pass
+
+    return metrics
 
 
 def _apply_audio_augmentation(
@@ -1933,6 +2002,12 @@ def train_epoch(
                     for k, v in residual_scales.items():
                         log_dict[f"train/fusion_residual_scale/{k}"] = float(v)
 
+                # KV adapter metrics (ΔQ scale, audio scale)
+                kv_metrics = _extract_kv_adapter_metrics(base_model)
+                if kv_metrics:
+                    for k, v in kv_metrics.items():
+                        log_dict[f"train/kv_adapter/{k}"] = float(v)
+
                 try:
                     if hasattr(base_model, "get_last_attention_summary"):
                         summary = base_model.get_last_attention_summary()
@@ -2025,6 +2100,14 @@ def train_epoch(
                 values = list(residual_scales.values())
                 residual_scale_mean = float(sum(values) / len(values))
 
+            # KV adapter metrics for console logging
+            kv_metrics = _extract_kv_adapter_metrics(base_model)
+            delta_q_scale_mean = None
+            if kv_metrics:
+                dq_scales = [v for k, v in kv_metrics.items() if "delta_q_scale" in k]
+                if dq_scales:
+                    delta_q_scale_mean = sum(dq_scales) / len(dq_scales)
+
             attn_mean = None
             attn_max = None
             try:
@@ -2048,6 +2131,8 @@ def train_epoch(
                 extras.append(f"proj_scale={proj_scale:.3f}")
             if residual_scale_mean is not None:
                 extras.append(f"res_scale={residual_scale_mean:.3f}")
+            if delta_q_scale_mean is not None:
+                extras.append(f"dq_scale={delta_q_scale_mean:.3f}")
             if attn_mean is not None and attn_max is not None:
                 extras.append(f"attn_mean={attn_mean:.4f} attn_max={attn_max:.4f}")
             if extras:
@@ -2121,6 +2206,12 @@ def train_epoch(
                 log_dict["train/fusion_residual_scale_count"] = float(len(values))
                 for k, v in residual_scales.items():
                     log_dict[f"train/fusion_residual_scale/{k}"] = float(v)
+
+            # KV adapter metrics (ΔQ scale, audio scale)
+            kv_metrics = _extract_kv_adapter_metrics(base_model)
+            if kv_metrics:
+                for k, v in kv_metrics.items():
+                    log_dict[f"train/kv_adapter/{k}"] = float(v)
 
             try:
                 if hasattr(base_model, "get_last_attention_summary"):
@@ -2263,7 +2354,13 @@ def train(
                 projector_decay.append(param)
             else:
                 projector_no_decay.append(param)
-        elif "fusion_adapter" in name or "lora" in name.lower():
+        elif (
+            "fusion_adapter" in name
+            or "kv_adapter" in name
+            or "audio_query_adapter" in name
+            or "kv_augmentation" in name
+            or "lora" in name.lower()
+        ):
             if _use_weight_decay(name, param):
                 adapter_decay.append(param)
             else:
@@ -3173,14 +3270,21 @@ def main():
             for key in sorted(breakdown.keys()):
                 print(f"    - {key}: {_format_param_count(breakdown[key])}")
 
-        # Check for LoRA parameters and warn if missing
+        # Check for LoRA or KV adapter parameters and warn if missing
         lora_params = breakdown.get("fusion_adapter/lora", 0)
-        if lora_params > 0:
+        kv_adapter_params = breakdown.get("kv_adapter", 0)
+        query_adapter_params = breakdown.get("kv_adapter/query_adapter", 0)
+
+        if kv_adapter_params > 0:
+            print(f"\n  ✓ KV Adapter parameters detected: {_format_param_count(kv_adapter_params)} (training enabled)")
+            if query_adapter_params > 0:
+                print(f"    - Query adapter (ΔQ): {_format_param_count(query_adapter_params)}")
+        elif lora_params > 0:
             print(f"\n  ✓ LoRA parameters detected: {_format_param_count(lora_params)} (training enabled)")
         else:
-            print(f"\n  ⚠️  WARNING: No LoRA parameters found in trainable params!")
-            print(f"     This may indicate LoRA weights are frozen (check fusion_adapter.py)")
-            print(f"     Expected ~10-15M LoRA params for cross-attention adapters")
+            print(f"\n  ⚠️  WARNING: No LoRA or KV adapter parameters found in trainable params!")
+            print(f"     This may indicate adapter weights are frozen")
+            print(f"     Expected: ~10-15M LoRA params (cross-attention) or ~1-5M KV adapter params")
 
     # Load datasets
     if is_main:

@@ -23,9 +23,11 @@ NUM_EPOCHS=${NUM_EPOCHS:-30}
 # Default was backwards (head=1e-3, safe=5e-4) which let head dominate
 SAFE_LR=${SAFE_LR:-1e-3}
 HEAD_LR=${HEAD_LR:-1e-4}
-# ΔQ (query adapter) gets its own HIGHER LR to accelerate audio attention learning
-# ΔQ is the bottleneck that makes attention non-uniform; it needs to move faster
-DELTA_Q_LR=${DELTA_Q_LR:-5e-3}
+# ΔQ (query adapter) LR - needs to be balanced
+# Too high (5e-3) → ΔQ explodes to 300%+ and destroys signal
+# Too low → ΔQ stays near zero and doesn't learn
+# Sweet spot: same as SAFE LR or slightly higher
+DELTA_Q_LR=${DELTA_Q_LR:-1e-3}
 # Freeze head for first N steps to force SAFE to learn discriminative features
 HEAD_WARMUP_STEPS=${HEAD_WARMUP_STEPS:-500}
 # audio_attn pools at positions with highest audio attention mass
