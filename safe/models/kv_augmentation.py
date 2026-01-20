@@ -454,6 +454,10 @@ class KVAugmentedAttention(nn.Module):
         audio_keys = audio_keys.view(bsz, n_audio, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         audio_values = audio_values.view(bsz, n_audio, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
+        # Cast audio K,V to match query dtype (handles fp16/bf16 models)
+        audio_keys = audio_keys.to(query_for_audio.dtype)
+        audio_values = audio_values.to(query_for_audio.dtype)
+
         # GQA expansion for audio K, V
         if self.num_key_value_groups > 1:
             audio_keys = self._repeat_kv(audio_keys, self.num_key_value_groups)
