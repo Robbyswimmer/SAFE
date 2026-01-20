@@ -237,7 +237,6 @@ class SAFEModel(nn.Module):
                 head_dim = llm_hidden_size // num_attention_heads
 
             print(f"[SAFE] LLM attention config: num_heads={num_attention_heads}, num_kv_heads={num_key_value_heads}, head_dim={head_dim}", flush=True)
-            print(f"[SAFE] Adapter K,V output size will be: {num_key_value_heads * head_dim}", flush=True)
 
             # Create per-layer KV adapters
             self.kv_adapters = nn.ModuleDict({
