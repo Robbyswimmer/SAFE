@@ -1827,6 +1827,8 @@ def train_epoch(
     step_start_time = start_time
     step_loss_sum = 0.0
     step_min_attn_loss_sum = 0.0  # Track min audio attention loss for logging
+    step_ablation_hinge_sum = 0.0
+    step_ablation_delta_sum = 0.0
     step_samples = 0
     step_micro_batches = 0
     last_proj_grad_norm: Optional[float] = None
@@ -2028,6 +2030,53 @@ def train_epoch(
                 )
                 loss = outputs["loss"]
 
+        # Optional forcing term: encourage audio to reduce loss vs ablated-audio baseline.
+        # This is a "with-audio must be better" hinge, but does NOT push the no-audio loss up
+        # (no_audio is computed under no_grad and detached).
+        ablation_loss_weight = float(config.get("ablation_loss_weight", 0.0) or 0.0)
+        ablation_loss_margin = float(config.get("ablation_loss_margin", 0.0) or 0.0)
+        ablation_every = int(config.get("ablation_loss_every_steps", 1) or 1)
+        ablation_hinge_value = 0.0
+        ablation_delta_value = 0.0
+        if (
+            (not dummy_batch)
+            and ablation_loss_weight > 0.0
+            and ablation_every > 0
+            and (optimizer_step % ablation_every == 0)
+            and (batch_idx % int(gradient_accumulation_steps) == 0)
+        ):
+            try:
+                with torch.no_grad():
+                    if use_amp:
+                        with autocast():
+                            outputs_no_audio = model(
+                                input_ids=input_ids,
+                                attention_mask=attention_mask,
+                                labels=labels,
+                                audio_tokens=None,
+                                audio_attention_mask=None,
+                            )
+                            loss_no_audio = outputs_no_audio["loss"]
+                    else:
+                        outputs_no_audio = model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=labels,
+                            audio_tokens=None,
+                            audio_attention_mask=None,
+                        )
+                        loss_no_audio = outputs_no_audio["loss"]
+
+                # Encourage loss_audio <= loss_no_audio - margin.
+                ablation_delta = loss_no_audio.detach() - loss
+                hinge = torch.nn.functional.relu(ablation_loss_margin - ablation_delta)
+                loss = loss + ablation_loss_weight * hinge
+
+                ablation_hinge_value = float(hinge.detach().item())
+                ablation_delta_value = float(ablation_delta.detach().item())
+            except Exception:
+                pass
+
         # Token-level training accuracy on supervised positions.
         # IMPORTANT: match the shifted next-token objective used in SAFEModel.forward().
         logits = outputs.get("logits") if isinstance(outputs, dict) else None
@@ -2147,6 +2196,8 @@ def train_epoch(
                 loss_unscaled_value = 0.0
         step_loss_sum += loss_unscaled_value
         step_min_attn_loss_sum += min_attn_loss_value
+        step_ablation_hinge_sum += ablation_hinge_value
+        step_ablation_delta_sum += ablation_delta_value
         step_samples += len(questions)
         step_micro_batches += 1
 
@@ -2200,6 +2251,8 @@ def train_epoch(
                     "train/micro_batches": step_micro_batches,
                     "train/loss_step": (step_loss_sum / max(step_micro_batches, 1)),
                     "train/min_attn_loss_step": (step_min_attn_loss_sum / max(step_micro_batches, 1)),
+                    "train/ablation_hinge_step": (step_ablation_hinge_sum / max(step_micro_batches, 1)),
+                    "train/ablation_delta_step": (step_ablation_delta_sum / max(step_micro_batches, 1)),
                     "train/samples_per_sec_step": (step_samples * world_size) / step_time,
                     "train/grad_norm": float(grad_norm) if grad_norm is not None else None,
                 }
@@ -3396,6 +3449,24 @@ def main():
                         help="Max caption length (tokens) for contrastive text embeddings")
     parser.add_argument("--gate-warmup-steps", type=int, default=0,
                         help="If >0, ramp SAFE gate 0→1 over this many optimizer steps")
+    parser.add_argument(
+        "--ablation-loss-weight",
+        type=float,
+        default=0.0,
+        help="Optional forcing term: weight for hinge loss encouraging audio to reduce LM loss vs ablated-audio baseline.",
+    )
+    parser.add_argument(
+        "--ablation-loss-margin",
+        type=float,
+        default=0.0,
+        help="Margin for ablation hinge: target improvement (loss_no_audio - loss_audio) >= margin.",
+    )
+    parser.add_argument(
+        "--ablation-loss-every-steps",
+        type=int,
+        default=1,
+        help="Apply ablation forcing loss every N optimizer steps (1 = every step).",
+    )
 
     # Audio augmentation (off by default)
     parser.add_argument("--audio-augment", action="store_true",
@@ -3846,6 +3917,9 @@ def main():
         "audio_contrastive_temperature": args.audio_contrastive_temperature,
         "audio_contrastive_max_length": args.audio_contrastive_max_length,
         "gate_warmup_steps": args.gate_warmup_steps,
+        "ablation_loss_weight": args.ablation_loss_weight,
+        "ablation_loss_margin": args.ablation_loss_margin,
+        "ablation_loss_every_steps": args.ablation_loss_every_steps,
         "audio_augment": args.audio_augment,
         "audio_augment_prob": args.audio_augment_prob,
         "export_eval_samples": bool(args.export_eval_samples),

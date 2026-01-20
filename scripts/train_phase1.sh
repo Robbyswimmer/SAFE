@@ -66,6 +66,9 @@ AUDIO_CONTRASTIVE_WEIGHT=${AUDIO_CONTRASTIVE_WEIGHT:-0.1}
 AUDIO_CONTRASTIVE_TEMPERATURE=${AUDIO_CONTRASTIVE_TEMPERATURE:-0.07}
 AUDIO_CONTRASTIVE_MAX_LENGTH=${AUDIO_CONTRASTIVE_MAX_LENGTH:-48}
 GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-0}
+ABLATION_LOSS_WEIGHT=${ABLATION_LOSS_WEIGHT:-0.0}
+ABLATION_LOSS_MARGIN=${ABLATION_LOSS_MARGIN:-0.0}
+ABLATION_LOSS_EVERY_STEPS=${ABLATION_LOSS_EVERY_STEPS:-1}
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}  # e.g., "8,16,24" - overrides config default
 LORA_RANK=${LORA_RANK:-""}                        # e.g., "8" - overrides config default
@@ -183,6 +186,7 @@ echo "Use Clotho: ${USE_CLOTHO}"
 echo "Use MACS: ${USE_MACS}"
 echo "Audio contrastive weight: ${AUDIO_CONTRASTIVE_WEIGHT}"
 echo "Gate warmup steps: ${GATE_WARMUP_STEPS}"
+echo "Ablation loss: weight=${ABLATION_LOSS_WEIGHT} margin=${ABLATION_LOSS_MARGIN} every=${ABLATION_LOSS_EVERY_STEPS}"
 echo "Gradient checkpointing: ${GRADIENT_CHECKPOINTING}"
 echo "Num workers: ${NUM_WORKERS}"
 echo "Max eval batches: ${MAX_EVAL_BATCHES}"
@@ -247,6 +251,9 @@ ${LAUNCHER} train_safe.py \
     --audio-contrastive-temperature "${AUDIO_CONTRASTIVE_TEMPERATURE}" \
     --audio-contrastive-max-length "${AUDIO_CONTRASTIVE_MAX_LENGTH}" \
     --gate-warmup-steps "${GATE_WARMUP_STEPS}" \
+    --ablation-loss-weight "${ABLATION_LOSS_WEIGHT}" \
+    --ablation-loss-margin "${ABLATION_LOSS_MARGIN}" \
+    --ablation-loss-every-steps "${ABLATION_LOSS_EVERY_STEPS}" \
     --num-workers "${NUM_WORKERS}" \
     --max-eval-batches "${MAX_EVAL_BATCHES}" \
     --suppress-eos-for-audio-early-steps "${SUPPRESS_EOS_FOR_AUDIO_EARLY_STEPS}" \
