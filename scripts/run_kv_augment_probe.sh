@@ -23,6 +23,9 @@ NUM_EPOCHS=${NUM_EPOCHS:-30}
 # Default was backwards (head=1e-3, safe=5e-4) which let head dominate
 SAFE_LR=${SAFE_LR:-1e-3}
 HEAD_LR=${HEAD_LR:-1e-4}
+# ΔQ (query adapter) gets its own HIGHER LR to accelerate audio attention learning
+# ΔQ is the bottleneck that makes attention non-uniform; it needs to move faster
+DELTA_Q_LR=${DELTA_Q_LR:-5e-3}
 # Freeze head for first N steps to force SAFE to learn discriminative features
 HEAD_WARMUP_STEPS=${HEAD_WARMUP_STEPS:-500}
 # audio_attn pools at positions with highest audio attention mass
@@ -39,8 +42,9 @@ echo "Data path: $DATA_PATH"
 echo "Output dir: $OUTPUT_DIR"
 echo "Batch size: $BATCH_SIZE"
 echo "Epochs: $NUM_EPOCHS"
-echo "SAFE LR: $SAFE_LR (should be > Head LR)"
+echo "SAFE LR: $SAFE_LR (projector + K/V adapters)"
 echo "Head LR: $HEAD_LR"
+echo "ΔQ LR: $DELTA_Q_LR (query adapter - should be highest for fast attention learning)"
 echo "Head warmup steps: $HEAD_WARMUP_STEPS (head frozen during warmup)"
 echo "Pooling: $POOLING"
 echo "========================================"
@@ -71,6 +75,7 @@ python train_audio_llm_probe.py \
     --num-epochs "$NUM_EPOCHS" \
     --safe-learning-rate "$SAFE_LR" \
     --head-learning-rate "$HEAD_LR" \
+    --delta-q-learning-rate "$DELTA_Q_LR" \
     --head-warmup-steps "$HEAD_WARMUP_STEPS" \
     --model-config kv_augment \
     --fusion-layer-indices "16,24,32" \

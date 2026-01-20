@@ -56,8 +56,9 @@ class AudioQueryAdapter(nn.Module):
         self.up_proj = nn.Linear(rank, num_heads * head_dim, bias=False)
         self.dropout = nn.Dropout(dropout)
 
-        # Learnable scale, start small for stable training
-        self.scale = nn.Parameter(torch.tensor(0.1))
+        # Learnable scale - start at 0.5 for faster ΔQ learning
+        # (up_proj is zero-init so base behavior preserved at step 0)
+        self.scale = nn.Parameter(torch.tensor(0.5))
 
         self._init_weights()
 

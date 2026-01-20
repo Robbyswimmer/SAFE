@@ -265,6 +265,20 @@ class SAFELLMProbe(nn.Module):
     def get_safe_params(self) -> List[nn.Parameter]:
         return list(self.safe_model.get_trainable_parameters())
 
+    def get_safe_params_without_delta_q(self) -> List[nn.Parameter]:
+        """Get SAFE params excluding query_adapter (ΔQ) params."""
+        delta_q_params = set(self.get_delta_q_params())
+        return [p for p in self.safe_model.get_trainable_parameters() if p not in delta_q_params]
+
+    def get_delta_q_params(self) -> List[nn.Parameter]:
+        """Get only query_adapter (ΔQ) params for separate LR group."""
+        params = []
+        if hasattr(self.safe_model, 'kv_adapters') and self.safe_model.kv_adapters is not None:
+            for adapter in self.safe_model.kv_adapters.values():
+                if hasattr(adapter, 'audio_query_adapter'):
+                    params.extend(list(adapter.audio_query_adapter.parameters()))
+        return params
+
     def get_head_params(self) -> List[nn.Parameter]:
         return list(self.head.parameters())
 
@@ -577,8 +591,24 @@ def build_optimizer(
     head_lr: float,
     safe_weight_decay: float,
     head_weight_decay: float,
+    delta_q_lr: Optional[float] = None,
 ) -> torch.optim.Optimizer:
-    safe_decay, safe_no_decay = _split_decay(model.get_safe_params())
+    """
+    Build optimizer with separate param groups.
+
+    If delta_q_lr is provided, ΔQ (query adapter) params get their own group
+    with higher LR to accelerate audio attention learning.
+    """
+    # Get ΔQ params separately if we have a separate LR
+    if delta_q_lr is not None and delta_q_lr > 0:
+        delta_q_params = model.get_delta_q_params()
+        safe_params = model.get_safe_params_without_delta_q()
+        delta_q_decay, delta_q_no_decay = _split_decay(delta_q_params)
+    else:
+        delta_q_decay, delta_q_no_decay = [], []
+        safe_params = model.get_safe_params()
+
+    safe_decay, safe_no_decay = _split_decay(safe_params)
     head_decay, head_no_decay = _split_decay(model.get_head_params())
 
     param_groups = [
@@ -587,6 +617,14 @@ def build_optimizer(
         {"name": "head_decay", "params": head_decay, "lr": head_lr, "weight_decay": head_weight_decay},
         {"name": "head_no_decay", "params": head_no_decay, "lr": head_lr, "weight_decay": 0.0},
     ]
+
+    # Add ΔQ groups with higher LR if specified
+    if delta_q_lr is not None and delta_q_lr > 0:
+        param_groups.extend([
+            {"name": "delta_q_decay", "params": delta_q_decay, "lr": delta_q_lr, "weight_decay": safe_weight_decay},
+            {"name": "delta_q_no_decay", "params": delta_q_no_decay, "lr": delta_q_lr, "weight_decay": 0.0},
+        ])
+
     param_groups = [g for g in param_groups if g["params"]]
 
     return torch.optim.AdamW(param_groups, betas=(0.9, 0.999))
@@ -690,24 +728,31 @@ def train_epoch(
         labels = labels.to(device)
         optimizer.zero_grad(set_to_none=True)
 
-        # Head warmup: freeze HEAD LR for early steps so SAFE learns first
+        # Head warmup: actually freeze HEAD during warmup so SAFE learns first
         # This is CRITICAL: without this, head dominates and SAFE never learns
+        # We set requires_grad=False to skip gradient computation entirely (saves compute)
         if getattr(args, "head_warmup_steps", 0) > 0:
             warmup_steps = int(args.head_warmup_steps)
             head_lr = float(args.head_learning_rate)
-            # Freeze head during warmup, unfreeze after
-            effective_head_lr = 0.0 if global_step < warmup_steps else head_lr
+            in_warmup = global_step < warmup_steps
+
+            # Set LR and requires_grad based on warmup state
             for group in optimizer.param_groups:
                 if str(group.get("name", "")).startswith("head_"):
-                    group["lr"] = effective_head_lr
-            # Log once when HEAD LR turns on (warmup complete)
+                    group["lr"] = 0.0 if in_warmup else head_lr
+
+            # Actually freeze/unfreeze head params (saves compute during warmup)
+            for p in model.get_head_params():
+                p.requires_grad = not in_warmup
+
+            # Log once when HEAD warmup completes
             if (
                 global_step == warmup_steps
                 and not hasattr(model, "_head_warmup_complete_logged")
             ):
                 model._head_warmup_complete_logged = True
                 lr_by_group = {g.get("name", f"g{idx}"): g.get("lr") for idx, g in enumerate(optimizer.param_groups)}
-                print(f"\n  [LR] HEAD warmup complete at step={global_step}. Head unfrozen. lrs={lr_by_group}\n", flush=True)
+                print(f"\n  [LR] HEAD warmup complete at step={global_step}. Head unfrozen (requires_grad=True). lrs={lr_by_group}\n", flush=True)
 
         with autocast(enabled=args.fp16):
             logits = model(audio=audio, device=device, pooling=args.pooling)
@@ -741,7 +786,33 @@ def train_epoch(
                 flush=True,
             )
 
-            # Log gradients/LRs on first log interval, and once right after HEAD warmup completes.
+            # Log ΔQ/Q and entropy at EVERY log interval (critical for tracking progress)
+            dq_q_str = ""
+            entropy_str = ""
+            avg_dq_q = None
+            avg_ent = None
+            if hasattr(model.safe_model, 'kv_hook_manager') and model.safe_model.kv_hook_manager is not None:
+                diag = model.safe_model.kv_hook_manager.get_diagnostics()
+                if diag:
+                    dq_ratios = []
+                    entropies = []
+                    for layer_idx, layer_diag in diag.items():
+                        if 'delta_q_rms' in layer_diag and 'q_rms' in layer_diag:
+                            q_rms = max(layer_diag['q_rms'], 1e-8)
+                            ratio = layer_diag['delta_q_rms'] / q_rms
+                            dq_ratios.append(ratio)
+                        if 'normalized_entropy' in layer_diag:
+                            entropies.append(layer_diag['normalized_entropy'])
+                    if dq_ratios:
+                        avg_dq_q = sum(dq_ratios) / len(dq_ratios)
+                        dq_q_str = f" ΔQ/Q={avg_dq_q*100:.4f}%"
+                    if entropies:
+                        avg_ent = sum(entropies) / len(entropies)
+                        entropy_str = f" entropy={avg_ent:.3f}"
+
+            print(f"  [KV] step={global_step}{dq_q_str}{entropy_str}", flush=True)
+
+            # Log gradients/LRs less frequently (first interval + after warmup)
             should_log_grads = not hasattr(model, "_grad_logged")
             if getattr(args, "head_warmup_steps", 0) and hasattr(model, "_head_warmup_complete_logged"):
                 should_log_grads = should_log_grads or not hasattr(model, "_grad_after_warmup_logged")
@@ -768,41 +839,21 @@ def train_epoch(
                     safe_g = safe_g ** 0.5 if safe_n else 0.0
 
                 lr_by_group = {g.get("name", f"g{idx}"): g.get("lr") for idx, g in enumerate(optimizer.param_groups)}
-
-                # Log ΔQ/Q ratio from KV augmentation (key diagnostic for training progress)
-                dq_q_str = ""
-                entropy_str = ""
-                if hasattr(model.safe_model, 'kv_hook_manager') and model.safe_model.kv_hook_manager is not None:
-                    diag = model.safe_model.kv_hook_manager.get_diagnostics()
-                    if diag:
-                        dq_ratios = []
-                        entropies = []
-                        for layer_idx, layer_diag in diag.items():
-                            if 'delta_q_rms' in layer_diag and 'q_rms' in layer_diag:
-                                q_rms = max(layer_diag['q_rms'], 1e-8)
-                                ratio = layer_diag['delta_q_rms'] / q_rms
-                                dq_ratios.append(ratio)
-                            if 'normalized_entropy' in layer_diag:
-                                entropies.append(layer_diag['normalized_entropy'])
-                        if dq_ratios:
-                            avg_dq_q = sum(dq_ratios) / len(dq_ratios)
-                            dq_q_str = f" ΔQ/Q={avg_dq_q*100:.4f}%"
-                        if entropies:
-                            avg_ent = sum(entropies) / len(entropies)
-                            entropy_str = f" entropy={avg_ent:.3f}"
-
-                print(f"  [Gradients] head={head_g:.4f} ({head_n}) safe={safe_g:.4f} ({safe_n}){dq_q_str}{entropy_str} lrs={lr_by_group}", flush=True)
+                print(f"  [Gradients] head={head_g:.4f} ({head_n}) safe={safe_g:.4f} ({safe_n}) lrs={lr_by_group}", flush=True)
 
             if wandb is not None and args.wandb:
-                wandb.log(
-                    {
-                        "train/loss": total_loss / max(total_seen, 1),
-                        "train/acc": total_correct / max(total_seen, 1),
-                        "train/gate": getattr(model.safe_model, "_default_gate", 1.0),
-                        "epoch": epoch,
-                    },
-                    step=global_step,
-                )
+                log_dict = {
+                    "train/loss": total_loss / max(total_seen, 1),
+                    "train/acc": total_correct / max(total_seen, 1),
+                    "train/gate": getattr(model.safe_model, "_default_gate", 1.0),
+                    "epoch": epoch,
+                }
+                # Log ΔQ/Q and entropy to wandb for tracking trends
+                if avg_dq_q is not None:
+                    log_dict["kv/delta_q_ratio"] = avg_dq_q * 100  # as percentage
+                if avg_ent is not None:
+                    log_dict["kv/entropy"] = avg_ent
+                wandb.log(log_dict, step=global_step)
 
     return {"loss": total_loss / max(total_seen, 1), "acc": total_correct / max(total_seen, 1)}, global_step
 
@@ -865,6 +916,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-epochs", type=int, default=20)
     p.add_argument("--safe-learning-rate", type=float, default=6e-5, help="LR for projector+fusion")
     p.add_argument("--head-learning-rate", type=float, default=1e-3, help="LR for linear probe head")
+    p.add_argument("--delta-q-learning-rate", type=float, default=None,
+                   help="LR for ΔQ (query adapter) params. If set, ΔQ gets its own optimizer group. "
+                        "Recommended: 3e-3 to 1e-2 (higher than safe-lr to accelerate audio attention learning)")
     p.add_argument("--safe-weight-decay", type=float, default=0.01)
     p.add_argument("--head-weight-decay", type=float, default=0.0)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
@@ -1074,6 +1128,7 @@ def main() -> None:
         head_lr=float(args.head_learning_rate),
         safe_weight_decay=float(args.safe_weight_decay),
         head_weight_decay=float(args.head_weight_decay),
+        delta_q_lr=float(args.delta_q_learning_rate) if args.delta_q_learning_rate else None,
     )
     scaler = GradScaler() if args.fp16 else None
 
