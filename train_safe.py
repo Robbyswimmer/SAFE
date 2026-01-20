@@ -1681,6 +1681,7 @@ def train_epoch(
     last_log_time = start_time
     step_start_time = start_time
     step_loss_sum = 0.0
+    step_min_attn_loss_sum = 0.0  # Track min audio attention loss for logging
     step_samples = 0
     step_micro_batches = 0
     last_proj_grad_norm: Optional[float] = None
@@ -1803,6 +1804,13 @@ def train_epoch(
             if audio_attention_mask is not None:
                 audio_attention_mask = audio_attention_mask.to(device)
 
+            # Enable attention weight capture for min_audio_attention loss (KV augment mode)
+            if (hasattr(base_model, 'min_audio_attention_loss') and
+                base_model.min_audio_attention_loss is not None and
+                hasattr(base_model, 'kv_hook_manager') and
+                base_model.kv_hook_manager is not None):
+                base_model.kv_hook_manager.set_return_attention_weights(True)
+
             # Forward pass with optional mixed precision
             if use_amp:
                 with autocast():
@@ -1884,6 +1892,30 @@ def train_epoch(
                 # Fail-safe: ignore contrastive errors to keep training running
                 pass
 
+        # Min audio attention regularization loss (KV augmentation mode)
+        # Forces the model to attend to audio tokens, preventing language-prior shortcuts
+        min_attn_loss_value = 0.0
+        if (hasattr(base_model, 'min_audio_attention_loss') and
+            base_model.min_audio_attention_loss is not None and
+            hasattr(base_model, 'kv_hook_manager') and
+            base_model.kv_hook_manager is not None):
+            try:
+                # Get attention weights from KV-augmented layers
+                attn_weights = base_model.kv_hook_manager.get_attention_weights()
+                if attn_weights:
+                    n_audio = base_model.num_audio_tokens
+                    min_attn_loss = base_model.min_audio_attention_loss(
+                        attention_weights=attn_weights,
+                        n_audio=n_audio,
+                        supervised_mask=None,  # Uses last-k tokens by default
+                    )
+                    if min_attn_loss.requires_grad:
+                        loss = loss + min_attn_loss
+                        min_attn_loss_value = min_attn_loss.detach().item()
+            except Exception:
+                # Fail-safe: ignore min attention errors to keep training running
+                pass
+
         # If loss has no gradient path (e.g., SAFE gate effectively off),
         # skip this batch to avoid autograd errors.
         if not isinstance(loss, torch.Tensor) or not loss.requires_grad:
@@ -1909,6 +1941,7 @@ def train_epoch(
             except Exception:
                 loss_unscaled_value = 0.0
         step_loss_sum += loss_unscaled_value
+        step_min_attn_loss_sum += min_attn_loss_value
         step_samples += len(questions)
         step_micro_batches += 1
 
@@ -1958,6 +1991,7 @@ def train_epoch(
                     "train/batch_idx": batch_idx,
                     "train/micro_batches": step_micro_batches,
                     "train/loss_step": (step_loss_sum / max(step_micro_batches, 1)),
+                    "train/min_attn_loss_step": (step_min_attn_loss_sum / max(step_micro_batches, 1)),
                     "train/samples_per_sec_step": (step_samples * world_size) / step_time,
                     "train/grad_norm": float(grad_norm) if grad_norm is not None else None,
                 }
@@ -2068,6 +2102,7 @@ def train_epoch(
             # Reset step accumulators
             step_start_time = time.time()
             step_loss_sum = 0.0
+            step_min_attn_loss_sum = 0.0
             step_samples = 0
             step_micro_batches = 0
 
@@ -2168,6 +2203,7 @@ def train_epoch(
                 "train/batch_idx": batch_idx,
                 "train/micro_batches": step_micro_batches,
                 "train/loss_step": (step_loss_sum / max(step_micro_batches, 1)),
+                "train/min_attn_loss_step": (step_min_attn_loss_sum / max(step_micro_batches, 1)),
                 "train/samples_per_sec_step": (step_samples * world_size) / step_time,
                 "train/grad_norm": float(grad_norm) if grad_norm is not None else None,
             }
@@ -2239,6 +2275,7 @@ def train_epoch(
         # Reset step accumulators
         step_start_time = time.time()
         step_loss_sum = 0.0
+        step_min_attn_loss_sum = 0.0
         step_samples = 0
         step_micro_batches = 0
 
@@ -2612,6 +2649,26 @@ def train(
                 start_min=0.5,
                 end_min=1.0,
             )
+
+        # Update min_audio_attention curriculum (decay from aggressive early to light late)
+        # This prevents language-prior shortcuts while allowing refinement in late training
+        if hasattr(base_model, 'min_audio_attention_loss') and base_model.min_audio_attention_loss is not None:
+            fusion_cfg = config.get("fusion_config", {})
+            # Linear decay: epoch 1 = start values, epoch num_epochs = decay targets
+            progress = (epoch - 1) / max(num_epochs - 1, 1)  # 0 at epoch 1, 1 at last epoch
+            start_attn = fusion_cfg.get("min_audio_attention", 0.05)
+            end_attn = fusion_cfg.get("min_audio_attention_decay_target", 0.005)
+            start_weight = fusion_cfg.get("min_audio_attention_weight", 0.5)
+            end_weight = fusion_cfg.get("min_audio_attention_weight_decay_target", 0.05)
+
+            current_attn = start_attn + (end_attn - start_attn) * progress
+            current_weight = start_weight + (end_weight - start_weight) * progress
+
+            base_model.min_audio_attention_loss.min_attention = current_attn
+            base_model.min_audio_attention_loss.loss_weight = current_weight
+
+            if is_main:
+                print(f"[MinAudioAttn] epoch={epoch}, min_attention={current_attn:.4f}, weight={current_weight:.3f}")
 
         # Set epoch on DistributedSampler for proper shuffling across epochs
         if train_sampler is not None:

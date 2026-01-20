@@ -320,12 +320,16 @@ KV_AUGMENT_CONFIG = {
         # This allows frozen queries to attend to audio K,V
         "query_adapter_rank": 16,
 
-        # Minimum attention regularization - DISABLED
-        # Previous: ε=0.1, weight=1.0 forced attention but didn't help classification
-        # ΔQ/Q can reach 3.7% and entropy 0.84 without it, proving mechanism works
-        # Keeping it on may steer learning into useless regime (attention != useful attention)
-        "min_audio_attention": 0.0,  # DISABLED - let model learn naturally
-        "min_audio_attention_weight": 0.0,  # DISABLED
+        # Minimum attention regularization - ENABLED for captioning
+        # Forces audio attention early to prevent language-prior shortcuts
+        # Decays over training to let model refine naturally
+        # Start: 5% attention mass, weight=0.5 (aggressive early)
+        # End: 0.5% attention mass, weight=0.05 (light pressure late)
+        "min_audio_attention": 0.05,
+        "min_audio_attention_weight": 0.5,
+        # Curriculum decay settings (used by MinAudioAttentionLoss.update_curriculum)
+        "min_audio_attention_decay_target": 0.005,
+        "min_audio_attention_weight_decay_target": 0.05,
 
         # Modality configuration (for compatibility with existing code)
         "modalities": {
