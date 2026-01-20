@@ -126,6 +126,9 @@ class KVAugmentationAdapter(nn.Module):
         self.use_bottleneck = use_bottleneck
         self.query_adapter_rank = query_adapter_rank
 
+        print(f"[KVAdapter] Created with num_heads={num_heads}, num_kv_heads={self.num_key_value_heads}, head_dim={head_dim}", flush=True)
+        print(f"[KVAdapter] total_kv_size={self.total_kv_size}, total_query_size={self.total_query_size}", flush=True)
+
         if use_bottleneck:
             # Bottleneck projection: hidden_size → bottleneck → kv_size (for GQA)
             self.audio_k_proj = nn.Sequential(
@@ -467,6 +470,16 @@ class KVAugmentedAttention(nn.Module):
         audio_keys, audio_values = self.kv_adapter(self._audio_tokens)
         # Use adapter's num_key_value_heads (may differ from LLM's for GQA)
         adapter_num_kv_heads = self.kv_adapter.num_key_value_heads
+
+        # DEBUG: Print shapes to diagnose mismatch
+        if not hasattr(self, '_debug_printed'):
+            print(f"[KV DEBUG] audio_keys.shape={audio_keys.shape}, bsz={bsz}, n_audio={n_audio}", flush=True)
+            print(f"[KV DEBUG] adapter_num_kv_heads={adapter_num_kv_heads}, head_dim={self.head_dim}", flush=True)
+            print(f"[KV DEBUG] expected size={bsz * n_audio * adapter_num_kv_heads * self.head_dim}", flush=True)
+            print(f"[KV DEBUG] actual size={audio_keys.numel()}", flush=True)
+            print(f"[KV DEBUG] adapter.total_kv_size={getattr(self.kv_adapter, 'total_kv_size', 'N/A')}", flush=True)
+            self._debug_printed = True
+
         audio_keys = audio_keys.view(bsz, n_audio, adapter_num_kv_heads, self.head_dim).transpose(1, 2)
         audio_values = audio_values.view(bsz, n_audio, adapter_num_kv_heads, self.head_dim).transpose(1, 2)
 
