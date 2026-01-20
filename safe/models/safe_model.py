@@ -1722,6 +1722,9 @@ class SAFEModel(nn.Module):
                     self.training
                     and self.min_audio_attention_loss is not None
                 )
+                # Always enable attention weight capture for external access (e.g., audio_attn pooling)
+                # The flag may have been set by external code before this forward call
+                # We only explicitly set it here if computing attention loss
                 if compute_attn_loss:
                     self.kv_hook_manager.set_return_attention_weights(True)
 
@@ -1742,11 +1745,14 @@ class SAFEModel(nn.Module):
 
                     return outputs, attn_reg_loss
                 finally:
-                    # Always clean up
-                    self.kv_hook_manager.clear_audio()
-                    self.kv_hook_manager.unwrap_attention_modules()
-                    if compute_attn_loss:
-                        self.kv_hook_manager.set_return_attention_weights(False)
+                    # Clean up but preserve attention weights for external access
+                    # (they get overwritten on next forward anyway)
+                    self.kv_hook_manager.clear_audio(preserve_attention_weights=True)
+                    # Don't unwrap - keep modules wrapped for efficiency
+                    # self.kv_hook_manager.unwrap_attention_modules()
+                    # Don't reset flag - let external code control this
+                    # if compute_attn_loss:
+                    #     self.kv_hook_manager.set_return_attention_weights(False)
 
             # Determine which fusion mode to use
             use_kv_augmentation = (

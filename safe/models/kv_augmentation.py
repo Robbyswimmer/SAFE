@@ -313,12 +313,17 @@ class KVAugmentedAttention(nn.Module):
         self._audio_mask = audio_mask
         self._gate = gate
 
-    def clear_audio(self):
-        """Clear audio tokens after forward pass."""
+    def clear_audio(self, preserve_attention_weights: bool = False):
+        """Clear audio tokens after forward pass.
+
+        Args:
+            preserve_attention_weights: If True, keep attention weights for later access
+        """
         self._audio_tokens = None
         self._audio_mask = None
         self._gate = 1.0
-        self._last_attention_weights = None
+        if not preserve_attention_weights:
+            self._last_attention_weights = None
 
     def set_return_attention_weights(self, return_weights: bool):
         """Enable/disable attention weight capture for regularization."""
@@ -765,10 +770,14 @@ class KVAugmentationHookManager:
         for wrapped in self.wrapped_attentions.values():
             wrapped.set_audio(audio_tokens, audio_mask, gate)
 
-    def clear_audio(self):
-        """Clear audio tokens after forward pass."""
+    def clear_audio(self, preserve_attention_weights: bool = False):
+        """Clear audio tokens after forward pass.
+
+        Args:
+            preserve_attention_weights: If True, keep attention weights for later access
+        """
         for wrapped in self.wrapped_attentions.values():
-            wrapped.clear_audio()
+            wrapped.clear_audio(preserve_attention_weights=preserve_attention_weights)
 
     def set_return_attention_weights(self, return_weights: bool):
         """Enable/disable attention weight capture."""
