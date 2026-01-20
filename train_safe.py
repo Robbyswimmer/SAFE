@@ -1154,6 +1154,9 @@ def evaluate(
         base_model.base_vl.llm.generation_config.eos_token_id = tokenizer.eos_token_id
         # Override max_length to respect max_new_tokens limit
         base_model.base_vl.llm.generation_config.max_length = None
+        # KV augmentation does not support KV caching; force cache off during evaluation generation.
+        if getattr(base_model, "enable_kv_augmentation", False):
+            base_model.base_vl.llm.generation_config.use_cache = False
 
     total_loss = 0.0
     num_batches = 0
@@ -1319,23 +1322,25 @@ def evaluate(
             **generation_kwargs,
         )
 
-        # Debug: Print raw token info for first batch to diagnose decoding issues
-        if batch_idx == 0:
-            print(f"[DecodeDebug] input_ids shape: {gen_input_ids.shape}, generated_ids shape: {generated_ids.shape}", flush=True)
-            print(f"[DecodeDebug] First 30 generated token IDs: {generated_ids[0, :30].tolist()}", flush=True)
-            # Decode first 30 tokens without skip_special_tokens to see raw output
-            raw_decode = tokenizer.decode(generated_ids[0, :30], skip_special_tokens=False)
-            print(f"[DecodeDebug] Raw decode (first 30 tokens): {repr(raw_decode)}", flush=True)
-
         # Decode predictions.
-        # HF generate may return either:
-        # - full sequence (prompt + new tokens), or
-        # - only new tokens (especially when inputs_embeds is used).
-        prompt_len = int(gen_input_ids.shape[1])
+        # HF generate may return either full sequence (prompt + new) or only new tokens.
+        prompt_len = int(gen_input_ids.shape[1])  # includes left padding
         if generated_ids.dim() == 2 and generated_ids.size(1) > prompt_len:
             decoded_ids = generated_ids[:, prompt_len:]
         else:
             decoded_ids = generated_ids
+
+        # Debug: Print token info for first batch to diagnose decoding issues
+        if batch_idx == 0:
+            print(
+                f"[DecodeDebug] prompt_len={prompt_len} input_ids shape: {gen_input_ids.shape}, "
+                f"generated_ids shape: {generated_ids.shape}, decoded_ids shape: {decoded_ids.shape}",
+                flush=True,
+            )
+            preview_ids = decoded_ids[0, :30].tolist() if decoded_ids.dim() == 2 else []
+            print(f"[DecodeDebug] First 30 decoded token IDs: {preview_ids}", flush=True)
+            raw_decode = tokenizer.decode(decoded_ids[0, :30], skip_special_tokens=False)
+            print(f"[DecodeDebug] Raw decode (first 30 decoded tokens): {repr(raw_decode)}", flush=True)
         batch_predictions = tokenizer.batch_decode(
             decoded_ids,
             skip_special_tokens=True,
