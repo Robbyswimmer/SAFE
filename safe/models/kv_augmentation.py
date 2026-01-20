@@ -26,12 +26,79 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class AudioQueryAdapter(nn.Module):
+    """
+    Low-rank adapter that produces ΔQ for audio attention.
+
+    LoRA-style: hidden → rank → num_heads * head_dim
+    Initialized near-zero so initial behavior ≈ no adapter.
+
+    This allows frozen LLM queries to attend to audio K,V by learning
+    a small delta: Q_audio = Q_frozen + ΔQ_adapter(H)
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 5120,
+        num_heads: int = 40,
+        head_dim: int = 128,
+        rank: int = 16,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.rank = rank
+
+        # LoRA-style down/up projection
+        self.down_proj = nn.Linear(hidden_size, rank, bias=False)
+        self.up_proj = nn.Linear(rank, num_heads * head_dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+        # Learnable scale, start small for stable training
+        self.scale = nn.Parameter(torch.tensor(0.1))
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize near-zero for stable start."""
+        nn.init.kaiming_uniform_(self.down_proj.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.up_proj.weight)  # Start with zero output
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Compute ΔQ for audio attention.
+
+        Args:
+            hidden_states: (batch, seq_len, hidden_size)
+
+        Returns:
+            delta_q: (batch, seq_len, num_heads * head_dim)
+        """
+        # Cast to match weights dtype if needed
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(self.down_proj.weight.dtype)
+
+        delta = self.down_proj(hidden_states)
+        delta = F.gelu(delta)
+        delta = self.dropout(delta)
+        delta = self.up_proj(delta)
+        delta = delta * self.scale
+
+        # Cast back to input dtype
+        return delta.to(input_dtype)
+
+
 class KVAugmentationAdapter(nn.Module):
     """
-    Trainable projections for audio tokens → K,V space.
+    Trainable projections for audio tokens → K,V space, plus query adapter.
 
     Projects audio tokens to keys and values compatible with LLM's self-attention.
     Uses bottleneck architecture to reduce parameters while maintaining expressivity.
+
+    Also includes an AudioQueryAdapter that produces ΔQ for audio attention,
+    allowing frozen queries to attend to audio K,V.
     """
 
     def __init__(
@@ -42,6 +109,7 @@ class KVAugmentationAdapter(nn.Module):
         bottleneck_dim: int = 64,
         dropout: float = 0.1,
         use_bottleneck: bool = True,
+        query_adapter_rank: int = 16,
     ):
         super().__init__()
 
@@ -50,6 +118,7 @@ class KVAugmentationAdapter(nn.Module):
         self.head_dim = head_dim
         self.total_head_size = num_heads * head_dim
         self.use_bottleneck = use_bottleneck
+        self.query_adapter_rank = query_adapter_rank
 
         if use_bottleneck:
             # Bottleneck projection: hidden_size → bottleneck → total_head_size
@@ -70,11 +139,25 @@ class KVAugmentationAdapter(nn.Module):
             self.audio_k_proj = nn.Linear(hidden_size, self.total_head_size)
             self.audio_v_proj = nn.Linear(hidden_size, self.total_head_size)
 
-        # Learnable scaling factor for audio contribution
-        # Start at 0.5 for meaningful gradients (same as residual_scale in CrossAttentionBlock)
+        # Learnable scaling factor for audio K,V (no gate here - gate applied at combine step only)
+        # Start at 0.5 for meaningful gradients
         self.audio_scale = nn.Parameter(torch.tensor(0.5))
         self.register_buffer("scale_min", torch.tensor(0.1))
         self.register_buffer("scale_max", torch.tensor(2.0))
+
+        # LayerNorm for audio tokens BEFORE K,V projection
+        # Critical: audio token norms can be huge (~500+), causing softmax saturation
+        self.audio_norm = nn.LayerNorm(hidden_size)
+
+        # Audio Query Adapter: produces ΔQ for audio attention
+        # This allows frozen queries to attend to audio K,V
+        self.audio_query_adapter = AudioQueryAdapter(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            rank=query_adapter_rank,
+            dropout=dropout,
+        )
 
         self._init_weights()
 
@@ -95,14 +178,15 @@ class KVAugmentationAdapter(nn.Module):
     def forward(
         self,
         audio_tokens: torch.Tensor,
-        gate: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Project audio tokens to K,V space.
 
+        NOTE: Gate is NOT applied here. Gate is applied once at the combine step
+        in _forward_with_audio_kv to avoid double-gating.
+
         Args:
             audio_tokens: (batch_size, num_audio_tokens, hidden_size)
-            gate: Scalar gate to modulate audio contribution
 
         Returns:
             audio_keys: (batch_size, num_audio_tokens, total_head_size)
@@ -110,15 +194,19 @@ class KVAugmentationAdapter(nn.Module):
         """
         # Cast audio tokens to match projection weights dtype
         input_dtype = audio_tokens.dtype
-        audio_tokens = audio_tokens.to(self.audio_k_proj[0].weight.dtype if self.use_bottleneck else self.audio_k_proj.weight.dtype)
+        weight_dtype = self.audio_k_proj[0].weight.dtype if self.use_bottleneck else self.audio_k_proj.weight.dtype
+        audio_tokens = audio_tokens.to(weight_dtype)
 
-        # Clamp scale to reasonable range
+        # Normalize audio tokens BEFORE projection
+        # Critical: audio token norms can be huge (~500+), causing softmax saturation
+        audio_tokens = self.audio_norm(audio_tokens)
+
+        # Clamp scale to reasonable range (no gate here - applied at combine step)
         scale = torch.clamp(self.audio_scale, self.scale_min, self.scale_max)
-        effective_scale = scale * gate
 
-        # Project to K,V space
-        audio_keys = self.audio_k_proj(audio_tokens) * effective_scale
-        audio_values = self.audio_v_proj(audio_tokens) * effective_scale
+        # Project to K,V space with learned scale
+        audio_keys = self.audio_k_proj(audio_tokens) * scale
+        audio_values = self.audio_v_proj(audio_tokens) * scale
 
         # Cast back to input dtype for compatibility with attention
         audio_keys = audio_keys.to(input_dtype)
@@ -180,6 +268,9 @@ class KVAugmentedAttention(nn.Module):
         self._last_attention_weights: Optional[torch.Tensor] = None
         self._return_attention_weights: bool = False
 
+        # Diagnostics storage (RMS ratios, attention mass, etc.)
+        self._last_diagnostics: Optional[Dict[str, float]] = None
+
         # Detect return format of original attention (for compatibility across HF versions)
         # Probe the original attention's forward signature to determine expected return format
         self._return_format = self._detect_return_format()
@@ -237,6 +328,10 @@ class KVAugmentedAttention(nn.Module):
         """Get attention weights from last forward pass."""
         return self._last_attention_weights
 
+    def get_diagnostics(self) -> Optional[Dict[str, float]]:
+        """Get diagnostics from last forward pass (RMS ratios, attention mass, etc.)."""
+        return self._last_diagnostics
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -291,20 +386,22 @@ class KVAugmentedAttention(nn.Module):
         **kwargs,
     ) -> Tuple[torch.Tensor, ...]:
         """
-        Compute attention with audio K,V augmentation.
+        Compute attention with SEPARATE text and audio branches.
 
-        Key differences from standard LlamaAttention:
-        1. Audio K,V are concatenated to text K,V
-        2. Audio K,V do NOT get RoPE (position-agnostic)
-        3. Attention mask is extended to include audio positions
+        Key architecture:
+        1. TEXT ATTENTION: Completely frozen, identical to original LlamaAttention
+        2. AUDIO ATTENTION: Uses adapted queries (Q + ΔQ) to attend to audio K,V
+        3. COMBINE: text_output + gate * audio_output
+
+        This preserves the base model's text processing while adding audio capability.
         """
         bsz, q_len, _ = hidden_states.size()
         n_audio = self._audio_tokens.size(1)
-
-        # Get original attention's projections
         orig_attn = self.original_attention
 
-        # Project hidden states to Q, K, V
+        # ============================================================
+        # 1. TEXT ATTENTION (frozen, identical to original LlamaAttention)
+        # ============================================================
         query_states = orig_attn.q_proj(hidden_states)
         key_states = orig_attn.k_proj(hidden_states)
         value_states = orig_attn.v_proj(hidden_states)
@@ -314,76 +411,100 @@ class KVAugmentedAttention(nn.Module):
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        # Apply rotary position embeddings to text Q, K (standard LLaMA)
+        # Apply RoPE to text Q, K (standard LLaMA)
         if hasattr(orig_attn, 'rotary_emb'):
             cos, sin = orig_attn.rotary_emb(value_states, position_ids)
             query_states, key_states = self._apply_rotary_pos_emb(
                 query_states, key_states, cos, sin
             )
 
-        # Project audio tokens to K, V (NO RoPE - position agnostic)
-        audio_keys, audio_values = self.kv_adapter(self._audio_tokens, self._gate)
+        # GQA expansion for text K, V
+        key_states_expanded = key_states
+        value_states_expanded = value_states
+        if self.num_key_value_groups > 1:
+            key_states_expanded = self._repeat_kv(key_states, self.num_key_value_groups)
+            value_states_expanded = self._repeat_kv(value_states, self.num_key_value_groups)
 
-        # Reshape audio K, V for attention
+        # Text attention (standard causal)
+        text_attn_weights = torch.matmul(query_states, key_states_expanded.transpose(2, 3)) / math.sqrt(self.head_dim)
+        if attention_mask is not None:
+            text_attn_weights = text_attn_weights + attention_mask
+        text_attn_weights = torch.clamp(text_attn_weights, min=-50.0, max=50.0)
+        text_attn_weights = F.softmax(text_attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        text_output = torch.matmul(text_attn_weights, value_states_expanded)
+
+        # ============================================================
+        # 2. AUDIO ATTENTION (trainable adapter)
+        # ============================================================
+        # Adapted query for audio: Q_audio = Q_frozen + ΔQ_adapter(H)
+        # CRITICAL: Apply RoPE to ΔQ to match query_states coordinate space
+        delta_q = self.kv_adapter.audio_query_adapter(hidden_states)
+        delta_q = delta_q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # Apply RoPE to delta_q (same rotation as query_states)
+        # This ensures ΔQ is in the same coordinate space as post-RoPE queries
+        if hasattr(orig_attn, 'rotary_emb'):
+            # Use the same cos, sin that was applied to query_states
+            delta_q = self._apply_rotary_pos_emb_single(delta_q, cos, sin)
+
+        query_for_audio = query_states + delta_q  # Q + ΔQ (both post-RoPE)
+
+        # Audio K, V (no RoPE - position agnostic, no gate - applied at combine step)
+        audio_keys, audio_values = self.kv_adapter(self._audio_tokens)
         audio_keys = audio_keys.view(bsz, n_audio, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         audio_values = audio_values.view(bsz, n_audio, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        # Concatenate audio K,V to text K,V
-        # Audio tokens become additional "memory" that all queries can attend to
-        key_states = torch.cat([key_states, audio_keys], dim=2)  # (bsz, heads, q_len + n_audio, head_dim)
-        value_states = torch.cat([value_states, audio_values], dim=2)
-
-        # Handle grouped-query attention (GQA) if needed
+        # GQA expansion for audio K, V
         if self.num_key_value_groups > 1:
-            key_states = self._repeat_kv(key_states, self.num_key_value_groups)
-            value_states = self._repeat_kv(value_states, self.num_key_value_groups)
+            audio_keys = self._repeat_kv(audio_keys, self.num_key_value_groups)
+            audio_values = self._repeat_kv(audio_values, self.num_key_value_groups)
 
-        # Extend attention mask to include audio positions
-        extended_mask = self._extend_attention_mask(
-            attention_mask, n_audio, bsz, q_len,
-            hidden_states.device, hidden_states.dtype
-        )
+        # Audio attention (non-causal, all positions can attend to all audio)
+        audio_attn_weights = torch.matmul(query_for_audio, audio_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+        audio_attn_weights = torch.clamp(audio_attn_weights, min=-50.0, max=50.0)
+        audio_attn_weights = F.softmax(audio_attn_weights, dim=-1, dtype=torch.float32).to(query_for_audio.dtype)
+        audio_output = torch.matmul(audio_attn_weights, audio_values)
 
-        # Compute attention
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if extended_mask is not None:
-            attn_weights = attn_weights + extended_mask
-
-        # Numerical stability
-        attn_weights = torch.clamp(attn_weights, min=-50.0, max=50.0)
-
-        # Softmax
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-
-        # Store attention weights for regularization if needed
+        # Store audio attention weights for regularization if needed
         if self._return_attention_weights:
-            self._last_attention_weights = attn_weights.detach()
+            self._last_attention_weights = audio_attn_weights.detach()
 
-        # Apply attention to values
-        attn_output = torch.matmul(attn_weights, value_states)
+        # ============================================================
+        # 3. COMBINE: text_output + gate * audio_output
+        # ============================================================
+        gated_audio_output = self._gate * audio_output
+        combined_output = text_output + gated_audio_output
 
-        # Reshape back
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, -1)
+        # ============================================================
+        # DIAGNOSTICS: Store RMS values for monitoring
+        # ============================================================
+        with torch.no_grad():
+            text_rms = torch.sqrt(torch.mean(text_output.float() ** 2)).item()
+            audio_rms = torch.sqrt(torch.mean(gated_audio_output.float() ** 2)).item()
+            rms_ratio = audio_rms / (text_rms + 1e-8)
+            audio_attn_mass = audio_attn_weights.sum(dim=-1).mean().item()
 
-        # Output projection
-        attn_output = orig_attn.o_proj(attn_output)
+            # Store for external access
+            self._last_diagnostics = {
+                "text_rms": text_rms,
+                "audio_rms": audio_rms,
+                "rms_ratio": rms_ratio,
+                "audio_attn_mass": audio_attn_mass,
+                "gate": self._gate,
+            }
 
-        # Prepare outputs - MUST match LlamaAttention return signature
-        # Different transformers versions have different return formats.
-        # We match whatever format we detected from the original attention.
+        # Reshape and output projection (frozen)
+        combined_output = combined_output.transpose(1, 2).contiguous().reshape(bsz, q_len, -1)
+        attn_output = orig_attn.o_proj(combined_output)
+
+        # Return format for LlamaDecoderLayer
         if output_attentions:
-            attn_weights_out = attn_weights
+            # Return audio attention weights (text weights available as text_attn_weights)
+            attn_weights_out = audio_attn_weights
         else:
             attn_weights_out = None
 
-        # Note: KV cache handling with audio augmentation is complex
-        # For now, we return None for past_key_value
-        past_key_value_out = None
-
         # LlamaDecoderLayer unpacks: hidden_states, _ = self.self_attn(...)
-        # So we must return exactly 2 values
         return (attn_output, attn_weights_out)
 
     def _apply_rotary_pos_emb(
@@ -398,6 +519,15 @@ class KVAugmentedAttention(nn.Module):
         q_embed = (q * cos) + (self._rotate_half(q) * sin)
         k_embed = (k * cos) + (self._rotate_half(k) * sin)
         return q_embed, k_embed
+
+    def _apply_rotary_pos_emb_single(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply rotary position embeddings to a single tensor (for ΔQ)."""
+        return (x * cos) + (self._rotate_half(x) * sin)
 
     @staticmethod
     def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -628,6 +758,58 @@ class KVAugmentationHookManager:
             if w is not None:
                 weights[idx] = w
         return weights
+
+    def get_diagnostics(self) -> Dict[int, Dict[str, float]]:
+        """
+        Get diagnostics from all layers.
+
+        Returns dict mapping layer_idx to diagnostics dict with:
+        - text_rms: RMS of text attention output
+        - audio_rms: RMS of gated audio output
+        - rms_ratio: audio_rms / text_rms (want 1%-10%)
+        - audio_attn_mass: mean attention mass to audio tokens
+        - gate: current gate value
+        """
+        diagnostics = {}
+        for idx, wrapped in self.wrapped_attentions.items():
+            d = wrapped.get_diagnostics()
+            if d is not None:
+                diagnostics[idx] = d
+        return diagnostics
+
+    def log_diagnostics(self, prefix: str = "") -> Dict[str, float]:
+        """
+        Get flattened diagnostics dict suitable for logging to wandb/tensorboard.
+
+        Returns dict with keys like:
+        - {prefix}layer_12/rms_ratio
+        - {prefix}layer_12/audio_attn_mass
+        - {prefix}mean/rms_ratio
+        - {prefix}mean/audio_attn_mass
+        """
+        all_diag = self.get_diagnostics()
+        if not all_diag:
+            return {}
+
+        log_dict = {}
+        rms_ratios = []
+        attn_masses = []
+
+        for layer_idx, diag in sorted(all_diag.items()):
+            layer_prefix = f"{prefix}layer_{layer_idx}/"
+            log_dict[f"{layer_prefix}text_rms"] = diag["text_rms"]
+            log_dict[f"{layer_prefix}audio_rms"] = diag["audio_rms"]
+            log_dict[f"{layer_prefix}rms_ratio"] = diag["rms_ratio"]
+            log_dict[f"{layer_prefix}audio_attn_mass"] = diag["audio_attn_mass"]
+            rms_ratios.append(diag["rms_ratio"])
+            attn_masses.append(diag["audio_attn_mass"])
+
+        # Averages across layers
+        if rms_ratios:
+            log_dict[f"{prefix}mean/rms_ratio"] = sum(rms_ratios) / len(rms_ratios)
+            log_dict[f"{prefix}mean/audio_attn_mass"] = sum(attn_masses) / len(attn_masses)
+
+        return log_dict
 
 
 class MinAudioAttentionLoss(nn.Module):

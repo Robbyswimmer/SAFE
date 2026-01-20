@@ -212,6 +212,7 @@ class SAFEModel(nn.Module):
                     bottleneck_dim=fusion_config.get("bottleneck_dim", 64),
                     dropout=fusion_config.get("dropout", 0.1),
                     use_bottleneck=fusion_config.get("use_bottleneck", True),
+                    query_adapter_rank=fusion_config.get("query_adapter_rank", 16),
                 )
                 for idx in kv_fusion_layers
             })

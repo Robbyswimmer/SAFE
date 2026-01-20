@@ -312,9 +312,16 @@ KV_AUGMENT_CONFIG = {
         "use_bottleneck": True,
         "dropout": 0.1,
 
-        # Minimum attention regularization (ensures audio is attended to)
-        "min_audio_attention": 0.01,  # Answer tokens must attend to audio ≥1%
-        "min_audio_attention_weight": 0.1,  # Weight of regularization loss
+        # Query adapter for audio attention (LoRA-style ΔQ)
+        # This allows frozen queries to attend to audio K,V
+        "query_adapter_rank": 16,
+
+        # Minimum attention regularization (WARM-START: strong early, decay later)
+        # Forces model to explore audio path so gradients can shape ΔQ
+        # Start with ε=0.1 (10%) and weight=1.0 for first ~1000 steps, then decay
+        "min_audio_attention": 0.1,  # Answer tokens must attend to audio ≥10% (strong)
+        "min_audio_attention_weight": 1.0,  # High weight for warm-start
+        # After warm-start: decay these values via training script or scheduler
 
         # Modality configuration (for compatibility with existing code)
         "modalities": {
