@@ -702,7 +702,7 @@ def main():
         print(f"\nLoading dataset from: {args.data_path}")
         dataset = AVEDataset(
             data_path=args.data_path,
-            split="val",
+            split="test",
             max_length=10.0,
         )
 
