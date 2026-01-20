@@ -108,6 +108,7 @@ class KVAugmentationAdapter(nn.Module):
         hidden_size: int = 5120,
         num_heads: int = 40,
         head_dim: int = 128,
+        num_key_value_heads: Optional[int] = None,  # For GQA models (e.g., LLaMA)
         bottleneck_dim: int = 64,
         dropout: float = 0.1,
         use_bottleneck: bool = True,
@@ -118,28 +119,31 @@ class KVAugmentationAdapter(nn.Module):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = head_dim
-        self.total_head_size = num_heads * head_dim
+        # For GQA: K,V have fewer heads than Q
+        self.num_key_value_heads = num_key_value_heads if num_key_value_heads is not None else num_heads
+        self.total_query_size = num_heads * head_dim  # For Q adapter
+        self.total_kv_size = self.num_key_value_heads * head_dim  # For K,V projections
         self.use_bottleneck = use_bottleneck
         self.query_adapter_rank = query_adapter_rank
 
         if use_bottleneck:
-            # Bottleneck projection: hidden_size → bottleneck → total_head_size
+            # Bottleneck projection: hidden_size → bottleneck → kv_size (for GQA)
             self.audio_k_proj = nn.Sequential(
                 nn.Linear(hidden_size, bottleneck_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(bottleneck_dim, self.total_head_size),
+                nn.Linear(bottleneck_dim, self.total_kv_size),
             )
             self.audio_v_proj = nn.Sequential(
                 nn.Linear(hidden_size, bottleneck_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(bottleneck_dim, self.total_head_size),
+                nn.Linear(bottleneck_dim, self.total_kv_size),
             )
         else:
             # Direct projection (more parameters)
-            self.audio_k_proj = nn.Linear(hidden_size, self.total_head_size)
-            self.audio_v_proj = nn.Linear(hidden_size, self.total_head_size)
+            self.audio_k_proj = nn.Linear(hidden_size, self.total_kv_size)
+            self.audio_v_proj = nn.Linear(hidden_size, self.total_kv_size)
 
         # Learnable scaling factor for audio K,V (no gate here - gate applied at combine step only)
         # Start at 0.5 for meaningful gradients
