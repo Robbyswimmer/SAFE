@@ -816,7 +816,8 @@ class SAFEModel(nn.Module):
         device: str = "cuda",
         include_audio_tokens: bool = True,
         num_audio_tokens: Optional[int] = None,
-        training_mode: bool = False
+        training_mode: bool = False,
+        llava_audio_prompt_style: str = "question",
     ) -> Dict[str, torch.Tensor]:
         """
         Prepare inputs for multimodal processing.
@@ -843,7 +844,12 @@ class SAFEModel(nn.Module):
         # For LLaVA/BLIP2, use proper multimodal input preparation
         if self.base_vl.model_type == "llava":
             # LLaVA-specific handling with chat templates and proper <image> token insertion
-            result = self._prepare_llava_inputs(text, images, device)
+            result = self._prepare_llava_inputs(
+                text=text,
+                images=images,
+                device=device,
+                llava_audio_prompt_style=llava_audio_prompt_style,
+            )
         elif self.base_vl.model_type == "blip2":
             # BLIP2-specific handling
             result = self._prepare_blip2_inputs(text, images, device)
@@ -996,7 +1002,8 @@ class SAFEModel(nn.Module):
         self,
         text: Union[str, List[str]],
         images: Optional[Union[torch.Tensor, List]] = None,
-        device: str = "cuda"
+        device: str = "cuda",
+        llava_audio_prompt_style: str = "question",
     ) -> Dict[str, torch.Tensor]:
         """
         Prepare inputs for LLaVA with proper chat templates and <image> tokens.
@@ -1046,8 +1053,16 @@ class SAFEModel(nn.Module):
                 prompt = f"USER: {image_token}\n{full_question} ASSISTANT:"
             else:
                 # Audio-only task: No short-answer instruction (audio captioning needs descriptions)
-                # Format: USER: Question: <question> ASSISTANT:
-                prompt = f"USER: Question: {question} ASSISTANT:"
+                # Format options:
+                # - question (default): USER: Question: <question> ASSISTANT:
+                # - plain: USER: <question> ASSISTANT:
+                # The "Question:" tag can trigger refusal/helpfulness priors in instruction-tuned LLaVA;
+                # for evaluation captioning we often prefer "plain".
+                style = str(llava_audio_prompt_style or "question").strip().lower()
+                if style == "plain":
+                    prompt = f"USER: {question} ASSISTANT:"
+                else:
+                    prompt = f"USER: Question: {question} ASSISTANT:"
 
             prompts.append(prompt)
         

@@ -1293,6 +1293,7 @@ def evaluate(
             answers=None,  # No answers for generation
             device=device,
             training_mode=False,
+            llava_audio_prompt_style=("plain" if (isinstance(eval_prompt, str) and eval_prompt.strip()) else "question"),
         )
 
         gen_input_ids = generation_inputs["input_ids"].to(device)
@@ -1342,6 +1343,8 @@ def evaluate(
                 f"generated_ids shape: {generated_ids.shape}, decoded_ids shape: {decoded_ids.shape}",
                 flush=True,
             )
+            if isinstance(eval_prompt, str) and eval_prompt.strip():
+                print(f"[EvalPrompt] Using eval_prompt={repr(eval_prompt.strip())} (llava_audio_prompt_style=plain)", flush=True)
             preview_ids = decoded_ids[0, :30].tolist() if decoded_ids.dim() == 2 else []
             print(f"[DecodeDebug] First 30 decoded token IDs: {preview_ids}", flush=True)
             raw_decode = tokenizer.decode(decoded_ids[0, :30], skip_special_tokens=False)
@@ -1768,6 +1771,8 @@ def train_epoch(
     token_correct = 0
     token_total = 0
 
+    _min_attn_last_logged = {"step": None}
+
     def _update_min_audio_attention_schedule(step: int) -> None:
         """
         Step-based curriculum for KV-augment min-audio-attention regularization.
@@ -1803,13 +1808,18 @@ def train_epoch(
         base_model.min_audio_attention_loss.min_attention = current_attn
         base_model.min_audio_attention_loss.loss_weight = current_weight
 
-        # Log phase boundaries for debugging.
-        if is_main and step in {0, warmup, warmup + ramp}:
+        # Log phase boundaries for debugging (only once per optimizer step).
+        if (
+            is_main
+            and step in {0, warmup, warmup + ramp}
+            and _min_attn_last_logged["step"] != step
+        ):
             print(
                 f"[MinAudioAttnSchedule] step={step} min_attention={current_attn:.4f} weight={current_weight:.4f} "
                 f"(warmup={warmup}, ramp={ramp})",
                 flush=True,
             )
+            _min_attn_last_logged["step"] = step
 
     def _ddp_noop_loss() -> torch.Tensor:
         """
@@ -3626,6 +3636,12 @@ def main():
         "export_eval_samples": bool(args.export_eval_samples),
         "export_eval_samples_audio": bool(args.export_eval_samples_audio),
     }
+
+    # Include model-side settings needed by training/eval helpers.
+    # (train_safe uses `config` in several places for evaluation prompt override and
+    # min-audio-attention scheduling, while the model constructor uses `model_config`.)
+    config["eval_prompt"] = model_config.get("eval_prompt")
+    config["fusion_config"] = model_config.get("fusion_config", {})
 
     # Optional W&B init (after model + data are available so config is complete)
     wandb_run = _maybe_init_wandb(
