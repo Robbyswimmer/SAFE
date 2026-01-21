@@ -1071,6 +1071,8 @@ def parse_args() -> argparse.Namespace:
                    help="Disable input LayerNorm in projector (helps preserve magnitude for classification)")
     p.add_argument("--disable-scale", action="store_true",
                    help="Disable learnable output_scale in projector (baseline MLP has no scale)")
+    p.add_argument("--identity-projector", action="store_true",
+                   help="Skip ALL projector transforms - pass raw CLAP embeddings (for debugging)")
     p.add_argument(
         "--fusion-injection-point",
         type=str,
@@ -1320,6 +1322,13 @@ def main() -> None:
         config.setdefault("projector_config", {})
         config["projector_config"]["disable_scale"] = True
         print(f"[Config] disable_scale=True (no learnable scale, like baseline MLP)", flush=True)
+    if args.identity_projector:
+        config.setdefault("projector_config", {})
+        config["projector_config"]["identity_mode"] = True
+        # Force output_dim=512 for identity mode (must match CLAP dim)
+        config["projector_config"]["output_dim"] = 512
+        config["num_audio_tokens"] = 1
+        print(f"[Config] identity_mode=True (raw CLAP pass-through, no transforms)", flush=True)
 
     # === CRITICAL: Print and verify config at startup ===
     print("\n" + "=" * 60, flush=True)

@@ -48,6 +48,7 @@ class AudioProjector(nn.Module):
         disable_output_norm: bool = False,  # If True, skip output LayerNorm (for classification probing)
         disable_input_norm: bool = False,  # If True, skip input LayerNorm (for classification probing)
         disable_scale: bool = False,  # If True, skip learnable output_scale (for classification probing)
+        identity_mode: bool = False,  # If True, skip ALL transformations - just reshape CLAP to tokens
     ):
         super().__init__()
 
@@ -59,6 +60,7 @@ class AudioProjector(nn.Module):
         self.disable_output_norm = disable_output_norm
         self.disable_input_norm = disable_input_norm
         self.disable_scale = disable_scale
+        self.identity_mode = identity_mode
 
         # Output dimension: use output_dim if specified, otherwise llm_hidden_size
         # For KV-augment mode, output_dim=audio_embed_dim keeps tokens small (~4M vs 42M params)
@@ -213,6 +215,20 @@ class AudioProjector(nn.Module):
         x = torch.nan_to_num(audio_features, nan=0.0, posinf=0.0, neginf=0.0)
         if x.dtype != torch.float32:
             x = x.float()
+
+        # IDENTITY MODE: Skip all transformations, just pass CLAP embeddings through
+        # This is for debugging - if identity works but MLP doesn't, the MLP is the problem
+        if self.identity_mode:
+            # Just reshape to (batch, 1, audio_embed_dim) - no transformation
+            audio_tokens = x.unsqueeze(1)  # (batch, 1, 512)
+            if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
+                with torch.no_grad():
+                    audio_norm = audio_tokens.norm(dim=-1).mean().item()
+                    print(f"[AudioProjector] IDENTITY MODE: audio_norm={audio_norm:.2f} (raw CLAP)", flush=True)
+                    self._projector_logs_emitted += 1
+            if out_dtype is not None:
+                audio_tokens = audio_tokens.to(out_dtype)
+            return audio_tokens
 
         # Normalize input for stability (can be disabled for classification probing)
         if not self.disable_input_norm:
