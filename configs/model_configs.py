@@ -217,8 +217,8 @@ PHASE1_CONFIG = {
 
     # Fusion configuration - MULTI-LAYER + HIGHER RANK
     "fusion_type": "multilayer",
-    # Phase 1: 3-layer injection at 30%/60%/90% depth for concentrated gradients
-    "fusion_layer_indices": [12, 24, 36],
+    # Phase 1: 6-layer injection distributed across early-to-mid layers
+    "fusion_layer_indices": [1, 5, 9, 13, 17, 21],
     # Keep LoRA rank modest; training full cross-attention matrices is too large.
     "lora_rank": 16,
     "fusion_config": {
@@ -232,9 +232,9 @@ PHASE1_CONFIG = {
             }
         },
         # Use bottleneck cross-attention instead of LoRA (simpler, no PEFT dependency)
-        # bottleneck_dim=64 for increased capacity
+        # bottleneck_dim=128 for increased capacity
         "use_bottleneck": True,
-        "bottleneck_dim": 64,
+        "bottleneck_dim": 128,
         # NEW: Add FFN after cross-attention (standard transformer pattern)
         # This provides crucial non-linear transformation capacity
         "use_ffn": True,
