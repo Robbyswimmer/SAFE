@@ -1065,6 +1065,8 @@ def parse_args() -> argparse.Namespace:
                    help="Override num_audio_tokens from config (e.g., 1 for minimal expansion)")
     p.add_argument("--projector-output-dim", type=int, default=None,
                    help="Override projector output_dim (e.g., 512 to keep in CLAP space instead of 5120)")
+    p.add_argument("--disable-output-norm", action="store_true",
+                   help="Disable output LayerNorm in projector (helps preserve magnitude for classification)")
     p.add_argument(
         "--fusion-injection-point",
         type=str,
@@ -1302,6 +1304,10 @@ def main() -> None:
         config.setdefault("projector_config", {})
         config["projector_config"]["output_dim"] = args.projector_output_dim
         print(f"[Config] projector_output_dim={args.projector_output_dim} (keeps in smaller space)", flush=True)
+    if args.disable_output_norm:
+        config.setdefault("projector_config", {})
+        config["projector_config"]["disable_output_norm"] = True
+        print(f"[Config] disable_output_norm=True (preserves magnitude for classification)", flush=True)
 
     # === CRITICAL: Print and verify config at startup ===
     print("\n" + "=" * 60, flush=True)

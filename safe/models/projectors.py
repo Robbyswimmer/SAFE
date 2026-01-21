@@ -45,6 +45,7 @@ class AudioProjector(nn.Module):
         use_swiglu: bool = False,
         use_positional_embedding: bool = False,
         output_dim: Optional[int] = None,  # If set, output in this dim instead of llm_hidden_size
+        disable_output_norm: bool = False,  # If True, skip output LayerNorm (for classification probing)
     ):
         super().__init__()
 
@@ -53,6 +54,7 @@ class AudioProjector(nn.Module):
         self.num_audio_tokens = num_audio_tokens
         self.use_swiglu = use_swiglu
         self.use_positional_embedding = use_positional_embedding
+        self.disable_output_norm = disable_output_norm
 
         # Output dimension: use output_dim if specified, otherwise llm_hidden_size
         # For KV-augment mode, output_dim=audio_embed_dim keeps tokens small (~4M vs 42M params)
@@ -228,7 +230,10 @@ class AudioProjector(nn.Module):
 
         # Apply output normalization per token (centers around 0, variance 1)
         # This naturally aligns with LLM embedding distribution without saturation
-        audio_tokens = self.output_norm(audio_tokens)
+        # NOTE: LayerNorm can destroy magnitude information needed for classification!
+        # Use disable_output_norm=True when training classification probes.
+        if not self.disable_output_norm:
+            audio_tokens = self.output_norm(audio_tokens)
 
         # Apply learnable scale to match LLM embedding magnitude.
         # Use warmup minimum that increases over training to prevent early collapse
