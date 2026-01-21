@@ -204,8 +204,8 @@ PHASE1_CONFIG = {
 
     # Projector configuration
     "projector_type": "standard",
-    # Increased tokens for more temporal detail
-    "num_audio_tokens": 16,
+    # 8 tokens for efficient audio representation
+    "num_audio_tokens": 8,
     "projector_config": {
         "dropout": 0.1,
         "bottleneck_dim": 1024,  # Keep for Phase 1, remove in Phase 2
