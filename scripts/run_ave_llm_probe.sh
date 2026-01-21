@@ -40,6 +40,7 @@ HEAD_TYPE=${HEAD_TYPE:-"linear"}
 PROJECTOR_OUTPUT_DIM=${PROJECTOR_OUTPUT_DIM:-""}
 DISABLE_OUTPUT_NORM=${DISABLE_OUTPUT_NORM:-0}
 DISABLE_INPUT_NORM=${DISABLE_INPUT_NORM:-0}
+DISABLE_SCALE=${DISABLE_SCALE:-0}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_DIR"
@@ -135,6 +136,11 @@ if [ "$DISABLE_INPUT_NORM" = "1" ]; then
   DISABLE_INPUT_NORM_ARG="--disable-input-norm"
 fi
 
+DISABLE_SCALE_ARG=""
+if [ "$DISABLE_SCALE" = "1" ]; then
+  DISABLE_SCALE_ARG="--disable-scale"
+fi
+
 FORCE_GATE_ARG=""
 if [ -n "$FORCE_GATE" ]; then
   FORCE_GATE_ARG="--force-gate $FORCE_GATE"
@@ -166,6 +172,7 @@ python train_audio_llm_probe.py \
   $PROJECTOR_OUTPUT_DIM_ARG \
   $DISABLE_OUTPUT_NORM_ARG \
   $DISABLE_INPUT_NORM_ARG \
+  $DISABLE_SCALE_ARG \
   $FUSION_INJECTION_ARG \
   $FUSION_MODE_ARG \
   --pooling "$POOLING" \

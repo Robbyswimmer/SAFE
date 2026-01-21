@@ -1069,6 +1069,8 @@ def parse_args() -> argparse.Namespace:
                    help="Disable output LayerNorm in projector (helps preserve magnitude for classification)")
     p.add_argument("--disable-input-norm", action="store_true",
                    help="Disable input LayerNorm in projector (helps preserve magnitude for classification)")
+    p.add_argument("--disable-scale", action="store_true",
+                   help="Disable learnable output_scale in projector (baseline MLP has no scale)")
     p.add_argument(
         "--fusion-injection-point",
         type=str,
@@ -1314,6 +1316,10 @@ def main() -> None:
         config.setdefault("projector_config", {})
         config["projector_config"]["disable_input_norm"] = True
         print(f"[Config] disable_input_norm=True (preserves magnitude for classification)", flush=True)
+    if args.disable_scale:
+        config.setdefault("projector_config", {})
+        config["projector_config"]["disable_scale"] = True
+        print(f"[Config] disable_scale=True (no learnable scale, like baseline MLP)", flush=True)
 
     # === CRITICAL: Print and verify config at startup ===
     print("\n" + "=" * 60, flush=True)

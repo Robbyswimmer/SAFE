@@ -47,6 +47,7 @@ class AudioProjector(nn.Module):
         output_dim: Optional[int] = None,  # If set, output in this dim instead of llm_hidden_size
         disable_output_norm: bool = False,  # If True, skip output LayerNorm (for classification probing)
         disable_input_norm: bool = False,  # If True, skip input LayerNorm (for classification probing)
+        disable_scale: bool = False,  # If True, skip learnable output_scale (for classification probing)
     ):
         super().__init__()
 
@@ -57,6 +58,7 @@ class AudioProjector(nn.Module):
         self.use_positional_embedding = use_positional_embedding
         self.disable_output_norm = disable_output_norm
         self.disable_input_norm = disable_input_norm
+        self.disable_scale = disable_scale
 
         # Output dimension: use output_dim if specified, otherwise llm_hidden_size
         # For KV-augment mode, output_dim=audio_embed_dim keeps tokens small (~4M vs 42M params)
@@ -241,15 +243,18 @@ class AudioProjector(nn.Module):
         # Apply learnable scale to match LLM embedding magnitude.
         # Use warmup minimum that increases over training to prevent early collapse
         # while still forcing strong audio signal later.
-        min_scale = getattr(self, '_scale_min', 0.5)  # Default 0.5, can be set externally
-        clamped_scale = torch.clamp(self.output_scale, min_scale, 10.0)
-        audio_tokens = audio_tokens * clamped_scale
+        # Can be disabled for classification probing to match baseline MLP behavior.
+        if not self.disable_scale:
+            min_scale = getattr(self, '_scale_min', 0.5)  # Default 0.5, can be set externally
+            clamped_scale = torch.clamp(self.output_scale, min_scale, 10.0)
+            audio_tokens = audio_tokens * clamped_scale
 
         # Log embedding norms for debugging
         if self.debug_logging and self._projector_logs_emitted < self._projector_log_limit:
             with torch.no_grad():
                 audio_norm = audio_tokens.norm(dim=-1).mean().item()
-                print(f"[AudioProjector] audio_norm={audio_norm:.2f}, scale={self.output_scale.item():.3f}", flush=True)
+                scale_val = self.output_scale.item() if not self.disable_scale else 0.0
+                print(f"[AudioProjector] audio_norm={audio_norm:.2f}, scale={scale_val:.3f} (disabled={self.disable_scale})", flush=True)
                 self._projector_logs_emitted += 1
 
         # Cast to requested/output dtype (the LM/base dtype)
