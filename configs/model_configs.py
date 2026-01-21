@@ -232,9 +232,9 @@ PHASE1_CONFIG = {
             }
         },
         # Use bottleneck cross-attention instead of LoRA (simpler, no PEFT dependency)
-        # bottleneck_dim=128 for increased capacity
+        # bottleneck_dim=256 for increased capacity
         "use_bottleneck": True,
-        "bottleneck_dim": 128,
+        "bottleneck_dim": 256,
         # NEW: Add FFN after cross-attention (standard transformer pattern)
         # This provides crucial non-linear transformation capacity
         "use_ffn": True,
