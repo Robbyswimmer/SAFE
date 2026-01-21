@@ -1136,7 +1136,136 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also evaluate with audio disabled (A/B diagnostic).",
     )
+    p.add_argument(
+        "--run-projector-ablation",
+        action="store_true",
+        help="Run projector ablation diagnostics on first batch before training. "
+             "Computes pairwise distance preservation, effective rank, token diversity, "
+             "sensitivity, and dimension variance metrics. Results logged to console and wandb.",
+    )
+    p.add_argument(
+        "--ablation-batch-size",
+        type=int,
+        default=128,
+        help="Batch size for projector ablation diagnostics (default: 128)",
+    )
     return p.parse_args()
+
+
+def run_projector_ablation_diagnostics(
+    model: "SAFELLMProbe",
+    loader: "DataLoader",
+    device: torch.device,
+    args: argparse.Namespace,
+) -> Dict[str, float]:
+    """
+    Run projector ablation diagnostics on first N samples.
+
+    Returns dict suitable for wandb logging.
+    """
+    from safe.models.projector_diagnostics import (
+        format_diagnostics_report,
+        diagnostics_to_wandb_dict,
+        get_diagnostic_summary,
+    )
+
+    print("\n" + "=" * 70, flush=True)
+    print("RUNNING PROJECTOR ABLATION DIAGNOSTICS", flush=True)
+    print("=" * 70, flush=True)
+
+    # Collect audio samples up to ablation_batch_size
+    audio_paths = []
+    target_size = getattr(args, 'ablation_batch_size', 128)
+
+    for batch in loader:
+        audio = batch.get("audio")
+        if audio is None:
+            continue
+        for path in audio:
+            if path is not None and isinstance(path, str):
+                audio_paths.append(path)
+                if len(audio_paths) >= target_size:
+                    break
+        if len(audio_paths) >= target_size:
+            break
+
+    if len(audio_paths) < 32:
+        print(f"[ABLATION] WARNING: Only found {len(audio_paths)} audio samples", flush=True)
+        print("[ABLATION] Need at least 32 for reliable diagnostics", flush=True)
+        return {}
+
+    print(f"[ABLATION] Collected {len(audio_paths)} audio samples", flush=True)
+
+    # Get encoder outputs and projector outputs
+    try:
+        safe_model = model.safe_model
+
+        # Encode audio to get CLAP embeddings
+        with torch.no_grad():
+            encoder_outputs_list = []
+            projector_outputs_list = []
+
+            # Process in batches to avoid OOM
+            batch_size = 16
+            for i in range(0, len(audio_paths), batch_size):
+                batch_paths = audio_paths[i:i + batch_size]
+
+                # Encode audio
+                audio_features = safe_model.audio_encoder(batch_paths)
+                if audio_features is None:
+                    continue
+                audio_features = audio_features.to(device)
+                encoder_outputs_list.append(audio_features)
+
+                # Project
+                projected = safe_model.audio_projector(audio_features.float())
+                projector_outputs_list.append(projected)
+
+            if not encoder_outputs_list:
+                print("[ABLATION] ERROR: No audio features extracted", flush=True)
+                return {}
+
+            encoder_outputs = torch.cat(encoder_outputs_list, dim=0)
+            projector_outputs = torch.cat(projector_outputs_list, dim=0)
+
+        print(f"[ABLATION] Encoder output shape: {tuple(encoder_outputs.shape)}", flush=True)
+        print(f"[ABLATION] Projector output shape: {tuple(projector_outputs.shape)}", flush=True)
+
+        # Run diagnostics via projector's get_diagnostics method
+        diagnostics = safe_model.audio_projector.get_diagnostics(
+            encoder_outputs=encoder_outputs,
+            projector_outputs=projector_outputs,
+        )
+
+        # Print report
+        report = format_diagnostics_report(diagnostics)
+        print(report, flush=True)
+
+        # Get summary
+        summary = get_diagnostic_summary(diagnostics)
+
+        # Print interpretation
+        print("\n" + "-" * 40, flush=True)
+        print("INTERPRETATION:", flush=True)
+
+        if summary["healthy"]:
+            print("\nNo critical issues detected.", flush=True)
+        else:
+            print(f"\nDIAGNOSED ISSUES ({summary['critical_count']} critical, {summary['warning_count']} warnings):", flush=True)
+            for issue in summary["issues"]:
+                print(f"  {issue}", flush=True)
+
+        print("-" * 40 + "\n", flush=True)
+
+        # Convert to wandb dict
+        wandb_dict = diagnostics_to_wandb_dict(diagnostics)
+        return wandb_dict
+
+    except Exception as e:
+        print(f"[ABLATION] ERROR: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return {}
 
 
 def main() -> None:
@@ -1302,6 +1431,20 @@ def main() -> None:
             print(f"      ... and {len(trainable_names) - 10} more", flush=True)
 
         print("=" * 70 + "\n", flush=True)
+
+    # === RUN PROJECTOR ABLATION DIAGNOSTICS ===
+    if args.run_projector_ablation:
+        ablation_metrics = run_projector_ablation_diagnostics(
+            model=model,
+            loader=train_loader,
+            device=device,
+            args=args,
+        )
+
+        # Log to wandb if available
+        if args.wandb and wandb is not None and ablation_metrics:
+            wandb.log(ablation_metrics, step=0)
+            print("[ABLATION] Metrics logged to wandb", flush=True)
 
     optimizer = build_optimizer(
         model=model,

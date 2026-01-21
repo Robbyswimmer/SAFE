@@ -143,12 +143,46 @@ class AudioProjector(nn.Module):
             nn.init.xavier_uniform_(last.weight)
             if last.bias is not None:
                 nn.init.zeros_(last.bias)
-    
+
     def set_debug_logging(self, enabled: bool, log_limit: int = 5) -> None:
         """Enable or disable projector debug logging."""
         self.debug_logging = bool(enabled)
         self._projector_log_limit = int(max(0, log_limit))
         self._projector_logs_emitted = 0
+
+    def get_diagnostics(
+        self,
+        encoder_outputs: torch.Tensor,
+        projector_outputs: Optional[torch.Tensor] = None,
+    ) -> "ProjectorDiagnostics":
+        """
+        Compute comprehensive diagnostics for projector behavior.
+
+        Args:
+            encoder_outputs: Raw CLAP embeddings (B, encoder_dim)
+            projector_outputs: Optional pre-computed projector outputs.
+                              If None, will compute via forward pass.
+
+        Returns:
+            ProjectorDiagnostics dataclass with all metrics
+        """
+        from .projector_diagnostics import ProjectorDiagnosticsComputer
+
+        if projector_outputs is None:
+            with torch.no_grad():
+                projector_outputs = self.forward(encoder_outputs)
+
+        computer = ProjectorDiagnosticsComputer(
+            variance_threshold=1e-6,
+            sensitivity_perturbation_scale=0.01,
+            top_k_singular_values=10,
+        )
+
+        return computer.compute_all(
+            encoder_outputs=encoder_outputs,
+            projector_outputs=projector_outputs,
+            projector=self,
+        )
 
     def forward(
         self,

@@ -34,6 +34,8 @@ FORCE_GATE=${FORCE_GATE:-""}
 HEAD_WARMUP_STEPS=${HEAD_WARMUP_STEPS:-0}
 BYPASS_LLM=${BYPASS_LLM:-0}
 NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-""}
+RUN_PROJECTOR_ABLATION=${RUN_PROJECTOR_ABLATION:-0}
+ABLATION_BATCH_SIZE=${ABLATION_BATCH_SIZE:-128}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_DIR"
@@ -104,6 +106,11 @@ if [ -n "$NUM_AUDIO_TOKENS" ]; then
   NUM_AUDIO_TOKENS_ARG="--num-audio-tokens $NUM_AUDIO_TOKENS"
 fi
 
+PROJECTOR_ABLATION_ARG=""
+if [ "$RUN_PROJECTOR_ABLATION" = "1" ]; then
+  PROJECTOR_ABLATION_ARG="--run-projector-ablation --ablation-batch-size $ABLATION_BATCH_SIZE"
+fi
+
 FORCE_GATE_ARG=""
 if [ -n "$FORCE_GATE" ]; then
   FORCE_GATE_ARG="--force-gate $FORCE_GATE"
@@ -140,6 +147,7 @@ python train_audio_llm_probe.py \
   $CKPT_ARGS \
   $HEAD_ONLY_ARG \
   $BYPASS_LLM_ARG \
+  $PROJECTOR_ABLATION_ARG \
   $FORCE_GATE_ARG \
   --head-warmup-steps "$HEAD_WARMUP_STEPS" \
   $WANDB_ARGS
