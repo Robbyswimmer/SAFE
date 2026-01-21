@@ -914,12 +914,41 @@ def train_epoch(
     num_batches = 0
     start_time = time.time()
 
+    # Track first batch for detailed debugging
+    _logged_first_batch = False
+
     for batch_idx, batch in enumerate(dataloader):
         audio = batch["audio"]
         target_texts = batch["target_texts"]
 
         if audio is None or len(audio) == 0:
             continue
+
+        # === CLAP/fp16 VERIFICATION (first batch only) ===
+        if not _logged_first_batch and dist_info["is_main"]:
+            _logged_first_batch = True
+            print(f"\n{'='*60}", flush=True)
+            print("TRAINING HEALTH CHECK (first batch)", flush=True)
+            print(f"{'='*60}", flush=True)
+            print(f"  fp16 enabled: {args.fp16}", flush=True)
+            print(f"  scaler active: {scaler is not None}", flush=True)
+            print(f"  audio batch size: {len(audio)}", flush=True)
+
+            # Verify CLAP embeddings are valid
+            try:
+                with torch.no_grad():
+                    test_embeddings = base_model.safe_model.audio_encoder(audio[:2])
+                    emb_norm = test_embeddings.norm(dim=-1).mean().item()
+                    has_nan = torch.isnan(test_embeddings).any().item()
+                    has_inf = torch.isinf(test_embeddings).any().item()
+                    print(f"  CLAP embeddings: norm={emb_norm:.4f}, has_nan={has_nan}, has_inf={has_inf}", flush=True)
+                    if has_nan or emb_norm < 0.1:
+                        print("  ⚠️  WARNING: CLAP embeddings may be invalid!", flush=True)
+                    else:
+                        print("  ✓ CLAP embeddings look healthy", flush=True)
+            except Exception as e:
+                print(f"  ⚠️  CLAP check failed: {e}", flush=True)
+            print(f"{'='*60}\n", flush=True)
 
         # Gate warmup (enabled by default): ramp fusion gate start→1 over initial optimizer steps.
         if getattr(args, "gate_warmup_steps", 0) and hasattr(base_model, "safe_model"):
@@ -1011,9 +1040,19 @@ def train_epoch(
                             fusion_count += 1
                 fusion_grad_norm = fusion_grad_norm ** 0.5 if fusion_count > 0 else 0.0
 
+                # Flag potential issues
+                warnings = []
+                if proj_count > 0 and proj_grad_norm < 1e-6:
+                    warnings.append("projector grads ~0")
+                if fusion_count > 0 and fusion_grad_norm < 1e-6:
+                    warnings.append("fusion grads ~0")
+                if proj_count == 0:
+                    warnings.append("no projector grads")
+
+                warn_str = f" ⚠️  {', '.join(warnings)}" if warnings else " ✓"
                 print(
-                    f"  [Gradients] Projector: {proj_grad_norm:.4f} ({proj_count} tensors) | "
-                    f"Fusion/KV: {fusion_grad_norm:.4f} ({fusion_count} tensors)",
+                    f"  [Gradients] Projector: {proj_grad_norm:.4f} ({proj_count}) | "
+                    f"Fusion/KV: {fusion_grad_norm:.4f} ({fusion_count}){warn_str}",
                     flush=True,
                 )
 
@@ -1321,6 +1360,41 @@ def main():
     )
 
     model = model.to(device)
+
+    # === ARCHITECTURE VERIFICATION ===
+    if dist_info["is_main"]:
+        print(f"\n{'='*60}", flush=True)
+        print("FUSION ARCHITECTURE VERIFICATION", flush=True)
+        print(f"{'='*60}", flush=True)
+        safe_model = model.safe_model
+
+        # Check fusion setup
+        has_midlayer = getattr(safe_model, 'enable_midlayer_fusion', False)
+        has_kv = getattr(safe_model, 'enable_kv_augmentation', False)
+        injection_point = getattr(safe_model, 'fusion_injection_point', 'unknown')
+
+        print(f"  enable_midlayer_fusion: {has_midlayer}", flush=True)
+        print(f"  fusion_injection_point: {injection_point}", flush=True)
+        print(f"  enable_kv_augmentation: {has_kv}", flush=True)
+
+        # Count trainable params
+        proj_params = sum(p.numel() for p in safe_model.audio_projector.parameters() if p.requires_grad)
+        fusion_params = 0
+        if safe_model.fusion_adapter is not None:
+            fusion_params = sum(p.numel() for p in safe_model.fusion_adapter.parameters() if p.requires_grad)
+        elif safe_model.kv_adapters is not None:
+            fusion_params = sum(p.numel() for p in safe_model.kv_adapters.parameters() if p.requires_grad)
+
+        print(f"  projector trainable params: {proj_params:,}", flush=True)
+        print(f"  fusion/KV trainable params: {fusion_params:,}", flush=True)
+
+        # Fusion layers
+        if safe_model.fusion_adapter is not None:
+            fusion_layers_active = list(safe_model.fusion_adapter.adapters.keys()) if hasattr(safe_model.fusion_adapter, 'adapters') else []
+            print(f"  fusion layers: {fusion_layers_active}", flush=True)
+
+        print(f"  fp16 training: {args.fp16}", flush=True)
+        print(f"{'='*60}\n", flush=True)
 
     # Load checkpoint if provided
     if args.load_checkpoint:

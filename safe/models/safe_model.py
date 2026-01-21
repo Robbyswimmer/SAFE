@@ -133,11 +133,10 @@ class SAFEModel(nn.Module):
         else:
             raise ValueError(f"Unsupported projector type: {projector_type}")
 
-        # Enable debug logging for projector norms
-        self.audio_projector.debug_logging = True
-        # Enable debug logging for audio encoder
+        # Debug logging for projector/encoder (disabled by default, enable for debugging)
+        self.audio_projector.debug_logging = False
         if hasattr(self.audio_encoder, 'debug_logging'):
-            self.audio_encoder.debug_logging = True
+            self.audio_encoder.debug_logging = False
 
         actual_output_dim = getattr(self.audio_projector, 'output_dim', llm_hidden_size)
         print(f"[SAFE] ✓ Audio projector initialized (output_dim={actual_output_dim})", flush=True)
@@ -629,20 +628,8 @@ class SAFEModel(nn.Module):
         else:
             audio_features = audio_features.float()  # Start with float32 for numerical stability
 
-        # DEBUG: Check for NaNs/Infs before cleaning
-        if self._encode_audio_count <= 3:
-            has_nan = torch.isnan(audio_features).any().item()
-            has_inf = torch.isinf(audio_features).any().item()
-            pre_norm = audio_features.norm(dim=-1).mean().item() if not has_nan else 0.0
-            print(f"[AudioEncode] PRE-SANITIZE: norm={pre_norm:.4f}, has_nan={has_nan}, has_inf={has_inf}, shape={list(audio_features.shape)}", flush=True)
-
         # Clean NaNs/Infs early in pipeline
         audio_features = torch.nan_to_num(audio_features, nan=0.0, posinf=1.0, neginf=-1.0)
-
-        # DEBUG: Check after cleaning
-        if self._encode_audio_count <= 3:
-            post_norm = audio_features.norm(dim=-1).mean().item()
-            print(f"[AudioEncode] POST-SANITIZE: norm={post_norm:.4f}", flush=True)
         
 
         # Stage 2: Projector processing with consistent dtype
