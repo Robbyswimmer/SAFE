@@ -2428,6 +2428,18 @@ def train_epoch(
 
             optimizer_step += 1
 
+            # Residual scale warmup: ramp from start to end over warmup_steps (per optimizer step)
+            res_warmup_steps = int(config.get("residual_scale_warmup_steps", 0) or 0)
+            if res_warmup_steps > 0 and hasattr(base_model, "set_residual_scale_step_warmup"):
+                res_start = float(config.get("residual_scale_warmup_start", 0.2))
+                res_end = float(config.get("residual_scale_warmup_end", 1.0))
+                base_model.set_residual_scale_step_warmup(
+                    optimizer_step,
+                    warmup_steps=res_warmup_steps,
+                    start_scale=res_start,
+                    end_scale=res_end,
+                )
+
             # Comprehensive diagnostics (every 10 steps during warmup, every 50 steps after)
             diag_frequency = 10 if optimizer_step <= 500 else 50
             if optimizer_step % diag_frequency == 0:
@@ -3252,18 +3264,7 @@ def train(
         if gate_warmup_steps > 0 and hasattr(base_model, "set_gate_warmup"):
             base_model.set_gate_warmup(optimizer_step, warmup_steps=gate_warmup_steps)
 
-        # Residual scale warmup: ramp residual scale from start to end over optimizer steps
-        # This prevents the model from learning to "fight" audio early in training
-        res_warmup_steps = int(config.get("residual_scale_warmup_steps", 0) or 0)
-        if res_warmup_steps > 0 and hasattr(base_model, "set_residual_scale_step_warmup"):
-            res_start = float(config.get("residual_scale_warmup_start", 0.2))
-            res_end = float(config.get("residual_scale_warmup_end", 1.0))
-            base_model.set_residual_scale_step_warmup(
-                optimizer_step,
-                warmup_steps=res_warmup_steps,
-                start_scale=res_start,
-                end_scale=res_end,
-            )
+        # Note: Residual scale warmup is now applied per optimizer step inside the training loop
 
         print(f"\n✓ Training complete:")
         print(f"  Loss: {train_metrics['loss']:.4f}")
