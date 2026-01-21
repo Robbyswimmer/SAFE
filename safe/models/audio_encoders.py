@@ -60,7 +60,11 @@ class CLAPAudioEncoder(nn.Module):
             for param in self.model.parameters():
                 param.requires_grad = False
             self.model.eval()
-            
+
+        # CRITICAL: Keep CLAP in fp32 to avoid numerical instability
+        # CLAP's internal computations are sensitive to precision
+        self.model = self.model.float()
+
         # Get audio embedding dimension
         self.audio_embed_dim = 512  # CLAP audio embedding dimension
 
@@ -215,10 +219,11 @@ class CLAPAudioEncoder(nn.Module):
                 raise ValueError(f"Unexpected audio tensor shape: {audio.shape}")
                 
         # Extract embeddings - CLAP expects numpy arrays
-        with torch.no_grad():
+        # CRITICAL: Disable autocast to prevent fp16 numerical instability in CLAP
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):
             # Convert to numpy for CLAP
             if isinstance(audio_batch, torch.Tensor):
-                audio_numpy = audio_batch.detach().cpu().numpy()
+                audio_numpy = audio_batch.detach().cpu().float().numpy()  # Ensure fp32
             else:
                 audio_numpy = audio_batch
 
