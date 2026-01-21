@@ -2761,6 +2761,25 @@ def train(
     if not param_groups:
         raise RuntimeError("No trainable parameters found to optimize.")
 
+    # DEBUG: Check if kv_adapter params are in optimizer
+    if is_main:
+        print("\n=== DEBUG: Parameter groups in optimizer ===")
+        total_in_optimizer = 0
+        kv_count = 0
+        for name, param in base_model.named_parameters():
+            if param.requires_grad:
+                total_in_optimizer += 1
+                if "kv_adapter" in name or "kv_adapters" in name:
+                    kv_count += 1
+                    print(f"  KV param: {name} requires_grad={param.requires_grad}")
+        print(f"Total trainable params: {total_in_optimizer}, KV adapter params: {kv_count}")
+        if kv_count == 0 and hasattr(base_model, 'kv_adapters') and base_model.kv_adapters is not None:
+            print("  ⚠️ WARNING: kv_adapters exists but 0 params have requires_grad=True!")
+            print("  Checking kv_adapters state:")
+            for name, param in base_model.kv_adapters.named_parameters():
+                print(f"    {name}: requires_grad={param.requires_grad}")
+        print("=" * 50 + "\n")
+
     optimizer = AdamW(param_groups, weight_decay=0.0)
 
     # Learning rate scheduler

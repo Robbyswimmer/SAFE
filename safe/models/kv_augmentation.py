@@ -823,7 +823,15 @@ class KVAugmentationHookManager:
         audio_mask: Optional[torch.Tensor] = None,
         gate: float = 1.0,
     ):
-        """Set audio tokens for current forward pass in all wrapped attentions."""
+        """Set audio tokens for current forward pass in all wrapped attentions.
+
+        NOTE: We do NOT clear audio tokens after forward anymore because gradient
+        checkpointing recomputes forward during backward. If audio tokens are cleared
+        after forward but before backward, the recomputed forward won't have audio
+        and gradients won't flow to kv_adapters.
+
+        Audio tokens persist until the next inject_audio() call.
+        """
         for wrapped in self.wrapped_attentions.values():
             wrapped.set_audio(audio_tokens, audio_mask, gate)
 

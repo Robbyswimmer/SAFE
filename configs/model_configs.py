@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Model configurations for SAFE training.
 Provides both demo and full production configurations.

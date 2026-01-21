@@ -1828,14 +1828,13 @@ class SAFEModel(nn.Module):
 
                     return outputs, attn_reg_loss
                 finally:
-                    # Clean up but preserve attention weights for external access
-                    # (they get overwritten on next forward anyway)
-                    self.kv_hook_manager.clear_audio(preserve_attention_weights=True)
-                    # Don't unwrap - keep modules wrapped for efficiency
-                    # self.kv_hook_manager.unwrap_attention_modules()
-                    # Don't reset flag - let external code control this
-                    # if compute_attn_loss:
-                    #     self.kv_hook_manager.set_return_attention_weights(False)
+                    # CRITICAL: Do NOT clear audio tokens here!
+                    # With gradient checkpointing, backward recomputes forward.
+                    # If audio tokens are cleared, the recompute won't have audio
+                    # and gradients won't flow to kv_adapters.
+                    # Audio tokens persist until next inject_audio() call.
+                    # self.kv_hook_manager.clear_audio(preserve_attention_weights=True)
+                    pass  # Audio cleanup deferred to next inject_audio()
 
             # Determine which fusion mode to use
             use_kv_augmentation = (
