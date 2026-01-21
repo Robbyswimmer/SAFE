@@ -211,8 +211,10 @@ class SAFELLMProbe(nn.Module):
         num_classes: int,
         head_type: str = "linear",  # "linear" or "mlp"
         pool_layers: Optional[List[int]] = None,  # None = last layer, or list like [16, 24, 32]
+        bypass_llm: bool = False,  # If True, classify directly from projected audio tokens (skip LLM)
     ):
         super().__init__()
+        self.bypass_llm = bypass_llm
 
         constructor_keys = {
             "llm_model_name",
@@ -238,6 +240,10 @@ class SAFELLMProbe(nn.Module):
         # Ensure only audio components train
         self.safe_model.enable_audio_training()
         hidden_size = int(config.get("llm_hidden_size", 5120))
+
+        if bypass_llm:
+            print(f"[Probe] BYPASS LLM MODE: classifying directly from projected audio tokens", flush=True)
+            print(f"[Probe] This tests if projector preserves discriminability", flush=True)
 
         # Multi-layer pooling: concat hidden states from multiple layers
         self.pool_layers = pool_layers
@@ -473,6 +479,21 @@ class SAFELLMProbe(nn.Module):
         audio_attention_mask = inputs.get("audio_attention_mask")
         if audio_attention_mask is not None:
             audio_attention_mask = audio_attention_mask.to(device)
+
+        # === BYPASS LLM MODE ===
+        # Classify directly from projected audio tokens (skip LLM entirely)
+        # This tests if the projector preserves discriminability
+        if self.bypass_llm:
+            if audio_tokens is None:
+                raise RuntimeError("bypass_llm mode requires audio_tokens but got None")
+            # audio_tokens: (B, num_audio_tokens, hidden_size) e.g. (B, 16, 5120)
+            # Mean pool over audio tokens
+            pooled = audio_tokens.mean(dim=1)  # (B, hidden_size)
+            if not hasattr(self, "_bypass_logged"):
+                self._bypass_logged = True
+                print(f"[Probe] BYPASS: audio_tokens {tuple(audio_tokens.shape)} -> pooled {tuple(pooled.shape)}", flush=True)
+            logits = self.head(pooled.float())
+            return logits
 
         # Fallback: capture the final hidden states via a pre-hook on the output embedding
         # module (often `lm_head`). This is robust when HF wrappers ignore hidden-state flags.
@@ -1098,6 +1119,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb-run-name", type=str, default=None)
     p.add_argument("--load-checkpoint", type=str, default=None, help="Load a SAFE checkpoint (e.g., from train_safe.py)")
     p.add_argument(
+        "--bypass-llm",
+        action="store_true",
+        help="DIAGNOSTIC: Skip LLM entirely, classify directly from projected audio tokens. "
+             "Tests if projector preserves CLAP discriminability.",
+    )
+    p.add_argument(
         "--head-only",
         action="store_true",
         help="Freeze projector+fusion and train only the linear head.",
@@ -1188,6 +1215,7 @@ def main() -> None:
         num_classes=len(AVE_CATEGORIES),
         head_type=args.head_type,
         pool_layers=pool_layers,
+        bypass_llm=args.bypass_llm,
     ).to(device)
 
     # === Verify pre-FFN fusion is set up correctly ===

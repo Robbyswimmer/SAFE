@@ -32,6 +32,7 @@ LOAD_CHECKPOINT=${LOAD_CHECKPOINT:-""}
 HEAD_ONLY=${HEAD_ONLY:-0}
 FORCE_GATE=${FORCE_GATE:-""}
 HEAD_WARMUP_STEPS=${HEAD_WARMUP_STEPS:-0}
+BYPASS_LLM=${BYPASS_LLM:-0}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_DIR"
@@ -92,6 +93,11 @@ if [ "$HEAD_ONLY" = "1" ]; then
   HEAD_ONLY_ARG="--head-only"
 fi
 
+BYPASS_LLM_ARG=""
+if [ "$BYPASS_LLM" = "1" ]; then
+  BYPASS_LLM_ARG="--bypass-llm"
+fi
+
 FORCE_GATE_ARG=""
 if [ -n "$FORCE_GATE" ]; then
   FORCE_GATE_ARG="--force-gate $FORCE_GATE"
@@ -107,7 +113,7 @@ if [ -n "$FUSION_MODE" ]; then
   FUSION_MODE_ARG="--fusion-mode $FUSION_MODE"
 fi
 
-echo "Resolved CLI extras: ${FUSION_INJECTION_ARG} ${FUSION_MODE_ARG} ${CKPT_ARGS} ${HEAD_ONLY_ARG} ${FORCE_GATE_ARG} ${FP16_ARG} ${WANDB_ARGS}"
+echo "Resolved CLI extras: ${FUSION_INJECTION_ARG} ${FUSION_MODE_ARG} ${CKPT_ARGS} ${HEAD_ONLY_ARG} ${BYPASS_LLM_ARG} ${FORCE_GATE_ARG} ${FP16_ARG} ${WANDB_ARGS}"
 
 python train_audio_llm_probe.py \
   --data-path "$DATA_PATH" \
@@ -126,6 +132,7 @@ python train_audio_llm_probe.py \
   $FP16_ARG \
   $CKPT_ARGS \
   $HEAD_ONLY_ARG \
+  $BYPASS_LLM_ARG \
   $FORCE_GATE_ARG \
   --head-warmup-steps "$HEAD_WARMUP_STEPS" \
   $WANDB_ARGS
