@@ -3037,6 +3037,19 @@ def train(
         if gate_warmup_steps > 0 and hasattr(base_model, "set_gate_warmup"):
             base_model.set_gate_warmup(optimizer_step, warmup_steps=gate_warmup_steps)
 
+        # Residual scale warmup: ramp residual scale from start to end over optimizer steps
+        # This prevents the model from learning to "fight" audio early in training
+        res_warmup_steps = int(config.get("residual_scale_warmup_steps", 0) or 0)
+        if res_warmup_steps > 0 and hasattr(base_model, "set_residual_scale_step_warmup"):
+            res_start = float(config.get("residual_scale_warmup_start", 0.2))
+            res_end = float(config.get("residual_scale_warmup_end", 1.0))
+            base_model.set_residual_scale_step_warmup(
+                optimizer_step,
+                warmup_steps=res_warmup_steps,
+                start_scale=res_start,
+                end_scale=res_end,
+            )
+
         print(f"\n✓ Training complete:")
         print(f"  Loss: {train_metrics['loss']:.4f}")
         print(f"  Time: {format_time(train_metrics['train_time'])}")
@@ -3468,6 +3481,12 @@ def main():
                         help="Max caption length (tokens) for contrastive text embeddings")
     parser.add_argument("--gate-warmup-steps", type=int, default=0,
                         help="If >0, ramp SAFE gate 0→1 over this many optimizer steps")
+    parser.add_argument("--residual-scale-warmup-steps", type=int, default=0,
+                        help="If >0, ramp residual scale from start to end over this many optimizer steps")
+    parser.add_argument("--residual-scale-warmup-start", type=float, default=0.2,
+                        help="Starting residual scale for warmup (default 0.2 = 20%% audio)")
+    parser.add_argument("--residual-scale-warmup-end", type=float, default=1.0,
+                        help="Ending residual scale for warmup (default 1.0 = 100%% audio)")
     parser.add_argument(
         "--ablation-loss-weight",
         type=float,
@@ -3936,6 +3955,9 @@ def main():
         "audio_contrastive_temperature": args.audio_contrastive_temperature,
         "audio_contrastive_max_length": args.audio_contrastive_max_length,
         "gate_warmup_steps": args.gate_warmup_steps,
+        "residual_scale_warmup_steps": args.residual_scale_warmup_steps,
+        "residual_scale_warmup_start": args.residual_scale_warmup_start,
+        "residual_scale_warmup_end": args.residual_scale_warmup_end,
         "ablation_loss_weight": args.ablation_loss_weight,
         "ablation_loss_margin": args.ablation_loss_margin,
         "ablation_loss_every_steps": args.ablation_loss_every_steps,

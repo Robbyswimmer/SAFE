@@ -344,6 +344,51 @@ class SAFEModel(nn.Module):
         gate = min(1.0, global_step / warmup_steps)
         self.set_gate(gate)
 
+    def set_residual_scale_step_warmup(self, global_step: int, warmup_steps: int = 300,
+                                        start_scale: float = 0.2, end_scale: float = 1.0) -> None:
+        """
+        Step-based residual scale warmup: gradually increase scale over warmup_steps.
+
+        This lets the model first learn text generation, then gradually learn to use audio.
+        Prevents the model from learning to "fight" audio contribution early in training.
+
+        Args:
+            global_step: Current optimizer step
+            warmup_steps: Number of steps to warm up over
+            start_scale: Initial scale value (e.g., 0.2 for 20% audio)
+            end_scale: Final scale value after warmup (e.g., 1.0 for 100% audio)
+        """
+        if warmup_steps <= 0:
+            target_scale = end_scale
+        elif global_step >= warmup_steps:
+            target_scale = end_scale
+        else:
+            progress = global_step / warmup_steps
+            target_scale = start_scale + (end_scale - start_scale) * progress
+
+        # Apply to fusion adapter's cross-attention blocks
+        if self.fusion_adapter is not None:
+            if hasattr(self.fusion_adapter, 'fusion_adapters'):
+                for adapter in self.fusion_adapter.fusion_adapters.values():
+                    if hasattr(adapter, 'cross_attention'):
+                        ca = adapter.cross_attention
+                        if hasattr(ca, 'base_model'):
+                            ca = ca.base_model
+                        if hasattr(ca, 'residual_scale'):
+                            with torch.no_grad():
+                                ca.residual_scale.fill_(target_scale)
+            elif hasattr(self.fusion_adapter, 'cross_attention'):
+                ca = self.fusion_adapter.cross_attention
+                if hasattr(ca, 'base_model'):
+                    ca = ca.base_model
+                if hasattr(ca, 'residual_scale'):
+                    with torch.no_grad():
+                        ca.residual_scale.fill_(target_scale)
+
+        # Log occasionally
+        if global_step % 50 == 0 and self.debug_logging:
+            print(f"[ResidualScaleWarmup] step={global_step}, scale={target_scale:.3f}", flush=True)
+
     def set_residual_scale_warmup(self, epoch: int, warmup_epochs: int = 5, start_scale: float = 0.1, end_scale: float = 1.0) -> None:
         """
         Gradually increase residual scale over warmup_epochs.

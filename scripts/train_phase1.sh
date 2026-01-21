@@ -66,6 +66,9 @@ AUDIO_CONTRASTIVE_WEIGHT=${AUDIO_CONTRASTIVE_WEIGHT:-0.0}
 AUDIO_CONTRASTIVE_TEMPERATURE=${AUDIO_CONTRASTIVE_TEMPERATURE:-0.07}
 AUDIO_CONTRASTIVE_MAX_LENGTH=${AUDIO_CONTRASTIVE_MAX_LENGTH:-48}
 GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-100}
+RESIDUAL_SCALE_WARMUP_STEPS=${RESIDUAL_SCALE_WARMUP_STEPS:-300}  # Ramp audio contribution 0.2→1.0
+RESIDUAL_SCALE_WARMUP_START=${RESIDUAL_SCALE_WARMUP_START:-0.2}  # Start at 20% audio
+RESIDUAL_SCALE_WARMUP_END=${RESIDUAL_SCALE_WARMUP_END:-1.0}      # End at 100% audio
 ABLATION_LOSS_WEIGHT=${ABLATION_LOSS_WEIGHT:-0.0}
 ABLATION_LOSS_MARGIN=${ABLATION_LOSS_MARGIN:-0.0}
 ABLATION_LOSS_EVERY_STEPS=${ABLATION_LOSS_EVERY_STEPS:-1}
@@ -186,6 +189,7 @@ echo "Use Clotho: ${USE_CLOTHO}"
 echo "Use MACS: ${USE_MACS}"
 echo "Audio contrastive weight: ${AUDIO_CONTRASTIVE_WEIGHT}"
 echo "Gate warmup steps: ${GATE_WARMUP_STEPS}"
+echo "Residual scale warmup: steps=${RESIDUAL_SCALE_WARMUP_STEPS} start=${RESIDUAL_SCALE_WARMUP_START} end=${RESIDUAL_SCALE_WARMUP_END}"
 echo "Ablation loss: weight=${ABLATION_LOSS_WEIGHT} margin=${ABLATION_LOSS_MARGIN} every=${ABLATION_LOSS_EVERY_STEPS}"
 echo "Gradient checkpointing: ${GRADIENT_CHECKPOINTING}"
 echo "Num workers: ${NUM_WORKERS}"
@@ -251,6 +255,9 @@ ${LAUNCHER} train_safe.py \
     --audio-contrastive-temperature "${AUDIO_CONTRASTIVE_TEMPERATURE}" \
     --audio-contrastive-max-length "${AUDIO_CONTRASTIVE_MAX_LENGTH}" \
     --gate-warmup-steps "${GATE_WARMUP_STEPS}" \
+    --residual-scale-warmup-steps "${RESIDUAL_SCALE_WARMUP_STEPS}" \
+    --residual-scale-warmup-start "${RESIDUAL_SCALE_WARMUP_START}" \
+    --residual-scale-warmup-end "${RESIDUAL_SCALE_WARMUP_END}" \
     --ablation-loss-weight "${ABLATION_LOSS_WEIGHT}" \
     --ablation-loss-margin "${ABLATION_LOSS_MARGIN}" \
     --ablation-loss-every-steps "${ABLATION_LOSS_EVERY_STEPS}" \
