@@ -46,6 +46,7 @@ class AudioProjector(nn.Module):
         use_positional_embedding: bool = False,
         output_dim: Optional[int] = None,  # If set, output in this dim instead of llm_hidden_size
         disable_output_norm: bool = False,  # If True, skip output LayerNorm (for classification probing)
+        disable_input_norm: bool = False,  # If True, skip input LayerNorm (for classification probing)
     ):
         super().__init__()
 
@@ -55,6 +56,7 @@ class AudioProjector(nn.Module):
         self.use_swiglu = use_swiglu
         self.use_positional_embedding = use_positional_embedding
         self.disable_output_norm = disable_output_norm
+        self.disable_input_norm = disable_input_norm
 
         # Output dimension: use output_dim if specified, otherwise llm_hidden_size
         # For KV-augment mode, output_dim=audio_embed_dim keeps tokens small (~4M vs 42M params)
@@ -210,11 +212,12 @@ class AudioProjector(nn.Module):
         if x.dtype != torch.float32:
             x = x.float()
 
-        # Normalize input for stability
-        normalized_input = self.input_norm(x)
+        # Normalize input for stability (can be disabled for classification probing)
+        if not self.disable_input_norm:
+            x = self.input_norm(x)
 
         # Project through MLP
-        projected = self.projector(normalized_input)  # (batch_size, output_dim * num_audio_tokens)
+        projected = self.projector(x)  # (batch_size, output_dim * num_audio_tokens)
 
         # Reshape to token format
         audio_tokens = projected.view(
