@@ -33,6 +33,7 @@ HEAD_ONLY=${HEAD_ONLY:-0}
 FORCE_GATE=${FORCE_GATE:-""}
 HEAD_WARMUP_STEPS=${HEAD_WARMUP_STEPS:-0}
 BYPASS_LLM=${BYPASS_LLM:-0}
+NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-""}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_DIR"
@@ -98,6 +99,11 @@ if [ "$BYPASS_LLM" = "1" ]; then
   BYPASS_LLM_ARG="--bypass-llm"
 fi
 
+NUM_AUDIO_TOKENS_ARG=""
+if [ -n "$NUM_AUDIO_TOKENS" ]; then
+  NUM_AUDIO_TOKENS_ARG="--num-audio-tokens $NUM_AUDIO_TOKENS"
+fi
+
 FORCE_GATE_ARG=""
 if [ -n "$FORCE_GATE" ]; then
   FORCE_GATE_ARG="--force-gate $FORCE_GATE"
@@ -124,6 +130,7 @@ python train_audio_llm_probe.py \
   --head-learning-rate "$HEAD_LR" \
   --model-config "$MODEL_CONFIG" \
   --fusion-layer-indices "$FUSION_LAYER_INDICES" \
+  $NUM_AUDIO_TOKENS_ARG \
   $FUSION_INJECTION_ARG \
   $FUSION_MODE_ARG \
   --pooling "$POOLING" \

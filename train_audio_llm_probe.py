@@ -1056,6 +1056,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", type=str, default="outputs/ave_llm_probe")
     p.add_argument("--model-config", type=str, default="phase1")
     p.add_argument("--fusion-layer-indices", type=str, default="1", help="Comma-separated fusion layers (default: 1)")
+    p.add_argument("--num-audio-tokens", type=int, default=None,
+                   help="Override num_audio_tokens from config (e.g., 1 for minimal expansion)")
     p.add_argument(
         "--fusion-injection-point",
         type=str,
@@ -1156,6 +1158,10 @@ def main() -> None:
         config.setdefault("fusion_config", {})
         config["fusion_config"]["fusion_mode"] = str(args.fusion_mode)
         print(f"[Config] fusion_mode={args.fusion_mode}", flush=True)
+    if args.num_audio_tokens is not None:
+        old_tokens = config.get("num_audio_tokens", "NOT SET")
+        config["num_audio_tokens"] = args.num_audio_tokens
+        print(f"[Config] num_audio_tokens={args.num_audio_tokens} (was {old_tokens})", flush=True)
 
     # === CRITICAL: Print and verify config at startup ===
     print("\n" + "=" * 60, flush=True)
