@@ -178,10 +178,10 @@ class CLAPAudioEncoder(nn.Module):
     def forward(self, audio: Union[torch.Tensor, List[Any]]) -> torch.Tensor:
         """
         Extract audio embeddings using CLAP.
-        
+
         Args:
             audio: Batch of audio data (various formats supported)
-            
+
         Returns:
             Audio embeddings (batch_size, audio_embed_dim)
         """
@@ -191,6 +191,11 @@ class CLAPAudioEncoder(nn.Module):
             for idx, a in enumerate(audio):
                 processed = self.preprocess_audio(a)
                 processed_audio.append(processed)
+                # DEBUG: Check first few preprocessed audios
+                if idx < 2 and self.debug_logging:
+                    pnorm = processed.norm().item()
+                    pmax = processed.abs().max().item()
+                    print(f"[CLAP] preprocess[{idx}]: norm={pnorm:.4f}, max={pmax:.4f}, shape={list(processed.shape)}", flush=True)
             audio_batch = torch.stack(processed_audio)  # (batch_size, 1, max_samples)
             # Squeeze out the channel dimension for CLAP compatibility
             if audio_batch.dim() == 3 and audio_batch.shape[1] == 1:
@@ -217,10 +222,24 @@ class CLAPAudioEncoder(nn.Module):
             else:
                 audio_numpy = audio_batch
 
+            # DEBUG: Check audio batch before CLAP
+            if self.debug_logging:
+                import numpy as np
+                batch_max = np.abs(audio_numpy).max()
+                batch_mean = np.abs(audio_numpy).mean()
+                has_nan = np.isnan(audio_numpy).any()
+                print(f"[CLAP] PRE-MODEL: max={batch_max:.4f}, mean={batch_mean:.6f}, has_nan={has_nan}, shape={audio_numpy.shape}", flush=True)
+
             audio_embeddings = self.model.get_audio_embedding_from_data(
                 x=audio_numpy,
                 use_tensor=False
             )
+
+            # DEBUG: Check embeddings after CLAP
+            if self.debug_logging:
+                emb_has_nan = np.isnan(audio_embeddings).any() if isinstance(audio_embeddings, np.ndarray) else torch.isnan(audio_embeddings).any().item()
+                emb_norm = np.linalg.norm(audio_embeddings, axis=-1).mean() if isinstance(audio_embeddings, np.ndarray) else audio_embeddings.norm(dim=-1).mean().item()
+                print(f"[CLAP] POST-MODEL: norm={emb_norm:.4f}, has_nan={emb_has_nan}", flush=True)
             
         # Ensure output is tensor on correct device
         if not isinstance(audio_embeddings, torch.Tensor):

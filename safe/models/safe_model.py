@@ -135,6 +135,9 @@ class SAFEModel(nn.Module):
 
         # Enable debug logging for projector norms
         self.audio_projector.debug_logging = True
+        # Enable debug logging for audio encoder
+        if hasattr(self.audio_encoder, 'debug_logging'):
+            self.audio_encoder.debug_logging = True
 
         actual_output_dim = getattr(self.audio_projector, 'output_dim', llm_hidden_size)
         print(f"[SAFE] ✓ Audio projector initialized (output_dim={actual_output_dim})", flush=True)
