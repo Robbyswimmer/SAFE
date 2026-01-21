@@ -1712,6 +1712,194 @@ def _extract_kv_adapter_metrics(model: Any) -> Dict[str, float]:
     return metrics
 
 
+def _log_comprehensive_diagnostics(
+    model: Any,
+    base_model: Any,
+    optimizer_step: int,
+    epoch: int,
+    loss: float,
+    grad_norm: Optional[float],
+    gate_value: Optional[float] = None,
+    wandb_run: Any = None,
+    console_log: bool = True,
+) -> Dict[str, Any]:
+    """
+    Comprehensive training diagnostics for debugging gradient flow and learning.
+
+    Logs:
+    - Gradient norms per component (projector, fusion, KV adapters)
+    - Audio projector output scale
+    - Fusion residual scales (per layer)
+    - KV adapter metrics (audio_scale, delta_q_scale)
+    - KV hook manager diagnostics (rms_ratio, entropy, attention patterns)
+    - Gate value (if warmup active)
+    - Parameter statistics (detect collapse)
+
+    Returns dict of all metrics for optional W&B logging.
+    """
+    diagnostics: Dict[str, Any] = {
+        "diag/optimizer_step": optimizer_step,
+        "diag/epoch": epoch,
+        "diag/loss": loss,
+    }
+
+    if grad_norm is not None:
+        diagnostics["diag/grad_norm_clipped"] = float(grad_norm)
+
+    if gate_value is not None:
+        diagnostics["diag/gate_value"] = float(gate_value)
+
+    # 1. Gradient norms per component
+    grad_norms = {"projector": 0.0, "fusion": 0.0, "kv_adapter": 0.0, "other": 0.0}
+    grad_counts = {"projector": 0, "fusion": 0, "kv_adapter": 0, "other": 0}
+    param_stats = {"projector": [], "fusion": [], "kv_adapter": []}
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        # Gradient norms
+        if param.grad is not None:
+            g_norm = param.grad.norm().item()
+            if "audio_projector" in name:
+                grad_norms["projector"] += g_norm
+                grad_counts["projector"] += 1
+            elif "fusion_adapter" in name:
+                grad_norms["fusion"] += g_norm
+                grad_counts["fusion"] += 1
+            elif "kv_adapter" in name or "kv_augmentation" in name:
+                grad_norms["kv_adapter"] += g_norm
+                grad_counts["kv_adapter"] += 1
+            else:
+                grad_norms["other"] += g_norm
+                grad_counts["other"] += 1
+
+        # Parameter value stats (detect collapse)
+        with torch.no_grad():
+            p_val = param.abs().mean().item()
+            if "audio_projector" in name:
+                param_stats["projector"].append(p_val)
+            elif "fusion_adapter" in name:
+                param_stats["fusion"].append(p_val)
+            elif "kv_adapter" in name:
+                param_stats["kv_adapter"].append(p_val)
+
+    for key in grad_norms:
+        diagnostics[f"diag/grad_norm/{key}"] = grad_norms[key]
+        diagnostics[f"diag/grad_count/{key}"] = grad_counts[key]
+
+    for key in param_stats:
+        if param_stats[key]:
+            diagnostics[f"diag/param_mean/{key}"] = sum(param_stats[key]) / len(param_stats[key])
+
+    # 2. Audio projector output scale
+    proj_scale = _extract_audio_projector_output_scale(base_model)
+    if proj_scale is not None:
+        diagnostics["diag/projector_output_scale"] = proj_scale
+
+    # 3. Fusion residual scales
+    residual_scales = _extract_fusion_residual_scales(base_model)
+    if residual_scales:
+        values = list(residual_scales.values())
+        diagnostics["diag/fusion_res_scale_mean"] = sum(values) / len(values)
+        diagnostics["diag/fusion_res_scale_min"] = min(values)
+        diagnostics["diag/fusion_res_scale_max"] = max(values)
+        for k, v in residual_scales.items():
+            diagnostics[f"diag/fusion_res_scale/{k}"] = v
+
+    # 4. KV adapter metrics (scales)
+    kv_metrics = _extract_kv_adapter_metrics(base_model)
+    for k, v in kv_metrics.items():
+        diagnostics[f"diag/kv/{k}"] = v
+
+    # 5. KV hook manager diagnostics (attention patterns, RMS ratios)
+    kv_hook_manager = getattr(base_model, "kv_hook_manager", None)
+    if kv_hook_manager is not None and hasattr(kv_hook_manager, "log_diagnostics"):
+        try:
+            kv_diag = kv_hook_manager.log_diagnostics(prefix="diag/kv_attn/")
+            diagnostics.update(kv_diag)
+        except Exception:
+            pass
+
+    # 6. Console output (periodic summary)
+    if console_log:
+        lines = [
+            f"\n{'='*80}",
+            f"[DiagCheck] Step {optimizer_step} | Epoch {epoch} | Loss {loss:.4f}",
+            f"{'='*80}",
+            f"  Gradient norms:",
+            f"    projector: {grad_norms['projector']:.2f} ({grad_counts['projector']} params)",
+            f"    fusion:    {grad_norms['fusion']:.2f} ({grad_counts['fusion']} params)",
+            f"    kv_adapter: {grad_norms['kv_adapter']:.2f} ({grad_counts['kv_adapter']} params)",
+        ]
+
+        if grad_norm is not None:
+            lines.append(f"    total (clipped): {grad_norm:.2f}")
+
+        if gate_value is not None:
+            lines.append(f"  Gate value: {gate_value:.3f}")
+
+        if proj_scale is not None:
+            lines.append(f"  Projector output scale: {proj_scale:.4f}")
+
+        if residual_scales:
+            lines.append(f"  Fusion residual scales: {residual_scales}")
+
+        if kv_metrics:
+            lines.append(f"  KV adapter scales: {kv_metrics}")
+
+        # KV attention diagnostics summary
+        if kv_hook_manager is not None:
+            try:
+                all_kv_diag = kv_hook_manager.get_diagnostics()
+                if all_kv_diag:
+                    lines.append(f"  KV attention diagnostics:")
+                    for layer_idx, diag in sorted(all_kv_diag.items()):
+                        rms_ratio = diag.get("rms_ratio", 0)
+                        entropy = diag.get("normalized_entropy", 0)
+                        audio_rms = diag.get("audio_rms", 0)
+                        text_rms = diag.get("text_rms", 0)
+                        lines.append(
+                            f"    Layer {layer_idx}: rms_ratio={rms_ratio:.4f} "
+                            f"entropy={entropy:.4f} audio_rms={audio_rms:.4f} text_rms={text_rms:.4f}"
+                        )
+            except Exception:
+                pass
+
+        # Health indicators
+        lines.append(f"  Health indicators:")
+
+        # Check for gradient collapse
+        total_grad = grad_norms["projector"] + grad_norms["fusion"] + grad_norms["kv_adapter"]
+        if total_grad < 1.0:
+            lines.append(f"    ⚠️  LOW GRADIENTS: total audio component grad norm = {total_grad:.4f}")
+        elif total_grad < 100.0:
+            lines.append(f"    ⚡ Moderate gradients: {total_grad:.2f}")
+        else:
+            lines.append(f"    ✓ Healthy gradients: {total_grad:.2f}")
+
+        # Check for scale collapse
+        if proj_scale is not None and proj_scale < 0.1:
+            lines.append(f"    ⚠️  PROJECTOR SCALE COLLAPSE: {proj_scale:.4f}")
+
+        if residual_scales:
+            min_res = min(residual_scales.values())
+            if min_res <= 0.5:
+                lines.append(f"    ⚠️  RESIDUAL AT MINIMUM: {min_res:.3f} (model fighting audio)")
+
+        lines.append(f"{'='*80}\n")
+        print("\n".join(lines), flush=True)
+
+    # 7. W&B logging
+    if wandb_run is not None:
+        try:
+            wandb_run.log(diagnostics, step=optimizer_step)
+        except Exception:
+            pass
+
+    return diagnostics
+
+
 def _apply_audio_augmentation(
     audio: List[Any],
     pipeline: AudioAugmentPipeline,
@@ -2240,6 +2428,24 @@ def train_epoch(
 
             optimizer_step += 1
 
+            # Comprehensive diagnostics (every 10 steps during warmup, every 50 steps after)
+            diag_frequency = 10 if optimizer_step <= 500 else 50
+            if optimizer_step % diag_frequency == 0:
+                # Get current gate value for logging
+                current_gate = getattr(base_model, "_default_gate", None)
+                avg_loss = step_loss_sum / max(step_micro_batches, 1)
+                _log_comprehensive_diagnostics(
+                    model=model,
+                    base_model=base_model,
+                    optimizer_step=optimizer_step,
+                    epoch=epoch,
+                    loss=avg_loss,
+                    grad_norm=float(grad_norm) if grad_norm is not None else None,
+                    gate_value=current_gate,
+                    wandb_run=wandb_run,
+                    console_log=True,
+                )
+
             # W&B logging at optimizer-step granularity
             if wandb_run is not None:
                 step_time = max(time.time() - step_start_time, 1e-6)
@@ -2302,6 +2508,15 @@ def train_epoch(
                 if kv_metrics:
                     for k, v in kv_metrics.items():
                         log_dict[f"train/kv_adapter/{k}"] = float(v)
+
+                # KV hook manager diagnostics (attention patterns, RMS ratios)
+                kv_hook_manager = getattr(base_model, "kv_hook_manager", None)
+                if kv_hook_manager is not None and hasattr(kv_hook_manager, "log_diagnostics"):
+                    try:
+                        kv_diag = kv_hook_manager.log_diagnostics(prefix="train/kv_attn/")
+                        log_dict.update(kv_diag)
+                    except Exception:
+                        pass
 
                 try:
                     if hasattr(base_model, "get_last_attention_summary"):
