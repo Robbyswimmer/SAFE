@@ -36,6 +36,8 @@ BYPASS_LLM=${BYPASS_LLM:-0}
 NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-""}
 RUN_PROJECTOR_ABLATION=${RUN_PROJECTOR_ABLATION:-0}
 ABLATION_BATCH_SIZE=${ABLATION_BATCH_SIZE:-128}
+HEAD_TYPE=${HEAD_TYPE:-"linear"}
+PROJECTOR_OUTPUT_DIM=${PROJECTOR_OUTPUT_DIM:-""}
 
 mkdir -p logs
 mkdir -p "$OUTPUT_DIR"
@@ -111,6 +113,16 @@ if [ "$RUN_PROJECTOR_ABLATION" = "1" ]; then
   PROJECTOR_ABLATION_ARG="--run-projector-ablation --ablation-batch-size $ABLATION_BATCH_SIZE"
 fi
 
+HEAD_TYPE_ARG=""
+if [ -n "$HEAD_TYPE" ]; then
+  HEAD_TYPE_ARG="--head-type $HEAD_TYPE"
+fi
+
+PROJECTOR_OUTPUT_DIM_ARG=""
+if [ -n "$PROJECTOR_OUTPUT_DIM" ]; then
+  PROJECTOR_OUTPUT_DIM_ARG="--projector-output-dim $PROJECTOR_OUTPUT_DIM"
+fi
+
 FORCE_GATE_ARG=""
 if [ -n "$FORCE_GATE" ]; then
   FORCE_GATE_ARG="--force-gate $FORCE_GATE"
@@ -138,6 +150,8 @@ python train_audio_llm_probe.py \
   --model-config "$MODEL_CONFIG" \
   --fusion-layer-indices "$FUSION_LAYER_INDICES" \
   $NUM_AUDIO_TOKENS_ARG \
+  $HEAD_TYPE_ARG \
+  $PROJECTOR_OUTPUT_DIM_ARG \
   $FUSION_INJECTION_ARG \
   $FUSION_MODE_ARG \
   --pooling "$POOLING" \

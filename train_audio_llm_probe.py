@@ -244,6 +244,11 @@ class SAFELLMProbe(nn.Module):
         if bypass_llm:
             print(f"[Probe] BYPASS LLM MODE: classifying directly from projected audio tokens", flush=True)
             print(f"[Probe] This tests if projector preserves discriminability", flush=True)
+            # In bypass mode, input_size is the projector output_dim, not llm_hidden_size
+            projector_config = config.get("projector_config", {})
+            projector_output_dim = projector_config.get("output_dim", hidden_size)
+            hidden_size = projector_output_dim
+            print(f"[Probe] Using projector output_dim={projector_output_dim} as input_size", flush=True)
 
         # Multi-layer pooling: concat hidden states from multiple layers
         self.pool_layers = pool_layers
@@ -1058,6 +1063,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fusion-layer-indices", type=str, default="1", help="Comma-separated fusion layers (default: 1)")
     p.add_argument("--num-audio-tokens", type=int, default=None,
                    help="Override num_audio_tokens from config (e.g., 1 for minimal expansion)")
+    p.add_argument("--projector-output-dim", type=int, default=None,
+                   help="Override projector output_dim (e.g., 512 to keep in CLAP space instead of 5120)")
     p.add_argument(
         "--fusion-injection-point",
         type=str,
@@ -1291,6 +1298,10 @@ def main() -> None:
         old_tokens = config.get("num_audio_tokens", "NOT SET")
         config["num_audio_tokens"] = args.num_audio_tokens
         print(f"[Config] num_audio_tokens={args.num_audio_tokens} (was {old_tokens})", flush=True)
+    if args.projector_output_dim is not None:
+        config.setdefault("projector_config", {})
+        config["projector_config"]["output_dim"] = args.projector_output_dim
+        print(f"[Config] projector_output_dim={args.projector_output_dim} (keeps in smaller space)", flush=True)
 
     # === CRITICAL: Print and verify config at startup ===
     print("\n" + "=" * 60, flush=True)
