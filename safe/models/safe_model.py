@@ -106,11 +106,14 @@ class SAFEModel(nn.Module):
         # Initialize audio projector
         print(f"[SAFE] Initializing audio projector ({projector_type})...", flush=True)
         sys.stdout.flush()
-        projector_config = projector_config or {}
+        projector_config = dict(projector_config) if projector_config else {}
 
         # For KV augmentation, projector outputs in audio_embed_dim space (not llm_hidden_size)
         # This reduces projector params from ~44M to ~4M (512*8 vs 5120*8 output)
-        projector_output_dim = audio_embed_dim if is_kv_augment else None
+        # Check if output_dim is explicitly set in projector_config (user override)
+        projector_output_dim = projector_config.pop("output_dim", None)
+        if projector_output_dim is None:
+            projector_output_dim = audio_embed_dim if is_kv_augment else None
 
         if projector_type == "standard":
             self.audio_projector = AudioProjector(
