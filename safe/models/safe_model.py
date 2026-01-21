@@ -1916,7 +1916,32 @@ class SAFEModel(nn.Module):
                     hook_handle.remove()
                 except Exception:
                     pass
-            return {"logits": logits, "loss": loss, "hidden_states": None, "attn_reg_loss": attn_reg_loss}
+
+            # Return hidden states if requested.
+            hidden_state_out = None
+            if wants_hidden:
+                try:
+                    hidden_state_out = hidden_capture.get("last")
+                except Exception:
+                    hidden_state_out = None
+                if hidden_state_out is None:
+                    try:
+                        hs = getattr(outputs, "hidden_states", None)
+                        if isinstance(hs, (list, tuple)) and len(hs) > 0 and torch.is_tensor(hs[-1]):
+                            hidden_state_out = hs[-1]
+                        else:
+                            lhs = getattr(outputs, "last_hidden_state", None)
+                            if torch.is_tensor(lhs):
+                                hidden_state_out = lhs
+                    except Exception:
+                        hidden_state_out = None
+
+            return {
+                "logits": logits,
+                "loss": loss,
+                "hidden_states": hidden_state_out,
+                "attn_reg_loss": attn_reg_loss,
+            }
         
         resolved_input_ids = input_ids if input_ids is not None else kwargs.pop("input_ids", None)
         inputs_embeds_kw = kwargs.pop("inputs_embeds", None)

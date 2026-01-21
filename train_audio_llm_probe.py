@@ -303,10 +303,13 @@ class SAFELLMProbe(nn.Module):
     def get_delta_q_params(self) -> List[nn.Parameter]:
         """Get only query_adapter (ΔQ) params for separate LR group."""
         params = []
-        if hasattr(self.safe_model, 'kv_adapters') and self.safe_model.kv_adapters is not None:
-            for adapter in self.safe_model.kv_adapters.values():
-                if hasattr(adapter, 'audio_query_adapter'):
-                    params.extend(list(adapter.audio_query_adapter.parameters()))
+        if hasattr(self.safe_model, "kv_adapters") and self.safe_model.kv_adapters is not None:
+            try:
+                for adapter in self.safe_model.kv_adapters.values():
+                    if hasattr(adapter, "audio_query_adapter"):
+                        params.extend(list(adapter.audio_query_adapter.parameters()))
+            except Exception:
+                pass
         return params
 
     def get_head_params(self) -> List[nn.Parameter]:
@@ -659,6 +662,10 @@ def build_optimizer(
     if delta_q_lr is not None and delta_q_lr > 0:
         delta_q_params = model.get_delta_q_params()
         safe_params = model.get_safe_params_without_delta_q()
+        if not delta_q_params:
+            # Likely not in kv_augment mode; fall back to a single SAFE group.
+            delta_q_lr = None
+            safe_params = model.get_safe_params()
         delta_q_decay, delta_q_no_decay = _split_decay(delta_q_params)
     else:
         delta_q_decay, delta_q_no_decay = [], []
@@ -824,6 +831,80 @@ def train_epoch(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), args.max_grad_norm)
             optimizer.step()
+
+        # === GRADIENT FLOW DIAGNOSTIC (every log_interval batches) ===
+        if (batch_idx + 1) % args.log_interval == 0:
+            with torch.no_grad():
+                grad_flow = {}
+
+                # 1. Classifier head gradient
+                head_grad = 0.0
+                head_count = 0
+                for p in model.get_head_params():
+                    if p.grad is not None:
+                        head_grad += p.grad.float().norm().item() ** 2
+                        head_count += 1
+                grad_flow["head"] = head_grad ** 0.5 if head_count > 0 else 0.0
+
+                # 2. Audio projector gradient
+                proj_grad = 0.0
+                proj_count = 0
+                if hasattr(model.safe_model, 'audio_projector') and model.safe_model.audio_projector is not None:
+                    for p in model.safe_model.audio_projector.parameters():
+                        if p.grad is not None:
+                            proj_grad += p.grad.float().norm().item() ** 2
+                            proj_count += 1
+                grad_flow["projector"] = proj_grad ** 0.5 if proj_count > 0 else 0.0
+
+                # 3. Fusion adapter gradient (pre-FFN fusion)
+                fusion_grad = 0.0
+                fusion_count = 0
+                if hasattr(model.safe_model, 'fusion_adapter') and model.safe_model.fusion_adapter is not None:
+                    fusion_adapter = model.safe_model.fusion_adapter
+                    for p in fusion_adapter.parameters():
+                        if p.grad is not None:
+                            fusion_grad += p.grad.float().norm().item() ** 2
+                            fusion_count += 1
+
+                    # Per-layer fusion gradients (MultiLayerFusionAdapter has fusion_adapters dict)
+                    if hasattr(fusion_adapter, 'fusion_adapters'):
+                        for layer_key, layer_adapter in fusion_adapter.fusion_adapters.items():
+                            layer_grad = 0.0
+                            layer_count = 0
+                            for p in layer_adapter.parameters():
+                                if p.grad is not None:
+                                    layer_grad += p.grad.float().norm().item() ** 2
+                                    layer_count += 1
+                            if layer_count > 0:
+                                grad_flow[f"fus_{layer_key}"] = layer_grad ** 0.5
+                grad_flow["fusion"] = fusion_grad ** 0.5 if fusion_count > 0 else 0.0
+
+                # 4. KV adapters gradient (per layer, for KV augmentation mode)
+                if hasattr(model.safe_model, 'kv_adapters') and model.safe_model.kv_adapters is not None:
+                    for layer_idx, adapter in model.safe_model.kv_adapters.items():
+                        layer_grad = 0.0
+                        layer_count = 0
+                        for p in adapter.parameters():
+                            if p.grad is not None:
+                                layer_grad += p.grad.float().norm().item() ** 2
+                                layer_count += 1
+                        grad_flow[f"kv_L{layer_idx}"] = layer_grad ** 0.5 if layer_count > 0 else 0.0
+
+                # 5. Check if gradients are vanishing (ratio of later to earlier components)
+                if grad_flow["projector"] > 1e-10 and grad_flow["head"] > 1e-10:
+                    vanish_ratio = grad_flow["projector"] / grad_flow["head"]
+                else:
+                    vanish_ratio = 0.0
+
+                # Format and print
+                grad_str = " ".join([f"{k}={v:.6f}" for k, v in grad_flow.items()])
+                print(f"  [GradFlow] {grad_str} vanish_ratio={vanish_ratio:.2e}", flush=True)
+
+                # Alert if gradients are suspiciously small
+                if grad_flow["projector"] < 1e-6 and grad_flow["head"] > 1e-3:
+                    if not hasattr(model, "_vanish_warned"):
+                        model._vanish_warned = True
+                        print("  ⚠️  WARNING: Projector gradient ~0 but head gradient exists - VANISHING GRADIENT!", flush=True)
 
         preds = logits.argmax(dim=-1)
         total_correct += int((preds == labels).sum().item())
@@ -1021,6 +1102,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Freeze projector+fusion and train only the linear head.",
     )
+    p.add_argument(
+        "--eval-ablate-audio",
+        action="store_true",
+        help="Also evaluate with audio disabled (A/B diagnostic).",
+    )
     return p.parse_args()
 
 
@@ -1052,13 +1138,16 @@ def main() -> None:
     print(f"  pooling: {args.pooling}", flush=True)
     fusion_cfg = config.get("fusion_config", {})
     fusion_mode = fusion_cfg.get("fusion_mode", "additive")
+    is_kv_augment = (fusion_mode == "kv_augment")
     print(f"  fusion_mode: {fusion_mode}", flush=True)
     print(f"  fusion_config keys: {list(fusion_cfg.keys())}", flush=True)
-    if fusion_mode == "kv_augment":
+    if is_kv_augment:
         print(f"  ✓ KV Augmentation mode detected", flush=True)
         print(f"    query_adapter_rank: {fusion_cfg.get('query_adapter_rank', 'NOT SET')}", flush=True)
         print(f"    num_attention_heads: {fusion_cfg.get('num_attention_heads', 'NOT SET')}", flush=True)
         print(f"    head_dim: {fusion_cfg.get('head_dim', 'NOT SET')}", flush=True)
+    else:
+        print("  ✓ Using pre-FFN residual fusion (midlayer hooks)", flush=True)
     print("=" * 60 + "\n", flush=True)
 
     # Hard assertion for kv_augment mode
@@ -1101,6 +1190,26 @@ def main() -> None:
         pool_layers=pool_layers,
     ).to(device)
 
+    # === Verify pre-FFN fusion is set up correctly ===
+    print("\n" + "=" * 60, flush=True)
+    print("FUSION ARCHITECTURE VERIFICATION:", flush=True)
+    print(f"  enable_midlayer_fusion: {getattr(model.safe_model, 'enable_midlayer_fusion', 'NOT SET')}", flush=True)
+    print(f"  fusion_injection_point: {getattr(model.safe_model, 'fusion_injection_point', 'NOT SET')}", flush=True)
+    print(f"  enable_kv_augmentation: {getattr(model.safe_model, 'enable_kv_augmentation', 'NOT SET')}", flush=True)
+    if hasattr(model.safe_model, 'fusion_adapter') and model.safe_model.fusion_adapter is not None:
+        fa = model.safe_model.fusion_adapter
+        print(f"  fusion_adapter type: {type(fa).__name__}", flush=True)
+        if hasattr(fa, 'fusion_adapters'):
+            print(f"  fusion_adapters keys: {list(fa.fusion_adapters.keys())}", flush=True)
+        if hasattr(fa, 'fusion_layer_indices'):
+            print(f"  fusion_layer_indices: {fa.fusion_layer_indices}", flush=True)
+        fa_params = sum(p.numel() for p in fa.parameters())
+        fa_trainable = sum(p.numel() for p in fa.parameters() if p.requires_grad)
+        print(f"  fusion_adapter params: {fa_params:,} total, {fa_trainable:,} trainable", flush=True)
+    else:
+        print("  fusion_adapter: None (using KV augmentation or not initialized)", flush=True)
+    print("=" * 60 + "\n", flush=True)
+
     # === Verify KV augmentation is set up if using audio_attn pooling ===
     if args.pooling == "audio_attn":
         has_kv_manager = (
@@ -1122,77 +1231,43 @@ def main() -> None:
         print("[Mode] head-only: freezing SAFE trainables (projector+fusion)", flush=True)
         model.freeze_safe(True)
 
-    # === DEBUG: Comprehensive check BEFORE optimizer creation ===
-    print("\n" + "=" * 70, flush=True)
-    print("DEBUG: Checking kv_adapters and param collection BEFORE optimizer...", flush=True)
-    print("=" * 70, flush=True)
+    # === KV-augment debug (only when in kv_augment mode) ===
+    if is_kv_augment:
+        print("\n" + "=" * 70, flush=True)
+        print("DEBUG: Checking kv_adapters and param collection BEFORE optimizer...", flush=True)
+        print("=" * 70, flush=True)
 
-    # 1. Check kv_adapters exists
-    print("\n1. KV_ADAPTERS CHECK:", flush=True)
-    if hasattr(model.safe_model, 'kv_adapters'):
-        if model.safe_model.kv_adapters is not None:
-            print(f"   ✓ kv_adapters exists, type={type(model.safe_model.kv_adapters)}", flush=True)
-            print(f"   ✓ Keys: {list(model.safe_model.kv_adapters.keys())}", flush=True)
-            kv_param_count = sum(1 for _ in model.safe_model.kv_adapters.parameters())
-            kv_trainable_count = sum(1 for p in model.safe_model.kv_adapters.parameters() if p.requires_grad)
-            print(f"   ✓ Total params: {kv_param_count}, Trainable: {kv_trainable_count}", flush=True)
-            print("\n   Named parameters:", flush=True)
-            for name, p in model.safe_model.kv_adapters.named_parameters():
-                status = "✓" if p.requires_grad else "❌FROZEN"
-                print(f"      {status} {name}: {tuple(p.shape)}", flush=True)
+        # 1. Check kv_adapters exists
+        print("\n1. KV_ADAPTERS CHECK:", flush=True)
+        if hasattr(model.safe_model, 'kv_adapters'):
+            if model.safe_model.kv_adapters is not None:
+                print(f"   ✓ kv_adapters exists, type={type(model.safe_model.kv_adapters)}", flush=True)
+                print(f"   ✓ Keys: {list(model.safe_model.kv_adapters.keys())}", flush=True)
+                kv_param_count = sum(1 for _ in model.safe_model.kv_adapters.parameters())
+                kv_trainable_count = sum(1 for p in model.safe_model.kv_adapters.parameters() if p.requires_grad)
+                print(f"   ✓ Total params: {kv_param_count}, Trainable: {kv_trainable_count}", flush=True)
+            else:
+                print("   ❌ kv_adapters is None - KV augmentation not initialized!", flush=True)
+                print("      Check: fusion_config.fusion_mode == 'kv_augment'?", flush=True)
         else:
-            print("   ❌ kv_adapters is None - KV augmentation not initialized!", flush=True)
-            print("      Check: fusion_config.fusion_mode == 'kv_augment'?", flush=True)
-    else:
-        print("   ❌ model.safe_model has no kv_adapters attribute!", flush=True)
+            print("   ❌ model.safe_model has no kv_adapters attribute!", flush=True)
 
-    # 2. Check enable_kv_augmentation flag
-    print("\n2. ENABLE FLAGS:", flush=True)
-    print(f"   enable_kv_augmentation: {getattr(model.safe_model, 'enable_kv_augmentation', 'NOT SET')}", flush=True)
-    print(f"   fusion_mode: {getattr(model.safe_model, 'fusion_mode', 'NOT SET')}", flush=True)
+        # 2. Check enable_kv_augmentation flag
+        print("\n2. ENABLE FLAGS:", flush=True)
+        print(f"   enable_kv_augmentation: {getattr(model.safe_model, 'enable_kv_augmentation', 'NOT SET')}", flush=True)
+        print(f"   fusion_mode: {getattr(model.safe_model, 'fusion_mode', 'NOT SET')}", flush=True)
 
-    # 3. Trace get_safe_params()
-    print("\n3. GET_SAFE_PARAMS() OUTPUT:", flush=True)
-    safe_params = model.get_safe_params()
-    print(f"   Total params from get_safe_params(): {len(safe_params)}", flush=True)
+        # 3. List trainable param names
+        trainable_names = [n for n, p in model.safe_model.named_parameters() if p.requires_grad]
+        query_adapter_count = sum(1 for n in trainable_names if "query_adapter" in n)
+        print(f"   Query adapter params: {query_adapter_count}", flush=True)
+        print(f"\n   First 10 trainable param names:", flush=True)
+        for n in trainable_names[:10]:
+            print(f"      - {n}", flush=True)
+        if len(trainable_names) > 10:
+            print(f"      ... and {len(trainable_names) - 10} more", flush=True)
 
-    # Try to identify each param
-    param_sources = []
-    for param in safe_params:
-        found = False
-        for name, p in model.named_parameters():
-            if p is param:
-                param_sources.append(name)
-                found = True
-                break
-        if not found:
-            param_sources.append("(unknown)")
-
-    # Count by source
-    projector_count = sum(1 for n in param_sources if "projector" in n.lower())
-    kv_count = sum(1 for n in param_sources if "kv_adapter" in n.lower())
-    query_count = sum(1 for n in param_sources if "query_adapter" in n.lower())
-    other_count = len(param_sources) - projector_count - kv_count - query_count
-
-    print(f"   - From audio_projector: {projector_count}", flush=True)
-    print(f"   - From kv_adapters (K,V): {kv_count}", flush=True)
-    print(f"   - From query_adapter (ΔQ): {query_count}", flush=True)
-    print(f"   - Other: {other_count}", flush=True)
-
-    if query_count == 0 and hasattr(model.safe_model, 'kv_adapters') and model.safe_model.kv_adapters is not None:
-        print("\n   ⚠️ PROBLEM: kv_adapters exists but query_adapter params NOT in get_safe_params()!", flush=True)
-        print("   Let me check get_trainable_parameters directly...", flush=True)
-        direct_params = list(model.safe_model.get_trainable_parameters())
-        direct_count = sum(1 for n, p in model.safe_model.named_parameters() if any(p is dp for dp in direct_params) and "query_adapter" in n)
-        print(f"   Direct query_adapter count from get_trainable_parameters: {direct_count}", flush=True)
-
-    print("\n   First 10 param names:", flush=True)
-    for n in param_sources[:10]:
-        print(f"      - {n}", flush=True)
-    if len(param_sources) > 10:
-        print(f"      ... and {len(param_sources) - 10} more", flush=True)
-
-    print("=" * 70 + "\n", flush=True)
+        print("=" * 70 + "\n", flush=True)
 
     optimizer = build_optimizer(
         model=model,
@@ -1290,6 +1365,14 @@ def main() -> None:
         val_metrics = evaluate(model=model, loader=test_loader, device=device, args=args)
         print(f"Train | loss={train_metrics['loss']:.4f} acc={train_metrics['acc']:.4f}", flush=True)
         print(f"Test  | loss={val_metrics['loss']:.4f} acc={val_metrics['acc']:.4f}", flush=True)
+
+        if args.eval_ablate_audio:
+            val_metrics_no_audio = evaluate_ablate_audio(model=model, loader=test_loader, device=device, args=args)
+            print(
+                f"Test(A/B) | acc audio={val_metrics['acc']:.4f} no_audio={val_metrics_no_audio['acc']:.4f} "
+                f"delta={val_metrics['acc'] - val_metrics_no_audio['acc']:.4f}",
+                flush=True,
+            )
 
         if args.wandb and wandb is not None:
             wandb.log(
