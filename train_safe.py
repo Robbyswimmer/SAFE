@@ -2242,12 +2242,16 @@ def train_epoch(
             # Apply text dropout to force audio reliance (modality dropout)
             text_dropout_prob = float(config.get("text_dropout_prob", 0.0) or 0.0)
             if text_dropout_prob > 0.0 and not dummy_batch:
+                # Get pad_token_id from model config
+                pad_token_id = base_model.base_vl.llm.config.pad_token_id
+                if pad_token_id is None:
+                    pad_token_id = 0  # Fallback
                 input_ids, attention_mask, labels = apply_text_dropout(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     labels=labels,
                     dropout_prob=text_dropout_prob,
-                    pad_token_id=tokenizer.pad_token_id,
+                    pad_token_id=pad_token_id,
                 )
 
             # Enable attention weight capture for min_audio_attention loss (KV augment mode)
