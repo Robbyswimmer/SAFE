@@ -2950,13 +2950,13 @@ def run_alignment_pretraining(
     world_size = dist_info.get("world_size", 1) if dist_info else 1
 
     if is_main:
-        print("\n" + "=" * 60)
-        print("STAGE 1: Projector Alignment Pre-training")
-        print("=" * 60)
-        print(f"  Epochs: {alignment_epochs}")
-        print(f"  Loss: Contrastive (audio ↔ caption embeddings)")
-        print(f"  Training: Projector ONLY (fusion frozen)")
-        print("=" * 60 + "\n")
+        print("\n" + "=" * 60, flush=True)
+        print("STAGE 1: Projector Alignment Pre-training", flush=True)
+        print("=" * 60, flush=True)
+        print(f"  Epochs: {alignment_epochs}", flush=True)
+        print(f"  Loss: Contrastive (audio ↔ caption embeddings)", flush=True)
+        print(f"  Training: Projector ONLY (fusion frozen)", flush=True)
+        print("=" * 60 + "\n", flush=True)
 
     # Get base model (handle DDP)
     base_model = model.module if hasattr(model, 'module') else model
@@ -2978,15 +2978,19 @@ def run_alignment_pretraining(
 
     if is_main:
         num_params = sum(p.numel() for p in projector_params)
-        print(f"  Trainable projector parameters: {num_params:,}")
+        print(f"  Trainable projector parameters: {num_params:,}", flush=True)
 
     # Create optimizer for projector only
     alignment_lr = float(config.get("alignment_lr", 1e-3) or 1e-3)
     optimizer = AdamW(projector_params, lr=alignment_lr, weight_decay=0.01)
+    if is_main:
+        print(f"  Optimizer created with lr={alignment_lr}", flush=True)
 
     # Setup AMP
     use_amp = config.get("fp16", False)
     scaler = GradScaler() if use_amp else None
+    if is_main:
+        print(f"  AMP enabled: {use_amp}", flush=True)
 
     # Contrastive loss temperature
     temperature = float(config.get("audio_contrastive_temperature", 0.07) or 0.07)
@@ -2994,14 +2998,22 @@ def run_alignment_pretraining(
     # Training loop
     grad_accum = max(1, int(config.get("gradient_accumulation_steps", 1) or 1))
     max_grad_norm = float(config.get("max_grad_norm", 1.0) or 1.0)
+    total_batches = len(train_loader)
+    if is_main:
+        print(f"  Total batches per epoch: {total_batches}, grad_accum: {grad_accum}", flush=True)
+        print(f"  Starting alignment training loop...", flush=True)
 
     global_step = 0
     for epoch in range(alignment_epochs):
+        if is_main:
+            print(f"\n  [Alignment] Epoch {epoch+1}/{alignment_epochs} starting...", flush=True)
         base_model.train()
         epoch_loss = 0.0
         num_batches = 0
 
         for batch_idx, batch in enumerate(train_loader):
+            if batch_idx == 0 and is_main:
+                print(f"    Got first batch from dataloader", flush=True)
             # Get audio and captions
             audio_paths = batch.get("audio_paths") or batch.get("audio_path", [])
             captions = batch.get("captions") or batch.get("caption", [])
@@ -3014,11 +3026,15 @@ def run_alignment_pretraining(
                 captions = [c[0] if c else "" for c in captions]
 
             try:
+                if batch_idx == 0 and is_main:
+                    print(f"    Encoding audio ({len(audio_paths)} samples)...", flush=True)
                 # Encode audio through CLAP + projector
                 with torch.no_grad():
                     audio_embeds = base_model.audio_encoder.encode_audio(
                         audio_paths, device=device
                     )
+                if batch_idx == 0 and is_main:
+                    print(f"    Audio encoded: {audio_embeds.shape}", flush=True)
 
                 # Project audio to LLM space
                 if use_amp:
@@ -3029,15 +3045,21 @@ def run_alignment_pretraining(
                         )
                 else:
                     audio_tokens = base_model.audio_projector(audio_embeds.float())
+                if batch_idx == 0 and is_main:
+                    print(f"    Audio projected: {audio_tokens.shape}", flush=True)
 
                 # Pool audio tokens: (B, num_tokens, hidden) -> (B, hidden)
                 audio_pooled = audio_tokens.mean(dim=1).float()
 
                 # Embed captions
+                if batch_idx == 0 and is_main:
+                    print(f"    Embedding captions...", flush=True)
                 text_embeds = _embed_texts_for_contrastive(
                     model, captions, device,
                     max_length=int(config.get("audio_contrastive_max_length", 48) or 48)
                 )
+                if batch_idx == 0 and is_main:
+                    print(f"    Text embedded: {text_embeds.shape}", flush=True)
 
                 # Normalize
                 audio_norm = torch.nn.functional.normalize(audio_pooled, dim=-1)
@@ -3063,6 +3085,10 @@ def run_alignment_pretraining(
 
                 epoch_loss += loss.item() * grad_accum
                 num_batches += 1
+
+                # Batch-level progress for debugging (first 5 batches, then every 50)
+                if is_main and (batch_idx < 5 or batch_idx % 50 == 0):
+                    print(f"    [Align] Batch {batch_idx+1}/{total_batches} | loss: {loss.item()*grad_accum:.4f}", flush=True)
 
                 # Optimizer step
                 if (batch_idx + 1) % grad_accum == 0:
@@ -3091,8 +3117,10 @@ def run_alignment_pretraining(
                             }, step=global_step)
 
             except Exception as e:
-                if is_main and batch_idx % 100 == 0:
+                if is_main:
+                    import traceback
                     print(f"[Align] Batch {batch_idx} error: {e}", flush=True)
+                    traceback.print_exc()
                 continue
 
         # Epoch summary
@@ -3153,6 +3181,9 @@ def train(
     if dist_info is None:
         dist_info = {"rank": 0, "world_size": 1, "is_main": True, "distributed": False}
     is_main = dist_info["is_main"]
+
+    if is_main:
+        print("Entered train() function...", flush=True)
 
     # For DDP, get the underlying model for parameter grouping
     base_model = model.module if dist_info["distributed"] else model
@@ -4549,6 +4580,8 @@ def main():
     config["train_eval_ablate_max_batches"] = args.train_eval_ablate_max_batches
 
     # Optional W&B init (after model + data are available so config is complete)
+    if is_main:
+        print("Initializing W&B...", flush=True)
     wandb_run = _maybe_init_wandb(
         args,
         train_config=config,
@@ -4560,6 +4593,8 @@ def main():
         train_size=len(train_dataset),
         val_size=len(val_dataset),
     )
+    if is_main:
+        print("W&B initialized, starting training...", flush=True)
 
     # Evaluation only mode
     if args.eval_only:
