@@ -75,6 +75,7 @@ ABLATION_LOSS_EVERY_STEPS=${ABLATION_LOSS_EVERY_STEPS:-1}
 FREEZE_PROJECTOR_AFTER_STEPS=${FREEZE_PROJECTOR_AFTER_STEPS:-0}  # Freeze audio projector after N steps (0=disabled)
 FUSION_BOTTLENECK_DIM=${FUSION_BOTTLENECK_DIM:-""}               # e.g., "512" - overrides config default (256)
 TEXT_DROPOUT_PROB=${TEXT_DROPOUT_PROB:-0.0}                      # Modality dropout: randomly drop text tokens (0.0=disabled)
+PROJ_SCALE_MIN=${PROJ_SCALE_MIN:-0.5}                            # Minimum projector scale (1.0 prevents suppression)
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}  # e.g., "8,16,24" - overrides config default
 LORA_RANK=${LORA_RANK:-""}                        # e.g., "8" - overrides config default
@@ -169,6 +170,11 @@ if [[ "${TEXT_DROPOUT_PROB}" != "0.0" && "${TEXT_DROPOUT_PROB}" != "0" ]]; then
   TEXT_DROPOUT_ARGS+=(--text-dropout-prob "${TEXT_DROPOUT_PROB}")
 fi
 
+PROJ_SCALE_MIN_ARGS=()
+if [[ "${PROJ_SCALE_MIN}" != "0.5" ]]; then
+  PROJ_SCALE_MIN_ARGS+=(--proj-scale-min "${PROJ_SCALE_MIN}")
+fi
+
 AUDIO_AUGMENT_ARGS=()
 if [[ "${AUDIO_AUGMENT}" != "0" ]]; then
   AUDIO_AUGMENT_ARGS+=(--audio-augment)
@@ -214,6 +220,7 @@ if [[ -n "${FUSION_BOTTLENECK_DIM}" ]]; then
   echo "Fusion bottleneck dim: ${FUSION_BOTTLENECK_DIM}"
 fi
 echo "Text dropout prob: ${TEXT_DROPOUT_PROB}"
+echo "Proj scale min: ${PROJ_SCALE_MIN}"
 echo "Gradient checkpointing: ${GRADIENT_CHECKPOINTING}"
 echo "Num workers: ${NUM_WORKERS}"
 echo "Max eval batches: ${MAX_EVAL_BATCHES}"
@@ -304,6 +311,7 @@ ${LAUNCHER} train_safe.py \
     "${FREEZE_PROJECTOR_ARGS[@]}" \
     "${FUSION_BOTTLENECK_ARGS[@]}" \
     "${TEXT_DROPOUT_ARGS[@]}" \
+    "${PROJ_SCALE_MIN_ARGS[@]}" \
     "${AUDIO_AUGMENT_ARGS[@]}" \
     "${WANDB_ARGS[@]}" \
     ${EXTRA_ARGS}

@@ -3804,6 +3804,12 @@ def main():
         help="Probability of dropping text tokens during training to force audio reliance (0.0=disabled)",
     )
     parser.add_argument(
+        "--proj-scale-min",
+        type=float,
+        default=0.5,
+        help="Minimum value for projector output_scale (prevents audio suppression, default 0.5, use 1.0 to force full audio)",
+    )
+    parser.add_argument(
         "--ablation-loss-weight",
         type=float,
         default=0.0,
@@ -4036,6 +4042,13 @@ def main():
     # Initialize model using the canonical create_model helper
     model = create_model(model_config) if is_main else create_model(model_config)
     model = model.to(device)
+
+    # Set projector scale minimum to prevent audio suppression
+    proj_scale_min = args.proj_scale_min
+    if hasattr(model, 'audio_projector') and model.audio_projector is not None:
+        model.audio_projector._scale_min = proj_scale_min
+        if is_main:
+            print(f"  ✓ Projector scale minimum set to: {proj_scale_min}")
 
     # If the base model is fp16 (common), LoRA/adapters may also be fp16.
     # GradScaler cannot unscale fp16 gradients, so keep trainable params fp32.
@@ -4288,6 +4301,7 @@ def main():
         "ablation_loss_every_steps": args.ablation_loss_every_steps,
         "freeze_projector_after_steps": args.freeze_projector_after_steps,
         "text_dropout_prob": args.text_dropout_prob,
+        "proj_scale_min": args.proj_scale_min,
         "audio_augment": args.audio_augment,
         "audio_augment_prob": args.audio_augment_prob,
         "export_eval_samples": bool(args.export_eval_samples),
