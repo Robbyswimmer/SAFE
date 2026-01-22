@@ -137,6 +137,55 @@ def cast_trainable_params_to_fp32(model: nn.Module) -> int:
     return converted
 
 
+def apply_text_dropout(
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    labels: torch.Tensor,
+    dropout_prob: float,
+    pad_token_id: int,
+    ignore_label_id: int = -100,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Apply modality dropout to text tokens to force audio reliance.
+
+    Randomly replaces text tokens with pad_token_id and updates attention_mask.
+    Does NOT drop tokens that are:
+    - Already pad tokens
+    - Part of the prompt (where labels == ignore_label_id)
+
+    Args:
+        input_ids: (batch, seq_len) token ids
+        attention_mask: (batch, seq_len) attention mask
+        labels: (batch, seq_len) labels (-100 for prompt tokens)
+        dropout_prob: probability of dropping each token
+        pad_token_id: token id to replace dropped tokens with
+        ignore_label_id: label value indicating prompt tokens (default -100)
+
+    Returns:
+        Modified (input_ids, attention_mask, labels)
+    """
+    if dropout_prob <= 0.0:
+        return input_ids, attention_mask, labels
+
+    # Create dropout mask - only drop tokens that are:
+    # 1. Not already pad tokens (attention_mask == 1)
+    # 2. Part of the answer (labels != ignore_label_id)
+    droppable = (attention_mask == 1) & (labels != ignore_label_id)
+
+    # Random mask
+    drop_mask = torch.rand_like(input_ids, dtype=torch.float) < dropout_prob
+    drop_mask = drop_mask & droppable
+
+    # Apply dropout
+    input_ids = input_ids.clone()
+    attention_mask = attention_mask.clone()
+
+    input_ids[drop_mask] = pad_token_id
+    attention_mask[drop_mask] = 0
+
+    return input_ids, attention_mask, labels
+
+
 def summarize_trainable_parameters(model: nn.Module) -> Dict[str, int]:
     """
     Return a breakdown of trainable parameters by component and sub-type.
@@ -2190,6 +2239,17 @@ def train_epoch(
             if audio_attention_mask is not None:
                 audio_attention_mask = audio_attention_mask.to(device)
 
+            # Apply text dropout to force audio reliance (modality dropout)
+            text_dropout_prob = float(config.get("text_dropout_prob", 0.0) or 0.0)
+            if text_dropout_prob > 0.0 and not dummy_batch:
+                input_ids, attention_mask, labels = apply_text_dropout(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    dropout_prob=text_dropout_prob,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
+
             # Enable attention weight capture for min_audio_attention loss (KV augment mode)
             if (hasattr(base_model, 'min_audio_attention_loss') and
                 base_model.min_audio_attention_loss is not None and
@@ -3734,6 +3794,12 @@ def main():
         help="Override fusion bottleneck dimension (None = use config default)",
     )
     parser.add_argument(
+        "--text-dropout-prob",
+        type=float,
+        default=0.0,
+        help="Probability of dropping text tokens during training to force audio reliance (0.0=disabled)",
+    )
+    parser.add_argument(
         "--ablation-loss-weight",
         type=float,
         default=0.0,
@@ -4217,6 +4283,7 @@ def main():
         "ablation_loss_margin": args.ablation_loss_margin,
         "ablation_loss_every_steps": args.ablation_loss_every_steps,
         "freeze_projector_after_steps": args.freeze_projector_after_steps,
+        "text_dropout_prob": args.text_dropout_prob,
         "audio_augment": args.audio_augment,
         "audio_augment_prob": args.audio_augment_prob,
         "export_eval_samples": bool(args.export_eval_samples),
