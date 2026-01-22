@@ -76,6 +76,8 @@ FREEZE_PROJECTOR_AFTER_STEPS=${FREEZE_PROJECTOR_AFTER_STEPS:-0}  # Freeze audio 
 FUSION_BOTTLENECK_DIM=${FUSION_BOTTLENECK_DIM:-""}               # e.g., "512" - overrides config default (256)
 TEXT_DROPOUT_PROB=${TEXT_DROPOUT_PROB:-0.0}                      # Modality dropout: randomly drop text tokens (0.0=disabled)
 PROJ_SCALE_MIN=${PROJ_SCALE_MIN:-0.5}                            # Minimum projector scale (1.0 prevents suppression)
+ALIGNMENT_EPOCHS=${ALIGNMENT_EPOCHS:-0}                          # Stage 1: Projector alignment pre-training epochs (0=disabled)
+ALIGNMENT_LR=${ALIGNMENT_LR:-1e-3}                               # Learning rate for alignment pre-training
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}  # e.g., "8,16,24" - overrides config default
 LORA_RANK=${LORA_RANK:-""}                        # e.g., "8" - overrides config default
@@ -175,6 +177,12 @@ if [[ "${PROJ_SCALE_MIN}" != "0.5" ]]; then
   PROJ_SCALE_MIN_ARGS+=(--proj-scale-min "${PROJ_SCALE_MIN}")
 fi
 
+ALIGNMENT_ARGS=()
+if [[ "${ALIGNMENT_EPOCHS}" != "0" ]]; then
+  ALIGNMENT_ARGS+=(--alignment-epochs "${ALIGNMENT_EPOCHS}")
+  ALIGNMENT_ARGS+=(--alignment-lr "${ALIGNMENT_LR}")
+fi
+
 AUDIO_AUGMENT_ARGS=()
 if [[ "${AUDIO_AUGMENT}" != "0" ]]; then
   AUDIO_AUGMENT_ARGS+=(--audio-augment)
@@ -221,6 +229,10 @@ if [[ -n "${FUSION_BOTTLENECK_DIM}" ]]; then
 fi
 echo "Text dropout prob: ${TEXT_DROPOUT_PROB}"
 echo "Proj scale min: ${PROJ_SCALE_MIN}"
+if [[ "${ALIGNMENT_EPOCHS}" != "0" ]]; then
+  echo "Alignment epochs: ${ALIGNMENT_EPOCHS} (Stage 1 pre-training)"
+  echo "Alignment LR: ${ALIGNMENT_LR}"
+fi
 echo "Gradient checkpointing: ${GRADIENT_CHECKPOINTING}"
 echo "Num workers: ${NUM_WORKERS}"
 echo "Max eval batches: ${MAX_EVAL_BATCHES}"
@@ -312,6 +324,7 @@ ${LAUNCHER} train_safe.py \
     "${FUSION_BOTTLENECK_ARGS[@]}" \
     "${TEXT_DROPOUT_ARGS[@]}" \
     "${PROJ_SCALE_MIN_ARGS[@]}" \
+    "${ALIGNMENT_ARGS[@]}" \
     "${AUDIO_AUGMENT_ARGS[@]}" \
     "${WANDB_ARGS[@]}" \
     ${EXTRA_ARGS}

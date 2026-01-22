@@ -2917,6 +2917,205 @@ def train_epoch(
     return metrics, optimizer_step
 
 
+def run_alignment_pretraining(
+    model: SAFEModel,
+    train_loader: DataLoader,
+    config: Dict[str, Any],
+    device: torch.device,
+    wandb_run: Any = None,
+    dist_info: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Stage 1: Projector alignment pre-training with contrastive loss.
+
+    Trains ONLY the audio projector to align audio embeddings with text embeddings
+    in the LLM's embedding space. This ensures the projector learns a semantically
+    meaningful mapping before caption generation training.
+
+    Args:
+        model: SAFE model (projector will be trained, everything else frozen)
+        train_loader: Training data loader
+        config: Training configuration
+        device: Device to train on
+        wandb_run: Optional W&B run for logging
+        dist_info: Distributed training info
+    """
+    from torch.cuda.amp import GradScaler, autocast
+
+    alignment_epochs = int(config.get("alignment_epochs", 0) or 0)
+    if alignment_epochs <= 0:
+        return
+
+    is_main = dist_info is None or dist_info.get("is_main", True)
+    world_size = dist_info.get("world_size", 1) if dist_info else 1
+
+    if is_main:
+        print("\n" + "=" * 60)
+        print("STAGE 1: Projector Alignment Pre-training")
+        print("=" * 60)
+        print(f"  Epochs: {alignment_epochs}")
+        print(f"  Loss: Contrastive (audio ↔ caption embeddings)")
+        print(f"  Training: Projector ONLY (fusion frozen)")
+        print("=" * 60 + "\n")
+
+    # Get base model (handle DDP)
+    base_model = model.module if hasattr(model, 'module') else model
+
+    # Freeze everything, then unfreeze projector only
+    for param in base_model.parameters():
+        param.requires_grad = False
+
+    projector_params = []
+    if hasattr(base_model, 'audio_projector') and base_model.audio_projector is not None:
+        for param in base_model.audio_projector.parameters():
+            param.requires_grad = True
+            projector_params.append(param)
+
+    if not projector_params:
+        if is_main:
+            print("⚠️ No projector parameters found, skipping alignment pre-training")
+        return
+
+    if is_main:
+        num_params = sum(p.numel() for p in projector_params)
+        print(f"  Trainable projector parameters: {num_params:,}")
+
+    # Create optimizer for projector only
+    alignment_lr = float(config.get("alignment_lr", 1e-3) or 1e-3)
+    optimizer = AdamW(projector_params, lr=alignment_lr, weight_decay=0.01)
+
+    # Setup AMP
+    use_amp = config.get("fp16", False)
+    scaler = GradScaler() if use_amp else None
+
+    # Contrastive loss temperature
+    temperature = float(config.get("audio_contrastive_temperature", 0.07) or 0.07)
+
+    # Training loop
+    grad_accum = max(1, int(config.get("gradient_accumulation_steps", 1) or 1))
+    max_grad_norm = float(config.get("max_grad_norm", 1.0) or 1.0)
+
+    global_step = 0
+    for epoch in range(alignment_epochs):
+        base_model.train()
+        epoch_loss = 0.0
+        num_batches = 0
+
+        for batch_idx, batch in enumerate(train_loader):
+            # Get audio and captions
+            audio_paths = batch.get("audio_paths") or batch.get("audio_path", [])
+            captions = batch.get("captions") or batch.get("caption", [])
+
+            if not audio_paths or not captions:
+                continue
+
+            # Handle list of lists for captions (take first caption)
+            if isinstance(captions[0], list):
+                captions = [c[0] if c else "" for c in captions]
+
+            try:
+                # Encode audio through CLAP + projector
+                with torch.no_grad():
+                    audio_embeds = base_model.audio_encoder.encode_audio(
+                        audio_paths, device=device
+                    )
+
+                # Project audio to LLM space
+                if use_amp:
+                    with autocast():
+                        audio_tokens = base_model.audio_projector(
+                            audio_embeds.float(),
+                            out_dtype=torch.float16
+                        )
+                else:
+                    audio_tokens = base_model.audio_projector(audio_embeds.float())
+
+                # Pool audio tokens: (B, num_tokens, hidden) -> (B, hidden)
+                audio_pooled = audio_tokens.mean(dim=1).float()
+
+                # Embed captions
+                text_embeds = _embed_texts_for_contrastive(
+                    model, captions, device,
+                    max_length=int(config.get("audio_contrastive_max_length", 48) or 48)
+                )
+
+                # Normalize
+                audio_norm = torch.nn.functional.normalize(audio_pooled, dim=-1)
+                text_norm = torch.nn.functional.normalize(text_embeds, dim=-1)
+
+                # Contrastive loss (InfoNCE)
+                sim = audio_norm @ text_norm.t() / max(temperature, 1e-5)
+                targets = torch.arange(sim.size(0), device=device)
+
+                if use_amp:
+                    with autocast():
+                        loss = torch.nn.functional.cross_entropy(sim, targets)
+                        loss = loss / grad_accum
+                else:
+                    loss = torch.nn.functional.cross_entropy(sim, targets)
+                    loss = loss / grad_accum
+
+                # Backward
+                if use_amp and scaler is not None:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
+                epoch_loss += loss.item() * grad_accum
+                num_batches += 1
+
+                # Optimizer step
+                if (batch_idx + 1) % grad_accum == 0:
+                    if use_amp and scaler is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(projector_params, max_grad_norm)
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(projector_params, max_grad_norm)
+                        optimizer.step()
+                    optimizer.zero_grad()
+                    global_step += 1
+
+                    # Log progress
+                    if is_main and global_step % 10 == 0:
+                        avg_loss = epoch_loss / max(num_batches, 1)
+                        print(f"[Align] Epoch {epoch+1}/{alignment_epochs} | "
+                              f"Step {global_step} | Loss: {avg_loss:.4f}", flush=True)
+
+                        if wandb_run is not None:
+                            wandb_run.log({
+                                "align/loss": avg_loss,
+                                "align/epoch": epoch + 1,
+                                "align/step": global_step,
+                            }, step=global_step)
+
+            except Exception as e:
+                if is_main and batch_idx % 100 == 0:
+                    print(f"[Align] Batch {batch_idx} error: {e}", flush=True)
+                continue
+
+        # Epoch summary
+        if is_main:
+            avg_loss = epoch_loss / max(num_batches, 1)
+            print(f"\n[Align] Epoch {epoch+1}/{alignment_epochs} complete | "
+                  f"Avg Loss: {avg_loss:.4f}\n", flush=True)
+
+    # Freeze projector after alignment
+    if is_main:
+        print("\n" + "=" * 60)
+        print("Stage 1 complete - Freezing projector for Stage 2")
+        print("=" * 60 + "\n")
+
+    for param in base_model.audio_projector.parameters():
+        param.requires_grad = False
+
+    # Re-enable fusion adapter for Stage 2
+    if hasattr(base_model, 'fusion_adapter') and base_model.fusion_adapter is not None:
+        for param in base_model.fusion_adapter.parameters():
+            param.requires_grad = True
+
+
 def train(
     model: SAFEModel,
     train_loader: DataLoader,
@@ -2957,6 +3156,24 @@ def train(
 
     # For DDP, get the underlying model for parameter grouping
     base_model = model.module if dist_info["distributed"] else model
+
+    # Stage 1: Alignment pre-training (if enabled)
+    # This trains ONLY the projector with contrastive loss before caption training
+    alignment_epochs = int(config.get("alignment_epochs", 0) or 0)
+    if alignment_epochs > 0:
+        run_alignment_pretraining(
+            model=model,
+            train_loader=train_loader,
+            config=config,
+            device=device,
+            wandb_run=wandb_run,
+            dist_info=dist_info,
+        )
+        # After alignment, projector is frozen - re-check requires_grad state
+        if is_main:
+            proj_trainable = sum(1 for p in base_model.audio_projector.parameters() if p.requires_grad)
+            fusion_trainable = sum(1 for p in base_model.fusion_adapter.parameters() if p.requires_grad) if base_model.fusion_adapter else 0
+            print(f"[Stage 2] Projector params trainable: {proj_trainable}, Fusion params trainable: {fusion_trainable}")
 
     # Setup optimizer with different learning rates (Stage-A style defaults)
     lr_projector = config.get("learning_rate_projector", 2e-4)
@@ -3810,6 +4027,18 @@ def main():
         help="Minimum value for projector output_scale (prevents audio suppression, default 0.5, use 1.0 to force full audio)",
     )
     parser.add_argument(
+        "--alignment-epochs",
+        type=int,
+        default=0,
+        help="Stage 1: Number of epochs for projector alignment pre-training with contrastive loss (0=disabled)",
+    )
+    parser.add_argument(
+        "--alignment-lr",
+        type=float,
+        default=1e-3,
+        help="Learning rate for Stage 1 alignment pre-training",
+    )
+    parser.add_argument(
         "--ablation-loss-weight",
         type=float,
         default=0.0,
@@ -4302,6 +4531,8 @@ def main():
         "freeze_projector_after_steps": args.freeze_projector_after_steps,
         "text_dropout_prob": args.text_dropout_prob,
         "proj_scale_min": args.proj_scale_min,
+        "alignment_epochs": args.alignment_epochs,
+        "alignment_lr": args.alignment_lr,
         "audio_augment": args.audio_augment,
         "audio_augment_prob": args.audio_augment_prob,
         "export_eval_samples": bool(args.export_eval_samples),
