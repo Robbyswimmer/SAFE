@@ -3014,27 +3014,40 @@ def run_alignment_pretraining(
         for batch_idx, batch in enumerate(train_loader):
             if batch_idx == 0 and is_main:
                 print(f"    Got first batch from dataloader", flush=True)
+                print(f"    Batch keys: {list(batch.keys())}", flush=True)
             # Get audio and captions
             audio_paths = batch.get("audio_paths") or batch.get("audio_path", [])
             captions = batch.get("captions") or batch.get("caption", [])
 
+            if batch_idx == 0 and is_main:
+                print(f"    audio_paths: {len(audio_paths) if audio_paths else 'None/empty'}", flush=True)
+                print(f"    captions: {len(captions) if captions else 'None/empty'}", flush=True)
+
             if not audio_paths or not captions:
+                if batch_idx == 0 and is_main:
+                    print(f"    Skipping batch - no audio/captions", flush=True)
                 continue
 
             # Handle list of lists for captions (take first caption)
             if isinstance(captions[0], list):
                 captions = [c[0] if c else "" for c in captions]
 
+            if batch_idx == 0 and is_main:
+                print(f"    Entering try block for audio encoding...", flush=True)
+
             try:
+                import time as _time
+                _t0 = _time.time()
                 if batch_idx == 0 and is_main:
                     print(f"    Encoding audio ({len(audio_paths)} samples)...", flush=True)
+                    print(f"    First audio path: {audio_paths[0]}", flush=True)
                 # Encode audio through CLAP + projector
                 with torch.no_grad():
                     audio_embeds = base_model.audio_encoder.encode_audio(
                         audio_paths, device=device
                     )
                 if batch_idx == 0 and is_main:
-                    print(f"    Audio encoded: {audio_embeds.shape}", flush=True)
+                    print(f"    Audio encoded: {audio_embeds.shape} (took {_time.time()-_t0:.2f}s)", flush=True)
 
                 # Project audio to LLM space
                 if use_amp:
