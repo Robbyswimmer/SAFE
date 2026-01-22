@@ -3015,9 +3015,9 @@ def run_alignment_pretraining(
             if batch_idx == 0 and is_main:
                 print(f"    Got first batch from dataloader", flush=True)
                 print(f"    Batch keys: {list(batch.keys())}", flush=True)
-            # Get audio and captions
+            # Get audio and captions (dataset uses 'answers' for captions in VQA format)
             audio_paths = batch.get("audio_paths") or batch.get("audio_path", [])
-            captions = batch.get("captions") or batch.get("caption", [])
+            captions = batch.get("captions") or batch.get("caption") or batch.get("answers", [])
 
             if batch_idx == 0 and is_main:
                 print(f"    audio_paths: {len(audio_paths) if audio_paths else 'None/empty'}", flush=True)
