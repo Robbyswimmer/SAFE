@@ -72,6 +72,8 @@ RESIDUAL_SCALE_WARMUP_END=${RESIDUAL_SCALE_WARMUP_END:-1.0}      # End at 100% a
 ABLATION_LOSS_WEIGHT=${ABLATION_LOSS_WEIGHT:-0.0}
 ABLATION_LOSS_MARGIN=${ABLATION_LOSS_MARGIN:-0.0}
 ABLATION_LOSS_EVERY_STEPS=${ABLATION_LOSS_EVERY_STEPS:-1}
+FREEZE_PROJECTOR_AFTER_STEPS=${FREEZE_PROJECTOR_AFTER_STEPS:-0}  # Freeze audio projector after N steps (0=disabled)
+FUSION_BOTTLENECK_DIM=${FUSION_BOTTLENECK_DIM:-""}               # e.g., "512" - overrides config default (256)
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}  # e.g., "8,16,24" - overrides config default
 LORA_RANK=${LORA_RANK:-""}                        # e.g., "8" - overrides config default
@@ -151,6 +153,16 @@ if [[ -n "${LABEL_SMOOTHING}" ]]; then
   LABEL_SMOOTHING_ARGS+=(--label-smoothing "${LABEL_SMOOTHING}")
 fi
 
+FREEZE_PROJECTOR_ARGS=()
+if [[ "${FREEZE_PROJECTOR_AFTER_STEPS}" != "0" ]]; then
+  FREEZE_PROJECTOR_ARGS+=(--freeze-projector-after-steps "${FREEZE_PROJECTOR_AFTER_STEPS}")
+fi
+
+FUSION_BOTTLENECK_ARGS=()
+if [[ -n "${FUSION_BOTTLENECK_DIM}" ]]; then
+  FUSION_BOTTLENECK_ARGS+=(--fusion-bottleneck-dim "${FUSION_BOTTLENECK_DIM}")
+fi
+
 AUDIO_AUGMENT_ARGS=()
 if [[ "${AUDIO_AUGMENT}" != "0" ]]; then
   AUDIO_AUGMENT_ARGS+=(--audio-augment)
@@ -191,6 +203,10 @@ echo "Audio contrastive weight: ${AUDIO_CONTRASTIVE_WEIGHT}"
 echo "Gate warmup steps: ${GATE_WARMUP_STEPS}"
 echo "Residual scale warmup: steps=${RESIDUAL_SCALE_WARMUP_STEPS} start=${RESIDUAL_SCALE_WARMUP_START} end=${RESIDUAL_SCALE_WARMUP_END}"
 echo "Ablation loss: weight=${ABLATION_LOSS_WEIGHT} margin=${ABLATION_LOSS_MARGIN} every=${ABLATION_LOSS_EVERY_STEPS}"
+echo "Freeze projector after steps: ${FREEZE_PROJECTOR_AFTER_STEPS}"
+if [[ -n "${FUSION_BOTTLENECK_DIM}" ]]; then
+  echo "Fusion bottleneck dim: ${FUSION_BOTTLENECK_DIM}"
+fi
 echo "Gradient checkpointing: ${GRADIENT_CHECKPOINTING}"
 echo "Num workers: ${NUM_WORKERS}"
 echo "Max eval batches: ${MAX_EVAL_BATCHES}"
@@ -278,6 +294,8 @@ ${LAUNCHER} train_safe.py \
     "${FUSION_LAYER_ARGS[@]}" \
     "${LORA_RANK_ARGS[@]}" \
     "${LABEL_SMOOTHING_ARGS[@]}" \
+    "${FREEZE_PROJECTOR_ARGS[@]}" \
+    "${FUSION_BOTTLENECK_ARGS[@]}" \
     "${AUDIO_AUGMENT_ARGS[@]}" \
     "${WANDB_ARGS[@]}" \
     ${EXTRA_ARGS}

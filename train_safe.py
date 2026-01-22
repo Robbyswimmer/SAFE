@@ -2440,6 +2440,15 @@ def train_epoch(
                     end_scale=res_end,
                 )
 
+            # Freeze projector after warmup to prevent audio suppression
+            freeze_projector_after = int(config.get("freeze_projector_after_steps", 0) or 0)
+            if freeze_projector_after > 0 and optimizer_step == freeze_projector_after:
+                projector = getattr(base_model, "audio_projector", None)
+                if projector is not None:
+                    for param in projector.parameters():
+                        param.requires_grad = False
+                    print(f"\n🔒 [Step {optimizer_step}] Froze audio_projector to prevent suppression", flush=True)
+
             # Comprehensive diagnostics (every 10 steps during warmup, every 50 steps after)
             diag_frequency = 10 if optimizer_step <= 500 else 50
             if optimizer_step % diag_frequency == 0:
@@ -2714,6 +2723,15 @@ def train_epoch(
         scheduler.step()
         optimizer.zero_grad()
         optimizer_step += 1
+
+        # Freeze projector after warmup to prevent audio suppression
+        freeze_projector_after = int(config.get("freeze_projector_after_steps", 0) or 0)
+        if freeze_projector_after > 0 and optimizer_step == freeze_projector_after:
+            projector = getattr(base_model, "audio_projector", None)
+            if projector is not None:
+                for param in projector.parameters():
+                    param.requires_grad = False
+                print(f"\n🔒 [Step {optimizer_step}] Froze audio_projector to prevent suppression", flush=True)
 
         if wandb_run is not None:
             step_time = max(time.time() - step_start_time, 1e-6)
@@ -3704,6 +3722,18 @@ def main():
     parser.add_argument("--residual-scale-warmup-end", type=float, default=1.0,
                         help="Ending residual scale for warmup (default 1.0 = 100%% audio)")
     parser.add_argument(
+        "--freeze-projector-after-steps",
+        type=int,
+        default=0,
+        help="Freeze audio projector after N optimizer steps to prevent audio suppression (0=disabled)",
+    )
+    parser.add_argument(
+        "--fusion-bottleneck-dim",
+        type=int,
+        default=None,
+        help="Override fusion bottleneck dimension (None = use config default)",
+    )
+    parser.add_argument(
         "--ablation-loss-weight",
         type=float,
         default=0.0,
@@ -3923,6 +3953,15 @@ def main():
         model_config["label_smoothing"] = args.label_smoothing
         if is_main:
             print(f"  ✓ Label smoothing overridden: {args.label_smoothing}")
+
+    # Override fusion bottleneck dimension if specified via CLI
+    if args.fusion_bottleneck_dim is not None:
+        if "fusion_config" in model_config and isinstance(model_config["fusion_config"], dict):
+            model_config["fusion_config"]["bottleneck_dim"] = args.fusion_bottleneck_dim
+        else:
+            model_config["fusion_config"] = {"bottleneck_dim": args.fusion_bottleneck_dim}
+        if is_main:
+            print(f"  ✓ Fusion bottleneck dimension overridden: {args.fusion_bottleneck_dim}")
 
     # Initialize model using the canonical create_model helper
     model = create_model(model_config) if is_main else create_model(model_config)
@@ -4177,6 +4216,7 @@ def main():
         "ablation_loss_weight": args.ablation_loss_weight,
         "ablation_loss_margin": args.ablation_loss_margin,
         "ablation_loss_every_steps": args.ablation_loss_every_steps,
+        "freeze_projector_after_steps": args.freeze_projector_after_steps,
         "audio_augment": args.audio_augment,
         "audio_augment_prob": args.audio_augment_prob,
         "export_eval_samples": bool(args.export_eval_samples),
