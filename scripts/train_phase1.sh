@@ -11,7 +11,7 @@
 #SBATCH --job-name=SAFE-Train
 #SBATCH --output=logs/train_%j.txt
 #SBATCH --error=logs/train_%j.err
-#SBATCH --time=72:00:00
+#SBATCH --time=168:00:00
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=16
 #SBATCH --mail-type=FAIL,END

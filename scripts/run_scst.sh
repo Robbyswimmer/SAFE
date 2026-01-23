@@ -3,7 +3,7 @@
 #SBATCH --job-name="SAFE-SCST"
 #SBATCH --output=logs/scst_%j.out
 #SBATCH --error=logs/scst_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --time=168:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
