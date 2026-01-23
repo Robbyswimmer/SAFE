@@ -78,6 +78,8 @@ TEXT_DROPOUT_PROB=${TEXT_DROPOUT_PROB:-0.0}                      # Modality drop
 PROJ_SCALE_MIN=${PROJ_SCALE_MIN:-0.5}                            # Minimum projector scale (1.0 prevents suppression)
 ALIGNMENT_EPOCHS=${ALIGNMENT_EPOCHS:-0}                          # Stage 1: Projector alignment pre-training epochs (0=disabled)
 ALIGNMENT_LR=${ALIGNMENT_LR:-1e-3}                               # Learning rate for alignment pre-training
+ALIGNMENT_USE_WAVCAPS=${ALIGNMENT_USE_WAVCAPS:-0}                # Include WavCaps in Stage 1 alignment (diversity)
+LOAD_ALIGNED_PROJECTOR=${LOAD_ALIGNED_PROJECTOR:-""}             # Path to aligned_projector.pt (skips Stage 1)
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 FUSION_LAYER_INDICES=${FUSION_LAYER_INDICES:-""}  # e.g., "8,16,24" - overrides config default
 LORA_RANK=${LORA_RANK:-""}                        # e.g., "8" - overrides config default
@@ -178,9 +180,14 @@ if [[ "${PROJ_SCALE_MIN}" != "0.5" ]]; then
 fi
 
 ALIGNMENT_ARGS=()
-if [[ "${ALIGNMENT_EPOCHS}" != "0" ]]; then
+if [[ -n "${LOAD_ALIGNED_PROJECTOR}" ]]; then
+  ALIGNMENT_ARGS+=(--load-aligned-projector "${LOAD_ALIGNED_PROJECTOR}")
+elif [[ "${ALIGNMENT_EPOCHS}" != "0" ]]; then
   ALIGNMENT_ARGS+=(--alignment-epochs "${ALIGNMENT_EPOCHS}")
   ALIGNMENT_ARGS+=(--alignment-lr "${ALIGNMENT_LR}")
+  if [[ "${ALIGNMENT_USE_WAVCAPS}" == "1" ]]; then
+    ALIGNMENT_ARGS+=(--alignment-use-wavcaps)
+  fi
 fi
 
 AUDIO_AUGMENT_ARGS=()
@@ -232,6 +239,7 @@ echo "Proj scale min: ${PROJ_SCALE_MIN}"
 if [[ "${ALIGNMENT_EPOCHS}" != "0" ]]; then
   echo "Alignment epochs: ${ALIGNMENT_EPOCHS} (Stage 1 pre-training)"
   echo "Alignment LR: ${ALIGNMENT_LR}"
+  echo "Alignment use WavCaps: ${ALIGNMENT_USE_WAVCAPS}"
 fi
 echo "Gradient checkpointing: ${GRADIENT_CHECKPOINTING}"
 echo "Num workers: ${NUM_WORKERS}"

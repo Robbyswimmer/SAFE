@@ -2922,6 +2922,8 @@ def run_alignment_pretraining(
     train_loader: DataLoader,
     config: Dict[str, Any],
     device: torch.device,
+    output_dir: Path,
+    data_path: Optional[Path] = None,
     wandb_run: Any = None,
     dist_info: Optional[Dict[str, Any]] = None,
 ) -> None:
@@ -2957,6 +2959,38 @@ def run_alignment_pretraining(
         print(f"  Loss: Contrastive (audio ↔ caption embeddings)", flush=True)
         print(f"  Training: Projector ONLY (fusion frozen)", flush=True)
         print("=" * 60 + "\n", flush=True)
+
+    # Check if we should add WavCaps for alignment (more diversity for contrastive learning)
+    alignment_use_wavcaps = config.get("alignment_use_wavcaps", False)
+    if alignment_use_wavcaps and data_path is not None:
+        try:
+            if is_main:
+                print("  Loading WavCaps for alignment...", flush=True)
+            wavcaps_dataset = WavCapsDataset(data_path, split="train")
+            if is_main:
+                print(f"  WavCaps loaded: {len(wavcaps_dataset)} samples", flush=True)
+
+            # Get base dataset from train_loader
+            base_dataset = train_loader.dataset
+
+            # Create combined dataset with WavCaps
+            from torch.utils.data import ConcatDataset
+            alignment_dataset = ConcatDataset([base_dataset, wavcaps_dataset])
+
+            # Create new dataloader for alignment
+            batch_size = train_loader.batch_size or 2
+            train_loader = create_safe_dataloader(
+                alignment_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=0,  # Keep it simple for alignment
+            )
+            if is_main:
+                print(f"  Alignment dataset: {len(alignment_dataset)} samples (base + WavCaps)", flush=True)
+        except Exception as e:
+            if is_main:
+                print(f"  ⚠️ Failed to load WavCaps for alignment: {e}", flush=True)
+                print(f"  Continuing with base dataset only", flush=True)
 
     # Get base model (handle DDP)
     base_model = model.module if hasattr(model, 'module') else model
@@ -3141,11 +3175,22 @@ def run_alignment_pretraining(
             print(f"\n[Align] Epoch {epoch+1}/{alignment_epochs} complete | "
                   f"Avg Loss: {avg_loss:.4f}\n", flush=True)
 
+    # Save aligned projector checkpoint
+    if is_main:
+        projector_path = output_dir / "aligned_projector.pt"
+        torch.save({
+            "projector_state_dict": base_model.audio_projector.state_dict(),
+            "alignment_epochs": alignment_epochs,
+            "alignment_lr": alignment_lr,
+            "final_loss": epoch_loss / max(num_batches, 1) if num_batches > 0 else float('nan'),
+        }, projector_path)
+        print(f"\n  ✓ Saved aligned projector to: {projector_path}", flush=True)
+
     # Freeze projector after alignment
     if is_main:
-        print("\n" + "=" * 60)
-        print("Stage 1 complete - Freezing projector for Stage 2")
-        print("=" * 60 + "\n")
+        print("\n" + "=" * 60, flush=True)
+        print("Stage 1 complete - Freezing projector for Stage 2", flush=True)
+        print("=" * 60 + "\n", flush=True)
 
     for param in base_model.audio_projector.parameters():
         param.requires_grad = False
@@ -3202,21 +3247,39 @@ def train(
 
     # Stage 1: Alignment pre-training (if enabled)
     # This trains ONLY the projector with contrastive loss before caption training
-    alignment_epochs = int(config.get("alignment_epochs", 0) or 0)
-    if alignment_epochs > 0:
-        run_alignment_pretraining(
-            model=model,
-            train_loader=train_loader,
-            config=config,
-            device=device,
-            wandb_run=wandb_run,
-            dist_info=dist_info,
-        )
-        # After alignment, projector is frozen - re-check requires_grad state
+    # Check if we should load a pre-aligned projector (skip Stage 1)
+    load_aligned_projector = config.get("load_aligned_projector")
+    if load_aligned_projector and Path(load_aligned_projector).exists():
         if is_main:
-            proj_trainable = sum(1 for p in base_model.audio_projector.parameters() if p.requires_grad)
-            fusion_trainable = sum(1 for p in base_model.fusion_adapter.parameters() if p.requires_grad) if base_model.fusion_adapter else 0
-            print(f"[Stage 2] Projector params trainable: {proj_trainable}, Fusion params trainable: {fusion_trainable}")
+            print(f"\n  Loading pre-aligned projector from: {load_aligned_projector}", flush=True)
+        checkpoint = torch.load(load_aligned_projector, map_location=device)
+        base_model.audio_projector.load_state_dict(checkpoint["projector_state_dict"])
+        # Freeze projector
+        for param in base_model.audio_projector.parameters():
+            param.requires_grad = False
+        if is_main:
+            print(f"  ✓ Loaded aligned projector (trained for {checkpoint.get('alignment_epochs', '?')} epochs, "
+                  f"final loss: {checkpoint.get('final_loss', '?'):.4f})", flush=True)
+            print(f"  ✓ Projector frozen, skipping Stage 1 alignment", flush=True)
+    else:
+        # Stage 1: Alignment pre-training (if enabled)
+        alignment_epochs = int(config.get("alignment_epochs", 0) or 0)
+        if alignment_epochs > 0:
+            run_alignment_pretraining(
+                model=model,
+                train_loader=train_loader,
+                config=config,
+                device=device,
+                output_dir=output_dir,
+                data_path=Path(config.get("alignment_data_path")) if config.get("alignment_data_path") else None,
+                wandb_run=wandb_run,
+                dist_info=dist_info,
+            )
+            # After alignment, projector is frozen - re-check requires_grad state
+            if is_main:
+                proj_trainable = sum(p.numel() for p in base_model.audio_projector.parameters() if p.requires_grad)
+                fusion_trainable = sum(p.numel() for p in base_model.fusion_adapter.parameters() if p.requires_grad) if base_model.fusion_adapter else 0
+                print(f"[Stage 2] Projector params trainable: {proj_trainable:,}, Fusion params trainable: {fusion_trainable:,}")
 
     # Setup optimizer with different learning rates (Stage-A style defaults)
     lr_projector = config.get("learning_rate_projector", 2e-4)
@@ -4082,6 +4145,17 @@ def main():
         help="Learning rate for Stage 1 alignment pre-training",
     )
     parser.add_argument(
+        "--alignment-use-wavcaps",
+        action="store_true",
+        help="Include WavCaps in Stage 1 alignment (adds diversity for contrastive learning)",
+    )
+    parser.add_argument(
+        "--load-aligned-projector",
+        type=str,
+        default=None,
+        help="Path to aligned_projector.pt to load (skips Stage 1 alignment)",
+    )
+    parser.add_argument(
         "--ablation-loss-weight",
         type=float,
         default=0.0,
@@ -4576,6 +4650,9 @@ def main():
         "proj_scale_min": args.proj_scale_min,
         "alignment_epochs": args.alignment_epochs,
         "alignment_lr": args.alignment_lr,
+        "alignment_use_wavcaps": args.alignment_use_wavcaps,
+        "alignment_data_path": args.data_path,  # For loading WavCaps in alignment
+        "load_aligned_projector": args.load_aligned_projector,
         "audio_augment": args.audio_augment,
         "audio_augment_prob": args.audio_augment_prob,
         "export_eval_samples": bool(args.export_eval_samples),

@@ -62,6 +62,7 @@ LR=${LR:-1e-5}
 TEMPERATURE=${TEMPERATURE:-0.7}
 NUM_SAMPLES=${NUM_SAMPLES:-5}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-20}
+TRAIN_SPLIT=${TRAIN_SPLIT:-"val"}  # Use val for SCST (5 refs per sample)
 
 # Training configuration
 BATCH_SIZE=${BATCH_SIZE:-1}
@@ -92,6 +93,7 @@ echo "Fusion layers: ${FUSION_LAYER_INDICES}"
 echo "Output dir: ${OUTPUT_DIR}"
 echo "Num audio tokens: ${NUM_AUDIO_TOKENS}"
 echo "Bottleneck dim: ${BOTTLENECK_DIM}"
+echo "Train split: ${TRAIN_SPLIT} (val=5 refs, train=1 ref)"
 echo "Temperature: ${TEMPERATURE}"
 echo "Num samples: ${NUM_SAMPLES}"
 echo "Learning rate: ${LR}"
@@ -134,6 +136,7 @@ python scripts/train_scst.py \
     ${FUSION_ARGS} \
     --num-audio-tokens "${NUM_AUDIO_TOKENS}" \
     --bottleneck-dim "${BOTTLENECK_DIM}" \
+    --train-split "${TRAIN_SPLIT}" \
     --num-epochs "${NUM_EPOCHS}" \
     --lr "${LR}" \
     --temperature "${TEMPERATURE}" \

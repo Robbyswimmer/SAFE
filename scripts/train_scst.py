@@ -163,6 +163,15 @@ def parse_args():
         help="Random seed",
     )
 
+    # Dataset split for SCST training
+    parser.add_argument(
+        "--train-split",
+        type=str,
+        default="val",
+        choices=["train", "val"],
+        help="Dataset split to use for SCST training. 'val' recommended (5 refs per sample)",
+    )
+
     # Evaluation
     parser.add_argument(
         "--eval-frequency",
@@ -738,11 +747,19 @@ def main():
 
     # Load datasets
     print("\n[4/5] Loading AudioCaps dataset...")
-    train_dataset = AudioCapsDataset(args.data_path, split="train")
-    val_dataset = AudioCapsDataset(args.data_path, split="val")
+    print(f"  SCST training split: {args.train_split}")
 
-    print(f"  Train samples: {len(train_dataset)}")
-    print(f"  Val samples: {len(val_dataset)}")
+    # Use specified split for SCST training
+    # val split has 5 refs per sample (better for CIDEr-based reward)
+    # train split has 1 ref per sample (suboptimal)
+    train_dataset = AudioCapsDataset(args.data_path, split=args.train_split)
+
+    # For evaluation, use test if training on val, otherwise use val
+    eval_split = "test" if args.train_split == "val" else "val"
+    val_dataset = AudioCapsDataset(args.data_path, split=eval_split)
+
+    print(f"  SCST train samples ({args.train_split}): {len(train_dataset)}")
+    print(f"  Eval samples ({eval_split}): {len(val_dataset)}")
 
     # Check reference count in first few samples
     sample = train_dataset[0]
