@@ -3044,8 +3044,9 @@ def run_alignment_pretraining(
                 # Encode audio through CLAP (uses forward method)
                 with torch.no_grad():
                     audio_embeds = base_model.audio_encoder(audio_paths)
+                    audio_embeds = audio_embeds.to(device)  # Move to GPU
                 if batch_idx == 0 and is_main:
-                    print(f"    Audio encoded: {audio_embeds.shape} (took {_time.time()-_t0:.2f}s)", flush=True)
+                    print(f"    Audio encoded: {audio_embeds.shape} on {audio_embeds.device} (took {_time.time()-_t0:.2f}s)", flush=True)
 
                 # Project audio to LLM space
                 if use_amp:
