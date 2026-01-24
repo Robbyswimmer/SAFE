@@ -31,7 +31,11 @@ audio_contrastive_temperature: 0.07
 audio_contrastive_answer_max_length: 64
 audio_contrastive_metric_weight: 0.3
 audio_contrastive_negative_threshold: 0.4
-audio_contrastive_max_negatives: 32
+audio_contrastive_max_negatives: 16  # Reduced from 32 to prevent OOM
+
+# Memory optimization for contrastive training
+max_captions_per_sample: 2  # Limit batch expansion for multi-caption datasets like WavCaps
+contrastive_embed_chunk_size: 8  # Process text embeddings in chunks to reduce peak memory
 
 # Generation parameters - increased candidates for better reranking
 audio_num_beams: 8  # Increased from 5 for more diverse candidates

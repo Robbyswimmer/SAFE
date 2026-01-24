@@ -32,6 +32,10 @@ audio_contrastive_answer_max_length: 48
 audio_contrastive_metric_weight: 0.0
 audio_contrastive_negative_threshold: 0.0
 audio_contrastive_max_negatives: 0
+
+# Memory optimization for contrastive training
+max_captions_per_sample: 1  # Minimal for micro tests
+contrastive_embed_chunk_size: 4  # Small chunks for memory efficiency
 audio_num_beams: 1
 audio_num_return_sequences: 1
 audio_num_samples: 0
