@@ -1816,7 +1816,7 @@ def _log_comprehensive_diagnostics(
             elif "fusion_adapter" in name:
                 grad_norms["fusion"] += g_norm
                 grad_counts["fusion"] += 1
-            elif "kv_adapter" in name or "kv_augmentation" in name:
+            elif "kv_adapter" in name or "kv_augmentation" in name or "kv_hook" in name or "adapters" in name:
                 grad_norms["kv_adapter"] += g_norm
                 grad_counts["kv_adapter"] += 1
             else:
@@ -3906,15 +3906,21 @@ def save_checkpoint(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     def _trainable_state_dict(module: nn.Module) -> Dict[str, torch.Tensor]:
+        """Save trainable params + always include projector and fusion (even if frozen)."""
         state: Dict[str, torch.Tensor] = {}
         for name, param in module.named_parameters():
-            if param.requires_grad:
+            # Always save projector and fusion weights (even if frozen after alignment)
+            is_audio_component = ("audio_projector" in name or
+                                  "fusion_adapter" in name or
+                                  "kv_hook" in name or
+                                  "adapters" in name)
+            if param.requires_grad or is_audio_component:
                 state[name] = param.detach().cpu()
         return state
 
     # Default to saving only trainable weights (SAFE Stage-A style). This avoids
     # multi-GB checkpoint writes when the base VL model is frozen.
-    model_state_dict = model.state_dict() if save_full_checkpoint else _trainable_state_dict(model)
+    model_state_dict = model.state_dict() if save_full_checkpoint else _trainable_state_dict(module=model)
 
     checkpoint = {
         "format": "full" if save_full_checkpoint else "trainable_only",
