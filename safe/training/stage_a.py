@@ -994,6 +994,10 @@ class StageATrainer:
             if contrastive_raw is not None:
                 total_loss = total_loss + (self.audio_contrastive_weight * contrastive_raw)
 
+            # Free GPU memory after contrastive loss to prevent OOM accumulation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         # Ensure total_loss has gradients
         if not total_loss.requires_grad:
             if safe_logits is None or not safe_logits.requires_grad:
@@ -2336,7 +2340,10 @@ class StageATrainer:
                 expanded_has_audio.append(audio_flag)
 
             if has_audio_flag:
-                for answer_text in normalized_refs:
+                # Limit max captions per sample to prevent OOM with multi-caption datasets like WavCaps
+                max_captions_per_sample = self.config.get("max_captions_per_sample", 2)
+                captions_to_use = normalized_refs[:max_captions_per_sample]
+                for answer_text in captions_to_use:
                     append_sample(answer_text, True)
             else:
                 append_sample(normalized_refs[0], False)
@@ -2901,6 +2908,7 @@ class StageATrainer:
             neg_vecs = self._embed_texts(extra_texts, device)
             neg_vecs = F.normalize(neg_vecs, dim=-1) if neg_vecs.numel() > 0 else torch.empty(0, text_vecs.size(1), device=device)
             text_vecs_extended = torch.cat([text_vecs, neg_vecs], dim=0)
+            del neg_vecs  # Free negative vectors after concatenation
         else:
             text_vecs_extended = text_vecs
 
@@ -2923,6 +2931,9 @@ class StageATrainer:
         logits_t2a = torch.matmul(text_vecs, audio_vecs.transpose(0, 1)) / temperature
         loss_t2a = F.cross_entropy(logits_t2a, targets, reduction='none')
         loss_t2a = (loss_t2a * weights).mean()
+
+        # Clean up intermediate tensors to reduce memory pressure
+        del logits, logits_t2a, text_vecs_extended, audio_vecs, text_vecs
 
         return 0.5 * (loss_a2t + loss_t2a)
 
@@ -3332,26 +3343,44 @@ class StageATrainer:
             return 0.0
 
     def _embed_texts(self, texts: Sequence[str], device: torch.device) -> torch.Tensor:
+        """Embed texts with chunked processing to prevent OOM on large batches."""
         tokenizer = self.safe_model.base_vl.tokenizer
         embedding_layer = self.safe_model.base_vl.llm.get_input_embeddings()
         hidden_size = embedding_layer.weight.size(1)
         if not texts:
             return torch.empty(0, hidden_size, device=device)
-        encoded = tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=self.audio_contrastive_answer_max_length,
-            return_tensors="pt",
-        )
-        input_ids = encoded["input_ids"].to(device)
-        attention_mask = encoded["attention_mask"].to(device)
-        with torch.no_grad():
-            text_embeds = embedding_layer(input_ids)
-        mask = attention_mask.unsqueeze(-1)
-        pooled = (text_embeds * mask).sum(dim=1).float()
-        denom = mask.sum(dim=1).clamp_min(1.0)
-        return pooled / denom
+
+        # Use chunked processing to reduce peak memory usage
+        chunk_size = self.config.get("contrastive_embed_chunk_size", 8)
+        all_pooled = []
+
+        for start_idx in range(0, len(texts), chunk_size):
+            end_idx = min(start_idx + chunk_size, len(texts))
+            chunk_texts = texts[start_idx:end_idx]
+
+            encoded = tokenizer(
+                list(chunk_texts),
+                padding=True,
+                truncation=True,
+                max_length=self.audio_contrastive_answer_max_length,
+                return_tensors="pt",
+            )
+            input_ids = encoded["input_ids"].to(device)
+            attention_mask = encoded["attention_mask"].to(device)
+
+            with torch.no_grad():
+                text_embeds = embedding_layer(input_ids)
+
+            mask = attention_mask.unsqueeze(-1)
+            pooled = (text_embeds * mask).sum(dim=1).float()
+            denom = mask.sum(dim=1).clamp_min(1.0)
+            chunk_result = pooled / denom
+            all_pooled.append(chunk_result)
+
+            # Clear intermediate tensors to free memory
+            del text_embeds, input_ids, attention_mask, mask, pooled, denom
+
+        return torch.cat(all_pooled, dim=0) if all_pooled else torch.empty(0, hidden_size, device=device)
 
     def _batch_contains_pixels(self, batch: Dict[str, Any], idx: int) -> bool:
         images = batch.get("images")
