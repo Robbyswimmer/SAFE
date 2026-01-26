@@ -21,6 +21,7 @@ from .fusion_adapter import (
     GatedFusionAdapter,
 )
 from .kv_augmentation import KVAugmentationHookManager, KVAugmentationAdapter
+from .layer_hooks import LayerHookManager
 
 
 class SAFEPointCloudModel(nn.Module):
@@ -145,20 +146,25 @@ class SAFEPointCloudModel(nn.Module):
         # Initialize fusion adapter (REUSE from audio SAFE)
         self.fusion_mode = fusion_config.get("fusion_mode", "residual")
         self.enable_kv_augmentation = (self.fusion_mode == "kv_augment")
+        self.fusion_layer_indices = fusion_layer_indices or [1]
+        self.fusion_injection_point = fusion_config.get("injection_point", "pre_ffn")
 
         if self.enable_kv_augmentation:
             print(f"[SAFE-PC] Initializing KV Augmentation...", flush=True)
             self.fusion_adapter = None
+            self.enable_midlayer_fusion = False
             self._setup_kv_augmentation(
-                fusion_layer_indices or [12, 24, 36],
+                self.fusion_layer_indices,
                 fusion_config,
             )
         else:
             print(f"[SAFE-PC] Initializing fusion adapter ({fusion_type})...", flush=True)
             if fusion_type == "multilayer":
+                # Use "pointcloud" as modality key for this adapter
+                modalities = {"pointcloud": {"layer_indices": self.fusion_layer_indices}}
                 self.fusion_adapter = MultiLayerFusionAdapter(
                     hidden_size=llm_hidden_size,
-                    fusion_layer_indices=fusion_layer_indices,
+                    modalities=modalities,
                     lora_rank=lora_rank,
                     num_attention_heads=fusion_config.get("num_attention_heads", 40),
                     lora_alpha=fusion_config.get("lora_alpha", 16.0),
@@ -168,16 +174,18 @@ class SAFEPointCloudModel(nn.Module):
                     bottleneck_dim=fusion_config.get("bottleneck_dim", 32),
                     fusion_mode=fusion_config.get("fusion_mode", "residual"),
                 )
+                self.enable_midlayer_fusion = True
             elif fusion_type == "lora":
                 self.fusion_adapter = LoRAFusionAdapter(
                     hidden_size=llm_hidden_size,
                     num_attention_heads=fusion_config.get("num_attention_heads", 40),
                     lora_rank=lora_rank,
                 )
+                self.enable_midlayer_fusion = False
             else:
                 raise ValueError(f"Unsupported fusion type: {fusion_type}")
 
-            print(f"[SAFE-PC] ✓ Fusion adapter initialized", flush=True)
+            print(f"[SAFE-PC] ✓ Fusion adapter initialized (midlayer={self.enable_midlayer_fusion})", flush=True)
 
         print(f"[SAFE-PC] ✓ Model initialization complete", flush=True)
 
@@ -283,29 +291,70 @@ class SAFEPointCloudModel(nn.Module):
         # Get text embeddings
         inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
 
-        # Apply fusion
-        if pointcloud_tokens is not None and self.enable_kv_augmentation:
+        # Determine fusion mode
+        use_midlayer_hooks = (
+            pointcloud_tokens is not None
+            and self.enable_midlayer_fusion
+            and self.fusion_adapter is not None
+            and hasattr(self.fusion_adapter, "apply_fusion_at_layer")
+        )
+
+        if use_midlayer_hooks:
+            # Align dtypes
+            pointcloud_tokens = pointcloud_tokens.to(
+                device=inputs_embeds.device,
+                dtype=inputs_embeds.dtype,
+            )
+
+            # Set up fusion layers mapping (mirrors audio SAFE)
+            fusion_layers = {"pointcloud": self.fusion_layer_indices}
+            modality_tokens = {"pointcloud": pointcloud_tokens}
+
+            # Create hook manager and register hooks
+            hook_manager = LayerHookManager(
+                model=self.base_vl.llm,
+                fusion_adapter=self.fusion_adapter,
+                fusion_layers=fusion_layers,
+                injection_point=self.fusion_injection_point,
+            )
+            hook_manager.register_hooks(
+                modality_tokens=modality_tokens,
+                modality_masks=None,
+                gate={"pointcloud": 1.0},
+            )
+
+            try:
+                outputs = self.base_vl.llm(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    use_cache=False,
+                )
+            finally:
+                hook_manager.remove_hooks()
+
+        elif pointcloud_tokens is not None and self.enable_kv_augmentation:
             # KV augmentation: inject tokens via hook manager
             if self.kv_hook_manager is not None:
                 self.kv_hook_manager.set_audio_tokens(pointcloud_tokens)
-        elif pointcloud_tokens is not None and self.fusion_adapter is not None:
-            # Traditional fusion: cross-attention
-            inputs_embeds = self.fusion_adapter(
-                hidden_states=inputs_embeds,
-                audio_tokens=pointcloud_tokens,
+
+            outputs = self.base_vl.llm(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                labels=labels,
+                use_cache=False,
             )
 
-        # Forward through LLM
-        outputs = self.base_vl.llm(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            labels=labels,
-            use_cache=False,
-        )
-
-        # Clear KV hooks
-        if self.kv_hook_manager is not None:
-            self.kv_hook_manager.clear_audio_tokens()
+            if self.kv_hook_manager is not None:
+                self.kv_hook_manager.clear_audio_tokens()
+        else:
+            # No fusion or unsupported fusion type
+            outputs = self.base_vl.llm(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                labels=labels,
+                use_cache=False,
+            )
 
         result = {"logits": outputs.logits}
 
@@ -351,32 +400,76 @@ class SAFEPointCloudModel(nn.Module):
         if pointcloud_tokens is None and pointcloud is not None:
             pointcloud_tokens = self.encode_pointcloud(pointcloud)
 
-        # Set up KV augmentation
-        if pointcloud_tokens is not None and self.kv_hook_manager is not None:
-            self.kv_hook_manager.set_audio_tokens(pointcloud_tokens)
-
         # Get embeddings
         inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
 
-        # Apply traditional fusion if not using KV augment
-        if pointcloud_tokens is not None and self.fusion_adapter is not None:
-            inputs_embeds = self.fusion_adapter(
-                hidden_states=inputs_embeds,
-                audio_tokens=pointcloud_tokens,
-            )
-
-        # Generate
-        outputs = self.base_vl.llm.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            max_new_tokens=max_new_tokens,
-            num_beams=num_beams,
-            **generate_kwargs,
+        # Determine fusion mode
+        use_midlayer_hooks = (
+            pointcloud_tokens is not None
+            and self.enable_midlayer_fusion
+            and self.fusion_adapter is not None
+            and hasattr(self.fusion_adapter, "apply_fusion_at_layer")
         )
 
-        # Clear hooks
-        if self.kv_hook_manager is not None:
-            self.kv_hook_manager.clear_audio_tokens()
+        if use_midlayer_hooks:
+            # Align dtypes
+            pointcloud_tokens = pointcloud_tokens.to(
+                device=inputs_embeds.device,
+                dtype=inputs_embeds.dtype,
+            )
+
+            # Set up fusion layers mapping
+            fusion_layers = {"pointcloud": self.fusion_layer_indices}
+            modality_tokens = {"pointcloud": pointcloud_tokens}
+
+            # Create hook manager and register hooks
+            hook_manager = LayerHookManager(
+                model=self.base_vl.llm,
+                fusion_adapter=self.fusion_adapter,
+                fusion_layers=fusion_layers,
+                injection_point=self.fusion_injection_point,
+            )
+            hook_manager.register_hooks(
+                modality_tokens=modality_tokens,
+                modality_masks=None,
+                gate={"pointcloud": 1.0},
+            )
+
+            try:
+                outputs = self.base_vl.llm.generate(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    max_new_tokens=max_new_tokens,
+                    num_beams=num_beams,
+                    **generate_kwargs,
+                )
+            finally:
+                hook_manager.remove_hooks()
+
+        elif pointcloud_tokens is not None and self.enable_kv_augmentation:
+            # KV augmentation
+            if self.kv_hook_manager is not None:
+                self.kv_hook_manager.set_audio_tokens(pointcloud_tokens)
+
+            outputs = self.base_vl.llm.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                num_beams=num_beams,
+                **generate_kwargs,
+            )
+
+            if self.kv_hook_manager is not None:
+                self.kv_hook_manager.clear_audio_tokens()
+        else:
+            # No fusion
+            outputs = self.base_vl.llm.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                num_beams=num_beams,
+                **generate_kwargs,
+            )
 
         return outputs
 
