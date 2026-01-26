@@ -34,6 +34,8 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent))
 
 from safe.models.safe_pointcloud_model import SAFEPointCloudModel
+from safe.models.pointcloud_classifier import PointCloudClassifier
+from safe.models.pointcloud_llm_probe import SAFEPointCloudLLMProbe
 from safe.data.pointcloud_datasets import (
     ModelNet40Dataset,
     Cap3DDataset,
@@ -97,6 +99,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--num-workers", type=int, default=4)
+
+    # Classification mode
+    parser.add_argument(
+        "--classification-head",
+        action="store_true",
+        help="Use a simple encoder+MLP classification head (non-generative baseline)",
+    )
+    parser.add_argument(
+        "--llm-probe-head",
+        action="store_true",
+        help="Use full SAFE (projector+fusion+LLM) with a classification head over pooled LLM hidden states",
+    )
+    parser.add_argument(
+        "--probe-pooling",
+        type=str,
+        default="last",
+        choices=["last", "mean"],
+        help="Pooling strategy for LLM probe hidden states",
+    )
+    parser.add_argument(
+        "--probe-head-type",
+        type=str,
+        default="linear",
+        choices=["linear", "mlp"],
+        help="Head type for LLM probe",
+    )
 
     # Debug
     parser.add_argument("--debug", action="store_true")
@@ -193,6 +221,57 @@ def create_model(
     return model
 
 
+def create_classifier_model(
+    config: Dict[str, Any],
+    device: str,
+    encoder_checkpoint: Optional[str] = None,
+) -> PointCloudClassifier:
+    """Create a simple point cloud classifier (encoder+MLP)."""
+    encoder_config = dict(config.get("pointcloud_encoder_config", {}))
+    if encoder_checkpoint:
+        encoder_config["checkpoint_path"] = encoder_checkpoint
+        print(f"Using encoder checkpoint: {encoder_checkpoint}")
+
+    num_classes = int(config.get("num_classes", 40))
+    model = PointCloudClassifier(
+        num_classes=num_classes,
+        encoder_model_name=encoder_config.get("model_name", "pointbert-base"),
+        encoder_num_points=int(config.get("num_points", encoder_config.get("num_points", 1024))),
+        encoder_embed_dim=int(config.get("pointcloud_embed_dim", encoder_config.get("embed_dim", 768))),
+        encoder_checkpoint_path=encoder_config.get("checkpoint_path"),
+        hidden_dim=int(config.get("classifier_hidden_dim", 512)),
+        dropout=float(config.get("classifier_dropout", 0.3)),
+    ).to(device)
+    return model
+
+
+def create_llm_probe_model(
+    config: Dict[str, Any],
+    device: str,
+    encoder_checkpoint: Optional[str] = None,
+    pooling: str = "last",
+    head_type: str = "linear",
+) -> SAFEPointCloudLLMProbe:
+    """Create a pointcloud LLM probe model (SAFE + classifier head)."""
+    safe_config = dict(config)
+    encoder_config = dict(config.get("pointcloud_encoder_config", {}))
+    if encoder_checkpoint:
+        encoder_config["checkpoint_path"] = encoder_checkpoint
+        safe_config["pointcloud_encoder_config"] = encoder_config
+        print(f"Using encoder checkpoint: {encoder_checkpoint}")
+
+    num_classes = int(config.get("num_classes", 40))
+    safe_config.setdefault("freeze_base_vl", True)
+    safe_config.setdefault("freeze_pointcloud_encoder", True)
+    model = SAFEPointCloudLLMProbe(
+        safe_config=safe_config,
+        num_classes=num_classes,
+        head_type=head_type,
+        pooling=pooling,
+    ).to(device)
+    return model
+
+
 def train_epoch_classification(
     model: SAFEPointCloudModel,
     dataloader: DataLoader,
@@ -286,6 +365,72 @@ def train_epoch_classification(
     }
 
 
+def train_epoch_classification_head(
+    model: PointCloudClassifier,
+    dataloader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: str,
+    args: argparse.Namespace,
+    epoch: int,
+) -> Dict[str, float]:
+    """Train one epoch for classification using a direct classification head."""
+    model.train()
+
+    total_loss = 0.0
+    correct = 0
+    total = 0
+    num_batches = 0
+
+    use_tqdm = sys.stdout.isatty()
+    pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}", disable=not use_tqdm)
+    loss_fct = nn.CrossEntropyLoss()
+
+    for batch_idx, batch in enumerate(pbar):
+        step_start = time.time()
+        pointclouds = batch["pointclouds"].to(device)
+        labels = batch["labels"].to(device, dtype=torch.long)
+
+        logits = model(pointclouds)
+        loss = loss_fct(logits, labels) / args.gradient_accumulation
+
+        if args.debug:
+            print(f"[DEBUG] Step {batch_idx}: before backward", flush=True)
+        loss.backward()
+        if args.debug:
+            print(f"[DEBUG] Step {batch_idx}: after backward", flush=True)
+
+        if (batch_idx + 1) % args.gradient_accumulation == 0:
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                args.max_grad_norm,
+            )
+            if args.debug:
+                print(f"[DEBUG] Step {batch_idx}: optimizer step", flush=True)
+            optimizer.step()
+            optimizer.zero_grad()
+
+        total_loss += loss.item() * args.gradient_accumulation
+        num_batches += 1
+
+        preds = logits.argmax(dim=-1)
+        correct += (preds == labels).sum().item()
+        total += labels.numel()
+
+        avg_loss = total_loss / num_batches
+        avg_acc = correct / max(total, 1)
+        if use_tqdm:
+            pbar.set_postfix({"loss": avg_loss, "acc": avg_acc})
+        elif (batch_idx % max(args.log_every, 1)) == 0:
+            step_ms = (time.time() - step_start) * 1000.0
+            print(
+                f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} acc={avg_acc:.4f} "
+                f"step_ms={step_ms:.0f}",
+                flush=True,
+            )
+
+    return {"loss": total_loss / max(num_batches, 1), "accuracy": correct / max(total, 1)}
+
+
 def evaluate_classification(
     model: SAFEPointCloudModel,
     dataloader: DataLoader,
@@ -368,6 +513,172 @@ def evaluate_classification(
         "total": total,
         "per_class_accuracy": per_class_acc,
     }
+
+
+def evaluate_classification_head(
+    model: PointCloudClassifier,
+    dataloader: DataLoader,
+    device: str,
+    args: argparse.Namespace,
+) -> Dict[str, float]:
+    """Evaluate direct classification head accuracy."""
+    model.eval()
+
+    correct = 0
+    total = 0
+    num_classes = None
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Evaluating")):
+            if batch_idx >= args.max_eval_batches:
+                break
+
+            pointclouds = batch["pointclouds"].to(device)
+            labels = batch["labels"].to(device, dtype=torch.long)
+
+            logits = model(pointclouds)
+            if num_classes is None:
+                num_classes = logits.shape[-1]
+
+            preds = logits.argmax(dim=-1)
+            correct += (preds == labels).sum().item()
+            total += labels.numel()
+
+    return {
+        "accuracy": correct / max(total, 1),
+        "correct": correct,
+        "total": total,
+        "num_classes": num_classes,
+    }
+
+
+def train_epoch_llm_probe_head(
+    model: SAFEPointCloudLLMProbe,
+    dataloader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: str,
+    args: argparse.Namespace,
+    epoch: int,
+) -> Dict[str, float]:
+    """Train one epoch for classification using LLM hidden-state probe head."""
+    model.train()
+
+    total_loss = 0.0
+    correct = 0
+    total = 0
+    num_batches = 0
+
+    use_tqdm = sys.stdout.isatty()
+    pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}", disable=not use_tqdm)
+    loss_fct = nn.CrossEntropyLoss()
+
+    tokenizer = model.safe_model.base_vl.tokenizer
+
+    for batch_idx, batch in enumerate(pbar):
+        step_start = time.time()
+        pointclouds = batch["pointclouds"].to(device)
+        labels = batch["labels"].to(device, dtype=torch.long)
+        questions = batch["questions"]
+
+        encoded = tokenizer(
+            list(questions),
+            padding=True,
+            truncation=True,
+            max_length=64,
+            return_tensors="pt",
+        )
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
+
+        probe_out = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pointcloud=pointclouds,
+        )
+        logits = probe_out.logits
+        loss = loss_fct(logits, labels) / args.gradient_accumulation
+
+        if args.debug:
+            print(f"[DEBUG] Step {batch_idx}: before backward", flush=True)
+        loss.backward()
+        if args.debug:
+            print(f"[DEBUG] Step {batch_idx}: after backward", flush=True)
+
+        if (batch_idx + 1) % args.gradient_accumulation == 0:
+            torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), args.max_grad_norm)
+            if args.debug:
+                print(f"[DEBUG] Step {batch_idx}: optimizer step", flush=True)
+            optimizer.step()
+            optimizer.zero_grad()
+
+        total_loss += loss.item() * args.gradient_accumulation
+        num_batches += 1
+
+        preds = logits.argmax(dim=-1)
+        correct += (preds == labels).sum().item()
+        total += labels.numel()
+
+        avg_loss = total_loss / num_batches
+        avg_acc = correct / max(total, 1)
+        if use_tqdm:
+            pbar.set_postfix({"loss": avg_loss, "acc": avg_acc})
+        elif (batch_idx % max(args.log_every, 1)) == 0:
+            step_ms = (time.time() - step_start) * 1000.0
+            print(
+                f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} acc={avg_acc:.4f} "
+                f"step_ms={step_ms:.0f}",
+                flush=True,
+            )
+
+    return {"loss": total_loss / max(num_batches, 1), "accuracy": correct / max(total, 1)}
+
+
+def evaluate_llm_probe_head(
+    model: SAFEPointCloudLLMProbe,
+    dataloader: DataLoader,
+    device: str,
+    args: argparse.Namespace,
+) -> Dict[str, float]:
+    """Evaluate LLM probe head accuracy."""
+    model.eval()
+
+    correct = 0
+    total = 0
+    tokenizer = model.safe_model.base_vl.tokenizer
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Evaluating")):
+            if batch_idx >= args.max_eval_batches:
+                break
+            pointclouds = batch["pointclouds"].to(device)
+            labels = batch["labels"].to(device, dtype=torch.long)
+            questions = batch["questions"]
+
+            encoded = tokenizer(
+                list(questions),
+                padding=True,
+                truncation=True,
+                max_length=64,
+                return_tensors="pt",
+            )
+            input_ids = encoded["input_ids"].to(device)
+            attention_mask = encoded.get("attention_mask")
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device)
+
+            logits = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pointcloud=pointclouds,
+            ).logits
+
+            preds = logits.argmax(dim=-1)
+            correct += (preds == labels).sum().item()
+            total += labels.numel()
+
+    return {"accuracy": correct / max(total, 1), "correct": correct, "total": total}
 
 
 def train_epoch_captioning(
@@ -588,10 +899,26 @@ def main():
 
     # Create model
     print("\nCreating model...")
-    model = create_model(config, args.device, encoder_checkpoint=args.encoder_checkpoint)
+    if args.phase == "classification" and args.classification_head:
+        model = create_classifier_model(config, args.device, encoder_checkpoint=args.encoder_checkpoint)
+    elif args.phase == "classification" and args.llm_probe_head:
+        model = create_llm_probe_model(
+            config,
+            args.device,
+            encoder_checkpoint=args.encoder_checkpoint,
+            pooling=args.probe_pooling,
+            head_type=args.probe_head_type,
+        )
+    else:
+        model = create_model(config, args.device, encoder_checkpoint=args.encoder_checkpoint)
 
     # Create optimizer
-    trainable_params = model.get_trainable_parameters()
+    if hasattr(model, "get_trainable_params"):
+        trainable_params = model.get_trainable_params()
+    elif hasattr(model, "get_trainable_parameters"):
+        trainable_params = model.get_trainable_parameters()
+    else:
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = AdamW(
         trainable_params,
         lr=args.lr,
@@ -613,9 +940,18 @@ def main():
 
         # Train
         if args.phase == "classification":
-            train_metrics = train_epoch_classification(
-                model, train_loader, optimizer, args.device, args, epoch
-            )
+            if args.classification_head:
+                train_metrics = train_epoch_classification_head(
+                    model, train_loader, optimizer, args.device, args, epoch
+                )
+            elif args.llm_probe_head:
+                train_metrics = train_epoch_llm_probe_head(
+                    model, train_loader, optimizer, args.device, args, epoch
+                )
+            else:
+                train_metrics = train_epoch_classification(
+                    model, train_loader, optimizer, args.device, args, epoch
+                )
         else:
             train_metrics = train_epoch_captioning(
                 model, train_loader, optimizer, args.device, args, epoch
@@ -628,7 +964,12 @@ def main():
         # Evaluate
         if (epoch + 1) % args.eval_every == 0:
             if args.phase == "classification":
-                eval_metrics = evaluate_classification(model, val_loader, args.device, args)
+                if args.classification_head:
+                    eval_metrics = evaluate_classification_head(model, val_loader, args.device, args)
+                elif args.llm_probe_head:
+                    eval_metrics = evaluate_llm_probe_head(model, val_loader, args.device, args)
+                else:
+                    eval_metrics = evaluate_classification(model, val_loader, args.device, args)
                 print(f"Val Accuracy: {eval_metrics['accuracy']:.4f}")
 
                 # Track best

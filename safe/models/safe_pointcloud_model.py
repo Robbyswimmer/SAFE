@@ -359,6 +359,7 @@ class SAFEPointCloudModel(nn.Module):
                     attention_mask=attention_mask,
                     labels=labels,
                     use_cache=False,
+                    **kwargs,
                 )
             finally:
                 hook_manager.remove_hooks()
@@ -373,6 +374,7 @@ class SAFEPointCloudModel(nn.Module):
                 attention_mask=attention_mask,
                 labels=labels,
                 use_cache=False,
+                **kwargs,
             )
 
             if self.kv_hook_manager is not None:
@@ -384,6 +386,7 @@ class SAFEPointCloudModel(nn.Module):
                 attention_mask=attention_mask,
                 labels=labels,
                 use_cache=False,
+                **kwargs,
             )
 
         # Debug: check outputs
@@ -403,6 +406,22 @@ class SAFEPointCloudModel(nn.Module):
             # Use HF's built-in loss computation (handles ignore_index properly)
             loss = outputs.loss
             result["loss"] = loss
+
+        # Expose last hidden state for downstream probes/classifiers.
+        hidden_state_out = None
+        try:
+            hs = getattr(outputs, "hidden_states", None)
+            if isinstance(hs, (list, tuple)) and len(hs) > 0 and torch.is_tensor(hs[-1]):
+                hidden_state_out = hs[-1]
+            else:
+                lhs = getattr(outputs, "last_hidden_state", None)
+                if torch.is_tensor(lhs):
+                    hidden_state_out = lhs
+        except Exception:
+            hidden_state_out = None
+
+        if torch.is_tensor(hidden_state_out):
+            result["hidden_states"] = hidden_state_out
 
         return result
 
