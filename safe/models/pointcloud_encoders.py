@@ -162,7 +162,8 @@ class PointBERTEncoder(nn.Module):
 
         if checkpoint_path and Path(checkpoint_path).exists():
             print(f"[PointCloud] Loading checkpoint: {checkpoint_path}", flush=True)
-            state_dict = torch.load(checkpoint_path, map_location="cpu")
+            # weights_only=False needed for PointBERT checkpoints (contain numpy arrays)
+            state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
             # Handle different checkpoint formats
             if "model" in state_dict:
                 state_dict = state_dict["model"]
