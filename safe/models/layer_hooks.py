@@ -21,6 +21,8 @@ class FusionHook:
         modality_masks: Optional[Dict[str, torch.Tensor]] = None,
         gate: Any = 1.0,
         supervised_mask: Optional[torch.Tensor] = None,
+        debug_fusion: bool = False,
+        debug_fusion_log_every: int = 50,
     ) -> None:
         self.layer_idx = layer_idx
         self.fusion_adapter = fusion_adapter
@@ -29,6 +31,9 @@ class FusionHook:
         self.modality_masks = modality_masks or {}
         self.gate = gate
         self.supervised_mask = supervised_mask
+        self.debug_fusion = bool(debug_fusion)
+        self.debug_fusion_log_every = int(debug_fusion_log_every)
+        self._call_idx = 0
 
     def __call__(self, module: nn.Module, inputs: tuple, output: Any) -> Any:
         if not self.modalities:
@@ -46,6 +51,32 @@ class FusionHook:
             gate=self.gate,
             supervised_mask=self.supervised_mask,
         )
+
+        if self.debug_fusion and self.debug_fusion_log_every > 0:
+            self._call_idx += 1
+            if (self._call_idx % self.debug_fusion_log_every) == 0:
+                try:
+                    hs = hidden_states.detach().float()
+                    fu = fused.detach().float()
+                    delta = fu - hs
+                    hs_norm = hs.norm(dim=-1).mean().item()
+                    delta_norm = delta.norm(dim=-1).mean().item()
+                    ratio = delta_norm / (hs_norm + 1e-6)
+                    delta_max = delta.abs().max().item()
+                    hs_max = hs.abs().max().item()
+                    finite = torch.isfinite(fu).all().item()
+
+                    gate_repr = self.gate
+                    if isinstance(self.gate, dict):
+                        gate_repr = {k: float(v) if isinstance(v, (int, float)) else v for k, v in self.gate.items()}
+                    print(
+                        f"[FUSION] layer={self.layer_idx} point={type(module).__name__} "
+                        f"hs_norm={hs_norm:.4f} delta_norm={delta_norm:.4f} ratio={ratio:.4f} "
+                        f"hs_max={hs_max:.3g} delta_max={delta_max:.3g} finite={finite} gate={gate_repr}",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
 
         return self._repack_output(fused, remainder, output_type=type(output))
 
@@ -94,17 +125,24 @@ class PreFFNFusionHook:
         self,
         layer_idx: int,
         fusion_adapter: MultiLayerFusionAdapter,
+        modalities: Optional[List[str]],
         modality_tokens: Dict[str, torch.Tensor],
         modality_masks: Optional[Dict[str, torch.Tensor]] = None,
         gate: Any = 1.0,
         supervised_mask: Optional[torch.Tensor] = None,
+        debug_fusion: bool = False,
+        debug_fusion_log_every: int = 50,
     ) -> None:
         self.layer_idx = layer_idx
         self.fusion_adapter = fusion_adapter
+        self.modalities = modalities or []
         self.modality_tokens = modality_tokens
         self.modality_masks = modality_masks or {}
         self.gate = gate
         self.supervised_mask = supervised_mask
+        self.debug_fusion = bool(debug_fusion)
+        self.debug_fusion_log_every = int(debug_fusion_log_every)
+        self._call_idx = 0
 
     def __call__(self, module: nn.Module, inputs: tuple) -> tuple:
         if not inputs:
@@ -122,6 +160,31 @@ class PreFFNFusionHook:
             gate=self.gate,
             supervised_mask=self.supervised_mask,
         )
+
+        if self.debug_fusion and self.debug_fusion_log_every > 0:
+            self._call_idx += 1
+            if (self._call_idx % self.debug_fusion_log_every) == 0:
+                try:
+                    hs = hidden_states.detach().float()
+                    fu = fused.detach().float()
+                    delta = fu - hs
+                    hs_norm = hs.norm(dim=-1).mean().item()
+                    delta_norm = delta.norm(dim=-1).mean().item()
+                    ratio = delta_norm / (hs_norm + 1e-6)
+                    delta_max = delta.abs().max().item()
+                    hs_max = hs.abs().max().item()
+                    finite = torch.isfinite(fu).all().item()
+                    gate_repr = self.gate
+                    if isinstance(self.gate, dict):
+                        gate_repr = {k: float(v) if isinstance(v, (int, float)) else v for k, v in self.gate.items()}
+                    print(
+                        f"[FUSION] layer={self.layer_idx} point=pre_ffn "
+                        f"hs_norm={hs_norm:.4f} delta_norm={delta_norm:.4f} ratio={ratio:.4f} "
+                        f"hs_max={hs_max:.3g} delta_max={delta_max:.3g} finite={finite} gate={gate_repr}",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
 
         # Replace the first positional arg (hidden states) with fused version
         if len(inputs) == 1:
@@ -153,6 +216,8 @@ class LayerHookManager:
         modality_masks: Optional[Dict[str, torch.Tensor]] = None,
         gate: Any = 1.0,
         supervised_mask: Optional[torch.Tensor] = None,
+        debug_fusion: bool = False,
+        debug_fusion_log_every: int = 50,
     ) -> None:
         self.remove_hooks()
         requested_layers = {idx for indices in self.fusion_layers.values() for idx in indices}
@@ -181,10 +246,13 @@ class LayerHookManager:
                 hook = PreFFNFusionHook(
                     layer_idx=idx,
                     fusion_adapter=self.fusion_adapter,
+                    modalities=modalities,
                     modality_tokens=modality_tokens,
                     modality_masks=modality_masks,
                     gate=gate,
                     supervised_mask=supervised_mask,
+                    debug_fusion=debug_fusion,
+                    debug_fusion_log_every=debug_fusion_log_every,
                 )
                 handle = ffn_module.register_forward_pre_hook(hook)
                 self._handles.append(handle)
@@ -197,6 +265,8 @@ class LayerHookManager:
                     modality_masks=modality_masks,
                     gate=gate,
                     supervised_mask=supervised_mask,
+                    debug_fusion=debug_fusion,
+                    debug_fusion_log_every=debug_fusion_log_every,
                 )
                 handle = layer_module.register_forward_hook(hook)
                 self._handles.append(handle)

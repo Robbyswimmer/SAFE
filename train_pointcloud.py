@@ -52,6 +52,46 @@ from safe.data.pointcloud_datasets import (
 from configs.pointcloud_configs import get_pointcloud_config, list_pointcloud_configs
 
 
+def _grad_summary(params: List[torch.nn.Parameter]) -> Dict[str, float]:
+    total = 0
+    with_grad = 0
+    none_grad = 0
+    nan_grad = 0
+    inf_grad = 0
+    l2_sum = 0.0
+    max_abs = 0.0
+
+    for p in params:
+        if not getattr(p, "requires_grad", False):
+            continue
+        total += 1
+        g = getattr(p, "grad", None)
+        if g is None:
+            none_grad += 1
+            continue
+        with_grad += 1
+        g_detached = g.detach()
+        if not torch.isfinite(g_detached).all():
+            nan_grad += int(torch.isnan(g_detached).any().item())
+            inf_grad += int(torch.isinf(g_detached).any().item())
+        l2_sum += float(g_detached.float().pow(2).sum().item())
+        try:
+            max_abs = max(max_abs, float(g_detached.abs().max().item()))
+        except Exception:
+            pass
+
+    l2_norm = math.sqrt(l2_sum) if l2_sum > 0 else 0.0
+    return {
+        "params_total": float(total),
+        "params_with_grad": float(with_grad),
+        "params_none_grad": float(none_grad),
+        "nan_grad_any": float(nan_grad),
+        "inf_grad_any": float(inf_grad),
+        "grad_l2": float(l2_norm),
+        "grad_max_abs": float(max_abs),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -137,6 +177,28 @@ def parse_args() -> argparse.Namespace:
 
     # Debug
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--debug-checks",
+        action="store_true",
+        help="Extra sanity checks (finite activations, grad flow); more verbose",
+    )
+    parser.add_argument(
+        "--debug-check-every",
+        type=int,
+        default=50,
+        help="How often to run debug checks (in steps)",
+    )
+    parser.add_argument(
+        "--debug-fusion",
+        action="store_true",
+        help="Log fusion strength (||delta||/||hidden||) at injection sites",
+    )
+    parser.add_argument(
+        "--debug-fusion-every",
+        type=int,
+        default=50,
+        help="How often fusion strength logs print (in hook calls)",
+    )
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument(
         "--log-every",
@@ -628,9 +690,30 @@ def train_epoch_llm_probe_head(
 
     for batch_idx, batch in enumerate(pbar):
         step_start = time.time()
+        if args.debug_fusion and batch_idx == 0:
+            try:
+                model.safe_model.set_fusion_debug(True, log_every=args.debug_fusion_every)
+            except Exception:
+                pass
         pointclouds = batch["pointclouds"].to(device)
         labels = batch["labels"].to(device, dtype=torch.long)
         questions = batch["questions"]
+
+        if args.debug_checks and epoch == 0 and batch_idx == 0:
+            pc_finite = torch.isfinite(pointclouds).all().item()
+            pc_min = pointclouds.min().item()
+            pc_max = pointclouds.max().item()
+            pc_mean = pointclouds.mean().item()
+            pc_std = pointclouds.float().std().item()
+            print(
+                f"[DEBUG] PC input: shape={tuple(pointclouds.shape)} finite={pc_finite} "
+                f"min={pc_min:.4f} max={pc_max:.4f} mean={pc_mean:.4f} std={pc_std:.4f}",
+                flush=True,
+            )
+            print(
+                f"[DEBUG] Labels: shape={tuple(labels.shape)} min={labels.min().item()} max={labels.max().item()}",
+                flush=True,
+            )
 
         encoded = tokenizer(
             list(questions),
@@ -650,6 +733,18 @@ def train_epoch_llm_probe_head(
             pointcloud=pointclouds,
         )
         logits = probe_out.logits
+        if args.debug_checks and epoch == 0 and batch_idx == 0:
+            pooled = probe_out.pooled
+            print(
+                f"[DEBUG] Pooled: shape={tuple(pooled.shape)} finite={torch.isfinite(pooled).all().item()} "
+                f"min={pooled.min().item():.4f} max={pooled.max().item():.4f}",
+                flush=True,
+            )
+            print(
+                f"[DEBUG] Logits: shape={tuple(logits.shape)} finite={torch.isfinite(logits).all().item()} "
+                f"min={logits.min().item():.4f} max={logits.max().item():.4f}",
+                flush=True,
+            )
         loss = loss_fct(logits, labels) / args.gradient_accumulation
 
         if args.debug:
@@ -659,7 +754,21 @@ def train_epoch_llm_probe_head(
             print(f"[DEBUG] Step {batch_idx}: after backward", flush=True)
 
         if (batch_idx + 1) % args.gradient_accumulation == 0:
-            torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), args.max_grad_norm)
+            total_norm = torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), args.max_grad_norm)
+            do_checks = args.debug_checks and ((batch_idx % max(args.debug_check_every, 1)) == 0)
+            if do_checks:
+                safe_stats = _grad_summary(model.get_safe_params())
+                head_stats = _grad_summary(model.get_head_params())
+                print(
+                    f"[DEBUG] GradClip: total_norm={float(total_norm):.4f} "
+                    f"safe_l2={safe_stats['grad_l2']:.4f} safe_max={safe_stats['grad_max_abs']:.4g} "
+                    f"safe_none={int(safe_stats['params_none_grad'])}/{int(safe_stats['params_total'])} "
+                    f"head_l2={head_stats['grad_l2']:.4f} head_max={head_stats['grad_max_abs']:.4g} "
+                    f"head_none={int(head_stats['params_none_grad'])}/{int(head_stats['params_total'])} "
+                    f"nan_any={int(safe_stats['nan_grad_any']+head_stats['nan_grad_any'])} "
+                    f"inf_any={int(safe_stats['inf_grad_any']+head_stats['inf_grad_any'])}",
+                    flush=True,
+                )
             if args.debug:
                 print(f"[DEBUG] Step {batch_idx}: optimizer step", flush=True)
             optimizer.step()

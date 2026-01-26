@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .base_vl import BaseVLModel
 from .pointcloud_encoders import PointBERTEncoder
-from .projectors import AudioProjector, AdaptiveAudioProjector
+from .projectors import AudioProjector, AdaptiveAudioProjector, TokenSetProjector
 from .fusion_adapter import (
     MultiLayerFusionAdapter,
     LoRAFusionAdapter,
@@ -79,6 +79,8 @@ class SAFEPointCloudModel(nn.Module):
         self.llm_hidden_size = llm_hidden_size
         self.pointcloud_embed_dim = pointcloud_embed_dim
         self.label_smoothing = label_smoothing
+        self.debug_fusion_stats = False
+        self.debug_fusion_log_every = 50
 
         # Initialize base VL model (same as SAFEModel)
         print(f"[SAFE-PC] Initializing BaseVLModel...", flush=True)
@@ -115,6 +117,7 @@ class SAFEPointCloudModel(nn.Module):
         # Initialize projector (REUSE AudioProjector - it's modality-agnostic!)
         print(f"[SAFE-PC] Initializing projector ({projector_type})...", flush=True)
         projector_config = dict(projector_config) if projector_config else {}
+        use_group_tokens = bool(pointcloud_encoder_config.get("return_group_tokens", False))
 
         # For KV augmentation, output to embed_dim space (smaller)
         projector_output_dim = projector_config.pop("output_dim", None)
@@ -122,14 +125,23 @@ class SAFEPointCloudModel(nn.Module):
             projector_output_dim = pointcloud_embed_dim if is_kv_augment else None
 
         if projector_type == "standard":
-            # Note: We reuse AudioProjector - the name is misleading but it's generic
-            self.pointcloud_projector = AudioProjector(
-                audio_embed_dim=pointcloud_embed_dim,  # Input from PC encoder
-                llm_hidden_size=llm_hidden_size,
-                num_audio_tokens=num_tokens,
-                output_dim=projector_output_dim,
-                **projector_config
-            )
+            if use_group_tokens:
+                # Token-set projector: (B, G, D) -> (B, num_tokens, output_dim)
+                self.pointcloud_projector = TokenSetProjector(
+                    input_dim=pointcloud_embed_dim,
+                    num_tokens=num_tokens,
+                    output_dim=projector_output_dim,
+                    **projector_config,
+                )
+            else:
+                # Note: We reuse AudioProjector - the name is misleading but it's generic
+                self.pointcloud_projector = AudioProjector(
+                    audio_embed_dim=pointcloud_embed_dim,  # Input from PC encoder
+                    llm_hidden_size=llm_hidden_size,
+                    num_audio_tokens=num_tokens,
+                    output_dim=projector_output_dim,
+                    **projector_config
+                )
         elif projector_type == "adaptive":
             self.pointcloud_projector = AdaptiveAudioProjector(
                 audio_embed_dim=pointcloud_embed_dim,
@@ -189,6 +201,11 @@ class SAFEPointCloudModel(nn.Module):
 
         print(f"[SAFE-PC] ✓ Model initialization complete", flush=True)
 
+    def set_fusion_debug(self, enabled: bool, log_every: int = 50) -> None:
+        """Enable periodic fusion strength logging (delta vs hidden norms)."""
+        self.debug_fusion_stats = bool(enabled)
+        self.debug_fusion_log_every = int(log_every)
+
     def _setup_kv_augmentation(
         self,
         layer_indices: List[int],
@@ -243,7 +260,22 @@ class SAFEPointCloudModel(nn.Module):
             Point cloud tokens (batch_size, num_tokens, hidden_dim)
         """
         # Get point cloud features from encoder
-        pc_features = self.pointcloud_encoder(pointcloud)  # (B, embed_dim)
+        # - (B, embed_dim) global vector (CLS)
+        # - or (B, G, embed_dim) group tokens if return_group_tokens=True
+        pc_features = self.pointcloud_encoder(pointcloud)
+
+        # Debug: check for inf/nan in encoder features once
+        if not hasattr(self, "_pc_feat_debug_logged"):
+            self._pc_feat_debug_logged = True
+            feat_finite = torch.isfinite(pc_features).all()
+            feat_min = pc_features.min().item()
+            feat_max = pc_features.max().item()
+            feat_mean = pc_features.mean().item()
+            print(
+                f"[DEBUG] PC feats: shape={tuple(pc_features.shape)}, "
+                f"finite={feat_finite}, min={feat_min:.4f}, max={feat_max:.4f}, mean={feat_mean:.4f}",
+                flush=True,
+            )
 
         # Get device and target dtype (LLM dtype, likely fp16)
         device = next(self.pointcloud_projector.parameters()).device
@@ -252,14 +284,35 @@ class SAFEPointCloudModel(nn.Module):
         # Keep in fp32 for projection to avoid overflow
         pc_features = pc_features.to(device=device, dtype=torch.float32)
 
-        # Project to token space (projector handles fp32 internally)
+        # Project to token space
         if self.projector_type == "adaptive":
+            # Adaptive projector only supports vector inputs; fall back to mean-pool if tokens are provided.
+            if pc_features.dim() == 3:
+                pc_vec = pc_features.mean(dim=1)
+            else:
+                pc_vec = pc_features
             pc_tokens = self.pointcloud_projector(
-                pc_features,
+                pc_vec,
                 num_tokens=num_tokens or self.num_tokens,
             )
         else:
+            # TokenSetProjector supports (B,G,D); AudioProjector expects (B,D)
+            if pc_features.dim() == 3 and isinstance(self.pointcloud_projector, AudioProjector):
+                pc_features = pc_features.mean(dim=1)
             pc_tokens = self.pointcloud_projector(pc_features)
+
+        # Debug: check projector output once
+        if not hasattr(self, "_pc_proj_debug_logged"):
+            self._pc_proj_debug_logged = True
+            proj_finite = torch.isfinite(pc_tokens).all()
+            proj_min = pc_tokens.min().item()
+            proj_max = pc_tokens.max().item()
+            proj_mean = pc_tokens.mean().item()
+            print(
+                f"[DEBUG] PC proj: shape={tuple(pc_tokens.shape)}, "
+                f"finite={proj_finite}, min={proj_min:.4f}, max={proj_max:.4f}, mean={proj_mean:.4f}",
+                flush=True,
+            )
 
         # Clamp before converting to fp16 to avoid overflow (fp16 max ~65504)
         if target_dtype == torch.float16:
@@ -345,6 +398,8 @@ class SAFEPointCloudModel(nn.Module):
                 modality_tokens=modality_tokens,
                 modality_masks=None,
                 gate={"pointcloud": 1.0},
+                debug_fusion=self.debug_fusion_stats,
+                debug_fusion_log_every=self.debug_fusion_log_every,
             )
 
             # Debug: log hook info once
@@ -486,6 +541,8 @@ class SAFEPointCloudModel(nn.Module):
                 modality_tokens=modality_tokens,
                 modality_masks=None,
                 gate={"pointcloud": 1.0},
+                debug_fusion=self.debug_fusion_stats,
+                debug_fusion_log_every=self.debug_fusion_log_every,
             )
 
             try:

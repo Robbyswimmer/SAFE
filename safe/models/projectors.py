@@ -280,6 +280,123 @@ class AudioProjector(nn.Module):
         return audio_tokens
 
 
+class TokenSetProjector(nn.Module):
+    """
+    Project a set of modality tokens into LLM token space.
+
+    Input:  (B, G, input_dim)  where G is number of encoder/group tokens
+    Output: (B, num_tokens, output_dim)
+
+    Uses learned queries to attend over encoder tokens and produce exactly
+    `num_tokens` pooled tokens, then an MLP to map to output_dim.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        num_tokens: int = 8,
+        dropout: float = 0.1,
+        activation: str = "gelu",
+        bottleneck_dim: Optional[int] = None,
+        use_positional_embedding: bool = False,
+        output_dim: Optional[int] = None,
+        disable_output_norm: bool = False,
+        disable_input_norm: bool = False,
+        disable_scale: bool = False,
+        **_unused: object,
+    ):
+        super().__init__()
+
+        self.input_dim = int(input_dim)
+        self.num_tokens = int(num_tokens)
+        self.output_dim = int(output_dim) if output_dim is not None else self.input_dim
+        self.disable_output_norm = bool(disable_output_norm)
+        self.disable_input_norm = bool(disable_input_norm)
+        self.disable_scale = bool(disable_scale)
+
+        if bottleneck_dim is None:
+            bottleneck_dim = min(2048, self.output_dim // 2) if self.output_dim > 1024 else min(512, self.output_dim)
+        self.bottleneck_dim = int(bottleneck_dim)
+
+        if activation.lower() == "gelu":
+            act_fn = nn.GELU()
+        elif activation.lower() == "relu":
+            act_fn = nn.ReLU()
+        elif activation.lower() == "silu":
+            act_fn = nn.SiLU()
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
+
+        self.key_norm = nn.LayerNorm(self.input_dim, eps=1e-6)
+        self.query_norm = nn.LayerNorm(self.input_dim, eps=1e-6)
+
+        # Learned queries that pool G encoder tokens down to num_tokens outputs
+        self.queries = nn.Parameter(torch.zeros(1, self.num_tokens, self.input_dim))
+        nn.init.normal_(self.queries, mean=0.0, std=0.02)
+
+        # MLP that maps pooled tokens to output_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(self.input_dim, self.bottleneck_dim),
+            act_fn,
+            nn.Dropout(dropout),
+            nn.Linear(self.bottleneck_dim, self.output_dim),
+        )
+
+        self.pos_embedding = None
+        if use_positional_embedding:
+            self.pos_embedding = nn.Parameter(torch.zeros(1, self.num_tokens, self.output_dim))
+            nn.init.normal_(self.pos_embedding, mean=0.0, std=0.02)
+
+        self.output_norm = nn.LayerNorm(self.output_dim, eps=1e-6)
+        self.output_scale = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, token_features: torch.Tensor, out_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        """
+        Args:
+            token_features: (B, G, input_dim) or (B, input_dim)
+        Returns:
+            tokens: (B, num_tokens, output_dim)
+        """
+        if token_features.dim() == 2:
+            token_features = token_features.unsqueeze(1)
+        if token_features.dim() != 3:
+            raise ValueError(f"token_features must be (B,G,D) or (B,D), got {tuple(token_features.shape)}")
+
+        x = torch.nan_to_num(token_features, nan=0.0, posinf=0.0, neginf=0.0)
+        if x.dtype != torch.float32:
+            x = x.float()
+
+        if not self.disable_input_norm:
+            k = self.key_norm(x)
+        else:
+            k = x
+
+        q = self.queries.expand(k.shape[0], -1, -1)
+        q = self.query_norm(q)
+
+        # Attention pooling: (B, T, D) x (B, D, G) -> (B, T, G)
+        attn_logits = torch.matmul(q, k.transpose(1, 2)) / (self.input_dim ** 0.5)
+        attn = torch.softmax(attn_logits, dim=-1)
+        pooled = torch.matmul(attn, x)  # (B, T, input_dim)
+
+        tokens = self.mlp(pooled)  # (B, T, output_dim)
+
+        if self.pos_embedding is not None:
+            tokens = tokens + self.pos_embedding
+
+        if not self.disable_output_norm:
+            tokens = self.output_norm(tokens)
+
+        if not self.disable_scale:
+            min_scale = getattr(self, "_scale_min", 0.5)
+            clamped_scale = torch.clamp(self.output_scale, min_scale, 10.0)
+            tokens = tokens * clamped_scale
+
+        if out_dtype is not None:
+            tokens = tokens.to(out_dtype)
+        return tokens
+
+
 class AdaptiveAudioProjector(nn.Module):
     """
     Adaptive projector that can output variable number of tokens based on input complexity.

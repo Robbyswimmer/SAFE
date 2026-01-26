@@ -82,6 +82,7 @@ class PointBERTEncoder(nn.Module):
         embed_dim: int = 768,
         use_pretrained: bool = True,
         checkpoint_path: Optional[str] = None,
+        return_group_tokens: bool = False,
     ):
         """
         Initialize point cloud encoder.
@@ -100,6 +101,7 @@ class PointBERTEncoder(nn.Module):
         self.num_points = num_points
         self.pointcloud_embed_dim = embed_dim
         self.debug_logging = False
+        self.return_group_tokens = bool(return_group_tokens)
 
         print(f"[PointCloud] Initializing point cloud encoder: {model_name}...", flush=True)
 
@@ -305,12 +307,19 @@ class PointBERTEncoder(nn.Module):
             if hasattr(self.encoder, 'expects_channels_first') and self.encoder.expects_channels_first:
                 batch = batch.transpose(1, 2)
 
-            embeddings = self.encoder(batch)
+            if self.return_group_tokens and hasattr(self.encoder, "forward"):
+                try:
+                    embeddings = self.encoder(batch, return_tokens=True)
+                except TypeError:
+                    embeddings = self.encoder(batch)
+            else:
+                embeddings = self.encoder(batch)
 
             # Ensure output is (B, embed_dim)
             if embeddings.dim() == 3:
-                # Pool over sequence dimension
-                embeddings = embeddings.mean(dim=1)
+                # If we're not explicitly returning tokens, pool over sequence dim
+                if not self.return_group_tokens:
+                    embeddings = embeddings.mean(dim=1)
 
         if self.debug_logging:
             print(f"[PointCloud] Output: shape={list(embeddings.shape)}, "
@@ -437,13 +446,14 @@ class PointTransformerEncoder(nn.Module):
 
         return groups
 
-    def forward(self, xyz: torch.Tensor) -> torch.Tensor:
+    def forward(self, xyz: torch.Tensor, return_tokens: bool = False) -> torch.Tensor:
         """
         Args:
             xyz: (B, N, 3) point cloud
 
         Returns:
-            (B, embed_dim) global embedding
+            If return_tokens=False: (B, embed_dim) global embedding (CLS)
+            If return_tokens=True: (B, num_groups, embed_dim) group token embeddings (no CLS)
         """
         if xyz.dim() == 2:
             xyz = xyz.unsqueeze(0)
@@ -469,6 +479,10 @@ class PointTransformerEncoder(nn.Module):
 
         # Normalize
         x = self.norm(x)
+
+        if return_tokens:
+            # Return group tokens (exclude CLS at index 0)
+            return x[:, 1:, :]  # (B, num_groups, embed_dim)
 
         # Return CLS token embedding
         return x[:, 0]  # (B, embed_dim)

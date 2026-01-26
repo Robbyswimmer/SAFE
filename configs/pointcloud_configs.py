@@ -26,6 +26,8 @@ MODELNET40_CONFIG: Dict[str, Any] = {
         "embed_dim": 768,
         "use_pretrained": True,
         "checkpoint_path": None,  # Set to path if you have pre-trained weights
+        # Use PointTransformer group tokens (not just CLS) for richer fusion.
+        "return_group_tokens": True,
     },
 
     # Model dimensions
@@ -34,10 +36,11 @@ MODELNET40_CONFIG: Dict[str, Any] = {
 
     # Projector configuration (reuses AudioProjector)
     "projector_type": "standard",
-    "num_tokens": 8,  # Same as audio baseline
+    "num_tokens": 16,  # More tokens helps for 40-way classification
     "projector_config": {
         "dropout": 0.1,
-        "bottleneck_dim": 1024,
+        "bottleneck_dim": 2048,
+        # TokenSetProjector ignores unknown keys like use_swiglu.
         "use_swiglu": True,
         "use_positional_embedding": True,
     },
@@ -45,7 +48,7 @@ MODELNET40_CONFIG: Dict[str, Any] = {
     # Fusion configuration (reuses MultiLayerFusionAdapter)
     # Uses pre-FFN residual fusion (same as audio LLM probe)
     "fusion_type": "multilayer",
-    "fusion_layer_indices": [1],  # Single layer for classification (like audio probe)
+    "fusion_layer_indices": [12, 24, 36],  # Stronger signal via multi-layer fusion
     "lora_rank": 8,
     "fusion_config": {
         "num_attention_heads": 40,  # LLaVA 13B heads
@@ -90,6 +93,7 @@ CAP3D_CONFIG: Dict[str, Any] = {
         "embed_dim": 768,
         "use_pretrained": True,
         "checkpoint_path": None,
+        "return_group_tokens": True,
     },
 
     # Model dimensions
