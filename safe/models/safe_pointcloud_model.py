@@ -288,8 +288,27 @@ class SAFEPointCloudModel(nn.Module):
         if pointcloud_tokens is None and pointcloud is not None:
             pointcloud_tokens = self.encode_pointcloud(pointcloud)
 
+        # Debug: check for inf/nan in pointcloud tokens
+        if pointcloud_tokens is not None and not hasattr(self, '_pc_debug_logged'):
+            self._pc_debug_logged = True
+            pc_finite = torch.isfinite(pointcloud_tokens).all()
+            pc_min = pointcloud_tokens.min().item()
+            pc_max = pointcloud_tokens.max().item()
+            pc_mean = pointcloud_tokens.mean().item()
+            print(f"[DEBUG] PC tokens: shape={tuple(pointcloud_tokens.shape)}, "
+                  f"finite={pc_finite}, min={pc_min:.4f}, max={pc_max:.4f}, mean={pc_mean:.4f}", flush=True)
+
         # Get text embeddings
         inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+
+        # Debug: check input embeddings
+        if not hasattr(self, '_embed_debug_logged'):
+            self._embed_debug_logged = True
+            emb_finite = torch.isfinite(inputs_embeds).all()
+            emb_min = inputs_embeds.min().item()
+            emb_max = inputs_embeds.max().item()
+            print(f"[DEBUG] Input embeds: shape={tuple(inputs_embeds.shape)}, "
+                  f"finite={emb_finite}, min={emb_min:.4f}, max={emb_max:.4f}", flush=True)
 
         # Determine fusion mode
         use_midlayer_hooks = (
@@ -322,6 +341,12 @@ class SAFEPointCloudModel(nn.Module):
                 modality_masks=None,
                 gate={"pointcloud": 1.0},
             )
+
+            # Debug: log hook info once
+            if not hasattr(self, '_hook_debug_logged'):
+                self._hook_debug_logged = True
+                print(f"[DEBUG] Hooks registered: num_hooks={hook_manager.num_hooks}, "
+                      f"layers={fusion_layers}, injection={self.fusion_injection_point}", flush=True)
 
             try:
                 outputs = self.base_vl.llm(
@@ -356,6 +381,17 @@ class SAFEPointCloudModel(nn.Module):
                 use_cache=False,
             )
 
+        # Debug: check outputs
+        if not hasattr(self, '_output_debug_logged'):
+            self._output_debug_logged = True
+            logits_finite = torch.isfinite(outputs.logits).all()
+            logits_min = outputs.logits.min().item()
+            logits_max = outputs.logits.max().item()
+            print(f"[DEBUG] Logits: shape={tuple(outputs.logits.shape)}, "
+                  f"finite={logits_finite}, min={logits_min:.4f}, max={logits_max:.4f}", flush=True)
+            if outputs.loss is not None:
+                print(f"[DEBUG] HF Loss: {outputs.loss.item():.4f}", flush=True)
+
         result = {"logits": outputs.logits}
 
         if labels is not None:
@@ -367,6 +403,14 @@ class SAFEPointCloudModel(nn.Module):
                 )
             else:
                 loss = outputs.loss
+
+            # Debug: check computed loss
+            if not hasattr(self, '_loss_debug_logged'):
+                self._loss_debug_logged = True
+                print(f"[DEBUG] Computed loss: {loss.item() if loss is not None else 'None'}", flush=True)
+                if labels is not None:
+                    print(f"[DEBUG] Labels: shape={tuple(labels.shape)}, "
+                          f"min={labels.min().item()}, max={labels.max().item()}", flush=True)
 
             result["loss"] = loss
 
