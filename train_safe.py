@@ -651,6 +651,11 @@ def _embed_texts_for_contrastive(
     if not texts:
         return torch.empty(0, hidden_size, device=device)
 
+    # Filter out None/empty strings (safety net)
+    texts = [t for t in texts if t is not None and isinstance(t, str) and t.strip()]
+    if not texts:
+        return torch.empty(0, hidden_size, device=device)
+
     encoded = tokenizer(
         texts,
         padding=True,
@@ -3064,7 +3069,17 @@ def run_alignment_pretraining(
 
             # Handle list of lists for captions (take first caption)
             if isinstance(captions[0], list):
-                captions = [c[0] if c else "" for c in captions]
+                captions = [c[0] if c else None for c in captions]
+
+            # Filter out None/empty captions and their corresponding audio paths
+            valid_pairs = [
+                (ap, cap) for ap, cap in zip(audio_paths, captions)
+                if cap is not None and isinstance(cap, str) and cap.strip()
+            ]
+            if not valid_pairs:
+                continue
+            audio_paths, captions = zip(*valid_pairs)
+            audio_paths, captions = list(audio_paths), list(captions)
 
             if batch_idx == 0 and is_main:
                 print(f"    Entering try block for audio encoding...", flush=True)
@@ -3161,6 +3176,12 @@ def run_alignment_pretraining(
                                 "align/epoch": epoch + 1,
                                 "align/step": global_step,
                             }, step=global_step)
+
+                # Periodic memory cleanup every 1000 batches (prevents OOM on long runs)
+                if (batch_idx + 1) % 1000 == 0:
+                    import gc
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
             except Exception as e:
                 if is_main:
