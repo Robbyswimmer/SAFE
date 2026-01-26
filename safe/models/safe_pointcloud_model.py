@@ -208,9 +208,9 @@ class SAFEPointCloudModel(nn.Module):
 
         # Create hook manager
         self.kv_hook_manager = KVAugmentationHookManager(
-            language_model=self.base_vl.llm,
-            adapters=kv_adapters,
-            layer_indices=layer_indices,
+            model=self.base_vl.llm,
+            kv_adapters=kv_adapters,
+            fusion_layer_indices=layer_indices,
         )
 
         print(f"[SAFE-PC] ✓ KV Augmentation initialized at layers {layer_indices}", flush=True)
