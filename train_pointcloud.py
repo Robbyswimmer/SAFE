@@ -348,7 +348,9 @@ def evaluate_classification(
                     class_correct[true_clean] = 0
                 class_total[true_clean] += 1
 
-                if true_clean in pred_clean or pred_clean in true_clean:
+                # Avoid counting empty/short generations as correct:
+                # in Python, "" in "chair" is True.
+                if pred_clean and true_clean and (true_clean in pred_clean):
                     correct += 1
                     class_correct[true_clean] += 1
 
