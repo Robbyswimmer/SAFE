@@ -194,10 +194,10 @@ class SAFEPointCloudModel(nn.Module):
         kv_adapters = nn.ModuleDict()
         for layer_idx in layer_indices:
             adapter = KVAugmentationAdapter(
-                audio_dim=self.pointcloud_embed_dim,  # Point cloud dim
+                input_dim=self.pointcloud_embed_dim,  # Point cloud dim
                 hidden_size=self.llm_hidden_size,
                 num_heads=num_attention_heads,
-                num_kv_heads=num_key_value_heads,
+                num_key_value_heads=num_key_value_heads,
                 head_dim=head_dim,
                 bottleneck_dim=fusion_config.get("bottleneck_dim", 64),
                 query_adapter_rank=fusion_config.get("query_adapter_rank", 16),
