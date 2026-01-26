@@ -52,6 +52,7 @@ NUM_WORKERS=${NUM_WORKERS:-4}
 FP16=${FP16:-0}
 DEBUG=${DEBUG:-0}
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
+POINTBERT_CHECKPOINT=${POINTBERT_CHECKPOINT:-"checkpoints/pointbert/pointbert_shapenet.pt"}
 
 # Create logs directory
 mkdir -p logs
@@ -72,6 +73,7 @@ echo "Epochs: ${NUM_EPOCHS}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "Learning rate: ${LR}"
 echo "Gradient accumulation: ${GRADIENT_ACCUMULATION}"
+echo "PointBERT checkpoint: ${POINTBERT_CHECKPOINT}"
 echo "========================================"
 
 # Build command
@@ -100,6 +102,13 @@ fi
 
 if [[ -n "${MAX_TRAIN_SAMPLES}" ]]; then
   CMD="$CMD --max-train-samples ${MAX_TRAIN_SAMPLES}"
+fi
+
+if [[ -f "${POINTBERT_CHECKPOINT}" ]]; then
+  CMD="$CMD --encoder-checkpoint ${POINTBERT_CHECKPOINT}"
+  echo "Using PointBERT checkpoint: ${POINTBERT_CHECKPOINT}"
+else
+  echo "No PointBERT checkpoint found, training encoder from scratch"
 fi
 
 echo "Running: ${CMD}"

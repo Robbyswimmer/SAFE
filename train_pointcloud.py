@@ -102,6 +102,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--max-train-samples", type=int, default=None)
 
+    # Encoder checkpoint
+    parser.add_argument(
+        "--encoder-checkpoint",
+        type=str,
+        default=None,
+        help="Path to pre-trained PointBERT checkpoint",
+    )
+
     return parser.parse_args()
 
 
@@ -140,14 +148,24 @@ def create_dataset(
     return dataset
 
 
-def create_model(config: Dict[str, Any], device: str) -> SAFEPointCloudModel:
+def create_model(
+    config: Dict[str, Any],
+    device: str,
+    encoder_checkpoint: Optional[str] = None,
+) -> SAFEPointCloudModel:
     """Create model from config."""
+    # Get encoder config and add checkpoint path if provided
+    encoder_config = dict(config.get("pointcloud_encoder_config", {}))
+    if encoder_checkpoint:
+        encoder_config["checkpoint_path"] = encoder_checkpoint
+        print(f"Using encoder checkpoint: {encoder_checkpoint}")
+
     # Extract constructor arguments
     model_kwargs = {
         "llm_model_name": config.get("llm_model_name", "llava-hf/llava-1.5-13b-hf"),
         "vision_model_name": config.get("vision_model_name", "openai/clip-vit-large-patch14"),
         "pointcloud_encoder_type": config.get("pointcloud_encoder_type", "pointbert"),
-        "pointcloud_encoder_config": config.get("pointcloud_encoder_config", {}),
+        "pointcloud_encoder_config": encoder_config,
         "projector_type": config.get("projector_type", "standard"),
         "num_tokens": config.get("num_tokens", 8),
         "projector_config": config.get("projector_config", {}),
@@ -530,7 +548,7 @@ def main():
 
     # Create model
     print("\nCreating model...")
-    model = create_model(config, args.device)
+    model = create_model(config, args.device, encoder_checkpoint=args.encoder_checkpoint)
 
     # Create optimizer
     trainable_params = model.get_trainable_parameters()
