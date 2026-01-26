@@ -5,6 +5,10 @@
 # Usage:
 #   bash scripts/train_pointcloud.sh                    # Single GPU
 #   sbatch --gres=gpu:1 scripts/train_pointcloud.sh     # SLURM
+#
+# Notes:
+# - For full SAFE + LLM probe classification (no decoding), set MODE=llm_probe (default).
+# - Extra CLI args can be passed via: sbatch ... scripts/train_pointcloud.sh --some-arg ...
 
 #SBATCH --job-name=SAFE-PointCloud
 #SBATCH --output=logs/pointcloud_%j.txt
@@ -38,6 +42,7 @@ which python
 # Configuration (override via environment variables)
 CONFIG=${CONFIG:-"modelnet40"}
 PHASE=${PHASE:-"classification"}
+MODE=${MODE:-"llm_probe"}  # llm_probe | classification_head | generative
 DATA_PATH=${DATA_PATH:-"data"}
 OUTPUT_DIR=${OUTPUT_DIR:-"checkpoints/pointcloud"}
 NUM_EPOCHS=${NUM_EPOCHS:-20}
@@ -49,10 +54,15 @@ EVAL_EVERY=${EVAL_EVERY:-1}
 MAX_EVAL_BATCHES=${MAX_EVAL_BATCHES:-50}
 SAVE_EVERY=${SAVE_EVERY:-5}
 NUM_WORKERS=${NUM_WORKERS:-4}
+LOG_EVERY=${LOG_EVERY:-10}
 FP16=${FP16:-0}
 DEBUG=${DEBUG:-0}
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 POINTBERT_CHECKPOINT=${POINTBERT_CHECKPOINT:-"checkpoints/pointbert/pointbert_shapenet.pt"}
+
+# LLM probe settings (MODE=llm_probe)
+PROBE_POOLING=${PROBE_POOLING:-"last"}     # last | mean
+PROBE_HEAD_TYPE=${PROBE_HEAD_TYPE:-"linear"}  # linear | mlp
 
 # Create logs directory
 mkdir -p logs
@@ -67,55 +77,77 @@ echo "Started: $(date)"
 echo "========================================"
 echo "Config: ${CONFIG}"
 echo "Phase: ${PHASE}"
+echo "Mode: ${MODE}"
 echo "Data path: ${DATA_PATH}"
 echo "Output dir: ${OUTPUT_DIR}"
 echo "Epochs: ${NUM_EPOCHS}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "Learning rate: ${LR}"
 echo "Gradient accumulation: ${GRADIENT_ACCUMULATION}"
+echo "Log every: ${LOG_EVERY}"
 echo "PointBERT checkpoint: ${POINTBERT_CHECKPOINT}"
+if [[ "${PHASE}" == "classification" && "${MODE}" == "llm_probe" ]]; then
+  echo "Probe pooling: ${PROBE_POOLING}"
+  echo "Probe head: ${PROBE_HEAD_TYPE}"
+fi
 echo "========================================"
 
 # Build command
-CMD="python train_pointcloud.py"
-CMD="$CMD --config ${CONFIG}"
-CMD="$CMD --phase ${PHASE}"
-CMD="$CMD --data-path ${DATA_PATH}"
-CMD="$CMD --output-dir ${OUTPUT_DIR}"
-CMD="$CMD --num-epochs ${NUM_EPOCHS}"
-CMD="$CMD --batch-size ${BATCH_SIZE}"
-CMD="$CMD --lr ${LR}"
-CMD="$CMD --gradient-accumulation ${GRADIENT_ACCUMULATION}"
-CMD="$CMD --warmup-steps ${WARMUP_STEPS}"
-CMD="$CMD --eval-every ${EVAL_EVERY}"
-CMD="$CMD --max-eval-batches ${MAX_EVAL_BATCHES}"
-CMD="$CMD --save-every ${SAVE_EVERY}"
-CMD="$CMD --num-workers ${NUM_WORKERS}"
+CMD=(
+  python train_pointcloud.py
+  --config "${CONFIG}"
+  --phase "${PHASE}"
+  --data-path "${DATA_PATH}"
+  --output-dir "${OUTPUT_DIR}"
+  --num-epochs "${NUM_EPOCHS}"
+  --batch-size "${BATCH_SIZE}"
+  --lr "${LR}"
+  --gradient-accumulation "${GRADIENT_ACCUMULATION}"
+  --warmup-steps "${WARMUP_STEPS}"
+  --eval-every "${EVAL_EVERY}"
+  --max-eval-batches "${MAX_EVAL_BATCHES}"
+  --save-every "${SAVE_EVERY}"
+  --num-workers "${NUM_WORKERS}"
+  --log-every "${LOG_EVERY}"
+)
+
+if [[ "${PHASE}" == "classification" ]]; then
+  if [[ "${MODE}" == "llm_probe" ]]; then
+    CMD+=(--llm-probe-head --probe-pooling "${PROBE_POOLING}" --probe-head-type "${PROBE_HEAD_TYPE}")
+  elif [[ "${MODE}" == "classification_head" ]]; then
+    CMD+=(--classification-head)
+  fi
+fi
 
 if [[ "${FP16}" == "1" ]]; then
-  CMD="$CMD --fp16"
+  CMD+=(--fp16)
 fi
 
 if [[ "${DEBUG}" == "1" ]]; then
-  CMD="$CMD --debug"
+  CMD+=(--debug)
 fi
 
 if [[ -n "${MAX_TRAIN_SAMPLES}" ]]; then
-  CMD="$CMD --max-train-samples ${MAX_TRAIN_SAMPLES}"
+  CMD+=(--max-train-samples "${MAX_TRAIN_SAMPLES}")
 fi
 
 if [[ -f "${POINTBERT_CHECKPOINT}" ]]; then
-  CMD="$CMD --encoder-checkpoint ${POINTBERT_CHECKPOINT}"
+  CMD+=(--encoder-checkpoint "${POINTBERT_CHECKPOINT}")
   echo "Using PointBERT checkpoint: ${POINTBERT_CHECKPOINT}"
 else
   echo "No PointBERT checkpoint found, training encoder from scratch"
 fi
 
-echo "Running: ${CMD}"
+if [[ "$#" -gt 0 ]]; then
+  echo "Extra args: $*"
+  CMD+=("$@")
+fi
+
+echo "Running: ${CMD[*]}"
 echo "========================================"
 
 # Run training
-$CMD
+"${CMD[@]}"
 
 echo "========================================"
 echo "Finished: $(date)"
