@@ -40,6 +40,8 @@ MODELNET40_CONFIG: Dict[str, Any] = {
     "projector_config": {
         "dropout": 0.1,
         "bottleneck_dim": 2048,
+        # Explicitly project into LLM hidden space (prevents dim mismatch).
+        "output_dim": 5120,
         # TokenSetProjector ignores unknown keys like use_swiglu.
         "use_swiglu": True,
         "use_positional_embedding": True,

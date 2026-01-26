@@ -122,7 +122,10 @@ class SAFEPointCloudModel(nn.Module):
         # For KV augmentation, output to embed_dim space (smaller)
         projector_output_dim = projector_config.pop("output_dim", None)
         if projector_output_dim is None:
-            projector_output_dim = pointcloud_embed_dim if is_kv_augment else None
+            # Default:
+            # - KV augmentation: keep tokens small in encoder space
+            # - Standard fusion: project into LLM hidden space for maximum capacity
+            projector_output_dim = pointcloud_embed_dim if is_kv_augment else llm_hidden_size
 
         if projector_type == "standard":
             if use_group_tokens:
@@ -154,6 +157,17 @@ class SAFEPointCloudModel(nn.Module):
 
         actual_output_dim = getattr(self.pointcloud_projector, 'output_dim', llm_hidden_size)
         print(f"[SAFE-PC] ✓ Projector initialized (output_dim={actual_output_dim})", flush=True)
+
+        # Safety: Fusion adapters expect modality tokens in LLM hidden space.
+        # If projector outputs a different dim (e.g., 768), add a small adapter to map -> llm_hidden_size.
+        self.pointcloud_token_adapter: Optional[nn.Module] = None
+        if (not is_kv_augment) and int(actual_output_dim) != int(llm_hidden_size):
+            print(
+                f"[SAFE-PC] Warning: projector output_dim={actual_output_dim} != llm_hidden_size={llm_hidden_size}. "
+                f"Adding pointcloud_token_adapter to map -> {llm_hidden_size}.",
+                flush=True,
+            )
+            self.pointcloud_token_adapter = nn.Linear(int(actual_output_dim), int(llm_hidden_size), bias=False)
 
         # Initialize fusion adapter (REUSE from audio SAFE)
         self.fusion_mode = fusion_config.get("fusion_mode", "residual")
@@ -317,6 +331,10 @@ class SAFEPointCloudModel(nn.Module):
         # Clamp before converting to fp16 to avoid overflow (fp16 max ~65504)
         if target_dtype == torch.float16:
             pc_tokens = torch.clamp(pc_tokens.float(), min=-65000, max=65000)
+
+        # Ensure tokens match LLM hidden size when using fusion adapters
+        if self.pointcloud_token_adapter is not None:
+            pc_tokens = self.pointcloud_token_adapter(pc_tokens.float())
 
         return pc_tokens.to(dtype=target_dtype)
 
