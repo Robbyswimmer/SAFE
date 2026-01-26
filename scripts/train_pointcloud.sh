@@ -62,6 +62,7 @@ FP16=${FP16:-0}
 DEBUG=${DEBUG:-0}
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 POINTBERT_CHECKPOINT=${POINTBERT_CHECKPOINT:-"checkpoints/pointbert/pointbert_shapenet.pt"}
+UNFREEZE_ENCODER_LAST_N=${UNFREEZE_ENCODER_LAST_N:-0}
 
 # Wandb (optional)
 WANDB=${WANDB:-0}
@@ -101,6 +102,7 @@ if [[ -n "${HEAD_WEIGHT_DECAY}" ]]; then echo "Head WD: ${HEAD_WEIGHT_DECAY}"; f
 echo "Gradient accumulation: ${GRADIENT_ACCUMULATION}"
 echo "Log every: ${LOG_EVERY}"
 echo "PointBERT checkpoint: ${POINTBERT_CHECKPOINT}"
+echo "Unfreeze encoder last N: ${UNFREEZE_ENCODER_LAST_N}"
 if [[ "${PHASE}" == "classification" && "${MODE}" == "llm_probe" ]]; then
   echo "Probe pooling: ${PROBE_POOLING}"
   echo "Probe head: ${PROBE_HEAD_TYPE}"
@@ -127,6 +129,7 @@ CMD=(
   --save-every "${SAVE_EVERY}"
   --num-workers "${NUM_WORKERS}"
   --log-every "${LOG_EVERY}"
+  --unfreeze-encoder-last-n "${UNFREEZE_ENCODER_LAST_N}"
 )
 
 if [[ -n "${SAFE_LR}" ]]; then

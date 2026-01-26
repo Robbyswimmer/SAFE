@@ -28,6 +28,7 @@ class PointCloudClassifier(nn.Module):
         encoder_num_points: int = 1024,
         encoder_embed_dim: int = 768,
         encoder_checkpoint_path: Optional[str] = None,
+        unfreeze_last_n_blocks: int = 0,
         hidden_dim: int = 512,
         dropout: float = 0.3,
     ) -> None:
@@ -40,6 +41,7 @@ class PointCloudClassifier(nn.Module):
             embed_dim=encoder_embed_dim,
             use_pretrained=True,
             checkpoint_path=encoder_checkpoint_path,
+            unfreeze_last_n_blocks=int(unfreeze_last_n_blocks),
         )
 
         self.classifier = nn.Sequential(
@@ -52,4 +54,3 @@ class PointCloudClassifier(nn.Module):
     def forward(self, pointclouds: Any) -> torch.Tensor:
         features = self.encoder(pointclouds)  # (B, D)
         return self.classifier(features)  # (B, num_classes)
-

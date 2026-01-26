@@ -607,9 +607,10 @@ class SAFEPointCloudModel(nn.Module):
         for param in self.base_vl.parameters():
             param.requires_grad = False
 
-        # Freeze point cloud encoder
-        for param in self.pointcloud_encoder.parameters():
-            param.requires_grad = False
+        # Freeze point cloud encoder unless it has explicitly-unfrozen params
+        if not any(p.requires_grad for p in self.pointcloud_encoder.parameters()):
+            for param in self.pointcloud_encoder.parameters():
+                param.requires_grad = False
 
         # Enable projector training
         for param in self.pointcloud_projector.parameters():

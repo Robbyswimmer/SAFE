@@ -83,6 +83,7 @@ class PointBERTEncoder(nn.Module):
         use_pretrained: bool = True,
         checkpoint_path: Optional[str] = None,
         return_group_tokens: bool = False,
+        unfreeze_last_n_blocks: int = 0,
     ):
         """
         Initialize point cloud encoder.
@@ -102,6 +103,7 @@ class PointBERTEncoder(nn.Module):
         self.pointcloud_embed_dim = embed_dim
         self.debug_logging = False
         self.return_group_tokens = bool(return_group_tokens)
+        self.unfreeze_last_n_blocks = int(unfreeze_last_n_blocks)
 
         print(f"[PointCloud] Initializing point cloud encoder: {model_name}...", flush=True)
 
@@ -118,7 +120,37 @@ class PointBERTEncoder(nn.Module):
             self.encoder.eval()
             print(f"[PointCloud] Encoder frozen ({sum(p.numel() for p in self.encoder.parameters())} params)", flush=True)
 
+        # Optional partial unfreeze (useful for classification finetuning)
+        if self.unfreeze_last_n_blocks > 0:
+            self._unfreeze_last_n_blocks(self.unfreeze_last_n_blocks)
+
         print(f"[PointCloud] ✓ Encoder initialized: embed_dim={embed_dim}, num_points={num_points}", flush=True)
+
+    def _unfreeze_last_n_blocks(self, n: int) -> None:
+        n = int(max(0, n))
+        if n <= 0:
+            return
+        if not hasattr(self.encoder, "blocks"):
+            print("[PointCloud] Warning: encoder has no .blocks; cannot partially unfreeze.", flush=True)
+            return
+        blocks = getattr(self.encoder, "blocks", None)
+        if not isinstance(blocks, (list, tuple, nn.ModuleList)):
+            print("[PointCloud] Warning: encoder.blocks is not a ModuleList; cannot partially unfreeze.", flush=True)
+            return
+
+        # Unfreeze last N transformer blocks and final norm
+        try:
+            for block in list(blocks)[-n:]:
+                for p in block.parameters():
+                    p.requires_grad = True
+            if hasattr(self.encoder, "norm"):
+                for p in self.encoder.norm.parameters():
+                    p.requires_grad = True
+            self.encoder.train()
+            trainable = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
+            print(f"[PointCloud] Partially unfroze last {n} blocks ({trainable:,} trainable params)", flush=True)
+        except Exception as e:
+            print(f"[PointCloud] Warning: partial unfreeze failed: {e}", flush=True)
 
     def _build_pointnet_encoder(self, embed_dim: int) -> nn.Module:
         """
@@ -301,8 +333,10 @@ class PointBERTEncoder(nn.Module):
         device = next(self.encoder.parameters()).device
         batch = batch.to(device)
 
-        # Get embeddings
-        with torch.no_grad():
+        # Get embeddings (allow gradients if any encoder params are trainable)
+        encoder_trainable = any(p.requires_grad for p in self.encoder.parameters())
+        context = torch.enable_grad() if encoder_trainable else torch.no_grad()
+        with context:
             # Transpose for conv layers: (B, N, 3) -> (B, 3, N)
             if hasattr(self.encoder, 'expects_channels_first') and self.encoder.expects_channels_first:
                 batch = batch.transpose(1, 2)

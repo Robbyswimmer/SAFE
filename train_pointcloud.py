@@ -223,6 +223,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to pre-trained PointBERT checkpoint",
     )
+    parser.add_argument(
+        "--unfreeze-encoder-last-n",
+        type=int,
+        default=0,
+        help="Unfreeze last N pointcloud encoder transformer blocks (0 = fully frozen)",
+    )
 
     return parser.parse_args()
 
@@ -266,6 +272,7 @@ def create_model(
     config: Dict[str, Any],
     device: str,
     encoder_checkpoint: Optional[str] = None,
+    unfreeze_encoder_last_n: int = 0,
 ) -> SAFEPointCloudModel:
     """Create model from config."""
     # Get encoder config and add checkpoint path if provided
@@ -273,6 +280,8 @@ def create_model(
     if encoder_checkpoint:
         encoder_config["checkpoint_path"] = encoder_checkpoint
         print(f"Using encoder checkpoint: {encoder_checkpoint}")
+    if int(unfreeze_encoder_last_n) > 0:
+        encoder_config["unfreeze_last_n_blocks"] = int(unfreeze_encoder_last_n)
 
     # Extract constructor arguments
     model_kwargs = {
@@ -305,12 +314,15 @@ def create_classifier_model(
     config: Dict[str, Any],
     device: str,
     encoder_checkpoint: Optional[str] = None,
+    unfreeze_encoder_last_n: int = 0,
 ) -> PointCloudClassifier:
     """Create a simple point cloud classifier (encoder+MLP)."""
     encoder_config = dict(config.get("pointcloud_encoder_config", {}))
     if encoder_checkpoint:
         encoder_config["checkpoint_path"] = encoder_checkpoint
         print(f"Using encoder checkpoint: {encoder_checkpoint}")
+    if int(unfreeze_encoder_last_n) > 0:
+        encoder_config["unfreeze_last_n_blocks"] = int(unfreeze_encoder_last_n)
 
     num_classes = int(config.get("num_classes", 40))
     model = PointCloudClassifier(
@@ -319,6 +331,7 @@ def create_classifier_model(
         encoder_num_points=int(config.get("num_points", encoder_config.get("num_points", 1024))),
         encoder_embed_dim=int(config.get("pointcloud_embed_dim", encoder_config.get("embed_dim", 768))),
         encoder_checkpoint_path=encoder_config.get("checkpoint_path"),
+        unfreeze_last_n_blocks=int(unfreeze_encoder_last_n),
         hidden_dim=int(config.get("classifier_hidden_dim", 512)),
         dropout=float(config.get("classifier_dropout", 0.3)),
     ).to(device)
@@ -331,6 +344,7 @@ def create_llm_probe_model(
     encoder_checkpoint: Optional[str] = None,
     pooling: str = "last",
     head_type: str = "linear",
+    unfreeze_encoder_last_n: int = 0,
 ) -> SAFEPointCloudLLMProbe:
     """Create a pointcloud LLM probe model (SAFE + classifier head)."""
     safe_config = dict(config)
@@ -339,6 +353,9 @@ def create_llm_probe_model(
         encoder_config["checkpoint_path"] = encoder_checkpoint
         safe_config["pointcloud_encoder_config"] = encoder_config
         print(f"Using encoder checkpoint: {encoder_checkpoint}")
+    if int(unfreeze_encoder_last_n) > 0:
+        encoder_config["unfreeze_last_n_blocks"] = int(unfreeze_encoder_last_n)
+        safe_config["pointcloud_encoder_config"] = encoder_config
 
     num_classes = int(config.get("num_classes", 40))
     safe_config.setdefault("freeze_base_vl", True)
@@ -1113,7 +1130,12 @@ def main():
     # Create model
     print("\nCreating model...")
     if args.phase == "classification" and args.classification_head:
-        model = create_classifier_model(config, args.device, encoder_checkpoint=args.encoder_checkpoint)
+        model = create_classifier_model(
+            config,
+            args.device,
+            encoder_checkpoint=args.encoder_checkpoint,
+            unfreeze_encoder_last_n=args.unfreeze_encoder_last_n,
+        )
     elif args.phase == "classification" and args.llm_probe_head:
         model = create_llm_probe_model(
             config,
@@ -1121,9 +1143,15 @@ def main():
             encoder_checkpoint=args.encoder_checkpoint,
             pooling=args.probe_pooling,
             head_type=args.probe_head_type,
+            unfreeze_encoder_last_n=args.unfreeze_encoder_last_n,
         )
     else:
-        model = create_model(config, args.device, encoder_checkpoint=args.encoder_checkpoint)
+        model = create_model(
+            config,
+            args.device,
+            encoder_checkpoint=args.encoder_checkpoint,
+            unfreeze_encoder_last_n=args.unfreeze_encoder_last_n,
+        )
 
     # Optimizer + scheduler (stepped per optimizer update)
     total_updates = max(1, (len(train_loader) * args.num_epochs) // max(args.gradient_accumulation, 1))
