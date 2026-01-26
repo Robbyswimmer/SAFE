@@ -400,26 +400,8 @@ class SAFEPointCloudModel(nn.Module):
         result = {"logits": outputs.logits}
 
         if labels is not None:
-            if self.label_smoothing > 0:
-                loss_fct = nn.CrossEntropyLoss(
-                    label_smoothing=self.label_smoothing,
-                    ignore_index=-100,
-                )
-                loss = loss_fct(
-                    outputs.logits.view(-1, outputs.logits.size(-1)),
-                    labels.view(-1),
-                )
-            else:
-                loss = outputs.loss
-
-            # Debug: check computed loss
-            if not hasattr(self, '_loss_debug_logged'):
-                self._loss_debug_logged = True
-                print(f"[DEBUG] Computed loss: {loss.item() if loss is not None else 'None'}", flush=True)
-                if labels is not None:
-                    print(f"[DEBUG] Labels: shape={tuple(labels.shape)}, "
-                          f"min={labels.min().item()}, max={labels.max().item()}", flush=True)
-
+            # Use HF's built-in loss computation (handles ignore_index properly)
+            loss = outputs.loss
             result["loss"] = loss
 
         return result
