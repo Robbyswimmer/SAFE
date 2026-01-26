@@ -245,13 +245,14 @@ class SAFEPointCloudModel(nn.Module):
         # Get point cloud features from encoder
         pc_features = self.pointcloud_encoder(pointcloud)  # (B, embed_dim)
 
-        # Get device/dtype from projector
+        # Get device and target dtype (LLM dtype, likely fp16)
         device = next(self.pointcloud_projector.parameters()).device
-        dtype = next(self.pointcloud_projector.parameters()).dtype
+        target_dtype = next(self.base_vl.llm.parameters()).dtype
 
-        pc_features = pc_features.to(device=device, dtype=dtype)
+        # Keep in fp32 for projection to avoid overflow
+        pc_features = pc_features.to(device=device, dtype=torch.float32)
 
-        # Project to token space
+        # Project to token space (projector handles fp32 internally)
         if self.projector_type == "adaptive":
             pc_tokens = self.pointcloud_projector(
                 pc_features,
@@ -260,7 +261,11 @@ class SAFEPointCloudModel(nn.Module):
         else:
             pc_tokens = self.pointcloud_projector(pc_features)
 
-        return pc_tokens
+        # Clamp before converting to fp16 to avoid overflow (fp16 max ~65504)
+        if target_dtype == torch.float16:
+            pc_tokens = torch.clamp(pc_tokens.float(), min=-65000, max=65000)
+
+        return pc_tokens.to(dtype=target_dtype)
 
     def forward(
         self,
