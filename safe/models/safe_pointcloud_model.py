@@ -66,6 +66,11 @@ class SAFEPointCloudModel(nn.Module):
     ):
         super().__init__()
 
+        # Initialize optional components to None (may be set later)
+        self.kv_adapters = None
+        self.kv_hook_manager = None
+        self.fusion_adapter = None
+
         self.pointcloud_encoder_type = pointcloud_encoder_type
         self.projector_type = projector_type
         self.fusion_type = fusion_type
@@ -174,7 +179,6 @@ class SAFEPointCloudModel(nn.Module):
 
             print(f"[SAFE-PC] ✓ Fusion adapter initialized", flush=True)
 
-        self.kv_hook_manager = None
         print(f"[SAFE-PC] ✓ Model initialization complete", flush=True)
 
     def _setup_kv_augmentation(
@@ -395,7 +399,7 @@ class SAFEPointCloudModel(nn.Module):
             for param in self.fusion_adapter.parameters():
                 param.requires_grad = True
 
-        # Enable KV adapters training
+        # Enable KV adapters training (only set in kv_augment mode)
         if self.kv_adapters is not None:
             for param in self.kv_adapters.parameters():
                 param.requires_grad = True
