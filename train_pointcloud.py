@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -27,8 +28,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -82,7 +88,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--safe-lr", type=float, default=None, help="LLM-probe: LR for projector+fusion params")
+    parser.add_argument("--head-lr", type=float, default=None, help="LLM-probe: LR for classifier head")
     parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--head-weight-decay", type=float, default=0.0, help="LLM-probe: weight decay for head")
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--gradient-accumulation", type=int, default=1)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
@@ -135,6 +144,15 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Log every N steps when tqdm is disabled (e.g., Slurm logs)",
     )
+
+    # Logging
+    parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
+    parser.add_argument("--wandb-project", type=str, default="SAFE", help="Wandb project")
+    parser.add_argument("--wandb-run-name", type=str, default=None, help="Wandb run name")
+    parser.add_argument("--wandb-entity", type=str, default=None, help="Wandb entity (optional)")
+    parser.add_argument("--wandb-group", type=str, default=None, help="Wandb group (optional)")
+    parser.add_argument("--wandb-tags", type=str, default=None, help="Comma-separated wandb tags")
+    parser.add_argument("--wandb-notes", type=str, default=None, help="Wandb notes (optional)")
 
     # Encoder checkpoint
     parser.add_argument(
@@ -276,6 +294,7 @@ def train_epoch_classification(
     model: SAFEPointCloudModel,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     device: str,
     args: argparse.Namespace,
     epoch: int,
@@ -341,6 +360,8 @@ def train_epoch_classification(
                 print(f"[DEBUG] Step {batch_idx}: optimizer step", flush=True)
             optimizer.step()
             optimizer.zero_grad()
+            if scheduler is not None:
+                scheduler.step()
 
         total_loss += loss.item() * args.gradient_accumulation
         num_batches += 1
@@ -351,14 +372,27 @@ def train_epoch_classification(
         correct += len(labels)  # Placeholder - real eval done separately
 
         avg_loss = total_loss / num_batches
+        do_log = (batch_idx % max(args.log_every, 1)) == 0
         if use_tqdm:
             pbar.set_postfix({"loss": avg_loss})
-        elif (batch_idx % max(args.log_every, 1)) == 0:
+        if do_log:
             step_ms = (time.time() - step_start) * 1000.0
-            print(
-                f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} step_ms={step_ms:.0f}",
-                flush=True,
-            )
+            if not use_tqdm:
+                print(
+                    f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} step_ms={step_ms:.0f}",
+                    flush=True,
+                )
+            if getattr(args, "wandb", False) and wandb is not None:
+                global_step = epoch * len(dataloader) + batch_idx
+                wandb.log(
+                    {
+                        "train/loss": avg_loss,
+                        "train/step_ms": step_ms,
+                        "epoch": epoch + 1,
+                        "lr": optimizer.param_groups[0]["lr"],
+                    },
+                    step=global_step,
+                )
 
     return {
         "loss": total_loss / max(num_batches, 1),
@@ -369,6 +403,7 @@ def train_epoch_classification_head(
     model: PointCloudClassifier,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     device: str,
     args: argparse.Namespace,
     epoch: int,
@@ -408,6 +443,8 @@ def train_epoch_classification_head(
                 print(f"[DEBUG] Step {batch_idx}: optimizer step", flush=True)
             optimizer.step()
             optimizer.zero_grad()
+            if scheduler is not None:
+                scheduler.step()
 
         total_loss += loss.item() * args.gradient_accumulation
         num_batches += 1
@@ -418,15 +455,29 @@ def train_epoch_classification_head(
 
         avg_loss = total_loss / num_batches
         avg_acc = correct / max(total, 1)
+        do_log = (batch_idx % max(args.log_every, 1)) == 0
         if use_tqdm:
             pbar.set_postfix({"loss": avg_loss, "acc": avg_acc})
-        elif (batch_idx % max(args.log_every, 1)) == 0:
+        if do_log:
             step_ms = (time.time() - step_start) * 1000.0
-            print(
-                f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} acc={avg_acc:.4f} "
-                f"step_ms={step_ms:.0f}",
-                flush=True,
-            )
+            if not use_tqdm:
+                print(
+                    f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} acc={avg_acc:.4f} "
+                    f"step_ms={step_ms:.0f}",
+                    flush=True,
+                )
+            if getattr(args, "wandb", False) and wandb is not None:
+                global_step = epoch * len(dataloader) + batch_idx
+                wandb.log(
+                    {
+                        "train/loss": avg_loss,
+                        "train/accuracy": avg_acc,
+                        "train/step_ms": step_ms,
+                        "epoch": epoch + 1,
+                        "lr": optimizer.param_groups[0]["lr"],
+                    },
+                    step=global_step,
+                )
 
     return {"loss": total_loss / max(num_batches, 1), "accuracy": correct / max(total, 1)}
 
@@ -556,6 +607,7 @@ def train_epoch_llm_probe_head(
     model: SAFEPointCloudLLMProbe,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     device: str,
     args: argparse.Namespace,
     epoch: int,
@@ -612,6 +664,8 @@ def train_epoch_llm_probe_head(
                 print(f"[DEBUG] Step {batch_idx}: optimizer step", flush=True)
             optimizer.step()
             optimizer.zero_grad()
+            if scheduler is not None:
+                scheduler.step()
 
         total_loss += loss.item() * args.gradient_accumulation
         num_batches += 1
@@ -622,15 +676,29 @@ def train_epoch_llm_probe_head(
 
         avg_loss = total_loss / num_batches
         avg_acc = correct / max(total, 1)
+        do_log = (batch_idx % max(args.log_every, 1)) == 0
         if use_tqdm:
             pbar.set_postfix({"loss": avg_loss, "acc": avg_acc})
-        elif (batch_idx % max(args.log_every, 1)) == 0:
+        if do_log:
             step_ms = (time.time() - step_start) * 1000.0
-            print(
-                f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} acc={avg_acc:.4f} "
-                f"step_ms={step_ms:.0f}",
-                flush=True,
-            )
+            if not use_tqdm:
+                print(
+                    f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} acc={avg_acc:.4f} "
+                    f"step_ms={step_ms:.0f}",
+                    flush=True,
+                )
+            if getattr(args, "wandb", False) and wandb is not None:
+                global_step = epoch * len(dataloader) + batch_idx
+                wandb.log(
+                    {
+                        "train/loss": avg_loss,
+                        "train/accuracy": avg_acc,
+                        "train/step_ms": step_ms,
+                        "epoch": epoch + 1,
+                        "lr": optimizer.param_groups[0]["lr"],
+                    },
+                    step=global_step,
+                )
 
     return {"loss": total_loss / max(num_batches, 1), "accuracy": correct / max(total, 1)}
 
@@ -685,6 +753,7 @@ def train_epoch_captioning(
     model: SAFEPointCloudModel,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     device: str,
     args: argparse.Namespace,
     epoch: int,
@@ -745,19 +814,34 @@ def train_epoch_captioning(
                 print(f"[DEBUG] Step {batch_idx}: optimizer step", flush=True)
             optimizer.step()
             optimizer.zero_grad()
+            if scheduler is not None:
+                scheduler.step()
 
         total_loss += loss.item() * args.gradient_accumulation
         num_batches += 1
 
         avg_loss = total_loss / num_batches
+        do_log = (batch_idx % max(args.log_every, 1)) == 0
         if use_tqdm:
             pbar.set_postfix({"loss": avg_loss})
-        elif (batch_idx % max(args.log_every, 1)) == 0:
+        if do_log:
             step_ms = (time.time() - step_start) * 1000.0
-            print(
-                f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} step_ms={step_ms:.0f}",
-                flush=True,
-            )
+            if not use_tqdm:
+                print(
+                    f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} step_ms={step_ms:.0f}",
+                    flush=True,
+                )
+            if getattr(args, "wandb", False) and wandb is not None:
+                global_step = epoch * len(dataloader) + batch_idx
+                wandb.log(
+                    {
+                        "train/loss": avg_loss,
+                        "train/step_ms": step_ms,
+                        "epoch": epoch + 1,
+                        "lr": optimizer.param_groups[0]["lr"],
+                    },
+                    step=global_step,
+                )
 
     return {"loss": total_loss / max(num_batches, 1)}
 
@@ -863,6 +947,26 @@ def main():
     print(f"Output dir: {args.output_dir}")
     print("=" * 60)
 
+    # Wandb
+    if args.wandb and wandb is None:
+        print("[WANDB] --wandb set but wandb is not installed; skipping logging.", flush=True)
+    if args.wandb and wandb is not None:
+        print(f"[WANDB] mode={os.environ.get('WANDB_MODE', '(unset)')}", flush=True)
+        print(f"[WANDB] disabled={os.environ.get('WANDB_DISABLED', '(unset)')}", flush=True)
+        print(f"[WANDB] api_key={'set' if os.environ.get('WANDB_API_KEY') else 'not set'}", flush=True)
+        tags = None
+        if args.wandb_tags:
+            tags = [t.strip() for t in args.wandb_tags.split(",") if t.strip()]
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            group=args.wandb_group,
+            name=args.wandb_run_name or f"pointcloud-{args.config}-{args.phase}-{time.strftime('%Y%m%d-%H%M%S')}",
+            notes=args.wandb_notes,
+            tags=tags,
+            config=vars(args),
+        )
+
     # Load config
     config = get_pointcloud_config(args.config)
     print(f"Loaded config: {config['name']}")
@@ -912,22 +1016,40 @@ def main():
     else:
         model = create_model(config, args.device, encoder_checkpoint=args.encoder_checkpoint)
 
-    # Create optimizer
-    if hasattr(model, "get_trainable_params"):
-        trainable_params = model.get_trainable_params()
-    elif hasattr(model, "get_trainable_parameters"):
-        trainable_params = model.get_trainable_parameters()
-    else:
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = AdamW(
-        trainable_params,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
+    # Optimizer + scheduler (stepped per optimizer update)
+    total_updates = max(1, (len(train_loader) * args.num_epochs) // max(args.gradient_accumulation, 1))
+    warmup_steps = max(0, int(args.warmup_steps))
 
-    # Scheduler
-    total_steps = len(train_loader) * args.num_epochs // args.gradient_accumulation
-    scheduler = CosineAnnealingLR(optimizer, T_max=total_steps)
+    def _lr_lambda(current_step: int) -> float:
+        if warmup_steps > 0 and current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_updates - warmup_steps))
+        progress = min(max(progress, 0.0), 1.0)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    if args.llm_probe_head and hasattr(model, "get_safe_params") and hasattr(model, "get_head_params"):
+        safe_lr = float(args.safe_lr) if args.safe_lr is not None else float(args.lr)
+        head_lr = float(args.head_lr) if args.head_lr is not None else max(1e-4, float(args.lr) * 10.0)
+        optimizer = AdamW(
+            [
+                {"params": model.get_safe_params(), "lr": safe_lr, "weight_decay": float(args.weight_decay)},
+                {"params": model.get_head_params(), "lr": head_lr, "weight_decay": float(args.head_weight_decay)},
+            ]
+        )
+    else:
+        if hasattr(model, "get_trainable_params"):
+            trainable_params = model.get_trainable_params()
+        elif hasattr(model, "get_trainable_parameters"):
+            trainable_params = model.get_trainable_parameters()
+        else:
+            trainable_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = AdamW(
+            trainable_params,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+
+    scheduler = LambdaLR(optimizer, lr_lambda=_lr_lambda)
 
     # Training loop
     print("\nStarting training...")
@@ -942,22 +1064,20 @@ def main():
         if args.phase == "classification":
             if args.classification_head:
                 train_metrics = train_epoch_classification_head(
-                    model, train_loader, optimizer, args.device, args, epoch
+                    model, train_loader, optimizer, scheduler, args.device, args, epoch
                 )
             elif args.llm_probe_head:
                 train_metrics = train_epoch_llm_probe_head(
-                    model, train_loader, optimizer, args.device, args, epoch
+                    model, train_loader, optimizer, scheduler, args.device, args, epoch
                 )
             else:
                 train_metrics = train_epoch_classification(
-                    model, train_loader, optimizer, args.device, args, epoch
+                    model, train_loader, optimizer, scheduler, args.device, args, epoch
                 )
         else:
             train_metrics = train_epoch_captioning(
-                model, train_loader, optimizer, args.device, args, epoch
+                model, train_loader, optimizer, scheduler, args.device, args, epoch
             )
-
-        scheduler.step()
 
         print(f"Train Loss: {train_metrics['loss']:.4f}")
 
@@ -971,6 +1091,17 @@ def main():
                 else:
                     eval_metrics = evaluate_classification(model, val_loader, args.device, args)
                 print(f"Val Accuracy: {eval_metrics['accuracy']:.4f}")
+                if args.wandb and wandb is not None:
+                    wandb.log(
+                        {
+                            "epoch": epoch + 1,
+                            "train/epoch_loss": train_metrics.get("loss"),
+                            "train/epoch_accuracy": train_metrics.get("accuracy"),
+                            "val/accuracy": eval_metrics.get("accuracy"),
+                            "lr": scheduler.get_last_lr()[0],
+                        },
+                        step=(epoch + 1) * len(train_loader),
+                    )
 
                 # Track best
                 if eval_metrics["accuracy"] > best_metric:
@@ -983,6 +1114,16 @@ def main():
                     print(f"  Pred: {s['prediction']}")
                     print(f"  Ref:  {s['reference']}")
                     print()
+                if args.wandb and wandb is not None:
+                    wandb.log(
+                        {
+                            "epoch": epoch + 1,
+                            "train/epoch_loss": train_metrics.get("loss"),
+                            "val/samples": len(eval_metrics.get("samples", [])),
+                            "lr": scheduler.get_last_lr()[0],
+                        },
+                        step=(epoch + 1) * len(train_loader),
+                    )
 
         # Save periodic checkpoint
         if (epoch + 1) % args.save_every == 0:

@@ -48,6 +48,9 @@ OUTPUT_DIR=${OUTPUT_DIR:-"checkpoints/pointcloud"}
 NUM_EPOCHS=${NUM_EPOCHS:-20}
 BATCH_SIZE=${BATCH_SIZE:-8}
 LR=${LR:-1e-4}
+SAFE_LR=${SAFE_LR:-""}
+HEAD_LR=${HEAD_LR:-""}
+HEAD_WEIGHT_DECAY=${HEAD_WEIGHT_DECAY:-""}
 GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-8}
 WARMUP_STEPS=${WARMUP_STEPS:-100}
 EVAL_EVERY=${EVAL_EVERY:-1}
@@ -59,6 +62,15 @@ FP16=${FP16:-0}
 DEBUG=${DEBUG:-0}
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 POINTBERT_CHECKPOINT=${POINTBERT_CHECKPOINT:-"checkpoints/pointbert/pointbert_shapenet.pt"}
+
+# Wandb (optional)
+WANDB=${WANDB:-0}
+WANDB_PROJECT=${WANDB_PROJECT:-"SAFE"}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-""}
+WANDB_ENTITY=${WANDB_ENTITY:-""}
+WANDB_GROUP=${WANDB_GROUP:-""}
+WANDB_TAGS=${WANDB_TAGS:-""}
+WANDB_NOTES=${WANDB_NOTES:-""}
 
 # LLM probe settings (MODE=llm_probe)
 PROBE_POOLING=${PROBE_POOLING:-"last"}     # last | mean
@@ -83,12 +95,18 @@ echo "Output dir: ${OUTPUT_DIR}"
 echo "Epochs: ${NUM_EPOCHS}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "Learning rate: ${LR}"
+if [[ -n "${SAFE_LR}" ]]; then echo "SAFE LR: ${SAFE_LR}"; fi
+if [[ -n "${HEAD_LR}" ]]; then echo "Head LR: ${HEAD_LR}"; fi
+if [[ -n "${HEAD_WEIGHT_DECAY}" ]]; then echo "Head WD: ${HEAD_WEIGHT_DECAY}"; fi
 echo "Gradient accumulation: ${GRADIENT_ACCUMULATION}"
 echo "Log every: ${LOG_EVERY}"
 echo "PointBERT checkpoint: ${POINTBERT_CHECKPOINT}"
 if [[ "${PHASE}" == "classification" && "${MODE}" == "llm_probe" ]]; then
   echo "Probe pooling: ${PROBE_POOLING}"
   echo "Probe head: ${PROBE_HEAD_TYPE}"
+fi
+if [[ "${WANDB}" == "1" ]]; then
+  echo "Wandb: enabled project=${WANDB_PROJECT} run_name=${WANDB_RUN_NAME:-auto}"
 fi
 echo "========================================"
 
@@ -110,6 +128,16 @@ CMD=(
   --num-workers "${NUM_WORKERS}"
   --log-every "${LOG_EVERY}"
 )
+
+if [[ -n "${SAFE_LR}" ]]; then
+  CMD+=(--safe-lr "${SAFE_LR}")
+fi
+if [[ -n "${HEAD_LR}" ]]; then
+  CMD+=(--head-lr "${HEAD_LR}")
+fi
+if [[ -n "${HEAD_WEIGHT_DECAY}" ]]; then
+  CMD+=(--head-weight-decay "${HEAD_WEIGHT_DECAY}")
+fi
 
 if [[ "${PHASE}" == "classification" ]]; then
   if [[ "${MODE}" == "llm_probe" ]]; then
@@ -136,6 +164,25 @@ if [[ -f "${POINTBERT_CHECKPOINT}" ]]; then
   echo "Using PointBERT checkpoint: ${POINTBERT_CHECKPOINT}"
 else
   echo "No PointBERT checkpoint found, training encoder from scratch"
+fi
+
+if [[ "${WANDB}" == "1" ]]; then
+  CMD+=(--wandb --wandb-project "${WANDB_PROJECT}")
+  if [[ -n "${WANDB_RUN_NAME}" ]]; then
+    CMD+=(--wandb-run-name "${WANDB_RUN_NAME}")
+  fi
+  if [[ -n "${WANDB_ENTITY}" ]]; then
+    CMD+=(--wandb-entity "${WANDB_ENTITY}")
+  fi
+  if [[ -n "${WANDB_GROUP}" ]]; then
+    CMD+=(--wandb-group "${WANDB_GROUP}")
+  fi
+  if [[ -n "${WANDB_TAGS}" ]]; then
+    CMD+=(--wandb-tags "${WANDB_TAGS}")
+  fi
+  if [[ -n "${WANDB_NOTES}" ]]; then
+    CMD+=(--wandb-notes "${WANDB_NOTES}")
+  fi
 fi
 
 if [[ "$#" -gt 0 ]]; then

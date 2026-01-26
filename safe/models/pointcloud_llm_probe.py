@@ -92,6 +92,12 @@ class SAFEPointCloudLLMProbe(nn.Module):
         params.extend(list(self.head.parameters()))
         return params
 
+    def get_safe_params(self) -> List[nn.Parameter]:
+        return list(self.safe_model.get_trainable_parameters())
+
+    def get_head_params(self) -> List[nn.Parameter]:
+        return list(self.head.parameters())
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -130,4 +136,3 @@ class SAFEPointCloudLLMProbe(nn.Module):
 
         logits = self.head(pooled.float())
         return PointCloudProbeOutput(logits=logits, pooled=pooled)
-
