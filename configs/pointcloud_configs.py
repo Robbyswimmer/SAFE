@@ -36,7 +36,7 @@ MODELNET40_CONFIG: Dict[str, Any] = {
 
     # Projector configuration (reuses AudioProjector)
     "projector_type": "standard",
-    "num_tokens": 16,  # More tokens helps for 40-way classification
+    "num_tokens": 32,  # More tokens helps for 40-way classification
     "projector_config": {
         "dropout": 0.1,
         "bottleneck_dim": 2048,
@@ -57,7 +57,7 @@ MODELNET40_CONFIG: Dict[str, Any] = {
         "attention_dropout": 0.1,
         "fusion_mode": "residual",  # Pre-FFN residual addition (not kv_augment)
         "use_bottleneck": True,
-        "bottleneck_dim": 64,
+        "bottleneck_dim": 256,
     },
 
     # Training configuration

@@ -73,7 +73,7 @@ WANDB_TAGS=${WANDB_TAGS:-""}
 WANDB_NOTES=${WANDB_NOTES:-""}
 
 # LLM probe settings (MODE=llm_probe)
-PROBE_POOLING=${PROBE_POOLING:-"last"}     # last | mean
+PROBE_POOLING=${PROBE_POOLING:-"mean"}     # last | mean
 PROBE_HEAD_TYPE=${PROBE_HEAD_TYPE:-"linear"}  # linear | mlp
 
 # Create logs directory

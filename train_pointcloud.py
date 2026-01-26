@@ -163,7 +163,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--probe-pooling",
         type=str,
-        default="last",
+        default="mean",
         choices=["last", "mean"],
         help="Pooling strategy for LLM probe hidden states",
     )
