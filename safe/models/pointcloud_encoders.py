@@ -275,6 +275,26 @@ class PointBERTEncoder(nn.Module):
             if batch.dim() == 2:
                 batch = batch.unsqueeze(0)  # (1, N, 3)
 
+            # Match preprocess_pointcloud behavior for tensor inputs:
+            # - take xyz
+            # - FPS to num_points
+            # - center + unit-sphere normalize
+            if batch.shape[-1] > 3:
+                batch = batch[..., :3]
+
+            # Subsample/pad to expected num_points
+            if batch.shape[1] != self.num_points:
+                batch = farthest_point_sample(batch, self.num_points)  # (B, num_points, 3)
+
+            # Center the point cloud
+            centroid = batch.mean(dim=1, keepdim=True)
+            batch = batch - centroid
+
+            # Normalize to unit sphere (per-sample)
+            max_dist = batch.norm(dim=-1).amax(dim=1, keepdim=True)  # (B, 1)
+            max_dist = max_dist.clamp(min=1e-6).unsqueeze(-1)  # (B, 1, 1)
+            batch = batch / max_dist
+
         # Ensure on correct device
         device = next(self.encoder.parameters()).device
         batch = batch.to(device)
