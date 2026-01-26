@@ -43,21 +43,16 @@ MODELNET40_CONFIG: Dict[str, Any] = {
     },
 
     # Fusion configuration (reuses MultiLayerFusionAdapter)
+    # Uses pre-FFN residual fusion (same as audio LLM probe)
     "fusion_type": "multilayer",
-    "fusion_layer_indices": [12, 24, 36],  # Early/mid/late injection
+    "fusion_layer_indices": [1],  # Single layer for classification (like audio probe)
     "lora_rank": 8,
     "fusion_config": {
         "num_attention_heads": 40,  # LLaVA 13B heads
         "attention_dropout": 0.1,
-        "fusion_mode": "kv_augment",
+        "fusion_mode": "residual",  # Pre-FFN residual addition (not kv_augment)
         "use_bottleneck": True,
         "bottleneck_dim": 64,
-        "modalities": {
-            "pointcloud": {
-                "layer_indices": [12, 24, 36],
-                "num_tokens": 8,
-            }
-        }
     },
 
     # Training configuration
@@ -111,22 +106,16 @@ CAP3D_CONFIG: Dict[str, Any] = {
         "use_positional_embedding": True,
     },
 
-    # Fusion configuration
+    # Fusion configuration (pre-FFN residual for captioning)
     "fusion_type": "multilayer",
-    "fusion_layer_indices": [12, 24, 36],
+    "fusion_layer_indices": [12, 24, 36],  # Multi-layer for generation
     "lora_rank": 8,
     "fusion_config": {
         "num_attention_heads": 40,
         "attention_dropout": 0.1,
-        "fusion_mode": "kv_augment",
+        "fusion_mode": "residual",  # Pre-FFN residual addition
         "use_bottleneck": True,
         "bottleneck_dim": 64,
-        "modalities": {
-            "pointcloud": {
-                "layer_indices": [12, 24, 36],
-                "num_tokens": 16,
-            }
-        }
     },
 
     # Training configuration
@@ -175,14 +164,14 @@ POINTCLOUD_DEMO_CONFIG: Dict[str, Any] = {
         "bottleneck_dim": 512,
     },
 
-    # Fusion configuration
+    # Fusion configuration (pre-FFN residual)
     "fusion_type": "multilayer",
-    "fusion_layer_indices": [6, 16, 24],
+    "fusion_layer_indices": [1],  # Single layer for demo
     "lora_rank": 4,
     "fusion_config": {
         "num_attention_heads": 20,  # OPT 2.7B
         "attention_dropout": 0.1,
-        "fusion_mode": "kv_augment",
+        "fusion_mode": "residual",  # Pre-FFN residual addition
         "use_bottleneck": True,
         "bottleneck_dim": 32,
     },
