@@ -401,7 +401,10 @@ class SAFEPointCloudModel(nn.Module):
 
         if labels is not None:
             if self.label_smoothing > 0:
-                loss_fct = nn.CrossEntropyLoss(label_smoothing=self.label_smoothing)
+                loss_fct = nn.CrossEntropyLoss(
+                    label_smoothing=self.label_smoothing,
+                    ignore_index=-100,
+                )
                 loss = loss_fct(
                     outputs.logits.view(-1, outputs.logits.size(-1)),
                     labels.view(-1),
