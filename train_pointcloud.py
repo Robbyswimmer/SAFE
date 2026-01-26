@@ -101,6 +101,12 @@ def parse_args() -> argparse.Namespace:
     # Debug
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--max-train-samples", type=int, default=None)
+    parser.add_argument(
+        "--log-every",
+        type=int,
+        default=10,
+        help="Log every N steps when tqdm is disabled (e.g., Slurm logs)",
+    )
 
     # Encoder checkpoint
     parser.add_argument(
@@ -203,9 +209,11 @@ def train_epoch_classification(
     total = 0
     num_batches = 0
 
-    pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
+    use_tqdm = sys.stdout.isatty()
+    pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}", disable=not use_tqdm)
 
     for batch_idx, batch in enumerate(pbar):
+        step_start = time.time()
         pointclouds = batch["pointclouds"].to(device)
         labels = batch["labels"].to(device)
         questions = batch["questions"]
@@ -239,13 +247,19 @@ def train_epoch_classification(
         loss = outputs["loss"]
         loss = loss / args.gradient_accumulation
 
+        if args.debug:
+            print(f"[DEBUG] Step {batch_idx}: before backward", flush=True)
         loss.backward()
+        if args.debug:
+            print(f"[DEBUG] Step {batch_idx}: after backward", flush=True)
 
         if (batch_idx + 1) % args.gradient_accumulation == 0:
             torch.nn.utils.clip_grad_norm_(
                 model.get_trainable_parameters(),
                 args.max_grad_norm,
             )
+            if args.debug:
+                print(f"[DEBUG] Step {batch_idx}: optimizer step", flush=True)
             optimizer.step()
             optimizer.zero_grad()
 
@@ -257,7 +271,15 @@ def train_epoch_classification(
         total += len(labels)
         correct += len(labels)  # Placeholder - real eval done separately
 
-        pbar.set_postfix({"loss": total_loss / num_batches})
+        avg_loss = total_loss / num_batches
+        if use_tqdm:
+            pbar.set_postfix({"loss": avg_loss})
+        elif (batch_idx % max(args.log_every, 1)) == 0:
+            step_ms = (time.time() - step_start) * 1000.0
+            print(
+                f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} step_ms={step_ms:.0f}",
+                flush=True,
+            )
 
     return {
         "loss": total_loss / max(num_batches, 1),
@@ -360,9 +382,11 @@ def train_epoch_captioning(
     total_loss = 0.0
     num_batches = 0
 
-    pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
+    use_tqdm = sys.stdout.isatty()
+    pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}", disable=not use_tqdm)
 
     for batch_idx, batch in enumerate(pbar):
+        step_start = time.time()
         pointclouds = batch["pointclouds"].to(device)
         questions = batch["questions"]
         answers = batch["answers"]
@@ -393,20 +417,34 @@ def train_epoch_captioning(
         )
 
         loss = outputs["loss"] / args.gradient_accumulation
+        if args.debug:
+            print(f"[DEBUG] Step {batch_idx}: before backward", flush=True)
         loss.backward()
+        if args.debug:
+            print(f"[DEBUG] Step {batch_idx}: after backward", flush=True)
 
         if (batch_idx + 1) % args.gradient_accumulation == 0:
             torch.nn.utils.clip_grad_norm_(
                 model.get_trainable_parameters(),
                 args.max_grad_norm,
             )
+            if args.debug:
+                print(f"[DEBUG] Step {batch_idx}: optimizer step", flush=True)
             optimizer.step()
             optimizer.zero_grad()
 
         total_loss += loss.item() * args.gradient_accumulation
         num_batches += 1
 
-        pbar.set_postfix({"loss": total_loss / num_batches})
+        avg_loss = total_loss / num_batches
+        if use_tqdm:
+            pbar.set_postfix({"loss": avg_loss})
+        elif (batch_idx % max(args.log_every, 1)) == 0:
+            step_ms = (time.time() - step_start) * 1000.0
+            print(
+                f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} step_ms={step_ms:.0f}",
+                flush=True,
+            )
 
     return {"loss": total_loss / max(num_batches, 1)}
 
