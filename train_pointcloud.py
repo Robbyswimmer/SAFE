@@ -174,6 +174,13 @@ def parse_args() -> argparse.Namespace:
         choices=["linear", "mlp"],
         help="Head type for LLM probe",
     )
+    parser.add_argument(
+        "--fusion-mode",
+        type=str,
+        default=None,
+        choices=["residual", "film", "kv_augment"],
+        help="Override fusion_config.fusion_mode from the config (useful for KV-augment experiments)",
+    )
 
     # Debug
     parser.add_argument("--debug", action="store_true")
@@ -1096,6 +1103,22 @@ def main():
     # Load config
     config = get_pointcloud_config(args.config)
     print(f"Loaded config: {config['name']}")
+
+    # Optional overrides (must happen BEFORE model creation)
+    if args.fusion_mode is not None:
+        config.setdefault("fusion_config", {})
+        config["fusion_config"]["fusion_mode"] = args.fusion_mode
+        print(f"[ConfigOverride] fusion_mode={args.fusion_mode}", flush=True)
+
+        # KV augmentation requires modality tokens in encoder space (input_dim),
+        # not LLM hidden space; force projector output_dim accordingly unless user overrides.
+        if args.fusion_mode == "kv_augment":
+            config.setdefault("projector_config", {})
+            config["projector_config"]["output_dim"] = int(config.get("pointcloud_embed_dim", 768))
+            print(
+                f"[ConfigOverride] kv_augment: projector_config.output_dim={config['projector_config']['output_dim']}",
+                flush=True,
+            )
 
     # Override batch size if specified
     if args.batch_size is None:

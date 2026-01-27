@@ -63,6 +63,7 @@ DEBUG=${DEBUG:-0}
 MAX_TRAIN_SAMPLES=${MAX_TRAIN_SAMPLES:-""}
 POINTBERT_CHECKPOINT=${POINTBERT_CHECKPOINT:-"checkpoints/pointbert/pointbert_shapenet.pt"}
 UNFREEZE_ENCODER_LAST_N=${UNFREEZE_ENCODER_LAST_N:-0}
+FUSION_MODE=${FUSION_MODE:-""}  # residual | film | kv_augment (optional override)
 
 # Wandb (optional)
 WANDB=${WANDB:-0}
@@ -103,6 +104,7 @@ echo "Gradient accumulation: ${GRADIENT_ACCUMULATION}"
 echo "Log every: ${LOG_EVERY}"
 echo "PointBERT checkpoint: ${POINTBERT_CHECKPOINT}"
 echo "Unfreeze encoder last N: ${UNFREEZE_ENCODER_LAST_N}"
+if [[ -n "${FUSION_MODE}" ]]; then echo "Fusion mode override: ${FUSION_MODE}"; fi
 if [[ "${PHASE}" == "classification" && "${MODE}" == "llm_probe" ]]; then
   echo "Probe pooling: ${PROBE_POOLING}"
   echo "Probe head: ${PROBE_HEAD_TYPE}"
@@ -131,6 +133,10 @@ CMD=(
   --log-every "${LOG_EVERY}"
   --unfreeze-encoder-last-n "${UNFREEZE_ENCODER_LAST_N}"
 )
+
+if [[ -n "${FUSION_MODE}" ]]; then
+  CMD+=(--fusion-mode "${FUSION_MODE}")
+fi
 
 if [[ -n "${SAFE_LR}" ]]; then
   CMD+=(--safe-lr "${SAFE_LR}")
