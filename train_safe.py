@@ -3090,9 +3090,26 @@ def run_alignment_pretraining(
                 if batch_idx == 0 and is_main:
                     print(f"    Encoding audio ({len(audio_paths)} samples)...", flush=True)
                     print(f"    First audio path: {audio_paths[0]}", flush=True)
-                # Encode audio through CLAP (uses forward method)
+                # Encode audio through CLAP (uses forward method).
+                # Some WavCaps files can be corrupt or undecodable on cluster builds;
+                # request a valid_mask and drop invalid pairs.
                 with torch.no_grad():
-                    audio_embeds = base_model.audio_encoder(audio_paths)
+                    enc_out = base_model.audio_encoder(audio_paths, return_valid_mask=True)
+                    if isinstance(enc_out, tuple) and len(enc_out) == 2:
+                        audio_embeds, valid_mask = enc_out
+                    else:
+                        audio_embeds, valid_mask = enc_out, None
+
+                    if valid_mask is not None:
+                        valid_list = valid_mask.detach().cpu().tolist()
+                        if not any(valid_list):
+                            if batch_idx == 0 and is_main:
+                                print("    Skipping batch - all audio failed to decode", flush=True)
+                            continue
+                        audio_paths = [ap for ap, ok in zip(audio_paths, valid_list) if ok]
+                        captions = [cap for cap, ok in zip(captions, valid_list) if ok]
+                        audio_embeds = audio_embeds[valid_mask]
+
                     audio_embeds = audio_embeds.to(device)  # Move to GPU
                 if batch_idx == 0 and is_main:
                     print(f"    Audio encoded: {audio_embeds.shape} on {audio_embeds.device} (took {_time.time()-_t0:.2f}s)", flush=True)

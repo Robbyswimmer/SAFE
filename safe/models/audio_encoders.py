@@ -2,6 +2,8 @@ import torch
 import numpy as np
 import torch.nn as nn
 import librosa
+import os
+import subprocess
 from typing import Any, Optional, Union, List, Tuple, Sequence
 import laion_clap
 import whisper
@@ -111,10 +113,17 @@ class CLAPAudioEncoder(nn.Module):
         Returns:
             Preprocessed audio tensor (1, max_samples)
         """
+        processed, _valid = self._preprocess_audio_with_valid(audio)
+        return processed
+
+    def _preprocess_audio_with_valid(
+        self, audio: Union[torch.Tensor, np.ndarray, str, Tuple[Any, Any], List[Any]]
+    ) -> Tuple[torch.Tensor, bool]:
         input_sr = self.sample_rate
+        valid = True
 
         if isinstance(audio, str):
-            audio_data, input_sr = librosa.load(audio, sr=self.sample_rate)
+            audio_data, input_sr, valid = self._load_audio_path(audio)
         elif isinstance(audio, list) and len(audio) >= 1:
             # Handle list payloads similarly to tuples (first element is waveform)
             candidate = audio[0]
@@ -150,6 +159,10 @@ class CLAPAudioEncoder(nn.Module):
         else:
             raise ValueError(f"Unsupported audio type: {type(audio)}")
 
+        if not valid:
+            audio_data = np.zeros((self.max_samples,), dtype=np.float32)
+            input_sr = self.sample_rate
+
         # Ensure correct sample rate
         if len(audio_data.shape) > 1:
             audio_data = audio_data.mean(axis=0)  # Convert to mono
@@ -177,9 +190,54 @@ class CLAPAudioEncoder(nn.Module):
 
         self._log_waveform_stats(audio_data, "CLAP.preprocess_audio")
 
-        return torch.from_numpy(audio_data).float().unsqueeze(0)  # (1, max_samples)
+        return torch.from_numpy(audio_data).float().unsqueeze(0), bool(valid)  # (1, max_samples)
+
+    def _load_audio_path(self, path: str) -> Tuple[np.ndarray, int, bool]:
+        """
+        Robust audio loader for cluster environments.
+
+        librosa/soundfile may fail to decode FLAC depending on libsndfile build.
+        Try librosa first, then fall back to ffmpeg if available.
+        """
+        try:
+            if not path or not isinstance(path, str):
+                return np.zeros((0,), dtype=np.float32), self.sample_rate, False
+            if not os.path.exists(path):
+                return np.zeros((0,), dtype=np.float32), self.sample_rate, False
+            audio_data, sr = librosa.load(path, sr=self.sample_rate)
+            return audio_data, sr, True
+        except Exception:
+            try:
+                cmd = [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-i",
+                    path,
+                    "-ac",
+                    "1",
+                    "-ar",
+                    str(int(self.sample_rate)),
+                    "-t",
+                    str(float(self.max_length)),
+                    "-f",
+                    "f32le",
+                    "pipe:1",
+                ]
+                proc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if proc.returncode != 0 or not proc.stdout:
+                    return np.zeros((0,), dtype=np.float32), self.sample_rate, False
+                audio_data = np.frombuffer(proc.stdout, dtype=np.float32)
+                return audio_data, self.sample_rate, True
+            except Exception:
+                return np.zeros((0,), dtype=np.float32), self.sample_rate, False
     
-    def forward(self, audio: Union[torch.Tensor, List[Any]]) -> torch.Tensor:
+    def forward(
+        self,
+        audio: Union[torch.Tensor, List[Any]],
+        return_valid_mask: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Extract audio embeddings using CLAP.
 
@@ -192,9 +250,11 @@ class CLAPAudioEncoder(nn.Module):
         if isinstance(audio, list):
             # Process batch of audio files/arrays
             processed_audio = []
+            valid_mask: List[bool] = []
             for idx, a in enumerate(audio):
-                processed = self.preprocess_audio(a)
+                processed, valid = self._preprocess_audio_with_valid(a)
                 processed_audio.append(processed)
+                valid_mask.append(bool(valid))
                 # DEBUG: Check first few preprocessed audios
                 if idx < 2 and self.debug_logging:
                     pnorm = processed.norm().item()
@@ -254,6 +314,8 @@ class CLAPAudioEncoder(nn.Module):
         if isinstance(audio, torch.Tensor):
             audio_embeddings = audio_embeddings.to(audio.device)
             
+        if return_valid_mask and isinstance(audio, list):
+            return audio_embeddings, torch.tensor(valid_mask, dtype=torch.bool)
         return audio_embeddings  # (batch_size, audio_embed_dim)
 
     def encode_text(self, texts: Union[str, Sequence[str]]) -> torch.Tensor:
