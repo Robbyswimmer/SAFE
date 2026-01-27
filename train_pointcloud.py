@@ -398,6 +398,8 @@ def train_epoch_classification(
 
     for batch_idx, batch in enumerate(pbar):
         step_start = time.time()
+        if batch.get("pointclouds") is None:
+            continue
         pointclouds = batch["pointclouds"].to(device)
         labels = batch["labels"].to(device)
         questions = batch["questions"]
@@ -508,6 +510,8 @@ def train_epoch_classification_head(
 
     for batch_idx, batch in enumerate(pbar):
         step_start = time.time()
+        if batch.get("pointclouds") is None:
+            continue
         pointclouds = batch["pointclouds"].to(device)
         labels = batch["labels"].to(device, dtype=torch.long)
 
@@ -719,6 +723,8 @@ def train_epoch_llm_probe_head(
                 model.safe_model.set_fusion_debug(True, log_every=args.debug_fusion_every)
             except Exception:
                 pass
+        if batch.get("pointclouds") is None:
+            continue
         pointclouds = batch["pointclouds"].to(device)
         labels = batch["labels"].to(device, dtype=torch.long)
         questions = batch["questions"]
@@ -902,15 +908,25 @@ def train_epoch_captioning(
 
     for batch_idx, batch in enumerate(pbar):
         step_start = time.time()
+        if batch.get("pointclouds") is None:
+            continue
         pointclouds = batch["pointclouds"].to(device)
         questions = batch["questions"]
         answers = batch["answers"]
 
-        # Tokenize
+        # Tokenize prompt + answer, but only compute loss on the answer span.
         tokenizer = model.base_vl.tokenizer
-        texts = [f"Question: {q} Answer: {a}" for q, a in zip(questions, answers)]
+        prompts = [f"Question: {q} Answer:" for q in questions]
+        texts = [f"{p} {a}" for p, a in zip(prompts, answers)]
         encoded = tokenizer(
             texts,
+            padding=True,
+            truncation=True,
+            max_length=256,
+            return_tensors="pt",
+        )
+        encoded_prompt = tokenizer(
+            prompts,
             padding=True,
             truncation=True,
             max_length=256,
@@ -919,8 +935,13 @@ def train_epoch_captioning(
         input_ids = encoded["input_ids"].to(device)
         attention_mask = encoded["attention_mask"].to(device)
 
-        # Labels
+        # Labels (mask prompt tokens + padding)
         lm_labels = input_ids.clone()
+        prompt_lens = encoded_prompt["attention_mask"].sum(dim=1).to(device)
+        for i in range(lm_labels.size(0)):
+            pl = int(prompt_lens[i].item())
+            pl = max(0, min(pl, lm_labels.size(1)))
+            lm_labels[i, :pl] = -100
         lm_labels[lm_labels == tokenizer.pad_token_id] = -100
 
         # Forward
@@ -996,6 +1017,8 @@ def evaluate_captioning(
             if batch_idx >= 5:  # Just sample a few
                 break
 
+            if batch.get("pointclouds") is None:
+                continue
             pointclouds = batch["pointclouds"].to(device)
             questions = batch["questions"]
             true_captions = batch["answers"]

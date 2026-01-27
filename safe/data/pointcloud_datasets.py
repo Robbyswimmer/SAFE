@@ -145,6 +145,7 @@ class ModelNet40Dataset(Dataset):
             "answers": class_name,
             "pointcloud": torch.from_numpy(pc).float(),
             "label": label,
+            "valid": True,
             "images": None,
             "audio": None,
         }
@@ -197,6 +198,11 @@ class Cap3DDataset(Dataset):
 
         # Filter to samples that have point cloud files
         self.pointcloud_dir = dataset_dir / "pointclouds"
+        if not self.pointcloud_dir.exists():
+            raise FileNotFoundError(
+                f"Cap3D pointcloud directory not found at {self.pointcloud_dir}. "
+                f"Expected structure like: {dataset_dir}/pointclouds/<object_id>.npy"
+            )
         self.examples = []
 
         for obj_id, caption in self.captions.items():
@@ -212,6 +218,10 @@ class Cap3DDataset(Dataset):
                 break
 
         print(f"[Cap3D] Loaded {len(self.examples)} samples ({self.split})", flush=True)
+        if len(self.examples) == 0:
+            raise RuntimeError(
+                f"[Cap3D] Found 0 usable samples. Check captions file and pointclouds directory: {self.pointcloud_dir}"
+            )
 
     def __len__(self) -> int:
         return len(self.examples)
@@ -221,7 +231,17 @@ class Cap3DDataset(Dataset):
         entry = self.examples[idx]
 
         # Load point cloud
-        pc = np.load(entry["pc_path"])
+        valid = True
+        try:
+            pc = np.load(entry["pc_path"])
+        except Exception:
+            pc = np.zeros((self.num_points, 3), dtype=np.float32)
+            valid = False
+
+        caption = entry["caption"]
+        if isinstance(caption, list):
+            # Some caption files store multiple captions per object
+            caption = next((c for c in caption if isinstance(c, str) and c.strip()), "")
 
         # Subsample
         if len(pc) > self.num_points:
@@ -239,8 +259,9 @@ class Cap3DDataset(Dataset):
         return {
             "sample_id": entry["object_id"],
             "question": "Describe this 3D object.",
-            "answers": entry["caption"],
+            "answers": caption,
             "pointcloud": torch.from_numpy(pc).float(),
+            "valid": valid,
             "images": None,
             "audio": None,
         }
@@ -323,6 +344,7 @@ class ShapeNetPartDataset(Dataset):
             "answers": answer,
             "pointcloud": torch.from_numpy(pc).float(),
             "label": label,
+            "valid": True,
             "images": None,
             "audio": None,
         }
@@ -334,6 +356,21 @@ def collate_pointcloud_batch(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
     Mirrors _collate_multimodal_batch from datasets.py.
     """
+    # Optionally filter invalid samples
+    if batch and any("valid" in s for s in batch):
+        batch = [s for s in batch if bool(s.get("valid", True))]
+
+    if not batch:
+        return {
+            "questions": [],
+            "answers": [],
+            "pointclouds": None,
+            "sample_ids": [],
+            "images": None,
+            "audio": None,
+            "labels": None,
+        }
+
     # Stack point clouds into tensor
     pointclouds = torch.stack([s["pointcloud"] for s in batch])
 

@@ -135,8 +135,8 @@ CAP3D_CONFIG: Dict[str, Any] = {
 
     # Memory and compute
     "expected_vram_gb": 40,
-    "recommended_batch_size": 4,
-    "gradient_accumulation_steps": 16,
+    "recommended_batch_size": 2,
+    "gradient_accumulation_steps": 32,
 }
 
 
