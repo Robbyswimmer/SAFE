@@ -55,7 +55,7 @@ MODELNET40_CONFIG: Dict[str, Any] = {
     "fusion_config": {
         "num_attention_heads": 40,  # LLaVA 13B heads
         "attention_dropout": 0.1,
-        "fusion_mode": "residual",  # Pre-FFN residual addition (not kv_augment)
+        "fusion_mode": "residual",  # Switch to "kv_augment" to test KV augmentation
         "use_bottleneck": True,
         "bottleneck_dim": 256,
     },

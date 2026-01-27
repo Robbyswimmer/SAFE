@@ -438,10 +438,22 @@ class SAFEPointCloudModel(nn.Module):
                 hook_manager.remove_hooks()
 
         elif pointcloud_tokens is not None and self.enable_kv_augmentation:
-            # KV augmentation: inject tokens via hook manager
-            if self.kv_hook_manager is not None:
-                self.kv_hook_manager.set_audio_tokens(pointcloud_tokens)
+            # KV augmentation: replace attention modules and inject tokens as K,V
+            if self.kv_hook_manager is None:
+                raise RuntimeError("KV augmentation enabled but kv_hook_manager is None")
 
+            # Wrap attention modules once (no-op if already wrapped)
+            self.kv_hook_manager.wrap_attention_modules()
+
+            # NOTE: Do NOT clear tokens after forward; gradient checkpointing replays forward in backward.
+            # Tokens persist until the next inject call.
+            self.kv_hook_manager.inject_audio(
+                audio_tokens=pointcloud_tokens,
+                audio_mask=None,
+                gate=1.0,
+            )
+
+            # KV augmentation wrapper does not support caching in forward.
             outputs = self.base_vl.llm(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
@@ -449,9 +461,6 @@ class SAFEPointCloudModel(nn.Module):
                 use_cache=False,
                 **kwargs,
             )
-
-            if self.kv_hook_manager is not None:
-                self.kv_hook_manager.clear_audio_tokens()
         else:
             # No fusion or unsupported fusion type
             outputs = self.base_vl.llm(
@@ -575,9 +584,21 @@ class SAFEPointCloudModel(nn.Module):
                 hook_manager.remove_hooks()
 
         elif pointcloud_tokens is not None and self.enable_kv_augmentation:
-            # KV augmentation
-            if self.kv_hook_manager is not None:
-                self.kv_hook_manager.set_audio_tokens(pointcloud_tokens)
+            # KV augmentation: wrap attention modules and inject tokens as K,V
+            if self.kv_hook_manager is None:
+                raise RuntimeError("KV augmentation enabled but kv_hook_manager is None")
+
+            self.kv_hook_manager.wrap_attention_modules()
+            self.kv_hook_manager.inject_audio(
+                audio_tokens=pointcloud_tokens,
+                audio_mask=None,
+                gate=1.0,
+            )
+
+            # Disable caching for KV augmentation unless explicitly set.
+            if "use_cache" not in generate_kwargs:
+                generate_kwargs = dict(generate_kwargs)
+                generate_kwargs["use_cache"] = False
 
             outputs = self.base_vl.llm.generate(
                 inputs_embeds=inputs_embeds,
@@ -586,9 +607,6 @@ class SAFEPointCloudModel(nn.Module):
                 num_beams=num_beams,
                 **generate_kwargs,
             )
-
-            if self.kv_hook_manager is not None:
-                self.kv_hook_manager.clear_audio_tokens()
         else:
             # No fusion
             outputs = self.base_vl.llm.generate(
