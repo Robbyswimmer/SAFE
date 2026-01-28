@@ -74,7 +74,17 @@ class SAFEModel(nn.Module):
         )
         print(f"[SAFE] ✓ BaseVLModel initialized", flush=True)
         sys.stdout.flush()
-        
+
+        # Detect actual hidden_size from loaded model (may differ from config for Qwen)
+        try:
+            actual_hidden = self.base_vl.llm.get_input_embeddings().weight.size(1)
+            if actual_hidden != llm_hidden_size:
+                print(f"[SAFE] Detected actual hidden_size={actual_hidden} (config had {llm_hidden_size})", flush=True)
+                llm_hidden_size = actual_hidden
+                self.llm_hidden_size = actual_hidden
+        except Exception:
+            pass  # Keep config value for LLaVA/BLIP2
+
         # Initialize audio encoder
         print(f"[SAFE] Initializing audio encoder ({audio_encoder_type})...", flush=True)
         sys.stdout.flush()
