@@ -22,6 +22,9 @@
 
 set -euo pipefail
 
+# Memory optimization - prevent CUDA OOM from fragmentation during long runs
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:128}"
+
 # Environment setup
 CONDA_ENV=${CONDA_ENV:-"safe-env"}
 

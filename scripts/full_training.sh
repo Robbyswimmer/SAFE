@@ -16,6 +16,9 @@ set -euo pipefail
 # Force unbuffered output for Python
 export PYTHONUNBUFFERED=1
 
+# Memory optimization - prevent CUDA OOM from fragmentation during long training runs
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:128}"
+
 if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
   source "$HOME/miniconda3/etc/profile.d/conda.sh"
 elif command -v module &>/dev/null; then

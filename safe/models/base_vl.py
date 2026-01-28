@@ -13,6 +13,7 @@ from transformers import (
     AutoProcessor
 )
 from typing import Optional, Dict, Any, Tuple
+import os
 
 
 class BaseVLModel(nn.Module):
@@ -34,6 +35,9 @@ class BaseVLModel(nn.Module):
         num_vision_tokens: int = 256,
         freeze_vision: bool = True,
         freeze_llm: bool = True,
+        enable_gradient_checkpointing: Optional[bool] = None,
+        prefer_flash_attention_2: bool = True,
+        qwen_quantization: str = "auto",  # "auto" | "4bit" | "8bit" | "none"
     ):
         super().__init__()
         
@@ -107,42 +111,103 @@ class BaseVLModel(nn.Module):
         elif "qwen" in llm_model_name.lower():
             print(f"[BaseVL] Detected Qwen model type", flush=True)
             sys.stdout.flush()
-            # Qwen: use 8-bit quantization to fit in memory
+            # Qwen: prefer bf16 and optionally flash-attn + (4/8)-bit quantization to fit memory.
             qwen_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+            # Env overrides (avoid plumbing flags through every script/config)
+            env_quant = os.environ.get("SAFE_QWEN_QUANT", "").strip().lower()
+            if env_quant:
+                qwen_quantization = env_quant
+            env_ckpt = os.environ.get("SAFE_GRAD_CKPT", "").strip()
+            if env_ckpt:
+                enable_gradient_checkpointing = env_ckpt not in ["0", "false", "False", "no", "NO"]
+            if enable_gradient_checkpointing is None:
+                enable_gradient_checkpointing = torch.cuda.is_available()
+            env_flash = os.environ.get("SAFE_PREFER_FLASH2", "").strip()
+            if env_flash:
+                prefer_flash_attention_2 = env_flash not in ["0", "false", "False", "no", "NO"]
+
+            # Allow env override for attention impl
+            attn_impl = None
+            if prefer_flash_attention_2 and torch.cuda.is_available():
+                attn_impl = os.environ.get("SAFE_ATTN_IMPL", "flash_attention_2")
+
+            def _try_load(quant_cfg: Optional[Any], torch_dtype: Optional[torch.dtype], attn_implementation: Optional[str]):
+                kwargs: Dict[str, Any] = {
+                    "low_cpu_mem_usage": True,
+                    "trust_remote_code": True,
+                }
+                if quant_cfg is not None:
+                    kwargs["quantization_config"] = quant_cfg
+                if torch_dtype is not None:
+                    kwargs["torch_dtype"] = torch_dtype
+                if attn_implementation is not None:
+                    kwargs["attn_implementation"] = attn_implementation
+                return AutoModelForCausalLM.from_pretrained(llm_model_name, **kwargs)
+
+            quant_mode = (qwen_quantization or "auto").lower()
+            tried: list = []
+            llm = None
+
+            quant_cfgs: list = []
             try:
                 from transformers import BitsAndBytesConfig
-                quantization_config = BitsAndBytesConfig(
-                    load_in_8bit=True,
-                )
-                print(f"[BaseVL] Using 8-bit quantization for Qwen", flush=True)
-                self.llm = AutoModelForCausalLM.from_pretrained(
-                    llm_model_name,
-                    quantization_config=quantization_config,
-                    low_cpu_mem_usage=True,
-                    trust_remote_code=True,
-                )
-            except ImportError:
-                print(f"[BaseVL] bitsandbytes not available, loading in bfloat16", flush=True)
-                self.llm = AutoModelForCausalLM.from_pretrained(
-                    llm_model_name,
-                    torch_dtype=qwen_dtype,
-                    low_cpu_mem_usage=True,
-                    trust_remote_code=True,
-                )
-            # NOTE: Gradient checkpointing is DISABLED for 8-bit Qwen
-            # The combination of 8-bit quantization + gradient checkpointing causes
-            # batch processing issues where hidden_states returns batch_size=1
-            # 8-bit alone provides sufficient memory savings
-            print(f"[BaseVL] Gradient checkpointing disabled (incompatible with 8-bit)", flush=True)
-            # Enable hidden states output for probe training
-            if hasattr(self.llm, 'config'):
+                if quant_mode in ["auto", "4bit"]:
+                    quant_cfgs.append(("4bit", BitsAndBytesConfig(load_in_4bit=True)))
+                if quant_mode in ["auto", "8bit"]:
+                    quant_cfgs.append(("8bit", BitsAndBytesConfig(load_in_8bit=True)))
+            except Exception:
+                quant_cfgs = []
+
+            # Try: flash2+quant, quant, flash2+bf16, bf16
+            attempts: list = []
+            for name, cfg in quant_cfgs:
+                attempts.append((f"{name}+{attn_impl or 'noattn'}", cfg, None, attn_impl))
+                attempts.append((name, cfg, None, None))
+            attempts.append((f"bf16+{attn_impl or 'noattn'}", None, qwen_dtype, attn_impl))
+            attempts.append(("bf16", None, qwen_dtype, None))
+
+            for name, cfg, td, ai in attempts:
+                try:
+                    print(f"[BaseVL] Qwen load attempt: {name}", flush=True)
+                    llm = _try_load(cfg, td, ai)
+                    break
+                except Exception as e:
+                    tried.append(f"{name}: {type(e).__name__}")
+                    continue
+
+            if llm is None:
+                raise RuntimeError(f"[BaseVL] Failed to load Qwen after attempts: {tried}")
+
+            self.llm = llm
+
+            # Strong defaults for adapter training on large Qwen:
+            # - disable KV cache (saves memory, required for checkpointing)
+            # - enable hidden states (probe training)
+            try:
+                self.llm.config.use_cache = False
+            except Exception:
+                pass
+            try:
                 self.llm.config.output_hidden_states = True
+            except Exception:
+                pass
+
+            # Enable gradient checkpointing if requested
+            if enable_gradient_checkpointing:
+                try:
+                    self.llm.gradient_checkpointing_enable()
+                    try:
+                        self.llm.config.use_cache = False
+                    except Exception:
+                        pass
+                    print(f"[BaseVL] Qwen gradient checkpointing enabled", flush=True)
+                except Exception as e:
+                    print(f"[BaseVL] Warning: could not enable gradient checkpointing: {e}", flush=True)
+
             print(f"[BaseVL] ✓ LLM model loaded", flush=True)
             sys.stdout.flush()
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                llm_model_name,
-                trust_remote_code=True,
-            )
+
+            self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name, trust_remote_code=True)
             print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
             sys.stdout.flush()
             self.model_type = "qwen"
