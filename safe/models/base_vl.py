@@ -43,25 +43,31 @@ class BaseVLModel(nn.Module):
         self.llm_hidden_size = llm_hidden_size
         self.num_vision_tokens = num_vision_tokens
 
-        # Load vision encoder (frozen) - use safetensors to avoid PyTorch security issue
-        print(f"[BaseVL] Loading vision encoder: {vision_model_name}...", flush=True)
+        # Load vision encoder (frozen) - skip if None (e.g., audio-only Qwen)
         import sys
-        sys.stdout.flush()
-        self.vision_encoder = CLIPVisionModel.from_pretrained(
-            vision_model_name,
-            use_safetensors=True
-        )
-        print(f"[BaseVL] ✓ Vision encoder loaded", flush=True)
-        sys.stdout.flush()
-        print(f"[BaseVL] Loading image processor: {vision_model_name}...", flush=True)
-        sys.stdout.flush()
-        self.image_processor = CLIPImageProcessor.from_pretrained(vision_model_name)
-        print(f"[BaseVL] ✓ Image processor loaded", flush=True)
-        sys.stdout.flush()
-        
-        if freeze_vision:
-            for param in self.vision_encoder.parameters():
-                param.requires_grad = False
+        if vision_model_name:
+            print(f"[BaseVL] Loading vision encoder: {vision_model_name}...", flush=True)
+            sys.stdout.flush()
+            self.vision_encoder = CLIPVisionModel.from_pretrained(
+                vision_model_name,
+                use_safetensors=True
+            )
+            print(f"[BaseVL] ✓ Vision encoder loaded", flush=True)
+            sys.stdout.flush()
+            print(f"[BaseVL] Loading image processor: {vision_model_name}...", flush=True)
+            sys.stdout.flush()
+            self.image_processor = CLIPImageProcessor.from_pretrained(vision_model_name)
+            print(f"[BaseVL] ✓ Image processor loaded", flush=True)
+            sys.stdout.flush()
+
+            if freeze_vision:
+                for param in self.vision_encoder.parameters():
+                    param.requires_grad = False
+        else:
+            print(f"[BaseVL] Skipping vision encoder (audio-only mode)", flush=True)
+            sys.stdout.flush()
+            self.vision_encoder = None
+            self.image_processor = None
         
         # Determine appropriate dtype based on device availability
         # Use float16 for GPU, float32 for CPU to avoid LayerNorm issues

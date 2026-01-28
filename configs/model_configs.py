@@ -368,7 +368,7 @@ QWEN3_14B_CONFIG = {
     # Base LLM - Qwen3-14B (no vision, audio-only)
     # Uses local path by default; set LLM_MODEL_PATH env var to override
     "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/Qwen_Qwen3-14B"),
-    "vision_model_name": "openai/clip-vit-large-patch14",  # Still needed for BaseVL init
+    "vision_model_name": None,  # No vision encoder needed for audio-only
 
     # Audio configuration (same as KV_AUGMENT)
     "audio_encoder_type": "clap",
