@@ -16,6 +16,7 @@ set -e
 #
 # Usage:
 #   MODEL_TYPE=llava ./scripts/run_layer_ablation.sh       # LLaVA 1.5 13B audio (default)
+#   MODEL_TYPE=llava_single ./scripts/run_layer_ablation.sh # LLaVA single layer: 1,3,5,...,39
 #   MODEL_TYPE=llava_kv ./scripts/run_layer_ablation.sh    # LLaVA 1.5 13B audio with KV augmentation
 #   MODEL_TYPE=qwen ./scripts/run_layer_ablation.sh        # Qwen3 8B audio
 #   MODEL_TYPE=pointcloud ./scripts/run_layer_ablation.sh  # LLaVA 1.5 13B point cloud
@@ -184,6 +185,49 @@ if [ "$MODEL_TYPE" = "llava" ]; then
         run_audio_experiment "$num_layers" "$layer_indices" "phase1" "llava" "--fp16"
     done
 
+elif [ "$MODEL_TYPE" = "llava_single" ]; then
+    echo ""
+    echo "========================================"
+    echo "LLaVA 1.5 13B Single Layer Ablation"
+    echo "Strategy: One layer per run, stride 2 (1,3,5,...,39)"
+    echo "========================================"
+
+    # Single layer runs: 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39
+    for layer in 1 3 5 7 9 11 13 15 17 19 21 23 25 27 29 31 33 35 37 39; do
+        run_name="layer-ablation-llava-L${layer}-preffn"
+        output_dir="${OUTPUT_BASE}/llava_layer${layer}"
+
+        echo ""
+        echo "========================================"
+        echo "Running LLaVA single layer: ${layer}"
+        echo "WandB run: ${run_name}"
+        echo "Output: ${output_dir}"
+        echo "Started: $(date)"
+        echo "========================================"
+
+        mkdir -p "$output_dir"
+
+        python train_audio_llm_probe.py \
+            --data-path "$DATA_PATH" \
+            --output-dir "$output_dir" \
+            --batch-size "$BATCH_SIZE" \
+            --num-epochs "$NUM_EPOCHS" \
+            --safe-learning-rate "$LEARNING_RATE" \
+            --head-learning-rate 1e-3 \
+            --model-config "phase1" \
+            --fusion-layer-indices "$layer" \
+            --fusion-injection-point "pre_ffn" \
+            --pooling "last" \
+            --num-workers 4 \
+            --log-interval 10 \
+            --fp16 \
+            --wandb \
+            --wandb-project "$WANDB_PROJECT" \
+            --wandb-run-name "$run_name"
+
+        echo "Completed LLaVA single layer ${layer} at $(date)"
+    done
+
 elif [ "$MODEL_TYPE" = "llava_kv" ]; then
     echo ""
     echo "========================================"
@@ -228,7 +272,7 @@ elif [ "$MODEL_TYPE" = "pointcloud" ]; then
 
 else
     echo "ERROR: Unknown MODEL_TYPE '$MODEL_TYPE'"
-    echo "Valid options: llava, llava_kv, qwen, pointcloud"
+    echo "Valid options: llava, llava_single, llava_kv, qwen, pointcloud"
     exit 1
 fi
 
