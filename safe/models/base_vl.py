@@ -113,8 +113,12 @@ class BaseVLModel(nn.Module):
                 llm_model_name,
                 torch_dtype=qwen_dtype,
                 low_cpu_mem_usage=True,
-                trust_remote_code=True,  # Qwen requires this
+                trust_remote_code=True,
             )
+            # Enable gradient checkpointing to reduce memory
+            if hasattr(self.llm, 'gradient_checkpointing_enable'):
+                self.llm.gradient_checkpointing_enable()
+                print(f"[BaseVL] ✓ Gradient checkpointing enabled for Qwen", flush=True)
             print(f"[BaseVL] ✓ LLM model loaded", flush=True)
             sys.stdout.flush()
             self.tokenizer = AutoTokenizer.from_pretrained(
