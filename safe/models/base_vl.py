@@ -129,10 +129,11 @@ class BaseVLModel(nn.Module):
                     low_cpu_mem_usage=True,
                     trust_remote_code=True,
                 )
-            # Enable gradient checkpointing to reduce memory
-            if hasattr(self.llm, 'gradient_checkpointing_enable'):
-                self.llm.gradient_checkpointing_enable()
-                print(f"[BaseVL] ✓ Gradient checkpointing enabled for Qwen", flush=True)
+            # NOTE: Gradient checkpointing is DISABLED for 8-bit Qwen
+            # The combination of 8-bit quantization + gradient checkpointing causes
+            # batch processing issues where hidden_states returns batch_size=1
+            # 8-bit alone provides sufficient memory savings
+            print(f"[BaseVL] Gradient checkpointing disabled (incompatible with 8-bit)", flush=True)
             # Enable hidden states output for probe training
             if hasattr(self.llm, 'config'):
                 self.llm.config.output_hidden_states = True
