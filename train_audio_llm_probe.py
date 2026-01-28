@@ -1294,6 +1294,11 @@ def main() -> None:
     if args.fusion_layer_indices:
         layers = [int(x.strip()) for x in str(args.fusion_layer_indices).split(",") if x.strip()]
         config["fusion_layer_indices"] = layers
+        # CRITICAL: Also update modalities dict if present (takes precedence over fusion_layer_indices)
+        if "fusion_config" in config and "modalities" in config["fusion_config"]:
+            if "audio" in config["fusion_config"]["modalities"]:
+                config["fusion_config"]["modalities"]["audio"]["layer_indices"] = layers
+                print(f"[Config] Updated modalities.audio.layer_indices to {layers}", flush=True)
     if args.fusion_injection_point is not None:
         config.setdefault("fusion_config", {})
         config["fusion_config"]["injection_point"] = str(args.fusion_injection_point)

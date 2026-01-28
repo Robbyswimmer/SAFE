@@ -53,22 +53,33 @@ fi
 echo "Python: $(which python)"
 
 # Define layer configurations for LLaVA (40 layers)
+# Strategy: Always start at layer 1, add layers with stride 4
+# Hypothesis: Early layers (1-7) have more transformation impact than layer count
 declare -A LLAVA_LAYERS
-LLAVA_LAYERS["1"]="20"                                    # Middle layer
-LLAVA_LAYERS["2"]="13,26"                                 # Thirds
-LLAVA_LAYERS["4"]="8,16,24,32"                            # Fifths
-LLAVA_LAYERS["8"]="4,9,14,19,24,29,34,39"                 # Every 5
-LLAVA_LAYERS["12"]="3,6,10,13,17,20,23,27,30,33,36,39"    # Every ~3
-LLAVA_LAYERS["16"]="2,4,7,9,12,14,17,19,22,24,27,29,32,34,37,39"  # Every ~2.5
+LLAVA_LAYERS["1"]="1"                                     # Just layer 1
+LLAVA_LAYERS["2"]="1,5"                                   # 1, 5
+LLAVA_LAYERS["3"]="1,5,9"                                 # 1, 5, 9
+LLAVA_LAYERS["4"]="1,5,9,13"                              # 1, 5, 9, 13
+LLAVA_LAYERS["5"]="1,5,9,13,17"                           # 1, 5, 9, 13, 17
+LLAVA_LAYERS["6"]="1,5,9,13,17,21"                        # 1, 5, 9, 13, 17, 21
+LLAVA_LAYERS["7"]="1,5,9,13,17,21,25"                     # 1, 5, 9, 13, 17, 21, 25
+LLAVA_LAYERS["8"]="1,5,9,13,17,21,25,29"                  # 1, 5, 9, 13, 17, 21, 25, 29
+LLAVA_LAYERS["9"]="1,5,9,13,17,21,25,29,33"               # 1, 5, 9, 13, 17, 21, 25, 29, 33
+LLAVA_LAYERS["10"]="1,5,9,13,17,21,25,29,33,37"           # 1, 5, 9, 13, 17, 21, 25, 29, 33, 37
+LLAVA_LAYERS["11"]="1,5,9,13,17,21,25,29,33,37,39"        # + layer 39
+LLAVA_LAYERS["12"]="1,5,9,13,17,21,25,29,33,35,37,39"     # + layer 35
 
 # Define layer configurations for Qwen 8B (32 layers)
+# Same strategy: start at 1, stride 4
 declare -A QWEN_LAYERS
-QWEN_LAYERS["1"]="16"                                     # Middle layer
-QWEN_LAYERS["2"]="10,21"                                  # Thirds
-QWEN_LAYERS["4"]="6,12,19,25"                             # Fifths
-QWEN_LAYERS["8"]="3,7,11,15,19,23,27,31"                  # Every 4
-QWEN_LAYERS["12"]="2,5,8,10,13,16,18,21,24,26,29,31"      # Every ~2.6
-QWEN_LAYERS["16"]="1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31"  # Every 2
+QWEN_LAYERS["1"]="1"                                      # Just layer 1
+QWEN_LAYERS["2"]="1,5"                                    # 1, 5
+QWEN_LAYERS["3"]="1,5,9"                                  # 1, 5, 9
+QWEN_LAYERS["4"]="1,5,9,13"                               # 1, 5, 9, 13
+QWEN_LAYERS["5"]="1,5,9,13,17"                            # 1, 5, 9, 13, 17
+QWEN_LAYERS["6"]="1,5,9,13,17,21"                         # 1, 5, 9, 13, 17, 21
+QWEN_LAYERS["7"]="1,5,9,13,17,21,25"                      # 1, 5, 9, 13, 17, 21, 25
+QWEN_LAYERS["8"]="1,5,9,13,17,21,25,29"                   # 1, 5, 9, 13, 17, 21, 25, 29 (max for 32 layers)
 
 run_audio_experiment() {
     local num_layers=$1
@@ -164,9 +175,10 @@ if [ "$MODEL_TYPE" = "llava" ]; then
     echo ""
     echo "========================================"
     echo "LLaVA 1.5 13B Audio Layer Ablation"
+    echo "Strategy: Start at layer 1, stride 4"
     echo "========================================"
 
-    for num_layers in 1 2 4 8 12 16; do
+    for num_layers in 1 2 3 4 5 6 7 8 9 10 11 12; do
         layer_indices="${LLAVA_LAYERS[$num_layers]}"
         run_audio_experiment "$num_layers" "$layer_indices" "phase1" "llava" "--fp16"
     done
@@ -175,6 +187,7 @@ elif [ "$MODEL_TYPE" = "qwen" ]; then
     echo ""
     echo "========================================"
     echo "Qwen3 8B Audio Layer Ablation"
+    echo "Strategy: Start at layer 1, stride 4"
     echo "========================================"
 
     # Qwen requires: no quantization, no gradient checkpointing, no fp16
@@ -182,7 +195,7 @@ elif [ "$MODEL_TYPE" = "qwen" ]; then
     export SAFE_GRAD_CKPT=0
     BATCH_SIZE=1  # Qwen needs batch size 1
 
-    for num_layers in 1 2 4 8 12 16; do
+    for num_layers in 1 2 3 4 5 6 7 8; do
         layer_indices="${QWEN_LAYERS[$num_layers]}"
         run_audio_experiment "$num_layers" "$layer_indices" "qwen3_8b" "qwen8b" ""
     done
@@ -191,10 +204,11 @@ elif [ "$MODEL_TYPE" = "pointcloud" ]; then
     echo ""
     echo "========================================"
     echo "LLaVA 1.5 13B Point Cloud Layer Ablation"
+    echo "Strategy: Start at layer 1, stride 4"
     echo "========================================"
 
     # Point cloud uses LLaVA layer indices (40 layers)
-    for num_layers in 1 2 4 8 12 16; do
+    for num_layers in 1 2 3 4 5 6 7 8 9 10 11 12; do
         layer_indices="${LLAVA_LAYERS[$num_layers]}"
         run_pointcloud_experiment "$num_layers" "$layer_indices"
     done
