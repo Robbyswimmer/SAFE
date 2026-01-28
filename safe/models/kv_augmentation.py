@@ -500,14 +500,27 @@ class KVAugmentedAttention(nn.Module):
         # Use adapter's num_key_value_heads (may differ from LLM's for GQA)
         adapter_num_kv_heads = self.kv_adapter.num_key_value_heads
 
-        # Handle beam search expansion: audio batch may be smaller than hidden_states batch
-        # During generation with beam search, batch expands by num_beams
+        # Handle batch size mismatch between audio and hidden_states
+        # This can happen with beam search expansion OR 8-bit quantization + gradient checkpointing
         audio_bsz = audio_keys.size(0)
-        if bsz > audio_bsz and bsz % audio_bsz == 0:
-            num_beams = bsz // audio_bsz
-            # Expand audio K,V for beam search: [B, T, D] -> [B*num_beams, T, D]
-            audio_keys = audio_keys.unsqueeze(1).expand(-1, num_beams, -1, -1).reshape(bsz, n_audio, -1)
-            audio_values = audio_values.unsqueeze(1).expand(-1, num_beams, -1, -1).reshape(bsz, n_audio, -1)
+        if bsz != audio_bsz:
+            if bsz > audio_bsz and bsz % audio_bsz == 0:
+                # Beam search expansion: audio batch smaller, expand to match
+                num_beams = bsz // audio_bsz
+                audio_keys = audio_keys.unsqueeze(1).expand(-1, num_beams, -1, -1).reshape(bsz, n_audio, -1)
+                audio_values = audio_values.unsqueeze(1).expand(-1, num_beams, -1, -1).reshape(bsz, n_audio, -1)
+            elif audio_bsz > bsz and audio_bsz % bsz == 0:
+                # 8-bit quantization quirk: hidden_states has smaller batch, slice audio
+                # This happens during gradient checkpointing recompute with quantized models
+                audio_keys = audio_keys[:bsz]
+                audio_values = audio_values[:bsz]
+            else:
+                # Unexpected mismatch - log warning and try to continue
+                if not hasattr(self, '_batch_mismatch_warned'):
+                    self._batch_mismatch_warned = True
+                    print(f"[KVWrapper] Warning: batch size mismatch: hidden_states={bsz}, audio={audio_bsz}", flush=True)
+                # Use audio batch size for reshape
+                bsz = audio_bsz
 
         audio_keys = audio_keys.view(bsz, n_audio, adapter_num_kv_heads, self.head_dim).transpose(1, 2)
         audio_values = audio_values.view(bsz, n_audio, adapter_num_kv_heads, self.head_dim).transpose(1, 2)
@@ -528,11 +541,17 @@ class KVAugmentedAttention(nn.Module):
         # Apply audio mask if provided: 1=attend, 0=mask.
         if self._audio_mask is not None:
             audio_mask = self._audio_mask.to(device=audio_attn_weights.device)
-            # Handle beam expansion (same logic as K/V expansion)
+            # Handle batch size mismatch (same logic as K/V handling above)
             if audio_mask.dim() == 2:
-                if audio_mask.size(0) != bsz and bsz % audio_mask.size(0) == 0:
-                    num_beams = bsz // audio_mask.size(0)
-                    audio_mask = audio_mask.unsqueeze(1).expand(-1, num_beams, -1).reshape(bsz, -1)
+                mask_bsz = audio_mask.size(0)
+                if mask_bsz != bsz:
+                    if bsz > mask_bsz and bsz % mask_bsz == 0:
+                        # Beam search expansion
+                        num_beams = bsz // mask_bsz
+                        audio_mask = audio_mask.unsqueeze(1).expand(-1, num_beams, -1).reshape(bsz, -1)
+                    elif mask_bsz > bsz:
+                        # 8-bit quantization quirk: slice to match
+                        audio_mask = audio_mask[:bsz]
                 audio_mask_expanded = audio_mask.unsqueeze(1).unsqueeze(2)  # (B,1,1,Ta)
                 audio_attn_weights = audio_attn_weights.masked_fill(audio_mask_expanded <= 0.5, float("-inf"))
         audio_attn_weights = torch.clamp(audio_attn_weights, min=-50.0, max=50.0)
