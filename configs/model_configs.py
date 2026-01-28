@@ -428,10 +428,11 @@ QWEN3_14B_CONFIG = {
     "freeze_audio_encoder": True,
     "label_smoothing": 0.1,
 
-    # Memory and compute (similar to LLaVA 13B)
-    "expected_vram_gb": 35,
+    # Memory and compute
+    # 8-bit Qwen3-14B requires batch_size=1 with gradient accumulation
+    "expected_vram_gb": 40,
     "recommended_batch_size": 1,
-    "gradient_accumulation_steps": 8
+    "gradient_accumulation_steps": 16  # Effective batch = 16
 }
 
 # Available configurations
