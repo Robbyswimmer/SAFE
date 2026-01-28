@@ -107,14 +107,28 @@ class BaseVLModel(nn.Module):
         elif "qwen" in llm_model_name.lower():
             print(f"[BaseVL] Detected Qwen model type", flush=True)
             sys.stdout.flush()
-            # Qwen works best with bfloat16
+            # Qwen: use 8-bit quantization to fit in memory
             qwen_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-            self.llm = AutoModelForCausalLM.from_pretrained(
-                llm_model_name,
-                torch_dtype=qwen_dtype,
-                low_cpu_mem_usage=True,
-                trust_remote_code=True,
-            )
+            try:
+                from transformers import BitsAndBytesConfig
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                )
+                print(f"[BaseVL] Using 8-bit quantization for Qwen", flush=True)
+                self.llm = AutoModelForCausalLM.from_pretrained(
+                    llm_model_name,
+                    quantization_config=quantization_config,
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True,
+                )
+            except ImportError:
+                print(f"[BaseVL] bitsandbytes not available, loading in bfloat16", flush=True)
+                self.llm = AutoModelForCausalLM.from_pretrained(
+                    llm_model_name,
+                    torch_dtype=qwen_dtype,
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True,
+                )
             # Enable gradient checkpointing to reduce memory
             if hasattr(self.llm, 'gradient_checkpointing_enable'):
                 self.llm.gradient_checkpointing_enable()
