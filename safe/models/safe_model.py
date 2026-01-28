@@ -232,8 +232,16 @@ class SAFEModel(nn.Module):
                 attn = getattr(layers[first_layer_idx], 'self_attn', None)
                 if attn is not None:
                     num_attention_heads = getattr(attn, 'num_heads', 40)
-                    num_key_value_heads = getattr(attn, 'num_key_value_heads', num_attention_heads)
                     head_dim = getattr(attn, 'head_dim', llm_hidden_size // num_attention_heads)
+                    # Try multiple ways to get num_key_value_heads for GQA models
+                    num_key_value_heads = getattr(attn, 'num_key_value_heads', None)
+                    if num_key_value_heads is None:
+                        # Try to infer from k_proj output dimension
+                        k_proj = getattr(attn, 'k_proj', None)
+                        if k_proj is not None and hasattr(k_proj, 'out_features'):
+                            num_key_value_heads = k_proj.out_features // head_dim
+                        else:
+                            num_key_value_heads = num_attention_heads
                 else:
                     # Fallback to config
                     llm_config = language_model.config

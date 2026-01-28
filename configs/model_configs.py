@@ -401,7 +401,8 @@ QWEN3_14B_CONFIG = {
     "lora_rank": 8,
     "fusion_config": {
         "fusion_mode": "kv_augment",
-        "num_attention_heads": 40,  # Qwen-3 14B uses 40 heads
+        "num_attention_heads": 40,  # Qwen-3 14B uses 40 query heads
+        "num_key_value_heads": 8,   # Qwen-3 14B uses GQA with 8 KV heads
         "head_dim": 128,
         "bottleneck_dim": 64,
         "use_bottleneck": True,

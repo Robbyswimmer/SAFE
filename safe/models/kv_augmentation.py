@@ -271,8 +271,24 @@ class KVAugmentedAttention(nn.Module):
         # Copy attributes from original attention for compatibility
         self.num_heads = getattr(original_attention, 'num_heads', 40)
         self.head_dim = getattr(original_attention, 'head_dim', 128)
-        self.num_key_value_heads = getattr(original_attention, 'num_key_value_heads', self.num_heads)
+        # Try multiple attribute names for GQA models (Qwen uses num_key_value_heads, LLaMA uses same)
+        # Also check the k_proj output dimension as a fallback
+        num_kv_heads = getattr(original_attention, 'num_key_value_heads', None)
+        if num_kv_heads is None:
+            # Try to infer from k_proj output dimension
+            k_proj = getattr(original_attention, 'k_proj', None)
+            if k_proj is not None and hasattr(k_proj, 'out_features'):
+                num_kv_heads = k_proj.out_features // self.head_dim
+            else:
+                num_kv_heads = self.num_heads  # Fallback to full heads (no GQA)
+        self.num_key_value_heads = num_kv_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        # Debug: log GQA config detection
+        if not hasattr(KVAugmentationAttentionWrapper, '_gqa_logged'):
+            KVAugmentationAttentionWrapper._gqa_logged = True
+            print(f"[KVWrapper] Detected GQA config: num_heads={self.num_heads}, "
+                  f"num_kv_heads={self.num_key_value_heads}, head_dim={self.head_dim}, "
+                  f"kv_groups={self.num_key_value_groups}", flush=True)
 
         # Storage for current forward pass audio data
         self._audio_tokens: Optional[torch.Tensor] = None
