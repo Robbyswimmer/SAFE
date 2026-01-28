@@ -16,6 +16,7 @@ set -e
 #
 # Usage:
 #   MODEL_TYPE=llava ./scripts/run_layer_ablation.sh       # LLaVA 1.5 13B audio (default)
+#   MODEL_TYPE=llava_kv ./scripts/run_layer_ablation.sh    # LLaVA 1.5 13B audio with KV augmentation
 #   MODEL_TYPE=qwen ./scripts/run_layer_ablation.sh        # Qwen3 8B audio
 #   MODEL_TYPE=pointcloud ./scripts/run_layer_ablation.sh  # LLaVA 1.5 13B point cloud
 
@@ -183,6 +184,18 @@ if [ "$MODEL_TYPE" = "llava" ]; then
         run_audio_experiment "$num_layers" "$layer_indices" "phase1" "llava" "--fp16"
     done
 
+elif [ "$MODEL_TYPE" = "llava_kv" ]; then
+    echo ""
+    echo "========================================"
+    echo "LLaVA 1.5 13B Audio Layer Ablation (KV Augmentation)"
+    echo "Strategy: Start at layer 1, stride 4"
+    echo "========================================"
+
+    for num_layers in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        layer_indices="${LLAVA_LAYERS[$num_layers]}"
+        run_audio_experiment "$num_layers" "$layer_indices" "kv_augment" "llava-kv" "--fp16"
+    done
+
 elif [ "$MODEL_TYPE" = "qwen" ]; then
     echo ""
     echo "========================================"
@@ -215,7 +228,7 @@ elif [ "$MODEL_TYPE" = "pointcloud" ]; then
 
 else
     echo "ERROR: Unknown MODEL_TYPE '$MODEL_TYPE'"
-    echo "Valid options: llava, qwen, pointcloud"
+    echo "Valid options: llava, llava_kv, qwen, pointcloud"
     exit 1
 fi
 
