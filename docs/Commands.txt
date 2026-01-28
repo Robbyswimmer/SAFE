@@ -1,0 +1,12 @@
+Qwen audio cls 8b:
+
+SAFE_QWEN_QUANT=none \
+  SAFE_GRAD_CKPT=0 \
+  FP16=0 \
+  MODEL_CONFIG=qwen3_8b \
+  DATA_PATH=/data/SalmanAsif/AVE_Dataset \
+  OUTPUT_DIR=outputs/ave_qwen3_8b \
+  BATCH_SIZE=1 \
+  USE_WANDB=1 \
+  WANDB_RUN_NAME=ave-qwen3-8b \
+  sbatch scripts/run_ave_llm_probe.sh
