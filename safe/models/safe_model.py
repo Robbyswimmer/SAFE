@@ -1536,8 +1536,9 @@ class SAFEModel(nn.Module):
         # Use default gate if none provided
         if gate is None:
             gate = self._default_gate
-        # For BLIP2/LLaVA models, fuse audio by prefixing projected tokens
-        if self.base_vl.model_type in ["blip2", "llava"]:
+        # For BLIP2/LLaVA/Qwen models, fuse audio by prefixing projected tokens
+        # Qwen uses same LLaMA-style architecture so uses same path as LLaVA
+        if self.base_vl.model_type in ["blip2", "llava", "qwen"]:
             pixel_values = kwargs.pop("pixel_values", None)
             audio_attention_mask = kwargs.pop("audio_attention_mask", None)
             filtered_kwargs = kwargs
@@ -1968,27 +1969,54 @@ class SAFEModel(nn.Module):
 
             # Return hidden states if requested.
             hidden_state_out = None
+            # Get expected batch size from inputs for validation
+            expected_batch_size = inputs_embeds.size(0)
             if wants_hidden:
                 try:
                     hidden_state_out = hidden_capture.get("last")
+                    # Validate batch size - hook may capture wrong size with quantized models
+                    if hidden_state_out is not None and hidden_state_out.size(0) != expected_batch_size:
+                        hidden_state_out = None  # Fall back to outputs.hidden_states
                 except Exception:
                     hidden_state_out = None
                 if hidden_state_out is None:
                     try:
                         hs = getattr(outputs, "hidden_states", None)
                         if isinstance(hs, (list, tuple)) and len(hs) > 0 and torch.is_tensor(hs[-1]):
-                            hidden_state_out = hs[-1]
-                        else:
+                            candidate = hs[-1]
+                            if candidate.size(0) == expected_batch_size:
+                                hidden_state_out = candidate
+                        if hidden_state_out is None:
                             lhs = getattr(outputs, "last_hidden_state", None)
-                            if torch.is_tensor(lhs):
+                            if torch.is_tensor(lhs) and lhs.size(0) == expected_batch_size:
                                 hidden_state_out = lhs
                     except Exception:
                         hidden_state_out = None
+                # Debug: log if hidden states couldn't be extracted
+                if hidden_state_out is None and not hasattr(self, '_hidden_debug_logged'):
+                    self._hidden_debug_logged = True
+                    hs = getattr(outputs, "hidden_states", None)
+                    lhs = getattr(outputs, "last_hidden_state", None)
+                    print(f"[SAFE] Warning: hidden_states extraction failed. "
+                          f"expected_batch={expected_batch_size}, "
+                          f"outputs.hidden_states={type(hs).__name__ if hs is not None else None}, "
+                          f"outputs.last_hidden_state={tuple(lhs.shape) if lhs is not None else None}", flush=True)
+
+            # Also return all_hidden_states for multi-layer probing
+            all_hidden_states = None
+            if wants_hidden:
+                try:
+                    hs = getattr(outputs, "hidden_states", None)
+                    if isinstance(hs, (list, tuple)) and len(hs) > 0:
+                        all_hidden_states = hs
+                except Exception:
+                    pass
 
             return {
                 "logits": logits,
                 "loss": loss,
                 "hidden_states": hidden_state_out,
+                "all_hidden_states": all_hidden_states,
                 "attn_reg_loss": attn_reg_loss,
             }
         
@@ -2080,7 +2108,7 @@ class SAFEModel(nn.Module):
             hidden_states = self.base_vl.llm.transformer.ln_f(hidden_states)
             logits = self.base_vl.llm.lm_head(hidden_states)
         else:
-            if self.base_vl.model_type in ["blip2", "llava"]:
+            if self.base_vl.model_type in ["blip2", "llava", "qwen"]:
                 base_inputs = {
                     "attention_mask": attention_mask,
                     "labels": labels,

@@ -133,6 +133,9 @@ class BaseVLModel(nn.Module):
             if hasattr(self.llm, 'gradient_checkpointing_enable'):
                 self.llm.gradient_checkpointing_enable()
                 print(f"[BaseVL] ✓ Gradient checkpointing enabled for Qwen", flush=True)
+            # Enable hidden states output for probe training
+            if hasattr(self.llm, 'config'):
+                self.llm.config.output_hidden_states = True
             print(f"[BaseVL] ✓ LLM model loaded", flush=True)
             sys.stdout.flush()
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -449,8 +452,8 @@ class BaseVLModel(nn.Module):
         Returns:
             Dictionary with logits, loss, etc.
         """
-        if self.model_type in ["llava", "blip2"]:
-            # Use native multimodal forward pass
+        if self.model_type in ["llava", "blip2", "qwen"]:
+            # Use native forward pass (works for LLaVA, BLIP2, and Qwen)
             llm_kwargs = dict(attention_mask=attention_mask, labels=labels, **kwargs)
             if self.model_type == "blip2" and pixel_values is None:
                 base = input_ids if input_ids is not None else inputs_embeds
