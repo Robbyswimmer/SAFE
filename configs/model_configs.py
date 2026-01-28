@@ -360,9 +360,11 @@ KV_AUGMENT_CONFIG = {
 
 # Qwen-3 8B Configuration
 # Uses Qwen-3 8B as base LLM instead of LLaVA for potentially better performance
+# IMPORTANT: Run with these env vars:
+#   SAFE_QWEN_QUANT=none SAFE_GRAD_CKPT=0 FP16=0 BATCH_SIZE=1
 QWEN3_14B_CONFIG = {
     "name": "qwen3_8b",
-    "description": "Qwen-3 8B base LLM with KV augmentation - modern LLM for audio captioning",
+    "description": "Qwen-3 8B base LLM with residual fusion - modern LLM for audio captioning",
     "eval_prompt": "Describe what you hear in one short sentence.",
 
     # Base LLM - Qwen3-8B (no vision, audio-only)
@@ -402,6 +404,7 @@ QWEN3_14B_CONFIG = {
     "fusion_config": {
         # Use simpler residual fusion for now (KV augment has compatibility issues)
         "fusion_mode": "residual",
+        "injection_point": "pre_ffn",  # Match LLaVA Phase1 config
         "num_attention_heads": 32,
         "dropout": 0.1,
         "modalities": {
@@ -417,10 +420,15 @@ QWEN3_14B_CONFIG = {
     "freeze_audio_encoder": True,
     "label_smoothing": 0.1,
 
-    # Memory and compute - Qwen3-8B is ~16GB, fits with batch_size=4
-    "expected_vram_gb": 24,
-    "recommended_batch_size": 4,
-    "gradient_accumulation_steps": 4
+    # Memory and compute - Qwen3-8B in bf16 requires ~32GB VRAM
+    # Must use: SAFE_QWEN_QUANT=none SAFE_GRAD_CKPT=0 FP16=0 BATCH_SIZE=1
+    "expected_vram_gb": 32,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+    # Qwen-specific settings (set via env vars)
+    "qwen_quant": "none",  # bf16 only, no quantization
+    "gradient_checkpointing": False,
+    "fp16_mixed_precision": False,  # bf16 incompatible with fp16 scaler
 }
 
 # Available configurations
@@ -430,8 +438,9 @@ CONFIGS = {
     "multimodal": MULTIMODAL_CONFIG,
     "phase1": PHASE1_CONFIG,
     "kv_augment": KV_AUGMENT_CONFIG,
-    "qwen3_14b": QWEN3_14B_CONFIG,  # Legacy alias
+    "qwen3_14b": QWEN3_14B_CONFIG,  # Legacy alias (actually 8B now)
     "qwen3_8b": QWEN3_14B_CONFIG,
+    "qwen": QWEN3_14B_CONFIG,  # Short alias
 }
 
 def get_config(config_name: str):
