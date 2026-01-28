@@ -181,6 +181,19 @@ def parse_args() -> argparse.Namespace:
         choices=["residual", "film", "kv_augment"],
         help="Override fusion_config.fusion_mode from the config (useful for KV-augment experiments)",
     )
+    parser.add_argument(
+        "--fusion-layer-indices",
+        type=str,
+        default=None,
+        help="Comma-separated fusion layer indices (e.g., '12,24,36'). Overrides config.",
+    )
+    parser.add_argument(
+        "--fusion-injection-point",
+        type=str,
+        default=None,
+        choices=["pre_ffn", "post_layer"],
+        help="Override fusion injection point (pre_ffn or post_layer)",
+    )
 
     # Debug
     parser.add_argument("--debug", action="store_true")
@@ -1128,6 +1141,16 @@ def main():
     print(f"Loaded config: {config['name']}")
 
     # Optional overrides (must happen BEFORE model creation)
+    if args.fusion_layer_indices is not None:
+        layers = [int(x.strip()) for x in args.fusion_layer_indices.split(",") if x.strip()]
+        config["fusion_layer_indices"] = layers
+        print(f"[ConfigOverride] fusion_layer_indices={layers}", flush=True)
+
+    if args.fusion_injection_point is not None:
+        config.setdefault("fusion_config", {})
+        config["fusion_config"]["injection_point"] = args.fusion_injection_point
+        print(f"[ConfigOverride] injection_point={args.fusion_injection_point}", flush=True)
+
     if args.fusion_mode is not None:
         config.setdefault("fusion_config", {})
         config["fusion_config"]["fusion_mode"] = args.fusion_mode

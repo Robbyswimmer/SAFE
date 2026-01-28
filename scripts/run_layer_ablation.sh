@@ -11,15 +11,17 @@
 
 set -e
 
-# Layer ablation study for audio classification
+# Layer ablation study for audio/pointcloud classification
 # Tests: 1, 2, 4, 8, 12, 16 fusion layers with pre-FFN injection
 #
 # Usage:
-#   MODEL_TYPE=llava ./scripts/run_layer_ablation.sh   # LLaVA 1.5 13B (default)
-#   MODEL_TYPE=qwen ./scripts/run_layer_ablation.sh    # Qwen3 8B
+#   MODEL_TYPE=llava ./scripts/run_layer_ablation.sh       # LLaVA 1.5 13B audio (default)
+#   MODEL_TYPE=qwen ./scripts/run_layer_ablation.sh        # Qwen3 8B audio
+#   MODEL_TYPE=pointcloud ./scripts/run_layer_ablation.sh  # LLaVA 1.5 13B point cloud
 
 MODEL_TYPE=${MODEL_TYPE:-"llava"}
 DATA_PATH=${DATA_PATH:-"/data/SalmanAsif/AVE_Dataset"}
+POINTCLOUD_DATA_PATH=${POINTCLOUD_DATA_PATH:-"./data"}
 OUTPUT_BASE=${OUTPUT_BASE:-"outputs/layer_ablation"}
 BATCH_SIZE=${BATCH_SIZE:-16}
 NUM_EPOCHS=${NUM_EPOCHS:-20}
@@ -68,7 +70,7 @@ QWEN_LAYERS["8"]="3,7,11,15,19,23,27,31"                  # Every 4
 QWEN_LAYERS["12"]="2,5,8,10,13,16,18,21,24,26,29,31"      # Every ~2.6
 QWEN_LAYERS["16"]="1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31"  # Every 2
 
-run_experiment() {
+run_audio_experiment() {
     local num_layers=$1
     local layer_indices=$2
     local model_config=$3
@@ -80,7 +82,7 @@ run_experiment() {
 
     echo ""
     echo "========================================"
-    echo "Running ${model_name}: ${num_layers} layers"
+    echo "Running ${model_name} (audio): ${num_layers} layers"
     echo "Layers: ${layer_indices}"
     echo "WandB run: ${run_name}"
     echo "Output: ${output_dir}"
@@ -107,7 +109,50 @@ run_experiment() {
         --wandb-run-name "$run_name" \
         $extra_args
 
-    echo "Completed ${model_name}: ${num_layers} layers at $(date)"
+    echo "Completed ${model_name} (audio): ${num_layers} layers at $(date)"
+    echo ""
+}
+
+run_pointcloud_experiment() {
+    local num_layers=$1
+    local layer_indices=$2
+
+    local run_name="layer-ablation-pointcloud-${num_layers}L-preffn"
+    local output_dir="${OUTPUT_BASE}/pointcloud_${num_layers}layers"
+
+    echo ""
+    echo "========================================"
+    echo "Running Point Cloud (LLaVA): ${num_layers} layers"
+    echo "Layers: ${layer_indices}"
+    echo "WandB run: ${run_name}"
+    echo "Output: ${output_dir}"
+    echo "Started: $(date)"
+    echo "========================================"
+
+    mkdir -p "$output_dir"
+
+    python train_pointcloud.py \
+        --config modelnet40 \
+        --phase classification \
+        --llm-probe-head \
+        --probe-pooling last \
+        --data-path "$POINTCLOUD_DATA_PATH" \
+        --output-dir "$output_dir" \
+        --batch-size "$BATCH_SIZE" \
+        --num-epochs "$NUM_EPOCHS" \
+        --lr "$LEARNING_RATE" \
+        --safe-lr "$LEARNING_RATE" \
+        --head-lr 1e-3 \
+        --fusion-layer-indices "$layer_indices" \
+        --fusion-injection-point "pre_ffn" \
+        --num-workers 4 \
+        --log-every 10 \
+        --fp16 \
+        --wandb \
+        --wandb-project "$WANDB_PROJECT" \
+        --wandb-run-name "$run_name"
+
+    echo "Completed Point Cloud (LLaVA): ${num_layers} layers at $(date)"
     echo ""
 }
 
@@ -118,18 +163,18 @@ run_experiment() {
 if [ "$MODEL_TYPE" = "llava" ]; then
     echo ""
     echo "========================================"
-    echo "LLaVA 1.5 13B Layer Ablation"
+    echo "LLaVA 1.5 13B Audio Layer Ablation"
     echo "========================================"
 
     for num_layers in 1 2 4 8 12 16; do
         layer_indices="${LLAVA_LAYERS[$num_layers]}"
-        run_experiment "$num_layers" "$layer_indices" "phase1" "llava" "--fp16"
+        run_audio_experiment "$num_layers" "$layer_indices" "phase1" "llava" "--fp16"
     done
 
 elif [ "$MODEL_TYPE" = "qwen" ]; then
     echo ""
     echo "========================================"
-    echo "Qwen3 8B Layer Ablation"
+    echo "Qwen3 8B Audio Layer Ablation"
     echo "========================================"
 
     # Qwen requires: no quantization, no gradient checkpointing, no fp16
@@ -139,12 +184,24 @@ elif [ "$MODEL_TYPE" = "qwen" ]; then
 
     for num_layers in 1 2 4 8 12 16; do
         layer_indices="${QWEN_LAYERS[$num_layers]}"
-        run_experiment "$num_layers" "$layer_indices" "qwen3_8b" "qwen8b" ""
+        run_audio_experiment "$num_layers" "$layer_indices" "qwen3_8b" "qwen8b" ""
+    done
+
+elif [ "$MODEL_TYPE" = "pointcloud" ]; then
+    echo ""
+    echo "========================================"
+    echo "LLaVA 1.5 13B Point Cloud Layer Ablation"
+    echo "========================================"
+
+    # Point cloud uses LLaVA layer indices (40 layers)
+    for num_layers in 1 2 4 8 12 16; do
+        layer_indices="${LLAVA_LAYERS[$num_layers]}"
+        run_pointcloud_experiment "$num_layers" "$layer_indices"
     done
 
 else
     echo "ERROR: Unknown MODEL_TYPE '$MODEL_TYPE'"
-    echo "Valid options: llava, qwen"
+    echo "Valid options: llava, qwen, pointcloud"
     exit 1
 fi
 
