@@ -269,19 +269,24 @@ class KVAugmentedAttention(nn.Module):
         self.layer_idx = layer_idx
 
         # Copy attributes from original attention for compatibility
-        self.num_heads = getattr(original_attention, 'num_heads', 40)
+        # Try to infer dimensions from projection layers as fallback (more reliable for Qwen)
+        q_proj = getattr(original_attention, 'q_proj', None)
+        k_proj = getattr(original_attention, 'k_proj', None)
+
+        # Get head_dim first (usually reliable from config or infer from hidden_size/num_heads)
         self.head_dim = getattr(original_attention, 'head_dim', 128)
-        # Try multiple attribute names for GQA models (Qwen uses num_key_value_heads, LLaMA uses same)
-        # Also check the k_proj output dimension as a fallback
+
+        # Get num_heads - try attribute first, then infer from q_proj
+        num_heads = getattr(original_attention, 'num_heads', None)
+        if num_heads is None and q_proj is not None and hasattr(q_proj, 'out_features'):
+            num_heads = q_proj.out_features // self.head_dim
+        self.num_heads = num_heads if num_heads is not None else 32  # Default for Qwen3-8B
+
+        # Get num_key_value_heads - try attribute first, then infer from k_proj
         num_kv_heads = getattr(original_attention, 'num_key_value_heads', None)
-        if num_kv_heads is None:
-            # Try to infer from k_proj output dimension
-            k_proj = getattr(original_attention, 'k_proj', None)
-            if k_proj is not None and hasattr(k_proj, 'out_features'):
-                num_kv_heads = k_proj.out_features // self.head_dim
-            else:
-                num_kv_heads = self.num_heads  # Fallback to full heads (no GQA)
-        self.num_key_value_heads = num_kv_heads
+        if num_kv_heads is None and k_proj is not None and hasattr(k_proj, 'out_features'):
+            num_kv_heads = k_proj.out_features // self.head_dim
+        self.num_key_value_heads = num_kv_heads if num_kv_heads is not None else self.num_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         # Debug: log GQA config detection (once per class)
         if not hasattr(self.__class__, '_gqa_logged'):
