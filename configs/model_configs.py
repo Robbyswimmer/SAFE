@@ -356,6 +356,80 @@ KV_AUGMENT_CONFIG = {
     "gradient_accumulation_steps": 8
 }
 
+# Qwen-3 14B Configuration
+# Uses Qwen-3 14B as base LLM instead of LLaVA for potentially better performance
+QWEN3_14B_CONFIG = {
+    "name": "qwen3_14b",
+    "description": "Qwen-3 14B base LLM with KV augmentation - modern LLM for audio captioning",
+    "eval_prompt": "Describe what you hear in one short sentence.",
+
+    # Base LLM - Qwen3-14B (no vision, audio-only)
+    "llm_model_name": "Qwen/Qwen3-14B",
+    "vision_model_name": "openai/clip-vit-large-patch14",  # Still needed for BaseVL init
+
+    # Audio configuration (same as KV_AUGMENT)
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0
+    },
+
+    # Model dimensions - Qwen-3 14B specs
+    "llm_hidden_size": 5120,  # Same as LLaVA 13B
+    "audio_embed_dim": 512,
+    "vision_embed_dim": 1024,
+
+    # Projector configuration (same as KV_AUGMENT)
+    "projector_type": "standard",
+    "num_audio_tokens": 8,
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    # Fusion configuration - KV AUGMENTATION MODE
+    "fusion_type": "multilayer",
+    # Qwen-3 14B has 48 layers (vs LLaVA 40)
+    # Proportionally: [16,24,32] * 48/40 = [19,29,38]
+    "fusion_layer_indices": [19, 29, 38],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "kv_augment",
+        "num_attention_heads": 40,  # Qwen-3 14B uses 40 heads
+        "head_dim": 128,
+        "bottleneck_dim": 64,
+        "use_bottleneck": True,
+        "dropout": 0.1,
+        "query_adapter_rank": 16,
+        # Min attention regularization (same as KV_AUGMENT)
+        "min_audio_attention_start": 0.0,
+        "min_audio_attention_weight_start": 0.0,
+        "min_audio_attention": 0.02,
+        "min_audio_attention_weight": 0.05,
+        "min_audio_attention_warmup_steps": 1000,
+        "min_audio_attention_ramp_steps": 4000,
+        "modalities": {
+            "audio": {
+                "layer_indices": [19, 29, 38],
+                "num_tokens": 8
+            }
+        },
+    },
+
+    # Training configuration
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+
+    # Memory and compute (similar to LLaVA 13B)
+    "expected_vram_gb": 35,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 8
+}
+
 # Available configurations
 CONFIGS = {
     "demo": DEMO_CONFIG,
@@ -363,6 +437,7 @@ CONFIGS = {
     "multimodal": MULTIMODAL_CONFIG,
     "phase1": PHASE1_CONFIG,
     "kv_augment": KV_AUGMENT_CONFIG,
+    "qwen3_14b": QWEN3_14B_CONFIG,
 }
 
 def get_config(config_name: str):

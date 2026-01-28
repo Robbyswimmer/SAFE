@@ -98,6 +98,26 @@ class BaseVLModel(nn.Module):
             self.processor = Blip2Processor.from_pretrained(llm_model_name)
             self.tokenizer = self.processor.tokenizer
             self.model_type = "blip2"
+        elif "qwen" in llm_model_name.lower():
+            print(f"[BaseVL] Detected Qwen model type", flush=True)
+            sys.stdout.flush()
+            # Qwen works best with bfloat16
+            qwen_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                llm_model_name,
+                torch_dtype=qwen_dtype,
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,  # Qwen requires this
+            )
+            print(f"[BaseVL] ✓ LLM model loaded", flush=True)
+            sys.stdout.flush()
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                llm_model_name,
+                trust_remote_code=True,
+            )
+            print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
+            sys.stdout.flush()
+            self.model_type = "qwen"
         else:
             print(f"[BaseVL] Using AutoModel for custom LLM", flush=True)
             sys.stdout.flush()
@@ -121,7 +141,7 @@ class BaseVLModel(nn.Module):
             for param in self.llm.parameters():
                 param.requires_grad = False
                 
-        # Vision projector - only needed for custom models
+        # Vision projector - only needed for custom models (not LLaVA, BLIP2, or Qwen)
         if self.model_type == "custom":
             vision_output_dim = self.vision_encoder.config.hidden_size
             self.vision_projector = nn.Sequential(
@@ -133,20 +153,22 @@ class BaseVLModel(nn.Module):
             for param in self.vision_projector.parameters():
                 param.requires_grad = False
         else:
-            # LLaVA and BLIP2 already have vision integration, we'll use them directly
+            # LLaVA, BLIP2, Qwen: no vision projector needed
+            # (LLaVA/BLIP2 have built-in vision; Qwen is audio-only in SAFE)
             self.vision_projector = None
         
-        # Special tokens - only for custom models
+        # Special tokens - only for custom models with vision
         if self.model_type == "custom":
             self.vision_start_token = "<img>"
             self.vision_end_token = "</img>"
-            
+
             # Add special tokens to tokenizer
             special_tokens = [self.vision_start_token, self.vision_end_token]
             self.tokenizer.add_tokens(special_tokens)
             self.llm.resize_token_embeddings(len(self.tokenizer))
         else:
-            # LLaVA and BLIP2 use their own vision tokens
+            # LLaVA, BLIP2, Qwen: no special vision tokens needed
+            # (Qwen uses audio fusion via SAFE, not vision tokens)
             self.vision_start_token = None
             self.vision_end_token = None
     
