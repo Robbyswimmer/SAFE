@@ -283,9 +283,9 @@ class KVAugmentedAttention(nn.Module):
                 num_kv_heads = self.num_heads  # Fallback to full heads (no GQA)
         self.num_key_value_heads = num_kv_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        # Debug: log GQA config detection
-        if not hasattr(KVAugmentationAttentionWrapper, '_gqa_logged'):
-            KVAugmentationAttentionWrapper._gqa_logged = True
+        # Debug: log GQA config detection (once per class)
+        if not hasattr(self.__class__, '_gqa_logged'):
+            self.__class__._gqa_logged = True
             print(f"[KVWrapper] Detected GQA config: num_heads={self.num_heads}, "
                   f"num_kv_heads={self.num_key_value_heads}, head_dim={self.head_dim}, "
                   f"kv_groups={self.num_key_value_groups}", flush=True)
