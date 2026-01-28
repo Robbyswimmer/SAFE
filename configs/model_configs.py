@@ -400,21 +400,10 @@ QWEN3_14B_CONFIG = {
     "fusion_layer_indices": [10, 19, 29],
     "lora_rank": 8,
     "fusion_config": {
-        "fusion_mode": "kv_augment",
-        "num_attention_heads": 32,  # Qwen-3 8B uses 32 query heads
-        "num_key_value_heads": 8,   # Qwen-3 8B uses GQA with 8 KV heads
-        "head_dim": 128,
-        "bottleneck_dim": 64,
-        "use_bottleneck": True,
+        # Use simpler residual fusion for now (KV augment has compatibility issues)
+        "fusion_mode": "residual",
+        "num_attention_heads": 32,
         "dropout": 0.1,
-        "query_adapter_rank": 16,
-        # Min attention regularization (same as KV_AUGMENT)
-        "min_audio_attention_start": 0.0,
-        "min_audio_attention_weight_start": 0.0,
-        "min_audio_attention": 0.02,
-        "min_audio_attention_weight": 0.05,
-        "min_audio_attention_warmup_steps": 1000,
-        "min_audio_attention_ramp_steps": 4000,
         "modalities": {
             "audio": {
                 "layer_indices": [10, 19, 29],
