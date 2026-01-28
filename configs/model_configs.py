@@ -358,16 +358,16 @@ KV_AUGMENT_CONFIG = {
     "gradient_accumulation_steps": 8
 }
 
-# Qwen-3 14B Configuration
-# Uses Qwen-3 14B as base LLM instead of LLaVA for potentially better performance
+# Qwen-3 8B Configuration
+# Uses Qwen-3 8B as base LLM instead of LLaVA for potentially better performance
 QWEN3_14B_CONFIG = {
-    "name": "qwen3_14b",
-    "description": "Qwen-3 14B base LLM with KV augmentation - modern LLM for audio captioning",
+    "name": "qwen3_8b",
+    "description": "Qwen-3 8B base LLM with KV augmentation - modern LLM for audio captioning",
     "eval_prompt": "Describe what you hear in one short sentence.",
 
-    # Base LLM - Qwen3-14B (no vision, audio-only)
+    # Base LLM - Qwen3-8B (no vision, audio-only)
     # Uses local path by default; set LLM_MODEL_PATH env var to override
-    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/Qwen_Qwen3-14B"),
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/Qwen_Qwen3-8B"),
     "vision_model_name": None,  # No vision encoder needed for audio-only
 
     # Audio configuration (same as KV_AUGMENT)
@@ -378,8 +378,8 @@ QWEN3_14B_CONFIG = {
         "max_length": 10.0
     },
 
-    # Model dimensions - Qwen-3 14B specs
-    "llm_hidden_size": 5120,  # Same as LLaVA 13B
+    # Model dimensions - Qwen-3 8B specs
+    "llm_hidden_size": 4096,
     "audio_embed_dim": 512,
     "vision_embed_dim": 1024,
 
@@ -395,14 +395,14 @@ QWEN3_14B_CONFIG = {
 
     # Fusion configuration - KV AUGMENTATION MODE
     "fusion_type": "multilayer",
-    # Qwen-3 14B has 48 layers (vs LLaVA 40)
-    # Proportionally: [16,24,32] * 48/40 = [19,29,38]
-    "fusion_layer_indices": [19, 29, 38],
+    # Qwen-3 8B has 32 layers
+    # Proportionally: [12,24,36] * 32/40 = [10,19,29]
+    "fusion_layer_indices": [10, 19, 29],
     "lora_rank": 8,
     "fusion_config": {
         "fusion_mode": "kv_augment",
-        "num_attention_heads": 40,  # Qwen-3 14B uses 40 query heads
-        "num_key_value_heads": 8,   # Qwen-3 14B uses GQA with 8 KV heads
+        "num_attention_heads": 32,  # Qwen-3 8B uses 32 query heads
+        "num_key_value_heads": 8,   # Qwen-3 8B uses GQA with 8 KV heads
         "head_dim": 128,
         "bottleneck_dim": 64,
         "use_bottleneck": True,
@@ -417,7 +417,7 @@ QWEN3_14B_CONFIG = {
         "min_audio_attention_ramp_steps": 4000,
         "modalities": {
             "audio": {
-                "layer_indices": [19, 29, 38],
+                "layer_indices": [10, 19, 29],
                 "num_tokens": 8
             }
         },
@@ -428,11 +428,10 @@ QWEN3_14B_CONFIG = {
     "freeze_audio_encoder": True,
     "label_smoothing": 0.1,
 
-    # Memory and compute
-    # 8-bit Qwen3-14B requires batch_size=1 with gradient accumulation
-    "expected_vram_gb": 40,
-    "recommended_batch_size": 1,
-    "gradient_accumulation_steps": 16  # Effective batch = 16
+    # Memory and compute - Qwen3-8B is ~16GB, fits with batch_size=4
+    "expected_vram_gb": 24,
+    "recommended_batch_size": 4,
+    "gradient_accumulation_steps": 4
 }
 
 # Available configurations
@@ -442,7 +441,8 @@ CONFIGS = {
     "multimodal": MULTIMODAL_CONFIG,
     "phase1": PHASE1_CONFIG,
     "kv_augment": KV_AUGMENT_CONFIG,
-    "qwen3_14b": QWEN3_14B_CONFIG,
+    "qwen3_14b": QWEN3_14B_CONFIG,  # Legacy alias
+    "qwen3_8b": QWEN3_14B_CONFIG,
 }
 
 def get_config(config_name: str):
