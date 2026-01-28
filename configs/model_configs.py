@@ -4,6 +4,8 @@ Model configurations for SAFE training.
 Provides both demo and full production configurations.
 """
 
+import os
+
 # Demo configuration - lightweight for testing
 DEMO_CONFIG = {
     "name": "demo",
@@ -364,7 +366,8 @@ QWEN3_14B_CONFIG = {
     "eval_prompt": "Describe what you hear in one short sentence.",
 
     # Base LLM - Qwen3-14B (no vision, audio-only)
-    "llm_model_name": "Qwen/Qwen3-14B",
+    # Uses local path by default; set LLM_MODEL_PATH env var to override
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/Qwen_Qwen3-14B"),
     "vision_model_name": "openai/clip-vit-large-patch14",  # Still needed for BaseVL init
 
     # Audio configuration (same as KV_AUGMENT)
