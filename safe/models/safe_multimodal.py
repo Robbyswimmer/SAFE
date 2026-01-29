@@ -18,7 +18,11 @@ from .audio_encoders import CLAPAudioEncoder
 from .pointcloud_encoders import PointBERTEncoder
 from .projectors import AudioProjector, TokenSetProjector
 from .fusion_adapter import MultiLayerFusionAdapter
-from .kv_augmentation import KVAugmentationHookManager, KVAugmentationAdapter
+from .kv_augmentation import (
+    KVAugmentationHookManager,
+    KVAugmentationAdapter,
+    MultiModalKVAugmentationHookManager,
+)
 from .layer_hooks import LayerHookManager
 
 
@@ -446,14 +450,50 @@ class SAFEMultiModalModel(nn.Module):
         modality_masks: Dict[str, torch.Tensor],
         gate_dict: Dict[str, float],
     ):
-        """Forward pass with KV augmentation for multiple modalities."""
-        # TODO: Implement multi-modal KV augmentation
-        # This requires extending KVAugmentationHookManager to handle multiple modalities
-        raise NotImplementedError(
-            "Multi-modal KV augmentation not yet implemented. "
-            "Use pre-FFN fusion for now, or implement KVAugmentationHookManager "
-            "extension for multiple modality token sets."
+        """
+        Forward pass with KV augmentation for multiple modalities.
+
+        Uses MultiModalKVAugmentationHookManager which handles N modalities,
+        each with its own adapter. Each modality gets:
+        - Its own K,V projections
+        - Its own query adapter (ΔQ)
+        - Independent gating
+
+        The outputs are combined as:
+            output = text_output + sum(gate_i * modality_i_output)
+        """
+        if self.kv_adapters is None:
+            raise RuntimeError("KV adapters not initialized")
+
+        # Initialize multi-modal hook manager if needed
+        if self.kv_hook_manager is None:
+            self.kv_hook_manager = MultiModalKVAugmentationHookManager(
+                model=self.base_vl.llm,
+                kv_adapters=self.kv_adapters,
+            )
+            self.kv_hook_manager.wrap_attention_modules()
+
+        # Filter to only active modalities with tokens
+        active_tokens = {k: v for k, v in modality_tokens.items() if v is not None}
+
+        if not active_tokens:
+            # No modality tokens - standard forward
+            return self.base_vl.llm(**llm_inputs)
+
+        # Inject modality tokens
+        self.kv_hook_manager.inject_modality_tokens(
+            modality_tokens=active_tokens,
+            modality_masks=modality_masks if modality_masks else None,
+            modality_gates=gate_dict,
         )
+
+        try:
+            outputs = self.base_vl.llm(**llm_inputs)
+        finally:
+            # Clear tokens after forward
+            self.kv_hook_manager.clear_modality_tokens()
+
+        return outputs
 
     def _resolve_fusion_layers(self) -> Dict[str, List[int]]:
         """Get fusion layer indices for each modality."""

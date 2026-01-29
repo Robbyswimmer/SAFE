@@ -1102,3 +1102,521 @@ class MinAudioAttentionLoss(nn.Module):
             "min_audio_attention": self.min_attention,
             "min_audio_attention_weight": self.loss_weight,
         }
+
+
+# =============================================================================
+# Multi-Modal KV Augmentation
+# =============================================================================
+
+
+class MultiModalKVAugmentedAttention(nn.Module):
+    """
+    Extension of KVAugmentedAttention that handles multiple modalities.
+
+    Each modality has its own KVAugmentationAdapter, and all modality outputs
+    are summed together:
+
+        output = text_output + gate_audio * audio_output + gate_pc * pc_output + ...
+
+    This allows each modality to:
+    - Have its own learned K,V projections
+    - Have its own query adapter (ΔQ)
+    - Be independently gated
+
+    Architecture:
+        1. TEXT ATTENTION: Frozen, identical to original LlamaAttention
+        2. For each modality:
+           - Compute Q + ΔQ_modality
+           - Attend to modality K,V
+           - Gate the output
+        3. COMBINE: text_output + sum(gated_modality_outputs)
+    """
+
+    def __init__(
+        self,
+        original_attention: nn.Module,
+        layer_idx: int,
+    ):
+        super().__init__()
+        self.original_attention = original_attention
+        self.layer_idx = layer_idx
+
+        # Modality adapters will be registered dynamically
+        self._modality_adapters: Dict[str, KVAugmentationAdapter] = {}
+
+        # Storage for current forward pass modality data
+        self._modality_tokens: Dict[str, torch.Tensor] = {}
+        self._modality_masks: Dict[str, Optional[torch.Tensor]] = {}
+        self._modality_gates: Dict[str, float] = {}
+
+        # Copy attributes from original attention
+        q_proj = getattr(original_attention, 'q_proj', None)
+        k_proj = getattr(original_attention, 'k_proj', None)
+
+        self.head_dim = getattr(original_attention, 'head_dim', 128)
+
+        num_heads = getattr(original_attention, 'num_heads', None)
+        if num_heads is None and q_proj is not None and hasattr(q_proj, 'out_features'):
+            num_heads = q_proj.out_features // self.head_dim
+        self.num_heads = num_heads if num_heads is not None else 32
+
+        num_kv_heads = getattr(original_attention, 'num_key_value_heads', None)
+        if num_kv_heads is None and k_proj is not None and hasattr(k_proj, 'out_features'):
+            num_kv_heads = k_proj.out_features // self.head_dim
+        self.num_key_value_heads = num_kv_heads if num_kv_heads is not None else self.num_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+
+        # Diagnostics and attention weights storage (per modality)
+        self._last_diagnostics: Dict[str, Dict[str, float]] = {}
+        self._return_format: Optional[int] = None
+
+    def register_modality_adapter(self, modality: str, adapter: KVAugmentationAdapter):
+        """Register an adapter for a specific modality."""
+        self._modality_adapters[modality] = adapter
+
+    def set_modality_tokens(
+        self,
+        modality: str,
+        tokens: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        gate: float = 1.0,
+    ):
+        """Set tokens for a specific modality for current forward pass."""
+        self._modality_tokens[modality] = tokens
+        self._modality_masks[modality] = mask
+        self._modality_gates[modality] = gate
+
+    def clear_modality_tokens(self):
+        """Clear all modality tokens after forward pass."""
+        self._modality_tokens.clear()
+        self._modality_masks.clear()
+        self._modality_gates.clear()
+
+    def get_diagnostics(self) -> Dict[str, Dict[str, float]]:
+        """Get diagnostics per modality."""
+        return self._last_diagnostics
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, ...]:
+        """Forward pass with optional multi-modal KV augmentation."""
+        # If no modality tokens, pass through to original
+        if not self._modality_tokens:
+            return self.original_attention(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                **kwargs,
+            )
+
+        return self._forward_with_multimodal_kv(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **kwargs,
+        )
+
+    def _forward_with_multimodal_kv(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.Tensor],
+        past_key_value: Optional[Tuple[torch.Tensor]],
+        output_attentions: bool,
+        use_cache: bool,
+        cache_position: Optional[torch.Tensor],
+        **kwargs,
+    ) -> Tuple[torch.Tensor, ...]:
+        """
+        Compute attention with multiple modality K,V branches.
+
+        Architecture:
+        1. TEXT ATTENTION: Frozen, identical to original
+        2. For each modality: Q + ΔQ_mod -> attend to mod K,V -> gate
+        3. COMBINE: text_output + sum(gated_modality_outputs)
+        """
+        bsz, q_len, _ = hidden_states.size()
+        orig_attn = self.original_attention
+
+        # Determine return format lazily
+        if self._return_format is None:
+            try:
+                with torch.no_grad():
+                    probe = orig_attn(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_value,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        **kwargs,
+                    )
+                self._return_format = len(probe) if isinstance(probe, tuple) else 1
+            except Exception:
+                self._return_format = 2
+
+        # ============================================================
+        # 1. TEXT ATTENTION (frozen)
+        # ============================================================
+        query_states = orig_attn.q_proj(hidden_states)
+        key_states = orig_attn.k_proj(hidden_states)
+        value_states = orig_attn.v_proj(hidden_states)
+
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+        # Apply RoPE
+        cos, sin = None, None
+        if hasattr(orig_attn, 'rotary_emb'):
+            cos, sin = orig_attn.rotary_emb(value_states, position_ids)
+            query_states, key_states = self._apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        # GQA expansion
+        key_states_expanded = key_states
+        value_states_expanded = value_states
+        if self.num_key_value_groups > 1:
+            key_states_expanded = self._repeat_kv(key_states, self.num_key_value_groups)
+            value_states_expanded = self._repeat_kv(value_states, self.num_key_value_groups)
+
+        # Text attention
+        text_attn_weights = torch.matmul(query_states, key_states_expanded.transpose(2, 3)) / math.sqrt(self.head_dim)
+        if attention_mask is not None:
+            text_attn_weights = text_attn_weights + attention_mask
+        text_attn_weights = torch.clamp(text_attn_weights, min=-50.0, max=50.0)
+        text_attn_weights = F.softmax(text_attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        text_output = torch.matmul(text_attn_weights, value_states_expanded)
+
+        # ============================================================
+        # 2. MODALITY ATTENTION (for each modality)
+        # ============================================================
+        combined_modality_output = torch.zeros_like(text_output)
+        self._last_diagnostics = {}
+
+        for modality, mod_tokens in self._modality_tokens.items():
+            if modality not in self._modality_adapters:
+                continue
+
+            adapter = self._modality_adapters[modality]
+            gate = self._modality_gates.get(modality, 1.0)
+            mod_mask = self._modality_masks.get(modality)
+            n_mod = mod_tokens.size(1)
+
+            # Adapted query: Q + ΔQ_modality
+            delta_q = adapter.audio_query_adapter(hidden_states)
+            delta_q = delta_q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+            # Apply RoPE to delta_q
+            if cos is not None and sin is not None:
+                delta_q = self._apply_rotary_pos_emb_single(delta_q, cos, sin)
+
+            query_for_mod = query_states + delta_q
+
+            # Modality K, V
+            mod_keys, mod_values = adapter(mod_tokens)
+            adapter_num_kv_heads = adapter.num_key_value_heads
+
+            # Handle batch size mismatch
+            mod_bsz = mod_keys.size(0)
+            if bsz != mod_bsz:
+                if bsz > mod_bsz and bsz % mod_bsz == 0:
+                    num_beams = bsz // mod_bsz
+                    mod_keys = mod_keys.unsqueeze(1).expand(-1, num_beams, -1, -1).reshape(bsz, n_mod, -1)
+                    mod_values = mod_values.unsqueeze(1).expand(-1, num_beams, -1, -1).reshape(bsz, n_mod, -1)
+                elif mod_bsz > bsz:
+                    mod_keys = mod_keys[:bsz]
+                    mod_values = mod_values[:bsz]
+
+            mod_keys = mod_keys.view(bsz, n_mod, adapter_num_kv_heads, self.head_dim).transpose(1, 2)
+            mod_values = mod_values.view(bsz, n_mod, adapter_num_kv_heads, self.head_dim).transpose(1, 2)
+
+            mod_keys = mod_keys.to(query_for_mod.dtype)
+            mod_values = mod_values.to(query_for_mod.dtype)
+
+            # GQA expansion
+            adapter_kv_groups = self.num_heads // adapter_num_kv_heads
+            if adapter_kv_groups > 1:
+                mod_keys = self._repeat_kv(mod_keys, adapter_kv_groups)
+                mod_values = self._repeat_kv(mod_values, adapter_kv_groups)
+
+            # Modality attention
+            mod_attn_weights = torch.matmul(query_for_mod, mod_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+            # Apply modality mask if provided
+            if mod_mask is not None:
+                mod_mask_dev = mod_mask.to(device=mod_attn_weights.device)
+                if mod_mask_dev.dim() == 2:
+                    mask_bsz = mod_mask_dev.size(0)
+                    if mask_bsz != bsz:
+                        if bsz > mask_bsz and bsz % mask_bsz == 0:
+                            num_beams = bsz // mask_bsz
+                            mod_mask_dev = mod_mask_dev.unsqueeze(1).expand(-1, num_beams, -1).reshape(bsz, -1)
+                        elif mask_bsz > bsz:
+                            mod_mask_dev = mod_mask_dev[:bsz]
+                    mod_mask_expanded = mod_mask_dev.unsqueeze(1).unsqueeze(2)
+                    mod_attn_weights = mod_attn_weights.masked_fill(mod_mask_expanded <= 0.5, float("-inf"))
+
+            mod_attn_weights = torch.clamp(mod_attn_weights, min=-50.0, max=50.0)
+            mod_attn_weights = F.softmax(mod_attn_weights, dim=-1, dtype=torch.float32).to(query_for_mod.dtype)
+            mod_output = torch.matmul(mod_attn_weights, mod_values)
+
+            # Gate and accumulate
+            gated_mod_output = gate * mod_output
+            combined_modality_output = combined_modality_output + gated_mod_output
+
+            # Store diagnostics for this modality
+            with torch.no_grad():
+                mod_rms = torch.sqrt(torch.mean(gated_mod_output.float() ** 2)).item()
+                text_rms = torch.sqrt(torch.mean(text_output.float() ** 2)).item()
+                delta_q_rms = torch.sqrt(torch.mean(delta_q.float() ** 2)).item()
+                q_rms = torch.sqrt(torch.mean(query_states.float() ** 2)).item()
+
+                self._last_diagnostics[modality] = {
+                    "text_rms": text_rms,
+                    "modality_rms": mod_rms,
+                    "rms_ratio": mod_rms / (text_rms + 1e-8),
+                    "delta_q_rms": delta_q_rms,
+                    "q_rms": q_rms,
+                    "delta_q_ratio": delta_q_rms / (q_rms + 1e-8),
+                    "gate": gate,
+                }
+
+        # ============================================================
+        # 3. COMBINE
+        # ============================================================
+        combined_output = text_output + combined_modality_output
+
+        # Reshape and output projection
+        combined_output = combined_output.transpose(1, 2).contiguous().reshape(bsz, q_len, -1)
+        attn_output = orig_attn.o_proj(combined_output)
+
+        # Return in expected format
+        if self._return_format == 1:
+            return attn_output
+        if self._return_format == 2:
+            return (attn_output, None)
+        return (attn_output, None, None)
+
+    def _apply_rotary_pos_emb(self, q, k, cos, sin):
+        q_embed = (q * cos) + (self._rotate_half(q) * sin)
+        k_embed = (k * cos) + (self._rotate_half(k) * sin)
+        return q_embed, k_embed
+
+    def _apply_rotary_pos_emb_single(self, x, cos, sin):
+        return (x * cos) + (self._rotate_half(x) * sin)
+
+    @staticmethod
+    def _rotate_half(x):
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
+
+    @staticmethod
+    def _repeat_kv(hidden_states, n_rep):
+        if n_rep == 1:
+            return hidden_states
+        batch, num_kv_heads, seq_len, head_dim = hidden_states.shape
+        hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_kv_heads, n_rep, seq_len, head_dim)
+        return hidden_states.reshape(batch, num_kv_heads * n_rep, seq_len, head_dim)
+
+
+class MultiModalKVAugmentationHookManager:
+    """
+    Manages attention module replacement for multi-modal KV augmentation.
+
+    Handles adapters keyed by "modality:layer_idx" (e.g., "audio:5", "pointcloud:5").
+    Each layer gets a MultiModalKVAugmentedAttention that can handle N modalities.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        kv_adapters: nn.ModuleDict,  # Keys like "audio:5", "pointcloud:5"
+    ):
+        self.model = model
+        self.kv_adapters = kv_adapters
+
+        # Parse adapters to get layer indices and modalities
+        self.layer_modalities: Dict[int, List[str]] = {}  # layer_idx -> list of modalities
+        for key in kv_adapters.keys():
+            modality, layer_str = key.split(":")
+            layer_idx = int(layer_str)
+            if layer_idx not in self.layer_modalities:
+                self.layer_modalities[layer_idx] = []
+            self.layer_modalities[layer_idx].append(modality)
+
+        self.fusion_layers = sorted(self.layer_modalities.keys())
+        self.layer_modules = self._discover_layer_modules(model)
+        self.original_attentions: Dict[int, nn.Module] = {}
+        self.wrapped_attentions: Dict[int, MultiModalKVAugmentedAttention] = {}
+        self._is_wrapped = False
+
+        # Log configuration
+        print(f"[MultiModalKVAug] Initialized with {len(self.fusion_layers)} layers", flush=True)
+        for layer_idx in self.fusion_layers:
+            mods = self.layer_modalities[layer_idx]
+            print(f"[MultiModalKVAug]   Layer {layer_idx}: {mods}", flush=True)
+
+    def _discover_layer_modules(self, model: nn.Module) -> Dict[int, nn.Module]:
+        """Locate decoder layer ModuleList."""
+        def _is_module_list(obj):
+            return isinstance(obj, (list, nn.ModuleList, tuple))
+
+        def _try_extract(candidate):
+            if candidate is None:
+                return None
+            if hasattr(candidate, "layers") and _is_module_list(getattr(candidate, "layers")):
+                return {i: layer for i, layer in enumerate(getattr(candidate, "layers"))}
+            if hasattr(candidate, "h") and _is_module_list(getattr(candidate, "h")):
+                return {i: layer for i, layer in enumerate(getattr(candidate, "h"))}
+            return None
+
+        seeds = [
+            model,
+            getattr(model, "model", None),
+            getattr(model, "language_model", None),
+            getattr(model, "decoder", None),
+            getattr(model, "transformer", None),
+        ]
+
+        seen = set()
+        queue = [s for s in seeds if s is not None]
+        expand_attrs = ("model", "language_model", "decoder", "transformer")
+        max_visits = 50
+        visits = 0
+
+        while queue and visits < max_visits:
+            candidate = queue.pop(0)
+            visits += 1
+            key = id(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            extracted = _try_extract(candidate)
+            if extracted is not None:
+                return extracted
+
+            for attr in expand_attrs:
+                child = getattr(candidate, attr, None)
+                if child is not None and id(child) not in seen:
+                    queue.append(child)
+
+        raise ValueError(f"Unable to locate decoder layers. Tried {visits} candidates.")
+
+    def wrap_attention_modules(self):
+        """Replace attention modules with MultiModalKVAugmentedAttention."""
+        if self._is_wrapped:
+            return
+
+        for layer_idx in self.fusion_layers:
+            if layer_idx not in self.layer_modules:
+                print(f"[MultiModalKVAug] Warning: layer {layer_idx} not found", flush=True)
+                continue
+
+            layer = self.layer_modules[layer_idx]
+
+            # Find attention module
+            if hasattr(layer, 'self_attn'):
+                original_attn = layer.self_attn
+                attn_attr = 'self_attn'
+            elif hasattr(layer, 'attention'):
+                original_attn = layer.attention
+                attn_attr = 'attention'
+            else:
+                print(f"[MultiModalKVAug] Warning: no attention in layer {layer_idx}", flush=True)
+                continue
+
+            # Store original
+            self.original_attentions[layer_idx] = original_attn
+
+            # Create multi-modal wrapped attention
+            wrapped = MultiModalKVAugmentedAttention(original_attn, layer_idx)
+
+            # Register all modality adapters for this layer
+            for modality in self.layer_modalities[layer_idx]:
+                adapter_key = f"{modality}:{layer_idx}"
+                adapter = self.kv_adapters[adapter_key]
+                wrapped.register_modality_adapter(modality, adapter)
+
+            self.wrapped_attentions[layer_idx] = wrapped
+
+            # Replace in layer
+            setattr(layer, attn_attr, wrapped)
+
+        self._is_wrapped = True
+        print(f"[MultiModalKVAug] Wrapped {len(self.wrapped_attentions)} attention modules", flush=True)
+
+    def unwrap_attention_modules(self):
+        """Restore original attention modules."""
+        if not self._is_wrapped:
+            return
+
+        for layer_idx, original in self.original_attentions.items():
+            layer = self.layer_modules[layer_idx]
+            if hasattr(layer, 'self_attn'):
+                layer.self_attn = original
+            else:
+                layer.attention = original
+
+        self.original_attentions.clear()
+        self.wrapped_attentions.clear()
+        self._is_wrapped = False
+
+    def inject_modality_tokens(
+        self,
+        modality_tokens: Dict[str, torch.Tensor],  # modality -> tokens
+        modality_masks: Optional[Dict[str, torch.Tensor]] = None,
+        modality_gates: Optional[Dict[str, float]] = None,
+    ):
+        """
+        Set modality tokens for current forward pass.
+
+        Args:
+            modality_tokens: Dict mapping modality name to tokens (batch, n_tokens, hidden)
+            modality_masks: Optional dict of attention masks per modality
+            modality_gates: Optional dict of gate values per modality
+        """
+        modality_masks = modality_masks or {}
+        modality_gates = modality_gates or {}
+
+        for wrapped in self.wrapped_attentions.values():
+            for modality, tokens in modality_tokens.items():
+                if tokens is not None:
+                    wrapped.set_modality_tokens(
+                        modality=modality,
+                        tokens=tokens,
+                        mask=modality_masks.get(modality),
+                        gate=modality_gates.get(modality, 1.0),
+                    )
+
+    def clear_modality_tokens(self):
+        """Clear all modality tokens after forward pass."""
+        for wrapped in self.wrapped_attentions.values():
+            wrapped.clear_modality_tokens()
+
+    def get_diagnostics(self) -> Dict[int, Dict[str, Dict[str, float]]]:
+        """Get diagnostics per layer per modality."""
+        diagnostics = {}
+        for layer_idx, wrapped in self.wrapped_attentions.items():
+            d = wrapped.get_diagnostics()
+            if d:
+                diagnostics[layer_idx] = d
+        return diagnostics
