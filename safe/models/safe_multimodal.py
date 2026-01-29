@@ -582,43 +582,136 @@ class SAFEMultiModalModel(nn.Module):
         """
         Load adapter weights.
 
+        Supports two checkpoint formats:
+        1. Adapter-only: keys like "audio_projector", "kv_adapters", etc.
+        2. Full training checkpoint: keys like "model_state_dict", "epoch", etc.
+
         Args:
             path: Path to checkpoint
             modality: If specified, only load adapters for this modality.
             strict: Whether to require exact key matching
         """
-        state_dict = torch.load(path, map_location="cpu")
+        checkpoint = torch.load(path, map_location="cpu")
 
+        # Handle full training checkpoint format (from train_audio_llm_probe.py)
+        if "model_state_dict" in checkpoint:
+            print(f"[SAFE-MM] Detected training checkpoint format", flush=True)
+            state_dict = checkpoint["model_state_dict"]
+            # Extract relevant adapter weights from full model state
+            # Keys in training checkpoint look like:
+            #   "safe_model.audio_projector.fc1.weight"
+            #   "safe_model.kv_adapters.audio:1.audio_k_proj.weight"
+            #   "safe_model.fusion_adapter.fusion_adapters.audio:1...."
+            adapter_state = {}
+
+            for key, value in state_dict.items():
+                # Handle audio projector
+                if "audio_projector" in key and (modality is None or modality == "audio"):
+                    # Strip prefix like "safe_model."
+                    new_key = key.split("audio_projector.")[-1]
+                    if "audio_projector" not in adapter_state:
+                        adapter_state["audio_projector"] = {}
+                    adapter_state["audio_projector"][new_key] = value
+
+                # Handle pointcloud projector
+                elif "pointcloud_projector" in key and (modality is None or modality == "pointcloud"):
+                    new_key = key.split("pointcloud_projector.")[-1]
+                    if "pointcloud_projector" not in adapter_state:
+                        adapter_state["pointcloud_projector"] = {}
+                    adapter_state["pointcloud_projector"][new_key] = value
+
+                # Handle KV adapters (keyed like "audio:1", "pointcloud:5")
+                elif "kv_adapters" in key:
+                    # Extract modality from key like "kv_adapters.audio:1.xxx"
+                    parts = key.split("kv_adapters.")[-1]
+                    adapter_modality = parts.split(":")[0]
+                    if modality is None or adapter_modality == modality:
+                        if "kv_adapters" not in adapter_state:
+                            adapter_state["kv_adapters"] = {}
+                        # Keep the full key after "kv_adapters."
+                        adapter_state["kv_adapters"][parts] = value
+
+                # Handle fusion adapters (pre-FFN)
+                elif "fusion_adapter" in key and "fusion_adapters" in key:
+                    parts = key.split("fusion_adapters.")[-1]
+                    adapter_modality = parts.split(":")[0]
+                    if modality is None or adapter_modality == modality:
+                        if "fusion_adapter" not in adapter_state:
+                            adapter_state["fusion_adapter"] = {}
+                        adapter_state["fusion_adapter"][parts] = value
+
+            state_dict = adapter_state
+        else:
+            state_dict = checkpoint
+
+        # Load audio projector
         if modality is None or modality == "audio":
             if "audio_projector" in state_dict:
-                self.audio_projector.load_state_dict(state_dict["audio_projector"], strict=strict)
+                proj_state = state_dict["audio_projector"]
+                if isinstance(proj_state, dict) and all(isinstance(v, torch.Tensor) for v in proj_state.values()):
+                    # It's already a proper state dict
+                    self.audio_projector.load_state_dict(proj_state, strict=strict)
+                else:
+                    # Nested format from training checkpoint extraction
+                    self.audio_projector.load_state_dict(proj_state, strict=strict)
                 print(f"[SAFE-MM] Loaded audio projector from {path}", flush=True)
 
+        # Load pointcloud projector
         if modality is None or modality == "pointcloud":
             if "pointcloud_projector" in state_dict:
-                self.pointcloud_projector.load_state_dict(state_dict["pointcloud_projector"], strict=strict)
+                proj_state = state_dict["pointcloud_projector"]
+                self.pointcloud_projector.load_state_dict(proj_state, strict=strict)
                 print(f"[SAFE-MM] Loaded pointcloud projector from {path}", flush=True)
 
+        # Load fusion adapters (pre-FFN)
         if self.fusion_adapter is not None:
             if "fusion_adapter" in state_dict:
-                self.fusion_adapter.load_state_dict(state_dict["fusion_adapter"], strict=strict)
-                print(f"[SAFE-MM] Loaded fusion adapter from {path}", flush=True)
-            elif f"fusion_adapter_{modality}" in state_dict:
-                # Load modality-specific adapters
-                adapter_state = state_dict[f"fusion_adapter_{modality}"]
-                for key, module_state in adapter_state.items():
-                    if key in self.fusion_adapter.fusion_adapters:
-                        self.fusion_adapter.fusion_adapters[key].load_state_dict(module_state, strict=strict)
-                print(f"[SAFE-MM] Loaded {modality} fusion adapters from {path}", flush=True)
+                fusion_state = state_dict["fusion_adapter"]
+                # Check if it's the full state dict or per-adapter dict
+                if any(k.startswith(("audio:", "pointcloud:")) for k in fusion_state.keys()):
+                    # Per-adapter format: {"audio:1": {...}, "pointcloud:1": {...}}
+                    # Need to load each adapter individually
+                    for adapter_key, adapter_weights in fusion_state.items():
+                        if adapter_key in self.fusion_adapter.fusion_adapters:
+                            if isinstance(adapter_weights, dict):
+                                self.fusion_adapter.fusion_adapters[adapter_key].load_state_dict(
+                                    adapter_weights, strict=strict
+                                )
+                            else:
+                                # It's a tensor, need to reconstruct state dict
+                                pass
+                    print(f"[SAFE-MM] Loaded fusion adapters from {path}", flush=True)
+                else:
+                    # Full state dict format
+                    self.fusion_adapter.load_state_dict(fusion_state, strict=strict)
+                    print(f"[SAFE-MM] Loaded fusion adapter from {path}", flush=True)
 
+        # Load KV adapters
         if self.kv_adapters is not None:
             if "kv_adapters" in state_dict:
-                self.kv_adapters.load_state_dict(state_dict["kv_adapters"], strict=strict)
-                print(f"[SAFE-MM] Loaded KV adapters from {path}", flush=True)
-            elif f"kv_adapters_{modality}" in state_dict:
-                # Load modality-specific KV adapters
-                kv_state = state_dict[f"kv_adapters_{modality}"]
-                for key, module_state in kv_state.items():
-                    if key in self.kv_adapters:
-                        self.kv_adapters[key].load_state_dict(module_state, strict=strict)
-                print(f"[SAFE-MM] Loaded {modality} KV adapters from {path}", flush=True)
+                kv_state = state_dict["kv_adapters"]
+                # Check format
+                if any(":" in k for k in kv_state.keys()):
+                    # Flat format from training checkpoint: {"audio:1.weight": tensor, ...}
+                    # Need to reconstruct per-adapter state dicts
+                    adapter_states = {}  # {"audio:1": {"weight": tensor, ...}, ...}
+                    for key, value in kv_state.items():
+                        # Key format: "audio:1.audio_k_proj.0.weight" or "audio:1.audio_query_adapter.down_proj.weight"
+                        parts = key.split(".", 1)
+                        adapter_key = parts[0]  # "audio:1"
+                        param_key = parts[1] if len(parts) > 1 else key
+                        if adapter_key not in adapter_states:
+                            adapter_states[adapter_key] = {}
+                        adapter_states[adapter_key][param_key] = value
+
+                    # Load each adapter
+                    loaded_count = 0
+                    for adapter_key, adapter_state in adapter_states.items():
+                        if adapter_key in self.kv_adapters:
+                            self.kv_adapters[adapter_key].load_state_dict(adapter_state, strict=strict)
+                            loaded_count += 1
+                    print(f"[SAFE-MM] Loaded {loaded_count} KV adapters from {path}", flush=True)
+                else:
+                    # Standard ModuleDict state dict format
+                    self.kv_adapters.load_state_dict(kv_state, strict=strict)
+                    print(f"[SAFE-MM] Loaded KV adapters from {path}", flush=True)
