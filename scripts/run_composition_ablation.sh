@@ -114,10 +114,11 @@ train_audio_preffn() {
         --data-path "$AVE_DATA_PATH" \
         --output-dir "$OUTPUT_AUDIO_PREFFN" \
         --batch-size "$BATCH_SIZE" \
-        --epochs "$NUM_EPOCHS" \
-        --lr "$LEARNING_RATE" \
+        --num-epochs "$NUM_EPOCHS" \
+        --safe-learning-rate "$LEARNING_RATE" \
         --fusion-layer-indices "$FUSION_LAYERS" \
         --fusion-injection-point pre_ffn \
+        --wandb \
         --wandb-project "$WANDB_PROJECT" \
         --wandb-run-name "composition-audio-preffn"
 
@@ -135,9 +136,10 @@ train_audio_kvaug() {
         --data-path "$AVE_DATA_PATH" \
         --output-dir "$OUTPUT_AUDIO_KVAUG" \
         --batch-size "$BATCH_SIZE" \
-        --epochs "$NUM_EPOCHS" \
-        --lr "$LEARNING_RATE" \
+        --num-epochs "$NUM_EPOCHS" \
+        --safe-learning-rate "$LEARNING_RATE" \
         --fusion-layer-indices "$FUSION_LAYERS" \
+        --wandb \
         --wandb-project "$WANDB_PROJECT" \
         --wandb-run-name "composition-audio-kvaug"
 
@@ -158,11 +160,12 @@ train_pc_preffn() {
         --output-dir "$OUTPUT_PC_PREFFN" \
         --batch-size "$BATCH_SIZE" \
         --num-epochs "$NUM_EPOCHS" \
-        --learning-rate "$LEARNING_RATE" \
+        --lr "$LEARNING_RATE" \
         --fusion-layer-indices "$FUSION_LAYERS" \
         --fusion-injection-point pre_ffn \
+        --wandb \
         --wandb-project "$WANDB_PROJECT" \
-        --wandb-run "composition-pc-preffn"
+        --wandb-run-name "composition-pc-preffn"
 
     echo "✓ Point cloud pre-FFN adapter saved to: $OUTPUT_PC_PREFFN"
 }
@@ -181,11 +184,12 @@ train_pc_kvaug() {
         --output-dir "$OUTPUT_PC_KVAUG" \
         --batch-size "$BATCH_SIZE" \
         --num-epochs "$NUM_EPOCHS" \
-        --learning-rate "$LEARNING_RATE" \
+        --lr "$LEARNING_RATE" \
         --fusion-layer-indices "$FUSION_LAYERS" \
         --fusion-mode kv_augment \
+        --wandb \
         --wandb-project "$WANDB_PROJECT" \
-        --wandb-run "composition-pc-kvaug"
+        --wandb-run-name "composition-pc-kvaug"
 
     echo "✓ Point cloud KV-aug adapter saved to: $OUTPUT_PC_KVAUG"
 }
