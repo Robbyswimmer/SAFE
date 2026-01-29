@@ -124,7 +124,7 @@ train_audio_preffn() {
         --fp16 \
         --wandb \
         --wandb-project "$WANDB_PROJECT" \
-        --wandb-run-name "captioning-audio-preffn"
+        --wandb-name "captioning-audio-preffn"
 
     echo "✓ Audio pre-FFN captioning adapter saved to: $OUTPUT_AUDIO_PREFFN"
 }
@@ -149,7 +149,7 @@ train_audio_kvaug() {
         --fp16 \
         --wandb \
         --wandb-project "$WANDB_PROJECT" \
-        --wandb-run-name "captioning-audio-kvaug"
+        --wandb-name "captioning-audio-kvaug"
 
     echo "✓ Audio KV-aug captioning adapter saved to: $OUTPUT_AUDIO_KVAUG"
 }
