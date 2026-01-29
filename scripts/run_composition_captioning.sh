@@ -166,17 +166,17 @@ train_pc_preffn() {
     echo "========================================"
 
     python train_pointcloud.py \
-        --config cap3d \
-        --phase captioning \
+        --config cap3d_captioning \
+        --task captioning \
         --data-path "$CAP3D_PATH" \
         --output-dir "$OUTPUT_PC_PREFFN" \
         --batch-size "$BATCH_SIZE" \
         --num-epochs "$PC_EPOCHS" \
-        --lr "$LEARNING_RATE" \
+        --learning-rate "$LEARNING_RATE" \
         --fusion-layer-indices "$FUSION_LAYERS" \
         --fusion-injection-point pre_ffn \
         --gradient-accumulation 16 \
-        --fp16 \
+        --log-every 10 \
         --wandb \
         --wandb-project "$WANDB_PROJECT" \
         --wandb-run-name "captioning-pc-preffn"
@@ -189,19 +189,25 @@ train_pc_kvaug() {
     echo "========================================"
     echo "Training: Point Cloud Adapter (KV-Aug) - Cap3D Captioning"
     echo "========================================"
+    echo "KV-Aug regularization enabled by default:"
+    echo "  --kv-reg-weight 0.1 (entropy reg)"
+    echo "  --ablation-loss-weight 0.5 (hinge loss)"
+    echo "  --ablation-loss-margin 0.1"
+    echo "  --ablation-loss-every 50"
+    echo "========================================"
 
     python train_pointcloud.py \
-        --config cap3d \
-        --phase captioning \
+        --config cap3d_captioning \
+        --task captioning \
         --data-path "$CAP3D_PATH" \
         --output-dir "$OUTPUT_PC_KVAUG" \
         --batch-size "$BATCH_SIZE" \
         --num-epochs "$PC_EPOCHS" \
-        --lr "$LEARNING_RATE" \
+        --learning-rate "$LEARNING_RATE" \
         --fusion-layer-indices "$FUSION_LAYERS" \
         --fusion-mode kv_augment \
         --gradient-accumulation 16 \
-        --fp16 \
+        --log-every 10 \
         --wandb \
         --wandb-project "$WANDB_PROJECT" \
         --wandb-run-name "captioning-pc-kvaug"
