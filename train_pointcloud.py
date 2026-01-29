@@ -182,6 +182,30 @@ def parse_args() -> argparse.Namespace:
         help="Override fusion_config.fusion_mode from the config (useful for KV-augment experiments)",
     )
     parser.add_argument(
+        "--kv-reg-weight",
+        type=float,
+        default=0.1,
+        help="KV-aug entropy regularization weight to prevent collapse (default: 0.1)",
+    )
+    parser.add_argument(
+        "--ablation-loss-weight",
+        type=float,
+        default=0.5,
+        help="Weight for hinge loss that enforces pointclouds help (KV-aug only, default: 0.5)",
+    )
+    parser.add_argument(
+        "--ablation-loss-margin",
+        type=float,
+        default=0.1,
+        help="Margin for ablation hinge: loss(no-pc) - loss(with-pc) must exceed this value (default: 0.1)",
+    )
+    parser.add_argument(
+        "--ablation-loss-every",
+        type=int,
+        default=50,
+        help="Compute ablation hinge every N steps to save compute (default: 50).",
+    )
+    parser.add_argument(
         "--fusion-layer-indices",
         type=str,
         default=None,
@@ -901,6 +925,74 @@ def evaluate_llm_probe_head(
     return {"accuracy": correct / max(total, 1), "correct": correct, "total": total}
 
 
+def compute_kv_aug_regularization(model: SAFEPointCloudModel, weight: float = 0.1) -> torch.Tensor:
+    """
+    Compute regularization loss to prevent KV-aug collapse.
+
+    The problem: KV-aug can collapse by learning constant audio output that biases
+    all tokens toward a single prediction (like "Question Question Question...").
+
+    Solution: Penalize uniform attention over PC tokens. Uniform attention means
+    all PC tokens contribute equally → constant bias. We want focused attention
+    that varies based on the actual PC content and text query.
+
+    Returns scalar loss tensor (0 if not KV-aug mode).
+    """
+    if not getattr(model, 'enable_kv_augmentation', False):
+        return torch.tensor(0.0)
+
+    kv_hook_manager = getattr(model, 'kv_hook_manager', None)
+    if kv_hook_manager is None:
+        return torch.tensor(0.0)
+
+    # Get live attention weights (with gradients)
+    attn_weights_dict = kv_hook_manager.get_live_attention_weights()
+    if not attn_weights_dict:
+        return torch.tensor(0.0)
+
+    reg_loss = torch.tensor(0.0, device=next(model.parameters()).device)
+
+    for layer_idx, attn_weights in attn_weights_dict.items():
+        # attn_weights: (batch, heads, seq_len, n_audio)
+        # Compute entropy per position, averaged over batch and heads
+        attn_dist = attn_weights.mean(dim=(0, 1))  # (seq_len, n_audio)
+        attn_dist = attn_dist.clamp(min=1e-10)
+
+        # Entropy: H = -sum(p * log(p))
+        entropy = -(attn_dist * attn_dist.log()).sum(dim=-1)  # (seq_len,)
+        mean_entropy = entropy.mean()
+
+        # Max entropy = log(n_audio) for uniform distribution
+        n_audio = attn_weights.size(-1)
+        max_entropy = math.log(n_audio) if n_audio > 1 else 1.0
+
+        # Normalized entropy in [0, 1], where 1 = uniform (bad)
+        normalized_entropy = mean_entropy / max_entropy
+
+        # Penalize HIGH entropy (uniform attention = collapse)
+        # We want entropy to be LOW (focused attention)
+        # Loss = normalized_entropy (higher when more uniform)
+        reg_loss = reg_loss + normalized_entropy
+
+        # Also penalize LOW variance in attention across positions
+        # If attention pattern is the same for all query positions, that's bad
+        # attn_weights: (batch, heads, seq_len, n_audio)
+        attn_var_across_positions = attn_weights.var(dim=2).mean()  # variance over seq_len
+        # Penalize low variance (encourage different attention patterns for different positions)
+        position_diversity_loss = 1.0 / (attn_var_across_positions + 1e-6)
+        # Scale down since this can be large
+        position_diversity_loss = torch.clamp(position_diversity_loss, max=10.0) * 0.01
+
+        reg_loss = reg_loss + position_diversity_loss
+
+    # Average over layers and scale by weight
+    num_layers = len(attn_weights_dict)
+    if num_layers > 0:
+        reg_loss = weight * reg_loss / num_layers
+
+    return reg_loss
+
+
 def train_epoch_captioning(
     model: SAFEPointCloudModel,
     dataloader: DataLoader,
@@ -914,7 +1006,27 @@ def train_epoch_captioning(
     model.train()
 
     total_loss = 0.0
+    total_reg_loss = 0.0
+    total_ablation_loss = 0.0
     num_batches = 0
+
+    # KV-aug regularization weight (only applies if KV-aug mode)
+    # argparse converts --kv-reg-weight to kv_reg_weight
+    kv_reg_weight = getattr(args, 'kv_reg_weight', 0.1)
+    ablation_weight = float(getattr(args, "ablation_loss_weight", 0.0) or 0.0)
+    ablation_margin = float(getattr(args, "ablation_loss_margin", 0.0) or 0.0)
+    ablation_every = max(1, int(getattr(args, "ablation_loss_every", 1) or 1))
+    is_kv_aug = getattr(model, 'enable_kv_augmentation', False)
+    if is_kv_aug:
+        print(f"[KV-Aug] Entropy regularization enabled (weight={kv_reg_weight})", flush=True)
+        if ablation_weight > 0.0:
+            print(
+                f"[KV-Aug] Ablation hinge enabled (weight={ablation_weight}, margin={ablation_margin}, every={ablation_every})",
+                flush=True,
+            )
+        # Enable attention weight capture for regularization
+        if model.kv_hook_manager is not None:
+            model.kv_hook_manager.set_return_attention_weights(True)
 
     use_tqdm = sys.stdout.isatty()
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}", disable=not use_tqdm)
@@ -965,7 +1077,36 @@ def train_epoch_captioning(
             pointcloud=pointclouds,
         )
 
-        loss = outputs["loss"] / args.gradient_accumulation
+        base_loss = outputs["loss"]
+        loss = base_loss
+
+        # Add KV-aug regularization to prevent collapse
+        reg_loss = torch.tensor(0.0, device=device)
+        if is_kv_aug and kv_reg_weight > 0:
+            reg_loss = compute_kv_aug_regularization(model, weight=kv_reg_weight)
+            loss = loss + reg_loss
+
+        # Hinge forcing: with-pointcloud loss should beat no-pointcloud baseline
+        ablation_loss = torch.tensor(0.0, device=device)
+        if is_kv_aug and ablation_weight > 0.0 and (batch_idx % ablation_every == 0):
+            try:
+                with torch.no_grad():
+                    outputs_no_pc = model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=lm_labels,
+                        pointcloud=None,
+                    )
+                    no_pc_loss = outputs_no_pc["loss"] if isinstance(outputs_no_pc, dict) else outputs_no_pc.loss
+                ablation_delta = no_pc_loss.detach() - base_loss
+                hinge = torch.relu(ablation_margin - ablation_delta)
+                ablation_loss = ablation_weight * hinge
+                loss = loss + ablation_loss
+            except Exception as e:
+                if args.debug:
+                    print(f"[DEBUG] Ablation hinge skipped: {e}", flush=True)
+
+        loss = loss / args.gradient_accumulation
         if args.debug:
             print(f"[DEBUG] Step {batch_idx}: before backward", flush=True)
         loss.backward()
@@ -984,20 +1125,35 @@ def train_epoch_captioning(
             if scheduler is not None:
                 scheduler.step()
 
-        total_loss += loss.item() * args.gradient_accumulation
-        num_batches += 1
+            total_loss += loss.item() * args.gradient_accumulation
+            if is_kv_aug:
+                total_reg_loss += reg_loss.item() if isinstance(reg_loss, torch.Tensor) else reg_loss
+                total_ablation_loss += ablation_loss.item() if isinstance(ablation_loss, torch.Tensor) else ablation_loss
+            num_batches += 1
 
-        avg_loss = total_loss / num_batches
-        do_log = (batch_idx % max(args.log_every, 1)) == 0
-        if use_tqdm:
-            pbar.set_postfix({"loss": avg_loss})
-        if do_log:
-            step_ms = (time.time() - step_start) * 1000.0
-            if not use_tqdm:
-                print(
-                    f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} step_ms={step_ms:.0f}",
-                    flush=True,
-                )
+            avg_loss = total_loss / num_batches
+            avg_reg_loss = total_reg_loss / num_batches if is_kv_aug else 0.0
+            do_log = (batch_idx % max(args.log_every, 1)) == 0
+            if use_tqdm:
+                if is_kv_aug:
+                    avg_ablation = total_ablation_loss / num_batches
+                    pbar.set_postfix({"loss": avg_loss, "reg": avg_reg_loss, "abl": avg_ablation})
+                else:
+                    pbar.set_postfix({"loss": avg_loss})
+            if do_log:
+                step_ms = (time.time() - step_start) * 1000.0
+                if not use_tqdm:
+                    if is_kv_aug:
+                        avg_ablation = total_ablation_loss / num_batches
+                        print(
+                            f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} reg={avg_reg_loss:.4f} abl={avg_ablation:.4f} step_ms={step_ms:.0f}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"[TRAIN] epoch={epoch+1} step={batch_idx} loss={avg_loss:.4f} step_ms={step_ms:.0f}",
+                            flush=True,
+                        )
             if getattr(args, "wandb", False) and wandb is not None:
                 global_step = epoch * len(dataloader) + batch_idx
                 wandb.log(
