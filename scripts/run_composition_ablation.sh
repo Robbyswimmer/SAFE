@@ -50,7 +50,7 @@ ARCH=${ARCH:-"both"}   # both, preffn, kvaug
 # Data paths
 AVE_DATA_PATH=${AVE_DATA_PATH:-"/data/SalmanAsif/AVE_Dataset"}
 MODELNET_DATA_PATH=${MODELNET_DATA_PATH:-"./data"}
-MCUB_DATA_PATH=${MCUB_DATA_PATH:-"./data/mcub"}
+MCUB_DATA_PATH=${MCUB_DATA_PATH:-"/data/SalmanAsif/Kaykobad-Reza/Model-Merging/data/test"}
 
 # Output directories
 OUTPUT_BASE=${OUTPUT_BASE:-"outputs/composition_ablation"}

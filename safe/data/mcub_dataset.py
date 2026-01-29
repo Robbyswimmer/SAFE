@@ -46,6 +46,7 @@ class MCUBDataset(Dataset):
         audio_max_length: float = 10.0,
         num_points: int = 1024,
         annotation_file: Optional[str] = None,
+        answer_file: Optional[str] = None,
     ):
         """
         Initialize MCUB dataset.
@@ -58,6 +59,7 @@ class MCUBDataset(Dataset):
             audio_max_length: Maximum audio length in seconds
             num_points: Number of points for point cloud sampling
             annotation_file: Path to annotation JSON (auto-detected if not specified)
+            answer_file: Path to answer JSON (auto-detected if not specified)
         """
         self.data_path = Path(data_path)
         self.modalities = modalities
@@ -66,11 +68,53 @@ class MCUBDataset(Dataset):
         self.audio_max_length = audio_max_length
         self.num_points = num_points
 
+        # Load answers first (to merge with annotations)
+        self.answers_by_id = self._load_answers(answer_file)
+
         # Load annotations
         self.samples = self._load_annotations(annotation_file)
 
         print(f"[MCUB] Loaded {len(self.samples)} samples", flush=True)
         print(f"[MCUB] Modalities: {modalities}", flush=True)
+        print(f"[MCUB] Answers loaded: {len(self.answers_by_id)}", flush=True)
+
+    def _load_answers(self, answer_file: Optional[str]) -> Dict[str, str]:
+        """Load ground truth answers from MCUB-answer.json."""
+        answers_by_id = {}
+
+        # Try to find answer file
+        if answer_file:
+            ans_path = Path(answer_file)
+        else:
+            possible_paths = [
+                self.data_path / "test" / "MCUB-answer.json",
+                self.data_path / "MCUB-answer.json",
+                self.data_path / "mcub_answers.json",
+            ]
+            ans_path = None
+            for p in possible_paths:
+                if p.exists():
+                    ans_path = p
+                    break
+
+        if ans_path is None or not ans_path.exists():
+            print(f"[MCUB] Warning: Answer file not found, answers will be empty")
+            return answers_by_id
+
+        print(f"[MCUB] Loading answers from: {ans_path}")
+        with open(ans_path, "r") as f:
+            answer_data = json.load(f)
+
+        # Parse answers - extract from gpt response in conversations
+        for sample in answer_data:
+            sample_id = sample.get("id", "")
+            conversations = sample.get("conversations", [])
+            for conv in conversations:
+                if conv.get("from") == "gpt" and conv.get("value"):
+                    answers_by_id[sample_id] = conv["value"]
+                    break
+
+        return answers_by_id
 
     def _load_annotations(self, annotation_file: Optional[str]) -> List[Dict]:
         """Load MCUB annotations from JSON file."""
@@ -80,6 +124,15 @@ class MCUBDataset(Dataset):
         else:
             # Common paths in ModelCompose structure
             possible_paths = [
+                # MCUB-3 with audio + pointcloud
+                self.data_path / "test" / "MCUB-3-audio-video-pointcloud.json",
+                self.data_path / "test" / "MCUB-3-image-audio-pointcloud.json",
+                self.data_path / "MCUB-3-audio-video-pointcloud.json",
+                self.data_path / "MCUB-3-image-audio-pointcloud.json",
+                # MCUB-4 (all modalities)
+                self.data_path / "test" / "MCUB-4.json",
+                self.data_path / "MCUB-4.json",
+                # Generic paths
                 self.data_path / "mcub_audio_pointcloud.json",
                 self.data_path / "mcub" / "audio_pointcloud.json",
                 self.data_path / "annotations" / f"mcub_{self.split}.json",
@@ -120,8 +173,21 @@ class MCUBDataset(Dataset):
         # Filter to samples that have our required modalities
         filtered = []
         for sample in samples:
-            has_audio = "audio" in sample or "audio_path" in sample
-            has_pc = "pointcloud" in sample or "pointcloud_path" in sample or "point_cloud" in sample
+            # Check modal_inputs structure (ModelCompose format)
+            modal_inputs = sample.get("modal_inputs", {})
+
+            has_audio = (
+                "audio" in modal_inputs or
+                "audio" in sample or
+                "audio_path" in sample
+            )
+            has_pc = (
+                "point" in modal_inputs or  # ModelCompose uses "point"
+                "pointcloud" in modal_inputs or
+                "pointcloud" in sample or
+                "pointcloud_path" in sample or
+                "point_cloud" in sample
+            )
 
             # Check if sample has the modalities we need
             if "audio" in self.modalities and not has_audio:
@@ -274,21 +340,41 @@ class MCUBDataset(Dataset):
         # Get sample ID
         sample_id = sample.get("id", sample.get("sample_id", f"mcub_{idx}"))
 
-        # Get question and answers
-        question = sample.get("question", sample.get("text", "What do these have in common?"))
+        # Parse ModelCompose conversation format
+        conversations = sample.get("conversations", [])
+        modal_inputs = sample.get("modal_inputs", {})
 
-        # Handle various answer formats
-        if "answer" in sample:
-            answers = sample["answer"]
-        elif "answers" in sample:
-            answers = sample["answers"]
-        elif "label" in sample:
-            answers = sample["label"]
-        else:
-            answers = ""
+        # Extract question from conversation
+        question = ""
+        answers = ""
+        choices = None
 
-        # Get multiple choice options if available
-        choices = sample.get("choices", sample.get("options", None))
+        for conv in conversations:
+            if conv.get("from") == "human":
+                question = conv.get("value", "")
+                # Extract choices from question text (A. xxx \nB. yyy format)
+                if "\nA." in question or "\nA. " in question:
+                    choices = self._parse_choices(question)
+            elif conv.get("from") == "gpt":
+                answers = conv.get("value", "")
+
+        # Fallback for non-conversation format
+        if not question:
+            question = sample.get("question", sample.get("text", "What do these have in common?"))
+
+        if not answers:
+            # Try to get answer from answer file (by ID)
+            if sample_id in self.answers_by_id:
+                answers = self.answers_by_id[sample_id]
+            elif "answer" in sample:
+                answers = sample["answer"]
+            elif "answers" in sample:
+                answers = sample["answers"]
+            elif "label" in sample:
+                answers = sample["label"]
+
+        if choices is None:
+            choices = sample.get("choices", sample.get("options", None))
 
         # Load modalities
         audio = None
@@ -296,14 +382,24 @@ class MCUBDataset(Dataset):
         valid = True
 
         if "audio" in self.modalities:
-            audio_info = sample.get("audio", sample.get("audio_path"))
+            # Try modal_inputs first (ModelCompose format)
+            audio_info = modal_inputs.get("audio")
+            if audio_info and isinstance(audio_info, list):
+                audio_info = audio_info[0]  # Take first audio file
+            if not audio_info:
+                audio_info = sample.get("audio", sample.get("audio_path"))
             if audio_info:
                 audio = self._load_audio(audio_info)
                 if audio is None:
                     valid = False
 
         if "pointcloud" in self.modalities:
-            pc_info = sample.get("pointcloud", sample.get("pointcloud_path", sample.get("point_cloud")))
+            # Try modal_inputs first - ModelCompose uses "point"
+            pc_info = modal_inputs.get("point") or modal_inputs.get("pointcloud")
+            if pc_info and isinstance(pc_info, list):
+                pc_info = pc_info[0]  # Take first point cloud file
+            if not pc_info:
+                pc_info = sample.get("pointcloud", sample.get("pointcloud_path", sample.get("point_cloud")))
             if pc_info:
                 pointcloud = self._load_pointcloud(pc_info)
                 if pointcloud is None:
@@ -320,6 +416,17 @@ class MCUBDataset(Dataset):
             "images": None,  # For compatibility with collate functions
             "raw_sample": sample,  # Keep original for debugging
         }
+
+    def _parse_choices(self, question: str) -> List[str]:
+        """Parse multiple choice options from question text."""
+        choices = []
+        import re
+        # Match patterns like "A. Water transportation" or "A) Water transportation"
+        pattern = r'([A-D])[.\)]\s*([^\n]+)'
+        matches = re.findall(pattern, question)
+        for letter, text in matches:
+            choices.append(f"{letter}. {text.strip()}")
+        return choices if choices else None
 
 
 def mcub_collate_fn(batch: List[Dict]) -> Dict[str, Any]:
