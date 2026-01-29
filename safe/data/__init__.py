@@ -19,6 +19,12 @@ from .audio_augment import (
     AudioAugmentPipeline,
     create_augment_pipeline,
 )
+from .mcub_dataset import (
+    MCUBDataset,
+    SyntheticMCUBDataset,
+    mcub_collate_fn,
+    create_mcub_dataloader,
+)
 
 __all__ = [
     "create_safe_dataloader",
@@ -34,4 +40,8 @@ __all__ = [
     "WaveformAugment",
     "AudioAugmentPipeline",
     "create_augment_pipeline",
+    "MCUBDataset",
+    "SyntheticMCUBDataset",
+    "mcub_collate_fn",
+    "create_mcub_dataloader",
 ]
