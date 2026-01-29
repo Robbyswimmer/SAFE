@@ -2967,6 +2967,17 @@ def run_alignment_pretraining(
 
     # Check if we should add WavCaps for alignment (more diversity for contrastive learning)
     alignment_use_wavcaps = config.get("alignment_use_wavcaps", False)
+
+    # Use smaller batch size for contrastive alignment to prevent OOM
+    # Contrastive loss creates B×B similarity matrix, so memory scales quadratically
+    alignment_batch_size = int(config.get("alignment_batch_size", 0) or 0)
+    if alignment_batch_size <= 0:
+        # Default: use half of training batch size, min 2, max 8
+        alignment_batch_size = min(8, max(2, (train_loader.batch_size or 4) // 2))
+
+    if is_main:
+        print(f"  Alignment batch size: {alignment_batch_size} (contrastive loss is memory-intensive)", flush=True)
+
     if alignment_use_wavcaps and data_path is not None:
         try:
             if is_main:
@@ -2982,11 +2993,10 @@ def run_alignment_pretraining(
             from torch.utils.data import ConcatDataset
             alignment_dataset = ConcatDataset([base_dataset, wavcaps_dataset])
 
-            # Create new dataloader for alignment
-            batch_size = train_loader.batch_size or 2
+            # Create new dataloader for alignment with smaller batch size
             train_loader = create_safe_dataloader(
                 alignment_dataset,
-                batch_size=batch_size,
+                batch_size=alignment_batch_size,
                 shuffle=True,
                 num_workers=0,  # Keep it simple for alignment
             )
@@ -2996,6 +3006,15 @@ def run_alignment_pretraining(
             if is_main:
                 print(f"  ⚠️ Failed to load WavCaps for alignment: {e}", flush=True)
                 print(f"  Continuing with base dataset only", flush=True)
+    else:
+        # Even without WavCaps, use smaller batch for alignment
+        base_dataset = train_loader.dataset
+        train_loader = create_safe_dataloader(
+            base_dataset,
+            batch_size=alignment_batch_size,
+            shuffle=True,
+            num_workers=0,
+        )
 
     # Get base model (handle DDP)
     base_model = model.module if hasattr(model, 'module') else model
@@ -3033,6 +3052,13 @@ def run_alignment_pretraining(
 
     # Contrastive loss temperature
     temperature = float(config.get("audio_contrastive_temperature", 0.07) or 0.07)
+
+    # Clear GPU memory before alignment (helps prevent OOM)
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    if is_main:
+        print(f"  Cleared GPU cache before alignment", flush=True)
 
     # Training loop
     grad_accum = max(1, int(config.get("gradient_accumulation_steps", 1) or 1))
@@ -4194,6 +4220,13 @@ def main():
         help="Include WavCaps in Stage 1 alignment (adds diversity for contrastive learning)",
     )
     parser.add_argument(
+        "--alignment-batch-size",
+        type=int,
+        default=0,
+        help="Batch size for Stage 1 alignment (0=auto, default is half of training batch, max 8). "
+             "Contrastive loss creates B×B similarity matrix, so smaller batches use less memory.",
+    )
+    parser.add_argument(
         "--load-aligned-projector",
         type=str,
         default=None,
@@ -4695,6 +4728,7 @@ def main():
         "alignment_epochs": args.alignment_epochs,
         "alignment_lr": args.alignment_lr,
         "alignment_use_wavcaps": args.alignment_use_wavcaps,
+        "alignment_batch_size": args.alignment_batch_size,
         "alignment_data_path": args.data_path,  # For loading WavCaps in alignment
         "load_aligned_projector": args.load_aligned_projector,
         "audio_augment": args.audio_augment,
