@@ -239,6 +239,9 @@ def evaluate_condition(
     else:
         raise ValueError(f"Unknown condition: {condition}")
 
+    # Get tokenizer from model
+    tokenizer = model.base_vl.processor.tokenizer
+
     # Evaluation loop
     results = []
     correct = 0
@@ -255,16 +258,28 @@ def evaluate_condition(
             if pointcloud is not None:
                 pointcloud = pointcloud.to(device)
 
-            # Forward pass
+            # Tokenize questions
+            questions = batch["questions"]
+            encoded = tokenizer(
+                questions,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512,
+            )
+            input_ids = encoded["input_ids"].to(device)
+            attention_mask = encoded["attention_mask"].to(device)
+
+            # Forward pass with text input
             outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
                 audio=audio if condition != "pc_only" else None,
                 pointcloud=pointcloud if condition != "audio_only" else None,
                 return_hidden_states=True,
             )
 
             # Get predictions
-            # For classification, we use the last hidden state pooled representation
-            # In a full evaluation, this would be compared against answer choices
             logits = outputs.get("logits")
             last_hidden = outputs.get("last_hidden_state")
 
@@ -273,45 +288,55 @@ def evaluate_condition(
                 answer = batch["answers"][i]
                 choices = batch["choices"][i]
 
-                # Simple accuracy computation
-                # In real MCUB evaluation, you would:
-                # 1. Generate text from the model
-                # 2. Compare against answer choices
-                # 3. Use exact match or fuzzy matching
+                # Get model's predicted next token (for multiple choice, look for A/B/C/D)
+                if logits is not None:
+                    # Get the logits for the last position
+                    last_logits = logits[i, -1, :]  # (vocab_size,)
 
-                # For now, we track that the forward pass works
-                # and store metadata for analysis
+                    # Get token IDs for A, B, C, D
+                    choice_tokens = tokenizer.encode("A B C D", add_special_tokens=False)
+                    # Filter to just A, B, C, D tokens
+                    choice_ids = [tokenizer.encode(c, add_special_tokens=False)[0] for c in ["A", "B", "C", "D"]]
+
+                    # Get logits for these tokens
+                    choice_logits = last_logits[choice_ids]
+                    predicted_idx = choice_logits.argmax().item()
+                    predicted_answer = ["A", "B", "C", "D"][predicted_idx]
+
+                    # Check if correct
+                    is_correct = (predicted_answer == answer) if answer else False
+                    if is_correct:
+                        correct += 1
+                else:
+                    predicted_answer = None
+                    is_correct = False
+
                 result = {
                     "sample_id": sample_id,
                     "condition": condition,
                     "answer": answer,
+                    "predicted": predicted_answer,
+                    "correct": is_correct,
                     "choices": choices,
                     "has_audio": audio is not None,
                     "has_pointcloud": pointcloud is not None,
                 }
 
-                # If we have a label (synthetic data), compute accuracy
-                if "label" in batch:
-                    label = batch["label"][i] if isinstance(batch["label"], list) else batch["label"][i].item()
-                    # For synthetic data, we can compute simple classification accuracy
-                    # using the hidden state similarity to class embeddings
-                    result["label"] = label
-
                 results.append(result)
                 total += 1
 
     # Compute metrics
+    accuracy = correct / total if total > 0 else 0.0
+
     metrics = {
         "condition": condition,
         "total_samples": total,
+        "correct": correct,
+        "accuracy": accuracy,
         "results": results,
     }
 
-    # If we have labels (synthetic), compute accuracy
-    if results and "label" in results[0]:
-        # For synthetic data, accuracy would be computed here
-        # For real MCUB, you need text generation and matching
-        metrics["note"] = "Full MCUB accuracy requires text generation evaluation"
+    print(f"  {condition}: {correct}/{total} = {accuracy:.2%}")
 
     return metrics
 
@@ -357,10 +382,8 @@ def print_results_summary(results: Dict[str, Any], config_name: str):
     for condition, metrics in results.items():
         print(f"\n{condition}:")
         print(f"  Total samples: {metrics['total_samples']}")
-        if "accuracy" in metrics:
-            print(f"  Accuracy: {metrics['accuracy']:.2%}")
-        if "note" in metrics:
-            print(f"  Note: {metrics['note']}")
+        print(f"  Correct: {metrics['correct']}")
+        print(f"  Accuracy: {metrics['accuracy']:.2%}")
 
     # Print composition analysis
     print(f"\n{'='*60}")
@@ -451,7 +474,8 @@ def main():
             "results": {
                 cond: {
                     "total_samples": metrics["total_samples"],
-                    "note": metrics.get("note", ""),
+                    "correct": metrics["correct"],
+                    "accuracy": metrics["accuracy"],
                 }
                 for cond, metrics in results.items()
             },
