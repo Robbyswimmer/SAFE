@@ -27,6 +27,7 @@ _AUDIO_ENCODER_CONFIG = {
 }
 
 # Point cloud encoder config (PointBERT)
+# Note: num_pointcloud_tokens=32 to match ModelNet40 training config
 _POINTCLOUD_ENCODER_CONFIG = {
     "pointcloud_encoder_type": "pointbert",
     "pointcloud_encoder_config": {
@@ -34,7 +35,7 @@ _POINTCLOUD_ENCODER_CONFIG = {
         "num_points": 1024,
     },
     "pointcloud_embed_dim": 768,
-    "num_pointcloud_tokens": 8,
+    "num_pointcloud_tokens": 32,
 }
 
 # Projector config (shared for both modalities)
@@ -86,7 +87,7 @@ COMPOSITION_PREFFN_CONFIG = {
             },
             "pointcloud": {
                 "layer_indices": _FUSION_LAYERS,
-                "num_tokens": 8,
+                "num_tokens": 32,  # Match ModelNet40 training config
             },
         },
 
@@ -153,7 +154,7 @@ COMPOSITION_KVAUG_CONFIG = {
             },
             "pointcloud": {
                 "layer_indices": _FUSION_LAYERS,
-                "num_tokens": 8,
+                "num_tokens": 32,  # Match ModelNet40 training config
             },
         },
     },
@@ -261,7 +262,7 @@ POINTCLOUD_ONLY_PREFFN_CONFIG = {
         "modalities": {
             "pointcloud": {
                 "layer_indices": _FUSION_LAYERS,
-                "num_tokens": 8,
+                "num_tokens": 32,  # Match ModelNet40 training config
             },
         },
         "use_bottleneck": True,
@@ -299,7 +300,7 @@ POINTCLOUD_ONLY_KVAUG_CONFIG = {
         "modalities": {
             "pointcloud": {
                 "layer_indices": _FUSION_LAYERS,
-                "num_tokens": 8,
+                "num_tokens": 32,  # Match ModelNet40 training config
             },
         },
     },
