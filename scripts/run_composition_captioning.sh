@@ -42,8 +42,9 @@ PHASE=${PHASE:-"all"}  # all, train_audio, train_pc, eval
 ARCH=${ARCH:-"both"}   # both, preffn, kvaug
 
 # Data paths
-# AudioCaps for audio captioning training
-AUDIOCAPS_PATH=${AUDIOCAPS_PATH:-"/data/SalmanAsif/shared/SAFECaptions/audiocaps"}
+# AudioCaps for audio captioning training (inside experiments/full_training/data/)
+# Note: Dataset loader expects data_path/audiocaps/ structure
+AUDIOCAPS_PATH=${AUDIOCAPS_PATH:-"experiments/full_training/data"}
 # Cap3D for point cloud captioning (uses local data/cap3d with downloaded shards)
 CAP3D_PATH=${CAP3D_PATH:-"data/cap3d"}
 # MCUB for evaluation
