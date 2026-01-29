@@ -110,7 +110,7 @@ train_audio_preffn() {
     echo "========================================"
 
     python train_audio_llm_probe.py \
-        --model-config audio_preffn \
+        --model-config phase1 \
         --data-path "$AVE_DATA_PATH" \
         --output-dir "$OUTPUT_AUDIO_PREFFN" \
         --batch-size "$BATCH_SIZE" \
@@ -132,7 +132,7 @@ train_audio_kvaug() {
     echo "========================================"
 
     python train_audio_llm_probe.py \
-        --model-config audio_kvaug \
+        --model-config kv_augment \
         --data-path "$AVE_DATA_PATH" \
         --output-dir "$OUTPUT_AUDIO_KVAUG" \
         --batch-size "$BATCH_SIZE" \
