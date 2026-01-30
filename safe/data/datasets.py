@@ -23,6 +23,7 @@ __all__ = [
     "AudioSetCapsDataset",
     "ClothoDataset",
     "MACSDataset",
+    "ESC50Dataset",
 ]
 
 
@@ -854,6 +855,114 @@ class MACSDataset(_BaseQADataset):
             "images": None,  # MACS is audio-only
         }
         return sample
+
+
+class ESC50Dataset(_BaseQADataset):
+    """
+    ESC-50: Environmental Sound Classification dataset.
+
+    2000 labeled environmental audio recordings (5 seconds each).
+    50 classes with 40 clips per class, organized in 5 folds for cross-validation.
+
+    Source: https://github.com/karolpiczak/ESC-50
+
+    Expected directory structure:
+        data/esc50/
+            esc50_train.json          # Simple split (folds 1-4)
+            esc50_val.json            # Simple split (fold 5)
+            esc50_fold1_train.json    # 5-fold CV: train on folds 2,3,4,5
+            esc50_fold1_val.json      # 5-fold CV: test on fold 1
+            ... (folds 2-5)
+            audio/*.wav               # All 2000 audio files
+            meta/esc50.csv            # Original metadata
+    """
+    dataset_name = "esc50"
+    file_stem = "esc50"
+
+    # ESC-50 class names (in order of target ID 0-49)
+    ESC50_CLASSES = [
+        "dog", "rooster", "pig", "cow", "frog", "cat", "hen", "insects",
+        "sheep", "crow", "rain", "sea_waves", "crackling_fire", "crickets",
+        "chirping_birds", "water_drops", "wind", "pouring_water", "toilet_flush",
+        "thunderstorm", "crying_baby", "sneezing", "clapping", "breathing",
+        "coughing", "footsteps", "laughing", "brushing_teeth", "snoring",
+        "drinking_sipping", "door_wood_knock", "mouse_click", "keyboard_typing",
+        "door_wood_creaks", "can_opening", "washing_machine", "vacuum_cleaner",
+        "clock_alarm", "clock_tick", "glass_breaking", "helicopter", "chainsaw",
+        "siren", "car_horn", "engine", "train", "church_bells", "airplane",
+        "fireworks", "hand_saw"
+    ]
+
+    def __init__(
+        self,
+        data_path: str | Path,
+        split: str = "train",
+        fold: Optional[int] = None,
+    ):
+        """
+        Initialize ESC-50 dataset.
+
+        Args:
+            data_path: Root data directory containing esc50/ subdirectory
+            split: "train" or "val"
+            fold: Optional fold number (1-5) for cross-validation.
+                  If None, uses simple esc50_train.json / esc50_val.json split.
+                  If specified, uses esc50_fold{N}_train.json / esc50_fold{N}_val.json
+        """
+        self.fold = fold
+
+        data_root = Path(data_path)
+        dataset_dir = data_root / self.dataset_name
+
+        # Determine which JSON file to load
+        if fold is not None:
+            if not 1 <= fold <= 5:
+                raise ValueError(f"ESC-50 fold must be 1-5, got {fold}")
+            preferred_file = dataset_dir / f"esc50_fold{fold}_{split}.json"
+        else:
+            preferred_file = dataset_dir / f"esc50_{split}.json"
+
+        if not preferred_file.exists():
+            raise FileNotFoundError(
+                f"ESC-50 split file not found: {preferred_file}\n"
+                f"Run: bash experiments/esc50_classification/scripts/download_esc50.sh"
+            )
+
+        super().__init__(data_path=data_path, split=split, preferred_file=preferred_file)
+        print(f"[ESC-50] Loaded {len(self.examples)} samples (split={split}, fold={fold})", flush=True)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        entry = self.examples[idx]
+
+        # Classification task: "What sound is this?" -> class label
+        question = "What sound is this?"
+        label = entry.get("label") or entry.get("category", "unknown")
+
+        # Resolve audio file path
+        resolved_audio = self._resolve_audio_file(entry)
+
+        sample = {
+            "sample_id": entry.get("id") or entry.get("filename", f"esc50_{idx}"),
+            "question": question,
+            "answers": label,  # Single class label as answer
+            "audio_path": str(resolved_audio) if resolved_audio else entry.get("audio_path"),
+            "audio": self._load_audio(entry),
+            "images": None,  # ESC-50 is audio-only
+            "label_id": entry.get("label_id", entry.get("target")),  # Numeric class ID
+            "fold": entry.get("fold"),
+            "esc10": entry.get("esc10", False),  # Part of ESC-10 subset
+        }
+        return sample
+
+    @classmethod
+    def get_class_names(cls) -> List[str]:
+        """Return the 50 ESC-50 class names in order."""
+        return cls.ESC50_CLASSES.copy()
+
+    @classmethod
+    def get_num_classes(cls) -> int:
+        """Return the number of classes (50)."""
+        return len(cls.ESC50_CLASSES)
 
 
 # ---------------------------------------------------------------------------
