@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=esc50-5fold
-#SBATCH --output=experiments/esc50_classification/logs/5fold_%j.log
-#SBATCH --error=experiments/esc50_classification/logs/5fold_%j.err
+#SBATCH --output=logs/esc50_5fold_%j.log
+#SBATCH --error=logs/esc50_5fold_%j.err
 #SBATCH --time=48:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8

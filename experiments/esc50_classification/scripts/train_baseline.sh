@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=esc50-baseline
-#SBATCH --output=experiments/esc50_classification/logs/baseline_%j.log
-#SBATCH --error=experiments/esc50_classification/logs/baseline_%j.err
+#SBATCH --output=logs/esc50_baseline_%j.log
+#SBATCH --error=logs/esc50_baseline_%j.err
 #SBATCH --time=12:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
