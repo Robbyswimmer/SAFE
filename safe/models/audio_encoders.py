@@ -12,13 +12,15 @@ from transformers import WhisperFeatureExtractor, WhisperModel
 
 class CLAPAudioEncoder(nn.Module):
     """
-    Frozen CLAP audio encoder for general audio semantics.
+    CLAP audio encoder for general audio semantics.
+    Supports partial unfreezing of transformer layers for fine-tuning.
     """
-    
+
     def __init__(
         self,
         model_name: str = 'laion/larger_clap_music_and_speech',
         freeze: bool = True,
+        unfreeze_layers: int = 0,  # Number of transformer layers to unfreeze from the end
         sample_rate: int = 48000,
         max_length: float = 10.0  # seconds
     ):
@@ -30,6 +32,7 @@ class CLAPAudioEncoder(nn.Module):
         self.debug_logging = False
         self._waveform_log_limit = 5
         self._waveform_logs_emitted = 0
+        self.unfreeze_layers = unfreeze_layers
 
         # Load CLAP model (suppress verbose output)
         import logging
@@ -57,11 +60,16 @@ class CLAPAudioEncoder(nn.Module):
                     sys.stdout.flush()
         finally:
             logging.getLogger().setLevel(old_level)
-        
+
+        # Freeze/unfreeze logic
         if freeze:
             for param in self.model.parameters():
                 param.requires_grad = False
             self.model.eval()
+
+            # Optionally unfreeze last N transformer layers
+            if unfreeze_layers > 0:
+                self._unfreeze_last_layers(unfreeze_layers)
 
         # CRITICAL: Keep CLAP in fp32 to avoid numerical instability
         # CLAP's internal computations are sensitive to precision
@@ -69,6 +77,64 @@ class CLAPAudioEncoder(nn.Module):
 
         # Get audio embedding dimension
         self.audio_embed_dim = 512  # CLAP audio embedding dimension
+
+    def _unfreeze_last_layers(self, num_layers: int) -> None:
+        """Unfreeze the last N transformer layers of the CLAP audio encoder."""
+        # CLAP uses HTSAT (Hierarchical Token-Semantic Audio Transformer) for audio
+        # The audio branch is in self.model.model.audio_branch
+        audio_branch = getattr(self.model.model, 'audio_branch', None)
+        if audio_branch is None:
+            print(f"[CLAP] Warning: Could not find audio_branch for unfreezing", flush=True)
+            return
+
+        # HTSAT has layers in audio_branch.htsat.layers (Swin Transformer layers)
+        htsat = getattr(audio_branch, 'htsat', None)
+        if htsat is None:
+            # Try alternate structure
+            htsat = audio_branch
+
+        layers = getattr(htsat, 'layers', None)
+        if layers is None:
+            # Try to find layers in the module
+            for name, module in htsat.named_modules():
+                if 'layers' in name.lower() and hasattr(module, '__len__'):
+                    layers = module
+                    break
+
+        if layers is not None and hasattr(layers, '__len__'):
+            total_layers = len(layers)
+            layers_to_unfreeze = min(num_layers, total_layers)
+            start_idx = total_layers - layers_to_unfreeze
+
+            unfrozen_count = 0
+            for i in range(start_idx, total_layers):
+                for param in layers[i].parameters():
+                    param.requires_grad = True
+                    unfrozen_count += 1
+
+            print(f"[CLAP] Unfroze last {layers_to_unfreeze}/{total_layers} transformer layers "
+                  f"({unfrozen_count} parameters)", flush=True)
+        else:
+            # Fallback: unfreeze by parameter name pattern
+            print(f"[CLAP] Could not find layer structure, unfreezing by name pattern", flush=True)
+            unfrozen_count = 0
+            for name, param in self.model.named_parameters():
+                # Look for layer indices in parameter names
+                if any(f'layer.{i}' in name or f'layers.{i}' in name
+                       for i in range(max(0, 12 - num_layers), 12)):  # Assume 12 layers
+                    param.requires_grad = True
+                    unfrozen_count += 1
+            print(f"[CLAP] Unfroze {unfrozen_count} parameters by name pattern", flush=True)
+
+        # Always unfreeze the final projection/norm layers
+        for name, param in self.model.named_parameters():
+            if any(x in name.lower() for x in ['audio_projection', 'final', 'norm', 'head']):
+                if 'audio' in name.lower():  # Only audio branch
+                    param.requires_grad = True
+
+    def get_trainable_params(self) -> int:
+        """Return count of trainable parameters."""
+        return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
 
     def set_debug_logging(self, enabled: bool, max_waveform_logs: int = 5) -> None:
         """Enable or disable verbose waveform statistics logging."""

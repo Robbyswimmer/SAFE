@@ -31,7 +31,7 @@
 
 | Experiment | Status | Accuracy (5-fold mean ± std) | Notes |
 |------------|--------|------------------------------|-------|
-| Baseline (default config) | 🔄 In Progress | 94.50% (fold 5 only) | Train 99%, see config below |
+| Baseline (default config) | 🔄 In Progress | 96.00% (fold 1), 94.50% (fold 5) | Train ~99%, see config below |
 | More fusion layers (1,5,9,13,17,21,25,29,33,37) | ⏳ Pending | | |
 | More tokens (8 → 16 → 32) | ⏳ Pending | | |
 | Unfreeze last 2 encoder blocks | ⏳ Pending | | |
@@ -319,14 +319,14 @@ Other settings:
 
 **Per-Fold Results** (baseline config):
 
-| Fold | Val Accuracy | Train Accuracy | Notes |
-|------|--------------|----------------|-------|
-| Fold 1 | | | |
-| Fold 2 | | | |
-| Fold 3 | | | |
-| Fold 4 | | | |
-| Fold 5 | **94.50%** | 99% | First run, 50 epochs |
-| **Mean ± Std** | | | 5-fold CV in progress |
+| Fold | Val Accuracy | Train Accuracy | Best Epoch | Notes |
+|------|--------------|----------------|------------|-------|
+| Fold 1 | **96.00%** | 98.75% | 8 | 5-fold CV run |
+| Fold 2 | | | | In progress |
+| Fold 3 | | | | |
+| Fold 4 | | | | |
+| Fold 5 | 94.50% | 99% | ~6 | Single-fold test run |
+| **Mean ± Std** | | | | 5-fold CV in progress |
 
 **Training Curves**: `experiments/esc50_classification/outputs/`
 

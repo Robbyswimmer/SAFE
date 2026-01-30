@@ -43,6 +43,11 @@ SAFE_LR=${SAFE_LR:-6e-5}
 HEAD_LR=${HEAD_LR:-1e-3}
 FUSION_LAYERS=${FUSION_LAYERS:-"1,5,9,13,17,21"}
 
+# Regularization / Augmentation (set to 0 to disable)
+MIXUP_ALPHA=${MIXUP_ALPHA:-0.0}
+LABEL_SMOOTHING=${LABEL_SMOOTHING:-0.0}
+UNFREEZE_CLAP=${UNFREEZE_CLAP:-0}
+
 # W&B settings
 WANDB_PROJECT=${WANDB_PROJECT:-"ESC50-Classification"}
 WANDB_NAME="baseline-fold${FOLD}"
@@ -61,6 +66,9 @@ echo "Epochs: $NUM_EPOCHS"
 echo "SAFE LR (projector+fusion): $SAFE_LR"
 echo "Head LR: $HEAD_LR"
 echo "Fusion layers: $FUSION_LAYERS"
+echo "Mixup alpha: $MIXUP_ALPHA"
+echo "Label smoothing: $LABEL_SMOOTHING"
+echo "Unfreeze CLAP layers: $UNFREEZE_CLAP"
 echo "========================================"
 
 # Activate conda environment
@@ -93,6 +101,9 @@ python train_audio_llm_probe.py \
     --num-epochs "$NUM_EPOCHS" \
     --safe-learning-rate "$SAFE_LR" \
     --head-learning-rate "$HEAD_LR" \
+    --mixup-alpha "$MIXUP_ALPHA" \
+    --label-smoothing "$LABEL_SMOOTHING" \
+    --unfreeze-clap-layers "$UNFREEZE_CLAP" \
     --fp16 \
     --wandb \
     --wandb-project "$WANDB_PROJECT" \
