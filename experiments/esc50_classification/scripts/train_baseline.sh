@@ -23,8 +23,14 @@ set -e
 
 # Configuration
 FOLD=${FOLD:-5}  # Default: use fold 5 as validation
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SAFE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+# Get SAFE root - use SLURM_SUBMIT_DIR if available (submitted from SAFE root)
+if [ -n "$SLURM_SUBMIT_DIR" ]; then
+    SAFE_ROOT="$SLURM_SUBMIT_DIR"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SAFE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+fi
 
 # Data and output paths
 DATA_PATH="${DATA_PATH:-$SAFE_ROOT/experiments/full_training/data}"
@@ -75,7 +81,7 @@ cd "$SAFE_ROOT"
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
-mkdir -p "experiments/esc50_classification/logs"
+mkdir -p "$SAFE_ROOT/logs"
 
 # Run training
 python train_safe.py \

@@ -32,8 +32,14 @@ set -e
 
 # Configuration
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-"baseline"}
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SAFE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+# Get SAFE root - use SLURM_SUBMIT_DIR if available (submitted from SAFE root)
+if [ -n "$SLURM_SUBMIT_DIR" ]; then
+    SAFE_ROOT="$SLURM_SUBMIT_DIR"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SAFE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+fi
 
 # Data and output paths
 DATA_PATH="${DATA_PATH:-$SAFE_ROOT/experiments/full_training/data}"
@@ -83,7 +89,7 @@ cd "$SAFE_ROOT"
 
 # Create output directories
 mkdir -p "$OUTPUT_BASE"
-mkdir -p "experiments/esc50_classification/logs"
+mkdir -p "$SAFE_ROOT/logs"
 
 # Array to store fold accuracies
 declare -a FOLD_ACCURACIES
