@@ -67,6 +67,22 @@ AVE_CATEGORIES = [
 
 AVE_LABEL_TO_IDX = {label: idx for idx, label in enumerate(AVE_CATEGORIES)}
 
+# ESC-50 class names (in order of target ID 0-49)
+ESC50_CATEGORIES = [
+    "dog", "rooster", "pig", "cow", "frog", "cat", "hen", "insects",
+    "sheep", "crow", "rain", "sea_waves", "crackling_fire", "crickets",
+    "chirping_birds", "water_drops", "wind", "pouring_water", "toilet_flush",
+    "thunderstorm", "crying_baby", "sneezing", "clapping", "breathing",
+    "coughing", "footsteps", "laughing", "brushing_teeth", "snoring",
+    "drinking_sipping", "door_wood_knock", "mouse_click", "keyboard_typing",
+    "door_wood_creaks", "can_opening", "washing_machine", "vacuum_cleaner",
+    "clock_alarm", "clock_tick", "glass_breaking", "helicopter", "chainsaw",
+    "siren", "car_horn", "engine", "train", "church_bells", "airplane",
+    "fireworks", "hand_saw"
+]
+
+ESC50_LABEL_TO_IDX = {label: idx for idx, label in enumerate(ESC50_CATEGORIES)}
+
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -172,6 +188,118 @@ class AVEDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         ex = self.examples[idx]
         audio_path = self._resolve_audio_path(ex["audio_name"])
+        return {
+            "audio": str(audio_path) if audio_path is not None else None,
+            "label": int(ex["label"]),
+            "category": ex["category"],
+        }
+
+
+class ESC50Dataset(Dataset):
+    """
+    ESC-50 loader for audio classification.
+
+    ESC-50: Environmental Sound Classification dataset
+    - 2000 audio clips (5 seconds each)
+    - 50 classes (40 clips per class)
+    - 5 predefined folds for cross-validation
+
+    Expected directory structure:
+        data/esc50/
+            esc50_train.json          # Simple split (folds 1-4)
+            esc50_val.json            # Simple split (fold 5)
+            esc50_fold1_train.json    # 5-fold CV: train on folds 2,3,4,5
+            esc50_fold1_val.json      # 5-fold CV: test on fold 1
+            ... (folds 2-5)
+            audio/*.wav               # All 2000 audio files
+    """
+
+    def __init__(
+        self,
+        data_path: str,
+        split: str,
+        fold: Optional[int] = None,
+        sample_rate: int = 48000,
+        max_length: float = 5.0,
+    ):
+        self.data_path = Path(data_path)
+        self.split = split
+        self.fold = fold
+        self.sample_rate = int(sample_rate)
+        self.max_length = float(max_length)
+
+        # Find esc50 subdirectory
+        if (self.data_path / "esc50").exists():
+            self.esc50_path = self.data_path / "esc50"
+        else:
+            self.esc50_path = self.data_path
+
+        # Determine which JSON file to load
+        if fold is not None:
+            json_file = self.esc50_path / f"esc50_fold{fold}_{split}.json"
+        else:
+            json_file = self.esc50_path / f"esc50_{split}.json"
+
+        if not json_file.exists():
+            raise FileNotFoundError(f"Could not find ESC-50 split file: {json_file}")
+
+        self.examples = self._load_data(json_file)
+
+        # Quick path sanity check
+        check_n = min(50, len(self.examples))
+        found = 0
+        for i in range(check_n):
+            if self._resolve_audio_path(self.examples[i]["filename"]) is not None:
+                found += 1
+        print(f"[ESC50Dataset] {split} (fold={fold}): {len(self.examples)} samples", flush=True)
+        if check_n > 0:
+            print(f"[ESC50Dataset] {split}: audio found for {found}/{check_n} sample check", flush=True)
+
+    def _load_data(self, json_file: Path) -> List[Dict[str, Any]]:
+        import json
+        with open(json_file, "r") as f:
+            data = json.load(f)
+
+        examples = []
+        for item in data:
+            label = item.get("label", item.get("category"))
+            label_id = item.get("label_id")
+
+            # Get label index
+            if label_id is not None:
+                idx = int(label_id)
+            elif label in ESC50_LABEL_TO_IDX:
+                idx = ESC50_LABEL_TO_IDX[label]
+            else:
+                continue
+
+            examples.append({
+                "filename": item.get("filename", item.get("audio_path")),
+                "label": idx,
+                "category": label,
+                "fold": item.get("fold"),
+            })
+
+        return examples
+
+    def _resolve_audio_path(self, filename: str) -> Optional[Path]:
+        candidates = [
+            self.esc50_path / "audio" / filename,
+            self.esc50_path / filename,
+            self.data_path / "audio" / filename,
+            self.data_path / filename,
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        ex = self.examples[idx]
+        audio_path = self._resolve_audio_path(ex["filename"])
         return {
             "audio": str(audio_path) if audio_path is not None else None,
             "label": int(ex["label"]),
@@ -1056,8 +1184,12 @@ def evaluate(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="SAFE LLM-probe audio classification (AVE)")
+    p = argparse.ArgumentParser(description="SAFE LLM-probe audio classification (AVE/ESC-50)")
     p.add_argument("--data-path", type=str, required=True)
+    p.add_argument("--dataset", type=str, default="ave", choices=["ave", "esc50"],
+                   help="Dataset to use: 'ave' (28 classes) or 'esc50' (50 classes)")
+    p.add_argument("--fold", type=int, default=None,
+                   help="Fold number for ESC-50 cross-validation (1-5). If not set, uses simple train/val split.")
     p.add_argument("--output-dir", type=str, default="outputs/ave_llm_probe")
     p.add_argument("--model-config", type=str, default="phase1")
     p.add_argument("--fusion-layer-indices", type=str, default="1", help="Comma-separated fusion layers (default: 1)")
@@ -1363,8 +1495,20 @@ def main() -> None:
             print(f"⚠️  WARNING: kv_augment expected layers {expected_layers}, got {actual_layers}", flush=True)
             print(f"   This may be intentional if testing different configs.", flush=True)
 
-    train_ds = AVEDataset(args.data_path, split="train")
-    test_ds = AVEDataset(args.data_path, split="test")
+    # Select dataset based on --dataset argument
+    if args.dataset == "esc50":
+        train_ds = ESC50Dataset(args.data_path, split="train", fold=args.fold)
+        test_ds = ESC50Dataset(args.data_path, split="val", fold=args.fold)
+        num_classes = len(ESC50_CATEGORIES)
+        categories = ESC50_CATEGORIES
+        print(f"[Dataset] ESC-50: {num_classes} classes, fold={args.fold}", flush=True)
+    else:
+        train_ds = AVEDataset(args.data_path, split="train")
+        test_ds = AVEDataset(args.data_path, split="test")
+        num_classes = len(AVE_CATEGORIES)
+        categories = AVE_CATEGORIES
+        print(f"[Dataset] AVE: {num_classes} classes", flush=True)
+
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
@@ -1390,7 +1534,7 @@ def main() -> None:
 
     model = SAFELLMProbe(
         config=config,
-        num_classes=len(AVE_CATEGORIES),
+        num_classes=num_classes,
         head_type=args.head_type,
         pool_layers=pool_layers,
         bypass_llm=args.bypass_llm,

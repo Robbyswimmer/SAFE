@@ -37,11 +37,10 @@ DATA_PATH="${DATA_PATH:-$SAFE_ROOT/experiments/full_training/data}"
 OUTPUT_DIR="${OUTPUT_DIR:-$SAFE_ROOT/experiments/esc50_classification/outputs/baseline_fold${FOLD}}"
 
 # Training hyperparameters
-BATCH_SIZE=${BATCH_SIZE:-4}
+BATCH_SIZE=${BATCH_SIZE:-16}
 NUM_EPOCHS=${NUM_EPOCHS:-50}
-LEARNING_RATE_PROJECTOR=${LR_PROJ:-1e-3}
-LEARNING_RATE_ADAPTER=${LR_ADAPTER:-5e-4}
-GRADIENT_ACCUMULATION=${GRAD_ACCUM:-8}
+SAFE_LR=${SAFE_LR:-6e-5}
+HEAD_LR=${HEAD_LR:-1e-3}
 FUSION_LAYERS=${FUSION_LAYERS:-"1,5,9,13,17,21"}
 
 # W&B settings
@@ -59,9 +58,8 @@ echo "Fold: $FOLD (train on others, val on fold $FOLD)"
 echo "========================================"
 echo "Batch size: $BATCH_SIZE"
 echo "Epochs: $NUM_EPOCHS"
-echo "LR (projector): $LEARNING_RATE_PROJECTOR"
-echo "LR (adapter): $LEARNING_RATE_ADAPTER"
-echo "Gradient accumulation: $GRADIENT_ACCUMULATION"
+echo "SAFE LR (projector+fusion): $SAFE_LR"
+echo "Head LR: $HEAD_LR"
 echo "Fusion layers: $FUSION_LAYERS"
 echo "========================================"
 
@@ -83,22 +81,22 @@ cd "$SAFE_ROOT"
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$SAFE_ROOT/logs"
 
-# Run training
-python train_safe.py \
-    --model-config phase1 \
+# Run training using train_audio_llm_probe.py for classification
+python train_audio_llm_probe.py \
+    --dataset esc50 \
     --data-path "$DATA_PATH" \
+    --fold "$FOLD" \
     --output-dir "$OUTPUT_DIR" \
+    --model-config phase1 \
+    --fusion-layer-indices "$FUSION_LAYERS" \
     --batch-size "$BATCH_SIZE" \
     --num-epochs "$NUM_EPOCHS" \
-    --learning-rate-projector "$LEARNING_RATE_PROJECTOR" \
-    --learning-rate-adapter "$LEARNING_RATE_ADAPTER" \
-    --gradient-accumulation-steps "$GRADIENT_ACCUMULATION" \
-    --fusion-layer-indices "$FUSION_LAYERS" \
+    --safe-learning-rate "$SAFE_LR" \
+    --head-learning-rate "$HEAD_LR" \
     --fp16 \
     --wandb \
     --wandb-project "$WANDB_PROJECT" \
-    --wandb-name "$WANDB_NAME" \
-    --wandb-tags "esc50,baseline,fold${FOLD},preffn"
+    --wandb-run-name "$WANDB_NAME"
 
 echo ""
 echo "========================================"

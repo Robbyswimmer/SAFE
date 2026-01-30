@@ -45,12 +45,11 @@ fi
 DATA_PATH="${DATA_PATH:-$SAFE_ROOT/experiments/full_training/data}"
 OUTPUT_BASE="${OUTPUT_DIR:-$SAFE_ROOT/experiments/esc50_classification/outputs/${EXPERIMENT_NAME}}"
 
-# Training hyperparameters (can override via environment)
-BATCH_SIZE=${BATCH_SIZE:-4}
+# Training hyperparameters
+BATCH_SIZE=${BATCH_SIZE:-16}
 NUM_EPOCHS=${NUM_EPOCHS:-50}
-LEARNING_RATE_PROJECTOR=${LR_PROJ:-1e-3}
-LEARNING_RATE_ADAPTER=${LR_ADAPTER:-5e-4}
-GRADIENT_ACCUMULATION=${GRAD_ACCUM:-8}
+SAFE_LR=${SAFE_LR:-6e-5}
+HEAD_LR=${HEAD_LR:-1e-3}
 FUSION_LAYERS=${FUSION_LAYERS:-"1,5,9,13,17,21"}
 
 # W&B settings
@@ -67,9 +66,8 @@ echo "Output base: $OUTPUT_BASE"
 echo "========================================"
 echo "Batch size: $BATCH_SIZE"
 echo "Epochs: $NUM_EPOCHS"
-echo "LR (projector): $LEARNING_RATE_PROJECTOR"
-echo "LR (adapter): $LEARNING_RATE_ADAPTER"
-echo "Gradient accumulation: $GRADIENT_ACCUMULATION"
+echo "SAFE LR (projector+fusion): $SAFE_LR"
+echo "Head LR: $HEAD_LR"
 echo "Fusion layers: $FUSION_LAYERS"
 echo "========================================"
 
@@ -108,21 +106,21 @@ for FOLD in 1 2 3 4 5; do
     mkdir -p "$FOLD_OUTPUT_DIR"
 
     # Run training for this fold
-    python train_safe.py \
-        --model-config phase1 \
+    python train_audio_llm_probe.py \
+        --dataset esc50 \
         --data-path "$DATA_PATH" \
+        --fold "$FOLD" \
         --output-dir "$FOLD_OUTPUT_DIR" \
+        --model-config phase1 \
+        --fusion-layer-indices "$FUSION_LAYERS" \
         --batch-size "$BATCH_SIZE" \
         --num-epochs "$NUM_EPOCHS" \
-        --learning-rate-projector "$LEARNING_RATE_PROJECTOR" \
-        --learning-rate-adapter "$LEARNING_RATE_ADAPTER" \
-        --gradient-accumulation-steps "$GRADIENT_ACCUMULATION" \
-        --fusion-layer-indices "$FUSION_LAYERS" \
+        --safe-learning-rate "$SAFE_LR" \
+        --head-learning-rate "$HEAD_LR" \
         --fp16 \
         --wandb \
         --wandb-project "$WANDB_PROJECT" \
-        --wandb-name "${EXPERIMENT_NAME}-fold${FOLD}" \
-        --wandb-tags "esc50,${EXPERIMENT_NAME},fold${FOLD},preffn,5fold"
+        --wandb-run-name "${EXPERIMENT_NAME}-fold${FOLD}"
 
     echo ""
     echo "Fold $FOLD training complete. Output: $FOLD_OUTPUT_DIR"
@@ -136,12 +134,6 @@ echo "========================================"
 echo ""
 echo "Results saved to: $OUTPUT_BASE"
 echo ""
-echo "To compute final accuracy, run:"
-echo "  python experiments/esc50_classification/scripts/aggregate_results.py $OUTPUT_BASE"
-echo ""
-echo "Or manually check each fold:"
-for FOLD in 1 2 3 4 5; do
-    echo "  Fold $FOLD: $OUTPUT_BASE/fold${FOLD}/metrics.json"
-done
+echo "Check each fold's best accuracy in the logs or W&B."
 echo ""
 echo "========================================"
