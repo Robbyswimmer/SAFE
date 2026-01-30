@@ -31,14 +31,31 @@
 
 | Experiment | Status | Accuracy (5-fold mean ± std) | Notes |
 |------------|--------|------------------------------|-------|
-| Baseline (default config) | 🔄 In Progress | | Layers 1,5,9,13,17,21 |
-| More fusion layers (1,5,9,13,17,21,25,29,33,37) | | | |
-| More tokens (8 → 16 → 32) | | | |
-| Unfreeze last 2 encoder blocks | | | |
-| Unfreeze last 4 encoder blocks | | | |
-| Higher learning rate sweep | | | |
-| Longer training (more epochs) | | | |
-| Data augmentation (SpecAugment, noise) | | | |
+| Baseline (default config) | 🔄 In Progress | 94.50% (fold 5 only) | Train 99%, see config below |
+| More fusion layers (1,5,9,13,17,21,25,29,33,37) | ⏳ Pending | | |
+| More tokens (8 → 16 → 32) | ⏳ Pending | | |
+| Unfreeze last 2 encoder blocks | ⏳ Pending | | |
+| Unfreeze last 4 encoder blocks | ⏳ Pending | | |
+| Higher learning rate sweep | ⏳ Pending | | |
+| Longer training (more epochs) | ⏳ Pending | | |
+| Data augmentation (SpecAugment, noise) | ⏳ Pending | | |
+
+**Baseline Configuration (fold 5 result: 94.50% test, 99% train)**:
+```
+Script: train_audio_llm_probe.py --dataset esc50
+Encoder: CLAP (frozen)
+LLM: LLaVA-1.5-13B (frozen)
+Fusion: Pre-FFN residual
+Fusion layers: 1,5,9,13,17,21 (6 layers)
+Num audio tokens: 8 (default)
+Batch size: 16
+Epochs: 50
+SAFE LR (projector+fusion): 6e-5
+Head LR: 1e-3
+Pooling: last token
+Head type: linear
+FP16: enabled
+```
 
 **Completion Criteria**:
 - [ ] Best config identified and documented
@@ -193,15 +210,21 @@ If captioning doesn't work well with our architecture, consider:
 
 **Active Phase**: Phase 1A - Audio Classification
 
-**Current Experiment**: ESC-50 Baseline (5-fold CV)
+**Current Experiment**: ESC-50 5-fold CV (baseline) + ablation planning
 
 **Blocking Issues**:
 - None
 
 **Next Steps**:
-1. Download ESC-50 dataset: `bash experiments/esc50_classification/scripts/download_esc50.sh`
-2. Run baseline training: `sbatch experiments/esc50_classification/scripts/train_5fold.sh`
-3. Analyze results and plan ablations based on baseline performance
+1. ✅ ~~Download ESC-50 dataset~~
+2. ✅ ~~Run baseline single-fold (94.50% on fold 5)~~
+3. 🔄 Run full 5-fold CV: `sbatch experiments/esc50_classification/scripts/train_5fold.sh`
+4. Plan ablations to push above 94.5%:
+   - More fusion layers (10 instead of 6)
+   - Higher SAFE LR (2e-4)
+   - Label smoothing (0.1)
+   - SpecAugment
+   - Unfreeze CLAP encoder
 
 ---
 
@@ -216,6 +239,26 @@ If captioning doesn't work well with our architecture, consider:
 ---
 
 ## Experiment Log
+
+### Week of 01/30/2026
+
+**Completed**:
+- ESC-50 dataset download and preparation (2000 clips, 50 classes)
+- ESC-50 baseline single-fold training (fold 5): **94.50% test accuracy**
+
+**In Progress**:
+- ESC-50 5-fold cross-validation running
+- Planning ablations to push above 94.5%
+
+**Blocked**:
+- None
+
+**Learnings**:
+- 94.5% achieved with just 6 fusion layers and frozen CLAP - very promising
+- Train/test gap (99% vs 94.5%) suggests room for regularization (mixup, label smoothing)
+- Model converged quickly (~epoch 6), may benefit from early stopping or fewer epochs
+
+---
 
 ### Week of ____/____/____ (copy this template for new weeks)
 
@@ -274,16 +317,16 @@ Other settings:
 | + Data augmentation | | | |
 | **Best combo** | | | |
 
-**Per-Fold Results** (for best config):
+**Per-Fold Results** (baseline config):
 
-| Fold | Val Accuracy | Notes |
-|------|--------------|-------|
-| Fold 1 | | |
-| Fold 2 | | |
-| Fold 3 | | |
-| Fold 4 | | |
-| Fold 5 | | |
-| **Mean ± Std** | | |
+| Fold | Val Accuracy | Train Accuracy | Notes |
+|------|--------------|----------------|-------|
+| Fold 1 | | | |
+| Fold 2 | | | |
+| Fold 3 | | | |
+| Fold 4 | | | |
+| Fold 5 | **94.50%** | 99% | First run, 50 epochs |
+| **Mean ± Std** | | | 5-fold CV in progress |
 
 **Training Curves**: `experiments/esc50_classification/outputs/`
 

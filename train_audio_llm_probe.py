@@ -1712,6 +1712,10 @@ def main() -> None:
         )
 
     best = -1.0
+    best_epoch = 0
+    best_train_acc = 0.0
+    best_train_loss = 0.0
+    best_val_loss = 0.0
     global_step = 0
 
     for epoch in range(1, args.num_epochs + 1):
@@ -1750,6 +1754,10 @@ def main() -> None:
 
         if val_metrics["acc"] > best:
             best = val_metrics["acc"]
+            best_epoch = epoch
+            best_train_acc = train_metrics["acc"]
+            best_train_loss = train_metrics["loss"]
+            best_val_loss = val_metrics["loss"]
             ckpt = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
@@ -1760,6 +1768,30 @@ def main() -> None:
             }
             torch.save(ckpt, os.path.join(args.output_dir, "best_model.pt"))
             print(f"  -> New best acc: {best:.4f}", flush=True)
+
+    # Print final summary
+    print("\n" + "=" * 60, flush=True)
+    print("TRAINING COMPLETE - FINAL RESULTS", flush=True)
+    print("=" * 60, flush=True)
+    print(f"Dataset: {args.dataset.upper()}", flush=True)
+    if hasattr(args, 'fold') and args.fold is not None:
+        print(f"Fold: {args.fold}", flush=True)
+    print(f"Best Test Accuracy: {best:.4f} ({best*100:.2f}%)", flush=True)
+    print(f"Best Epoch: {best_epoch}", flush=True)
+    print(f"Train Acc @ Best: {best_train_acc:.4f}", flush=True)
+    print(f"Train Loss @ Best: {best_train_loss:.4f}", flush=True)
+    print(f"Val Loss @ Best: {best_val_loss:.4f}", flush=True)
+    print("-" * 60, flush=True)
+    print("Configuration:", flush=True)
+    print(f"  Fusion layers: {args.fusion_layer_indices}", flush=True)
+    print(f"  SAFE LR: {args.safe_learning_rate}", flush=True)
+    print(f"  Head LR: {args.head_learning_rate}", flush=True)
+    print(f"  Batch size: {args.batch_size}", flush=True)
+    print(f"  Epochs: {args.num_epochs}", flush=True)
+    print(f"  Model config: {args.model_config}", flush=True)
+    print("-" * 60, flush=True)
+    print(f"Checkpoint saved: {args.output_dir}/best_model.pt", flush=True)
+    print("=" * 60, flush=True)
 
     if args.wandb and wandb is not None:
         wandb.finish()
