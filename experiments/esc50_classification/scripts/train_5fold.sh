@@ -51,6 +51,7 @@ NUM_EPOCHS=${NUM_EPOCHS:-50}
 SAFE_LR=${SAFE_LR:-6e-5}
 HEAD_LR=${HEAD_LR:-1e-3}
 FUSION_LAYERS=${FUSION_LAYERS:-"1,5,9,13,17,21"}
+NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-8}
 
 # Regularization / Augmentation (set to 0 to disable)
 MIXUP_ALPHA=${MIXUP_ALPHA:-0.0}
@@ -75,6 +76,7 @@ echo "Epochs: $NUM_EPOCHS"
 echo "SAFE LR (projector+fusion): $SAFE_LR"
 echo "Head LR: $HEAD_LR"
 echo "Fusion layers: $FUSION_LAYERS"
+echo "Num audio tokens: $NUM_AUDIO_TOKENS"
 echo "Mixup alpha: $MIXUP_ALPHA"
 echo "Label smoothing: $LABEL_SMOOTHING"
 echo "Unfreeze CLAP layers: $UNFREEZE_CLAP"
@@ -123,6 +125,7 @@ for FOLD in 1 2 3 4 5; do
         --output-dir "$FOLD_OUTPUT_DIR" \
         --model-config phase1 \
         --fusion-layer-indices "$FUSION_LAYERS" \
+        --num-audio-tokens "$NUM_AUDIO_TOKENS" \
         --batch-size "$BATCH_SIZE" \
         --num-epochs "$NUM_EPOCHS" \
         --safe-learning-rate "$SAFE_LR" \
