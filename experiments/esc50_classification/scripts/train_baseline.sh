@@ -51,6 +51,7 @@ UNFREEZE_CLAP=${UNFREEZE_CLAP:-0}
 # W&B settings
 WANDB_PROJECT=${WANDB_PROJECT:-"ESC50-Classification"}
 WANDB_NAME="baseline-fold${FOLD}"
+WANDB_TAGS=${WANDB_TAGS:-"esc50,baseline"}
 
 echo "========================================"
 echo "ESC-50 Classification - Baseline Training"
@@ -69,6 +70,7 @@ echo "Fusion layers: $FUSION_LAYERS"
 echo "Mixup alpha: $MIXUP_ALPHA"
 echo "Label smoothing: $LABEL_SMOOTHING"
 echo "Unfreeze CLAP layers: $UNFREEZE_CLAP"
+echo "W&B tags: $WANDB_TAGS"
 echo "========================================"
 
 # Activate conda environment
@@ -107,7 +109,8 @@ python train_audio_llm_probe.py \
     --fp16 \
     --wandb \
     --wandb-project "$WANDB_PROJECT" \
-    --wandb-run-name "$WANDB_NAME"
+    --wandb-run-name "$WANDB_NAME" \
+    --wandb-tags "${WANDB_TAGS},fold${FOLD}"
 
 echo ""
 echo "========================================"

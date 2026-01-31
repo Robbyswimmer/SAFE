@@ -59,6 +59,7 @@ UNFREEZE_CLAP=${UNFREEZE_CLAP:-0}
 
 # W&B settings
 WANDB_PROJECT=${WANDB_PROJECT:-"ESC50-Classification"}
+WANDB_TAGS=${WANDB_TAGS:-"esc50,5fold"}
 
 echo "========================================"
 echo "ESC-50 Classification - 5-Fold CV"
@@ -77,6 +78,7 @@ echo "Fusion layers: $FUSION_LAYERS"
 echo "Mixup alpha: $MIXUP_ALPHA"
 echo "Label smoothing: $LABEL_SMOOTHING"
 echo "Unfreeze CLAP layers: $UNFREEZE_CLAP"
+echo "W&B tags: $WANDB_TAGS"
 echo "========================================"
 
 # Activate conda environment
@@ -131,7 +133,8 @@ for FOLD in 1 2 3 4 5; do
         --fp16 \
         --wandb \
         --wandb-project "$WANDB_PROJECT" \
-        --wandb-run-name "${EXPERIMENT_NAME}-fold${FOLD}"
+        --wandb-run-name "${EXPERIMENT_NAME}-fold${FOLD}" \
+        --wandb-tags "${WANDB_TAGS},${EXPERIMENT_NAME},fold${FOLD}"
 
     echo ""
     echo "Fold $FOLD training complete. Output: $FOLD_OUTPUT_DIR"

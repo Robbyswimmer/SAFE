@@ -1404,6 +1404,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", type=str, default="SAFE")
     p.add_argument("--wandb-run-name", type=str, default=None)
+    p.add_argument("--wandb-tags", type=str, default=None,
+                   help="Comma-separated tags for wandb run (e.g., 'esc50,5fold,baseline')")
     p.add_argument("--load-checkpoint", type=str, default=None, help="Load a SAFE checkpoint (e.g., from train_safe.py)")
     p.add_argument(
         "--bypass-llm",
@@ -1849,10 +1851,16 @@ def main() -> None:
         raise RuntimeError("kv_augment mode requires query_adapter params in optimizer. See debug output above.")
 
     if args.wandb and wandb is not None:
+        # Parse tags if provided
+        tags = None
+        if args.wandb_tags:
+            tags = [t.strip() for t in args.wandb_tags.split(",") if t.strip()]
+
         wandb.init(
             project=args.wandb_project,
             name=args.wandb_run_name or f"llm-probe-ave-layer{args.fusion_layer_indices}",
             config=vars(args),
+            tags=tags,
         )
 
     best = -1.0

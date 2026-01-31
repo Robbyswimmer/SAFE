@@ -31,14 +31,16 @@
 
 | Experiment | Status | Accuracy (5-fold mean ± std) | Notes |
 |------------|--------|------------------------------|-------|
-| Baseline (default config) | 🔄 In Progress | 96.00% (fold 1), 94.50% (fold 5) | Train ~99%, see config below |
-| More fusion layers (1,5,9,13,17,21,25,29,33,37) | ⏳ Pending | | |
+| Baseline (batch=16) | 🔄 In Progress | 96.00% (fold 1), 94.50% (fold 5) | Train ~99%, see config below |
+| **Larger batch (batch=32)** | ✅ Fold 5 done | **95.75%** (fold 5) | **Tied best**, epoch 32, val_loss 0.59 |
+| **more_layers (10 layers)** | ✅ Fold 5 done | **95.75%** (fold 5) | **Tied best**, epoch 14, val_loss 0.46 |
+| higher_lr (LR 2e-4) | ✅ Fold 5 done | 95.50% (fold 5) | Best epoch 26 |
+| layers_lr_combo (10 layers + LR 2e-4) | ✅ Fold 5 done | 95.25% (fold 5) | Best epoch 46, higher LR hurt |
 | More tokens (8 → 16 → 32) | ⏳ Pending | | |
 | Unfreeze last 2 encoder blocks | ⏳ Pending | | |
 | Unfreeze last 4 encoder blocks | ⏳ Pending | | |
-| Higher learning rate sweep | ⏳ Pending | | |
-| Longer training (more epochs) | ⏳ Pending | | |
-| Data augmentation (SpecAugment, noise) | ⏳ Pending | | |
+| Label smoothing (0.1) | ⏳ Pending | | |
+| Mixup (alpha=0.2-0.4) | ⏳ Pending | | |
 
 **Baseline Configuration (fold 5 result: 94.50% test, 99% train)**:
 ```
@@ -317,7 +319,7 @@ Other settings:
 | + Data augmentation | | | |
 | **Best combo** | | | |
 
-**Per-Fold Results** (baseline config):
+**Per-Fold Results** (baseline config, batch=16):
 
 | Fold | Val Accuracy | Train Accuracy | Best Epoch | Notes |
 |------|--------------|----------------|------------|-------|
@@ -327,6 +329,17 @@ Other settings:
 | Fold 4 | | | | |
 | Fold 5 | 94.50% | 99% | ~6 | Single-fold test run |
 | **Mean ± Std** | | | | 5-fold CV in progress |
+
+**Per-Fold Results** (larger_batch config, batch=32):
+
+| Fold | Val Accuracy | Train Accuracy | Best Epoch | Notes |
+|------|--------------|----------------|------------|-------|
+| Fold 1 | | | | In progress |
+| Fold 2 | | | | |
+| Fold 3 | | | | |
+| Fold 4 | | | | |
+| Fold 5 | **95.75%** | 100% | 32 | Val loss 0.59 @ best |
+| **Mean ± Std** | | | | |
 
 **Training Curves**: `experiments/esc50_classification/outputs/`
 
