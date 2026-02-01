@@ -273,6 +273,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Unfreeze last N pointcloud encoder transformer blocks (0 = fully frozen)",
     )
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=0,
+        help="Stop training if val accuracy doesn't improve for N epochs (0 = disabled)",
+    )
 
     return parser.parse_args()
 
@@ -1416,6 +1422,8 @@ def main():
     # Training loop
     print("\nStarting training...")
     best_metric = 0.0
+    epochs_without_improvement = 0
+    best_epoch = 0
 
     for epoch in range(args.num_epochs):
         print(f"\n{'='*40}")
@@ -1468,7 +1476,19 @@ def main():
                 # Track best
                 if eval_metrics["accuracy"] > best_metric:
                     best_metric = eval_metrics["accuracy"]
+                    best_epoch = epoch + 1
+                    epochs_without_improvement = 0
                     save_checkpoint(model, optimizer, epoch, eval_metrics, output_dir, "best")
+                else:
+                    epochs_without_improvement += 1
+
+                # Early stopping check
+                if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
+                    print(f"\n{'='*60}")
+                    print(f"EARLY STOPPING: No improvement for {args.early_stopping_patience} epochs")
+                    print(f"Best accuracy: {best_metric:.4f} at epoch {best_epoch}")
+                    print(f"{'='*60}")
+                    break
             else:
                 eval_metrics = evaluate_captioning(model, val_loader, args.device, args)
                 print("Sample predictions:")
@@ -1496,9 +1516,12 @@ def main():
             )
 
     print("\n" + "=" * 60)
-    print("Training complete!")
+    print("TRAINING COMPLETE - FINAL RESULTS")
+    print("=" * 60)
     if args.phase == "classification":
-        print(f"Best accuracy: {best_metric:.4f}")
+        print(f"Best Accuracy: {best_metric:.4f} ({best_metric*100:.2f}%)")
+        print(f"Best Epoch: {best_epoch}")
+    print(f"Total Epochs: {epoch + 1}")
     print(f"Checkpoints saved to: {output_dir}")
     print("=" * 60)
 

@@ -1921,9 +1921,14 @@ def main() -> None:
             best_train_acc = train_metrics["acc"]
             best_train_loss = train_metrics["loss"]
             best_val_loss = val_metrics["loss"]
+            # Only save trainable parameters (not the frozen 13B LLM!)
+            trainable_state_dict = {
+                k: v for k, v in model.state_dict().items()
+                if any(p.data_ptr() == v.data_ptr() for p in model.get_trainable_params())
+            }
             ckpt = {
                 "epoch": epoch,
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": trainable_state_dict,
                 "optimizer_state_dict": optimizer.state_dict(),
                 "best_acc": best,
                 "config": config,
