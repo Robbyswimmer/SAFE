@@ -31,16 +31,16 @@
 
 | Experiment | Status | Accuracy (5-fold mean ± std) | Notes |
 |------------|--------|------------------------------|-------|
+| **kitchen_sink_8tok** | ✅ **COMPLETE** | **97.35% ± 0.45%** | **BEST** - unfreeze2+mixup+label_smooth |
 | Baseline (batch=16) | 🔄 In Progress | 96.00% (fold 1), 94.50% (fold 5) | Train ~99%, see config below |
-| **Larger batch (batch=32)** | ✅ Fold 5 done | **95.75%** (fold 5) | **Tied best**, epoch 32, val_loss 0.59 |
-| **more_layers (10 layers)** | ✅ Fold 5 done | **95.75%** (fold 5) | **Tied best**, epoch 14, val_loss 0.46 |
+| Larger batch (batch=32) | ✅ Fold 5 done | 95.75% (fold 5) | epoch 32, val_loss 0.59 |
+| more_layers (10 layers) | ✅ Fold 5 done | 95.75% (fold 5) | epoch 14, val_loss 0.46 |
 | higher_lr (LR 2e-4) | ✅ Fold 5 done | 95.50% (fold 5) | Best epoch 26 |
 | layers_lr_combo (10 layers + LR 2e-4) | ✅ Fold 5 done | 95.25% (fold 5) | Best epoch 46, higher LR hurt |
-| More tokens (8 → 16 → 32) | ⏳ Pending | | |
-| Unfreeze last 2 encoder blocks | ⏳ Pending | | |
-| Unfreeze last 4 encoder blocks | ⏳ Pending | | |
-| Label smoothing (0.1) | ⏳ Pending | | |
-| Mixup (alpha=0.2-0.4) | ⏳ Pending | | |
+| Label smoothing (0.1) | 🔄 Running | 97.50% (fold 1) | Strong single-fold result |
+| Mixup (alpha=0.3) | 🔄 Running | 97.00% (fold 1) | |
+| Unfreeze 2 CLAP layers | 🔄 Running | 96.00% (fold 1) | |
+| kitchen_sink_16tok | 🔄 Running | | 16 tokens version |
 
 **Baseline Configuration (fold 5 result: 94.50% test, 99% train)**:
 ```
@@ -60,29 +60,89 @@ FP16: enabled
 ```
 
 **Completion Criteria**:
-- [ ] Best config identified and documented
+- [x] Best config identified and documented (kitchen_sink_8tok)
 - [ ] Ablation table showing contribution of each trick
-- [ ] Final accuracy: ____% (5-fold mean ± std)
-- [ ] Training curves saved to `experiments/esc50_classification/outputs/`
+- [x] Final accuracy: **97.35% ± 0.45%** (5-fold mean ± std)
+- [x] Training curves saved to `experiments/esc50_classification/outputs/`
 
-### 1B. Point Cloud Classification (ModelNet40 / ScanObjectNN)
+**Best Configuration (kitchen_sink_8tok: 97.35% ± 0.45%)**:
+```
+Encoder: CLAP (unfreeze last 2 layers)
+LLM: LLaVA-1.5-13B (frozen)
+Fusion: Pre-FFN residual
+Fusion layers: 1,5,9,13,17,21 (6 layers)
+Num audio tokens: 8
+Batch size: 16
+Epochs: 50
+SAFE LR: 6e-5
+Head LR: 1e-3
+Mixup alpha: 0.3
+Label smoothing: 0.1
+```
+
+**Per-Fold Results (kitchen_sink_8tok)**:
+| Fold | Accuracy | Best Epoch |
+|------|----------|------------|
+| 1 | 97.25% | 48 |
+| 2 | 98.00% | 42 |
+| 3 | 97.50% | 46 |
+| 4 | 97.25% | 45 |
+| 5 | 96.75% | 36 |
+| **Mean ± Std** | **97.35% ± 0.45%** | |
+
+### 1B. Point Cloud Classification (ModelNet40)
+
+**Dataset**: ModelNet40 (3D CAD model classification)
+- 12,311 models (9,843 train / 2,468 test)
+- 40 classes (airplane, bathtub, bed, chair, etc.)
+- Single train/test split (no cross-validation)
+
+**SOTA Targets**:
+| Model | Accuracy | Notes |
+|-------|----------|-------|
+| PointNeXt | 94.0% | Current SOTA |
+| Point-MAE | 93.8% | Self-supervised |
+| PointBERT | 93.2% | BERT-style pre-training |
+| PointNet++ | 91.9% | Hierarchical |
+| **Our target** | **90%+** | Competitive with specialized models |
+
+**Experiment Scripts**:
+- Download: `experiments/modelnet40_classification/scripts/download_modelnet40.sh`
+- Baseline: `experiments/modelnet40_classification/scripts/train_baseline.sh`
 
 | Experiment | Status | Accuracy | Notes |
 |------------|--------|----------|-------|
-| Baseline (default config) | | | |
-| More fusion layers | | | |
-| More tokens (8 → 16 → 32) | | | |
-| Unfreeze last 2 encoder blocks | | | |
-| Unfreeze last 4 encoder blocks | | | |
-| More points (1024 → 2048 → 4096) | | | |
-| Higher learning rate sweep | | | |
-| Longer training | | | |
+| Baseline (default config) | ⏳ Pending | | 6 layers, 8 tokens, 1024 pts |
+| More fusion layers (10) | ⏳ Pending | | Based on ESC-50 results |
+| More tokens (16 → 32) | ⏳ Pending | | |
+| Unfreeze last 2 encoder blocks | ⏳ Pending | | |
+| Unfreeze last 4 encoder blocks | ⏳ Pending | | |
+| More points (1024 → 2048) | ⏳ Pending | | |
+| Higher learning rate sweep | ⏳ Pending | | |
+
+**Baseline Configuration**:
+```
+Script: train_pointcloud.py --config modelnet40 --llm-probe-head
+Encoder: PointBERT (frozen)
+LLM: LLaVA-1.5-13B (frozen)
+Fusion: Pre-FFN residual
+Fusion layers: 1,5,9,13,17,21 (6 layers)
+Num tokens: 8
+Num points: 1024
+Batch size: 16
+Epochs: 50
+SAFE LR: 6e-5
+Head LR: 1e-3
+Pooling: last token
+Head type: linear
+FP16: enabled
+```
 
 **Completion Criteria**:
 - [ ] Best config identified and documented
 - [ ] Ablation table showing contribution of each trick
 - [ ] Final accuracy: ____%
-- [ ] Training curves saved
+- [ ] Training curves saved to `experiments/modelnet40_classification/outputs/`
 
 ---
 
@@ -287,11 +347,12 @@ If captioning doesn't work well with our architecture, consider:
 - Evaluation: Mean accuracy ± std across 5 folds
 
 **SOTA Comparison**:
-| Model | Accuracy |
-|-------|----------|
-| BEATs | 98.1% |
-| CLAP | 96.7% |
-| AST | 95.7% |
+| Model | Accuracy | Notes |
+|-------|----------|-------|
+| BEATs | 98.1% | Current SOTA |
+| **SAFE (ours)** | **97.35% ± 0.45%** | **Beats CLAP by 0.65%** |
+| CLAP | 96.7% | Our encoder (frozen) |
+| AST | 95.7% | |
 | Human | 81.3% |
 | **SAFE (ours)** | ____% |
 
@@ -354,7 +415,19 @@ Other settings:
 
 ### Phase 1B: Point Cloud Classification Results
 
-**Dataset**: ModelNet40 / ScanObjectNN (specify)
+**Dataset**: ModelNet40
+- 12,311 models (9,843 train / 2,468 test)
+- 40 classes
+- Single train/test split
+
+**SOTA Comparison**:
+| Model | Accuracy |
+|-------|----------|
+| PointNeXt | 94.0% |
+| Point-MAE | 93.8% |
+| PointBERT | 93.2% |
+| PointNet++ | 91.9% |
+| **SAFE (ours)** | ____% |
 
 **Best Configuration**:
 ```

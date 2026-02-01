@@ -117,7 +117,8 @@ for FOLD in 1 2 3 4 5; do
     FOLD_OUTPUT_DIR="${OUTPUT_BASE}/fold${FOLD}"
     mkdir -p "$FOLD_OUTPUT_DIR"
 
-    # Run training for this fold
+    # Run training for this fold and capture output
+    FOLD_LOG="${FOLD_OUTPUT_DIR}/training.log"
     python train_audio_llm_probe.py \
         --dataset esc50 \
         --data-path "$DATA_PATH" \
@@ -137,7 +138,18 @@ for FOLD in 1 2 3 4 5; do
         --wandb \
         --wandb-project "$WANDB_PROJECT" \
         --wandb-run-name "${EXPERIMENT_NAME}-fold${FOLD}" \
-        --wandb-tags "${WANDB_TAGS},${EXPERIMENT_NAME},fold${FOLD}"
+        --wandb-tags "${WANDB_TAGS},${EXPERIMENT_NAME},fold${FOLD}" \
+        2>&1 | tee "$FOLD_LOG"
+
+    # Extract best accuracy from the log
+    FOLD_ACC=$(grep "Best Test Accuracy:" "$FOLD_LOG" | tail -1 | sed 's/.*: \([0-9.]*\).*/\1/')
+    if [ -n "$FOLD_ACC" ]; then
+        FOLD_ACCURACIES[$FOLD]=$FOLD_ACC
+        echo ">>> Fold $FOLD Best Accuracy: $FOLD_ACC"
+    else
+        echo ">>> WARNING: Could not extract accuracy for fold $FOLD"
+        FOLD_ACCURACIES[$FOLD]="0.0"
+    fi
 
     echo ""
     echo "Fold $FOLD training complete. Output: $FOLD_OUTPUT_DIR"
@@ -151,6 +163,113 @@ echo "========================================"
 echo ""
 echo "Results saved to: $OUTPUT_BASE"
 echo ""
-echo "Check each fold's best accuracy in the logs or W&B."
+
+# Calculate and display summary statistics
+echo "========================================"
+echo "5-FOLD RESULTS SUMMARY"
+echo "========================================"
+echo "Experiment: $EXPERIMENT_NAME"
+echo "========================================"
 echo ""
+echo "Per-Fold Accuracies:"
+for FOLD in 1 2 3 4 5; do
+    ACC=${FOLD_ACCURACIES[$FOLD]}
+    ACC_PCT=$(echo "$ACC * 100" | bc -l 2>/dev/null || echo "N/A")
+    if [ "$ACC_PCT" != "N/A" ]; then
+        ACC_PCT=$(printf "%.2f" $ACC_PCT)
+    fi
+    echo "  Fold $FOLD: $ACC ($ACC_PCT%)"
+done
+echo ""
+
+# Calculate mean and std using Python (more reliable than bc for this)
+python3 << EOF
+import sys
+accs = []
+for fold in range(1, 6):
+    acc_str = "${FOLD_ACCURACIES[1]}" if fold == 1 else \
+              "${FOLD_ACCURACIES[2]}" if fold == 2 else \
+              "${FOLD_ACCURACIES[3]}" if fold == 3 else \
+              "${FOLD_ACCURACIES[4]}" if fold == 4 else \
+              "${FOLD_ACCURACIES[5]}"
+    try:
+        accs.append(float(acc_str))
+    except:
+        pass
+
+if len(accs) == 5:
+    import statistics
+    mean = statistics.mean(accs)
+    std = statistics.stdev(accs)
+    print("=" * 40)
+    print(f"MEAN ACCURACY: {mean:.4f} ({mean*100:.2f}%)")
+    print(f"STD DEVIATION: {std:.4f} ({std*100:.2f}%)")
+    print(f"RESULT: {mean*100:.2f}% ± {std*100:.2f}%")
+    print("=" * 40)
+
+    # SOTA comparison
+    print("")
+    print("SOTA Comparison:")
+    print(f"  BEATs:      98.10%")
+    print(f"  CLAP:       96.70%")
+    print(f"  AST:        95.70%")
+    print(f"  SAFE (ours): {mean*100:.2f}% ± {std*100:.2f}%")
+    print("=" * 40)
+else:
+    print(f"WARNING: Only {len(accs)} valid fold accuracies found")
+    print(f"Accuracies: {accs}")
+EOF
+
+echo ""
+echo "========================================"
+
+# Save summary to file
+SUMMARY_FILE="${OUTPUT_BASE}/5fold_summary.txt"
+cat << EOF > "$SUMMARY_FILE"
+ESC-50 5-Fold Cross-Validation Summary
+======================================
+Experiment: $EXPERIMENT_NAME
+Date: $(date)
+Job ID: ${SLURM_JOB_ID:-local}
+
+Configuration:
+  Batch size: $BATCH_SIZE
+  Epochs: $NUM_EPOCHS
+  SAFE LR: $SAFE_LR
+  Head LR: $HEAD_LR
+  Fusion layers: $FUSION_LAYERS
+  Num audio tokens: $NUM_AUDIO_TOKENS
+  Mixup alpha: $MIXUP_ALPHA
+  Label smoothing: $LABEL_SMOOTHING
+  Unfreeze CLAP layers: $UNFREEZE_CLAP
+
+Per-Fold Results:
+  Fold 1: ${FOLD_ACCURACIES[1]}
+  Fold 2: ${FOLD_ACCURACIES[2]}
+  Fold 3: ${FOLD_ACCURACIES[3]}
+  Fold 4: ${FOLD_ACCURACIES[4]}
+  Fold 5: ${FOLD_ACCURACIES[5]}
+
+EOF
+
+# Append mean/std calculation to summary file
+python3 << EOF >> "$SUMMARY_FILE"
+accs = []
+for acc_str in ["${FOLD_ACCURACIES[1]}", "${FOLD_ACCURACIES[2]}", "${FOLD_ACCURACIES[3]}", "${FOLD_ACCURACIES[4]}", "${FOLD_ACCURACIES[5]}"]:
+    try:
+        accs.append(float(acc_str))
+    except:
+        pass
+
+if len(accs) == 5:
+    import statistics
+    mean = statistics.mean(accs)
+    std = statistics.stdev(accs)
+    print(f"Mean Accuracy: {mean:.4f} ({mean*100:.2f}%)")
+    print(f"Std Deviation: {std:.4f} ({std*100:.2f}%)")
+    print(f"")
+    print(f"Final Result: {mean*100:.2f}% ± {std*100:.2f}%")
+EOF
+
+echo "Summary saved to: $SUMMARY_FILE"
 echo "========================================"
