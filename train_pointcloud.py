@@ -51,6 +51,90 @@ from safe.data.pointcloud_datasets import (
 )
 from configs.pointcloud_configs import get_pointcloud_config, list_pointcloud_configs
 
+import numpy as np
+import torch.nn.functional as F
+
+
+class LabelSmoothingCrossEntropy(nn.Module):
+    """
+    Cross entropy loss with label smoothing.
+
+    Smoothing of 0.1 means 90% confidence on true class,
+    10% distributed uniformly across other classes.
+    """
+
+    def __init__(self, smoothing: float = 0.1, reduction: str = 'mean'):
+        super().__init__()
+        self.smoothing = smoothing
+        self.reduction = reduction
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        n_classes = pred.size(-1)
+
+        # Create smoothed target distribution
+        with torch.no_grad():
+            smooth_target = torch.zeros_like(pred)
+            smooth_target.fill_(self.smoothing / (n_classes - 1))
+            smooth_target.scatter_(1, target.unsqueeze(1), 1.0 - self.smoothing)
+
+        # Compute cross entropy with soft targets
+        log_probs = F.log_softmax(pred, dim=-1)
+        loss = -(smooth_target * log_probs).sum(dim=-1)
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        return loss
+
+
+def mixup_pointcloud_data(
+    pointclouds: torch.Tensor,
+    labels: torch.Tensor,
+    alpha: float = 0.4,
+) -> tuple:
+    """
+    Mixup augmentation for point cloud classification.
+
+    Args:
+        pointclouds: Tensor of shape (B, N, 3) containing point clouds
+        labels: Tensor of class labels
+        alpha: Beta distribution parameter (higher = more mixing)
+
+    Returns:
+        mixed_pointclouds: Mixed point cloud tensor
+        labels_a: Original labels
+        labels_b: Shuffled labels
+        lam: Mixing coefficient
+    """
+    if alpha <= 0:
+        return pointclouds, labels, labels, 1.0
+
+    batch_size = pointclouds.size(0)
+    lam = np.random.beta(alpha, alpha)
+
+    # Random permutation for mixing
+    index = torch.randperm(batch_size, device=pointclouds.device)
+
+    # Mix point clouds (simple linear interpolation in 3D space)
+    mixed_pointclouds = lam * pointclouds + (1 - lam) * pointclouds[index]
+
+    labels_a = labels
+    labels_b = labels[index]
+
+    return mixed_pointclouds, labels_a, labels_b, lam
+
+
+def mixup_criterion(
+    criterion: nn.Module,
+    pred: torch.Tensor,
+    labels_a: torch.Tensor,
+    labels_b: torch.Tensor,
+    lam: float,
+) -> torch.Tensor:
+    """Compute mixup loss as weighted combination of two label losses."""
+    return lam * criterion(pred, labels_a) + (1 - lam) * criterion(pred, labels_b)
+
 
 def _grad_summary(params: List[torch.nn.Parameter]) -> Dict[str, float]:
     total = 0
@@ -135,6 +219,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--gradient-accumulation", type=int, default=1)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument("--label-smoothing", type=float, default=0.0,
+                        help="Label smoothing factor (0 = disabled)")
+    parser.add_argument("--mixup-alpha", type=float, default=0.0,
+                        help="Mixup alpha parameter (0 = disabled)")
 
     # Evaluation
     parser.add_argument("--eval-every", type=int, default=1, help="Eval every N epochs")
@@ -210,6 +298,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Comma-separated fusion layer indices (e.g., '12,24,36'). Overrides config.",
+    )
+    parser.add_argument(
+        "--num-pointcloud-tokens",
+        type=int,
+        default=None,
+        help="Number of point cloud tokens to inject (default: from config, typically 8)",
     )
     parser.add_argument(
         "--fusion-injection-point",
@@ -755,7 +849,16 @@ def train_epoch_llm_probe_head(
 
     use_tqdm = sys.stdout.isatty()
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}", disable=not use_tqdm)
-    loss_fct = nn.CrossEntropyLoss()
+
+    # Set up loss function with optional label smoothing
+    label_smoothing = getattr(args, 'label_smoothing', 0.0)
+    if label_smoothing > 0:
+        loss_fct = LabelSmoothingCrossEntropy(smoothing=label_smoothing)
+    else:
+        loss_fct = nn.CrossEntropyLoss()
+
+    # Check if mixup is enabled
+    use_mixup = getattr(args, 'mixup_alpha', 0.0) > 0
 
     tokenizer = model.safe_model.base_vl.tokenizer
 
@@ -771,6 +874,16 @@ def train_epoch_llm_probe_head(
         pointclouds = batch["pointclouds"].to(device)
         labels = batch["labels"].to(device, dtype=torch.long)
         questions = batch["questions"]
+
+        # Apply mixup if enabled
+        if use_mixup:
+            pointclouds, labels_a, labels_b, lam = mixup_pointcloud_data(
+                pointclouds, labels, args.mixup_alpha
+            )
+        else:
+            labels_a = labels
+            labels_b = labels
+            lam = 1.0
 
         if args.debug_checks and epoch == 0 and batch_idx == 0:
             pc_finite = torch.isfinite(pointclouds).all().item()
@@ -818,7 +931,12 @@ def train_epoch_llm_probe_head(
                 f"min={logits.min().item():.4f} max={logits.max().item():.4f}",
                 flush=True,
             )
-        loss = loss_fct(logits, labels) / args.gradient_accumulation
+
+        # Compute loss (with mixup if enabled)
+        if use_mixup:
+            loss = mixup_criterion(loss_fct, logits, labels_a, labels_b, lam) / args.gradient_accumulation
+        else:
+            loss = loss_fct(logits, labels) / args.gradient_accumulation
 
         if args.debug:
             print(f"[DEBUG] Step {batch_idx}: before backward", flush=True)
@@ -1307,6 +1425,10 @@ def main():
         layers = [int(x.strip()) for x in args.fusion_layer_indices.split(",") if x.strip()]
         config["fusion_layer_indices"] = layers
         print(f"[ConfigOverride] fusion_layer_indices={layers}", flush=True)
+
+    if args.num_pointcloud_tokens is not None:
+        config["num_tokens"] = args.num_pointcloud_tokens
+        print(f"[ConfigOverride] num_tokens={args.num_pointcloud_tokens}", flush=True)
 
     if args.fusion_injection_point is not None:
         config.setdefault("fusion_config", {})

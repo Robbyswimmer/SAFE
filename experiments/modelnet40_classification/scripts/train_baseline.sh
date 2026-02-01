@@ -46,6 +46,10 @@ NUM_POINTS=${NUM_POINTS:-1024}
 # Early stopping (patience in epochs)
 EARLY_STOPPING_PATIENCE=${EARLY_STOPPING_PATIENCE:-5}
 
+# Regularization / Augmentation
+LABEL_SMOOTHING=${LABEL_SMOOTHING:-0.0}
+MIXUP_ALPHA=${MIXUP_ALPHA:-0.0}
+
 # Encoder unfreezing (0 = fully frozen)
 UNFREEZE_ENCODER=${UNFREEZE_ENCODER:-0}
 
@@ -70,9 +74,11 @@ echo "Epochs: $NUM_EPOCHS"
 echo "SAFE LR: $SAFE_LR"
 echo "Head LR: $HEAD_LR"
 echo "Fusion layers: $FUSION_LAYERS"
-echo "Num tokens: $NUM_TOKENS"
+echo "Num pointcloud tokens: $NUM_TOKENS"
 echo "Num points: $NUM_POINTS"
 echo "Early stopping patience: $EARLY_STOPPING_PATIENCE"
+echo "Label smoothing: $LABEL_SMOOTHING"
+echo "Mixup alpha: $MIXUP_ALPHA"
 echo "Unfreeze encoder layers: $UNFREEZE_ENCODER"
 echo "Encoder checkpoint: $ENCODER_CHECKPOINT"
 echo "W&B tags: $WANDB_TAGS"
@@ -106,10 +112,13 @@ python train_pointcloud.py \
     --data-path "$DATA_PATH" \
     --output-dir "$OUTPUT_DIR" \
     --fusion-layer-indices "$FUSION_LAYERS" \
+    --num-pointcloud-tokens "$NUM_TOKENS" \
     --batch-size "$BATCH_SIZE" \
     --num-epochs "$NUM_EPOCHS" \
     --safe-lr "$SAFE_LR" \
     --head-lr "$HEAD_LR" \
+    --label-smoothing "$LABEL_SMOOTHING" \
+    --mixup-alpha "$MIXUP_ALPHA" \
     --unfreeze-encoder-last-n "$UNFREEZE_ENCODER" \
     --encoder-checkpoint "$ENCODER_CHECKPOINT" \
     --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
