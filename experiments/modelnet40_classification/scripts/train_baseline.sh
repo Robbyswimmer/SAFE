@@ -31,7 +31,7 @@ fi
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-"baseline"}
 
 # Data and output paths
-DATA_PATH="${DATA_PATH:-$SAFE_ROOT/experiments/full_training/data}"
+DATA_PATH="${DATA_PATH:-$SAFE_ROOT/data}"
 OUTPUT_DIR="${OUTPUT_DIR:-$SAFE_ROOT/experiments/modelnet40_classification/outputs/${EXPERIMENT_NAME}}"
 
 # Training hyperparameters
