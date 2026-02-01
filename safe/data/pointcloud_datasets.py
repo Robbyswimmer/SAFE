@@ -14,6 +14,168 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 from torch.utils.data import Dataset, DataLoader
 
 
+# =============================================================================
+# Point Cloud Augmentation Functions
+# Based on PointNeXt (NeurIPS 2022) best practices
+# =============================================================================
+
+def random_rotate_pointcloud(pc: np.ndarray, rotation_range: float = 180.0) -> np.ndarray:
+    """
+    Randomly rotate point cloud around the Y-axis (up axis).
+
+    Args:
+        pc: Point cloud of shape (N, 3) or (N, 6) with normals
+        rotation_range: Max rotation in degrees (default: full 360 via ±180)
+
+    Returns:
+        Rotated point cloud
+    """
+    theta = np.random.uniform(-rotation_range, rotation_range) * np.pi / 180.0
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
+    # Rotation matrix around Y-axis
+    rotation_matrix = np.array([
+        [cos_t, 0, sin_t],
+        [0, 1, 0],
+        [-sin_t, 0, cos_t]
+    ])
+
+    pc_rotated = pc.copy()
+    pc_rotated[:, :3] = pc[:, :3] @ rotation_matrix.T
+
+    # Rotate normals if present
+    if pc.shape[1] > 3:
+        pc_rotated[:, 3:6] = pc[:, 3:6] @ rotation_matrix.T
+
+    return pc_rotated
+
+
+def random_scale_pointcloud(pc: np.ndarray, scale_range: tuple = (0.8, 1.2)) -> np.ndarray:
+    """
+    Randomly scale point cloud uniformly.
+
+    Args:
+        pc: Point cloud of shape (N, 3+)
+        scale_range: (min_scale, max_scale) tuple
+
+    Returns:
+        Scaled point cloud
+    """
+    scale = np.random.uniform(scale_range[0], scale_range[1])
+    pc_scaled = pc.copy()
+    pc_scaled[:, :3] = pc[:, :3] * scale
+    return pc_scaled
+
+
+def random_jitter_pointcloud(pc: np.ndarray, sigma: float = 0.01, clip: float = 0.05) -> np.ndarray:
+    """
+    Add random Gaussian noise to point positions.
+
+    Args:
+        pc: Point cloud of shape (N, 3+)
+        sigma: Standard deviation of Gaussian noise
+        clip: Maximum absolute noise value
+
+    Returns:
+        Jittered point cloud
+    """
+    noise = np.clip(np.random.normal(0, sigma, (pc.shape[0], 3)), -clip, clip)
+    pc_jittered = pc.copy()
+    pc_jittered[:, :3] = pc[:, :3] + noise
+    return pc_jittered
+
+
+def random_translate_pointcloud(pc: np.ndarray, translate_range: float = 0.2) -> np.ndarray:
+    """
+    Randomly translate point cloud.
+
+    Args:
+        pc: Point cloud of shape (N, 3+)
+        translate_range: Maximum translation in each axis
+
+    Returns:
+        Translated point cloud
+    """
+    translation = np.random.uniform(-translate_range, translate_range, 3)
+    pc_translated = pc.copy()
+    pc_translated[:, :3] = pc[:, :3] + translation
+    return pc_translated
+
+
+def random_dropout_pointcloud(pc: np.ndarray, max_dropout_ratio: float = 0.875) -> np.ndarray:
+    """
+    Randomly drop points from point cloud.
+
+    Args:
+        pc: Point cloud of shape (N, 3+)
+        max_dropout_ratio: Maximum fraction of points to drop
+
+    Returns:
+        Point cloud with some points dropped (and duplicated to maintain size)
+    """
+    dropout_ratio = np.random.uniform(0, max_dropout_ratio)
+    n_points = pc.shape[0]
+    n_drop = int(n_points * dropout_ratio)
+
+    if n_drop == 0:
+        return pc
+
+    # Randomly select points to keep
+    keep_indices = np.random.choice(n_points, n_points - n_drop, replace=False)
+    pc_dropped = pc[keep_indices]
+
+    # Duplicate random points to maintain original size
+    if len(pc_dropped) < n_points:
+        dup_indices = np.random.choice(len(pc_dropped), n_points - len(pc_dropped), replace=True)
+        pc_dropped = np.concatenate([pc_dropped, pc_dropped[dup_indices]], axis=0)
+
+    return pc_dropped
+
+
+def augment_pointcloud(
+    pc: np.ndarray,
+    rotate: bool = True,
+    scale: bool = True,
+    jitter: bool = True,
+    translate: bool = True,
+    dropout: bool = False,
+    rotation_range: float = 180.0,
+    scale_range: tuple = (0.8, 1.2),
+    jitter_sigma: float = 0.01,
+    jitter_clip: float = 0.05,
+    translate_range: float = 0.2,
+    dropout_ratio: float = 0.875,
+) -> np.ndarray:
+    """
+    Apply a sequence of augmentations to a point cloud.
+
+    Based on PointNeXt best practices for ModelNet40.
+
+    Args:
+        pc: Point cloud of shape (N, 3+)
+        rotate: Apply random Y-axis rotation
+        scale: Apply random uniform scaling
+        jitter: Apply random Gaussian noise
+        translate: Apply random translation
+        dropout: Apply random point dropout
+        *_range/*_sigma: Parameters for each augmentation
+
+    Returns:
+        Augmented point cloud
+    """
+    if rotate:
+        pc = random_rotate_pointcloud(pc, rotation_range)
+    if scale:
+        pc = random_scale_pointcloud(pc, scale_range)
+    if translate:
+        pc = random_translate_pointcloud(pc, translate_range)
+    if jitter:
+        pc = random_jitter_pointcloud(pc, jitter_sigma, jitter_clip)
+    if dropout:
+        pc = random_dropout_pointcloud(pc, dropout_ratio)
+
+    return pc
+
+
 # ModelNet40 class names (alphabetical order)
 MODELNET40_CLASSES = [
     "airplane", "bathtub", "bed", "bench", "bookshelf",
@@ -48,6 +210,12 @@ class ModelNet40Dataset(Dataset):
         split: str = "train",
         num_points: int = 1024,
         use_normals: bool = False,
+        augment: bool = None,  # None = auto (True for train, False for test)
+        aug_rotate: bool = True,
+        aug_scale: bool = True,
+        aug_jitter: bool = True,
+        aug_translate: bool = True,
+        aug_dropout: bool = False,
     ):
         """
         Initialize ModelNet40 dataset.
@@ -57,11 +225,25 @@ class ModelNet40Dataset(Dataset):
             split: "train" or "test"
             num_points: Number of points to sample from each object
             use_normals: Whether to include point normals (6D instead of 3D)
+            augment: Whether to apply data augmentation (default: True for train)
+            aug_rotate: Apply random rotation around Y-axis
+            aug_scale: Apply random scaling [0.8, 1.2]
+            aug_jitter: Apply random Gaussian noise (sigma=0.01)
+            aug_translate: Apply random translation
+            aug_dropout: Apply random point dropout
         """
         self.data_path = Path(data_path)
         self.split = split.lower()
         self.num_points = num_points
         self.use_normals = use_normals
+
+        # Augmentation settings
+        self.augment = augment if augment is not None else (self.split == "train")
+        self.aug_rotate = aug_rotate
+        self.aug_scale = aug_scale
+        self.aug_jitter = aug_jitter
+        self.aug_translate = aug_translate
+        self.aug_dropout = aug_dropout
 
         # Find dataset directory
         dataset_dir = self.data_path / self.dataset_name
@@ -121,7 +303,7 @@ class ModelNet40Dataset(Dataset):
         Q: "What type of object is this?"
         A: "airplane" (class name)
         """
-        pc = self.pointclouds[idx]
+        pc = self.pointclouds[idx].copy()  # Copy to avoid modifying original
         label = self.labels[idx]
         class_name = self.class_names[label]
 
@@ -138,6 +320,17 @@ class ModelNet40Dataset(Dataset):
         # Take only xyz
         if pc.shape[-1] > 3 and not self.use_normals:
             pc = pc[:, :3]
+
+        # Apply augmentations during training
+        if self.augment:
+            pc = augment_pointcloud(
+                pc,
+                rotate=self.aug_rotate,
+                scale=self.aug_scale,
+                jitter=self.aug_jitter,
+                translate=self.aug_translate,
+                dropout=self.aug_dropout,
+            )
 
         return {
             "sample_id": f"modelnet40_{self.split}_{idx}",

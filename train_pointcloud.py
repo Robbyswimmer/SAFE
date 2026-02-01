@@ -224,6 +224,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mixup-alpha", type=float, default=0.0,
                         help="Mixup alpha parameter (0 = disabled)")
 
+    # Point cloud augmentation (based on PointNeXt best practices)
+    parser.add_argument("--no-augment", action="store_true",
+                        help="Disable all point cloud augmentation")
+    parser.add_argument("--no-aug-rotate", action="store_true",
+                        help="Disable random rotation augmentation")
+    parser.add_argument("--no-aug-scale", action="store_true",
+                        help="Disable random scaling augmentation")
+    parser.add_argument("--no-aug-jitter", action="store_true",
+                        help="Disable random jitter augmentation")
+    parser.add_argument("--no-aug-translate", action="store_true",
+                        help="Disable random translation augmentation")
+    parser.add_argument("--aug-dropout", action="store_true",
+                        help="Enable random point dropout augmentation (disabled by default)")
+
     # Evaluation
     parser.add_argument("--eval-every", type=int, default=1, help="Eval every N epochs")
     parser.add_argument("--max-eval-batches", type=int, default=50)
@@ -387,10 +401,18 @@ def create_dataset(
     num_points = config.get("num_points", 1024)
 
     if dataset_name in ["modelnet40", "modelnet40_cls"]:
+        # Augmentation settings (only for training)
+        augment = not getattr(args, 'no_augment', False) and split == "train"
         dataset = ModelNet40Dataset(
             data_path=args.data_path,
             split=split,
             num_points=num_points,
+            augment=augment,
+            aug_rotate=not getattr(args, 'no_aug_rotate', False),
+            aug_scale=not getattr(args, 'no_aug_scale', False),
+            aug_jitter=not getattr(args, 'no_aug_jitter', False),
+            aug_translate=not getattr(args, 'no_aug_translate', False),
+            aug_dropout=getattr(args, 'aug_dropout', False),
         )
     elif dataset_name in ["cap3d", "cap3d_captioning"]:
         dataset = Cap3DDataset(
@@ -1465,6 +1487,23 @@ def main():
 
     print(f"Train samples: {len(train_dataset)}")
     print(f"Val samples: {len(val_dataset)}")
+
+    # Print augmentation settings
+    if hasattr(train_dataset, 'augment') and train_dataset.augment:
+        aug_list = []
+        if getattr(train_dataset, 'aug_rotate', False):
+            aug_list.append("rotate")
+        if getattr(train_dataset, 'aug_scale', False):
+            aug_list.append("scale")
+        if getattr(train_dataset, 'aug_jitter', False):
+            aug_list.append("jitter")
+        if getattr(train_dataset, 'aug_translate', False):
+            aug_list.append("translate")
+        if getattr(train_dataset, 'aug_dropout', False):
+            aug_list.append("dropout")
+        print(f"Augmentations: {', '.join(aug_list) if aug_list else 'none'}")
+    else:
+        print("Augmentations: disabled")
 
     # Create dataloaders
     train_loader = create_pointcloud_dataloader(
