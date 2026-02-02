@@ -36,7 +36,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$SAFE_ROOT/experiments/modelnet40_classification/outpu
 
 # Training hyperparameters
 BATCH_SIZE=${BATCH_SIZE:-16}
-NUM_EPOCHS=${NUM_EPOCHS:-300}
+NUM_EPOCHS=${NUM_EPOCHS:-500}
 SAFE_LR=${SAFE_LR:-6e-5}
 HEAD_LR=${HEAD_LR:-1e-3}
 FUSION_LAYERS=${FUSION_LAYERS:-"1,5,9,13,17,21"}
