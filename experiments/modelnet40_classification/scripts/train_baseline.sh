@@ -36,15 +36,12 @@ OUTPUT_DIR="${OUTPUT_DIR:-$SAFE_ROOT/experiments/modelnet40_classification/outpu
 
 # Training hyperparameters
 BATCH_SIZE=${BATCH_SIZE:-16}
-NUM_EPOCHS=${NUM_EPOCHS:-100}
+NUM_EPOCHS=${NUM_EPOCHS:-300}
 SAFE_LR=${SAFE_LR:-6e-5}
 HEAD_LR=${HEAD_LR:-1e-3}
 FUSION_LAYERS=${FUSION_LAYERS:-"1,5,9,13,17,21"}
 NUM_TOKENS=${NUM_TOKENS:-8}
 NUM_POINTS=${NUM_POINTS:-1024}
-
-# Early stopping (patience in epochs)
-EARLY_STOPPING_PATIENCE=${EARLY_STOPPING_PATIENCE:-5}
 
 # Regularization / Augmentation
 LABEL_SMOOTHING=${LABEL_SMOOTHING:-0.0}
@@ -76,7 +73,6 @@ echo "Head LR: $HEAD_LR"
 echo "Fusion layers: $FUSION_LAYERS"
 echo "Num pointcloud tokens: $NUM_TOKENS"
 echo "Num points: $NUM_POINTS"
-echo "Early stopping patience: $EARLY_STOPPING_PATIENCE"
 echo "Label smoothing: $LABEL_SMOOTHING"
 echo "Mixup alpha: $MIXUP_ALPHA"
 echo "Unfreeze encoder layers: $UNFREEZE_ENCODER"
@@ -121,7 +117,6 @@ python train_pointcloud.py \
     --mixup-alpha "$MIXUP_ALPHA" \
     --unfreeze-encoder-last-n "$UNFREEZE_ENCODER" \
     --encoder-checkpoint "$ENCODER_CHECKPOINT" \
-    --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
     --max-eval-batches 999 \
     --eval-every 1 \
     --fp16 \
