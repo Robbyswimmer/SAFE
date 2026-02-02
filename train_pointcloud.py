@@ -217,6 +217,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--head-weight-decay", type=float, default=0.0, help="LLM-probe: weight decay for head")
     parser.add_argument("--warmup-steps", type=int, default=100)
+    parser.add_argument("--lr-scheduler", type=str, default="cosine",
+                        choices=["cosine", "constant", "linear"],
+                        help="LR scheduler type (cosine decays to min_lr, constant keeps LR fixed, linear decays linearly)")
+    parser.add_argument("--min-lr", type=float, default=1e-6,
+                        help="Minimum learning rate (floor for cosine/linear decay)")
     parser.add_argument("--gradient-accumulation", type=int, default=1)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--label-smoothing", type=float, default=0.0,
@@ -1548,13 +1553,26 @@ def main():
     # Optimizer + scheduler (stepped per optimizer update)
     total_updates = max(1, (len(train_loader) * args.num_epochs) // max(args.gradient_accumulation, 1))
     warmup_steps = max(0, int(args.warmup_steps))
+    min_lr_ratio = args.min_lr / (args.safe_lr if args.safe_lr else args.lr)  # Floor as ratio of initial LR
 
     def _lr_lambda(current_step: int) -> float:
+        # Warmup phase
         if warmup_steps > 0 and current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
+
+        # After warmup
         progress = float(current_step - warmup_steps) / float(max(1, total_updates - warmup_steps))
         progress = min(max(progress, 0.0), 1.0)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        if args.lr_scheduler == "constant":
+            return 1.0
+        elif args.lr_scheduler == "linear":
+            # Linear decay from 1.0 to min_lr_ratio
+            return max(min_lr_ratio, 1.0 - progress * (1.0 - min_lr_ratio))
+        else:  # cosine (default)
+            # Cosine decay from 1.0 to min_lr_ratio
+            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return max(min_lr_ratio, cosine_decay)
 
     if args.llm_probe_head and hasattr(model, "get_safe_params") and hasattr(model, "get_head_params"):
         safe_lr = float(args.safe_lr) if args.safe_lr is not None else float(args.lr)

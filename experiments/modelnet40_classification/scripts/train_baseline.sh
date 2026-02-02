@@ -47,6 +47,10 @@ NUM_POINTS=${NUM_POINTS:-1024}
 LABEL_SMOOTHING=${LABEL_SMOOTHING:-0.0}
 MIXUP_ALPHA=${MIXUP_ALPHA:-0.0}
 
+# Learning rate schedule
+LR_SCHEDULER=${LR_SCHEDULER:-"constant"}
+MIN_LR=${MIN_LR:-1e-6}
+
 # Encoder unfreezing (0 = fully frozen)
 UNFREEZE_ENCODER=${UNFREEZE_ENCODER:-0}
 
@@ -75,6 +79,8 @@ echo "Num pointcloud tokens: $NUM_TOKENS"
 echo "Num points: $NUM_POINTS"
 echo "Label smoothing: $LABEL_SMOOTHING"
 echo "Mixup alpha: $MIXUP_ALPHA"
+echo "LR scheduler: $LR_SCHEDULER"
+echo "Min LR: $MIN_LR"
 echo "Unfreeze encoder layers: $UNFREEZE_ENCODER"
 echo "Encoder checkpoint: $ENCODER_CHECKPOINT"
 echo "W&B tags: $WANDB_TAGS"
@@ -115,6 +121,8 @@ python train_pointcloud.py \
     --head-lr "$HEAD_LR" \
     --label-smoothing "$LABEL_SMOOTHING" \
     --mixup-alpha "$MIXUP_ALPHA" \
+    --lr-scheduler "$LR_SCHEDULER" \
+    --min-lr "$MIN_LR" \
     --unfreeze-encoder-last-n "$UNFREEZE_ENCODER" \
     --encoder-checkpoint "$ENCODER_CHECKPOINT" \
     --max-eval-batches 999 \
