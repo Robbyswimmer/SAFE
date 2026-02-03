@@ -7,7 +7,8 @@
       "Bash(xargs -I{} sh -c \"echo \"\"=== {} ===\"\" && head -2 \"\"{}\"\"\")",
       "Bash(cat:*)",
       "WebSearch",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(python3:*)"
     ],
     "deny": []
   }

@@ -25,6 +25,11 @@ from .mcub_dataset import (
     mcub_collate_fn,
     create_mcub_dataloader,
 )
+from .nuscenes_qa_dataset import (
+    NuScenesQADataset,
+    collate_nuscenes_qa_batch,
+    download_nuscenes_qa,
+)
 
 __all__ = [
     "create_safe_dataloader",
@@ -44,4 +49,7 @@ __all__ = [
     "SyntheticMCUBDataset",
     "mcub_collate_fn",
     "create_mcub_dataloader",
+    "NuScenesQADataset",
+    "collate_nuscenes_qa_batch",
+    "download_nuscenes_qa",
 ]

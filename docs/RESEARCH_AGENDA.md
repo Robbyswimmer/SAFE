@@ -112,17 +112,17 @@ Label smoothing: 0.1
 
 | Experiment | Status | Accuracy | Notes |
 |------------|--------|----------|-------|
-| Baseline (default config) | ⏳ Pending | | 6 layers, 8 tokens, 1024 pts |
+| Baseline (cosine LR) | 🔄 Running | ~81% | Plateaued, LR decaying too fast |
+| Constant LR (500 epochs) | 🔄 Running | TBD | New default config |
+| Full augmentation | 🔄 Running | TBD | rotate+scale+jitter+translate |
 | More fusion layers (10) | ⏳ Pending | | Based on ESC-50 results |
 | More tokens (16 → 32) | ⏳ Pending | | |
 | Unfreeze last 2 encoder blocks | ⏳ Pending | | |
-| Unfreeze last 4 encoder blocks | ⏳ Pending | | |
-| More points (1024 → 2048) | ⏳ Pending | | |
-| Higher learning rate sweep | ⏳ Pending | | |
+| Label smoothing + mixup | ⏳ Pending | | Based on ESC-50 success |
 
-**Baseline Configuration**:
+**Current Configuration** (updated):
 ```
-Script: train_pointcloud.py --config modelnet40 --llm-probe-head
+Script: train_pointcloud.py
 Encoder: PointBERT (frozen)
 LLM: LLaVA-1.5-13B (frozen)
 Fusion: Pre-FFN residual
@@ -130,11 +130,12 @@ Fusion layers: 1,5,9,13,17,21 (6 layers)
 Num tokens: 8
 Num points: 1024
 Batch size: 16
-Epochs: 50
+Epochs: 500 (increased from 100)
+LR scheduler: constant (changed from cosine)
 SAFE LR: 6e-5
 Head LR: 1e-3
-Pooling: last token
-Head type: linear
+Augmentation: rotation, scale, jitter, translate (enabled)
+Label smoothing: 0.1
 FP16: enabled
 ```
 
@@ -207,29 +208,115 @@ If captioning doesn't work well with our architecture, consider:
 
 ## Phase 4: Modality Composition (Pre-FFN)
 
-**Goal**: Test how audio + point cloud interact when combined. Does composition help?
+**Goal**: Test how point cloud + image interact when combined. Does composition help?
 
-### 4A. MCUB Evaluation
+### 4A. ScanNet Scene Classification (PC + Image)
+
+**Dataset**: ScanNet
+- 1,513 indoor scenes (1,201 train / 312 val)
+- 17 scene types (apartment, bathroom, bedroom, etc.)
+- Paired data: RGB images + 3D point clouds
+
+**Experiment Scripts**:
+- Preprocess: `experiments/scannet_composition/scripts/preprocess_scannet.py`
+- Training: `experiments/scannet_composition/scripts/train_composition.sh`
 
 | Condition | Status | Accuracy | Notes |
 |-----------|--------|----------|-------|
-| Audio only | | | |
-| Point cloud only | | | |
-| Audio + PC (both) | | | |
-| Vision only (baseline) | | | |
-| Audio + Vision | | | |
-| PC + Vision | | | |
-| All three | | | |
+| Image only | ⏳ Pending | | LLaVA vision baseline |
+| Point cloud only | ⏳ Pending | | SAFE with PointBERT |
+| **PC + Image** | ⏳ Pending | | Late fusion composition |
 
-**Key Questions**:
-- Does adding modalities improve accuracy?
-- Is there interference between modalities?
-- Which combinations work best?
+**Hypothesis**: Image likely dominates for scene classification (visual appearance is strong signal). May show neutral or small composition benefit.
 
 **Completion Criteria**:
-- [ ] Full composition matrix evaluated
-- [ ] Statistical significance tested
-- [ ] Clear conclusions about composition effects
+- [ ] All three conditions evaluated
+- [ ] Statistical comparison of conditions
+- [ ] Document whether composition helps or hurts
+
+### 4B. NuScenes-QA 3D Question Answering (PC + Image) [RECOMMENDED]
+
+**Dataset**: NuScenes-QA (via Hugging Face - NO REGISTRATION REQUIRED!)
+- ~5,800 QA pairs from autonomous driving scenes (day + night)
+- 5D LiDAR point clouds + 6-view camera images
+- Multi-hop reasoning questions
+- Evaluation: BLEU-1/4, METEOR, exact match
+
+| Split | Day | Night | Total |
+|-------|-----|-------|-------|
+| Train | 2,229 | 659 | 2,888 |
+| Validation | 2,229 | 659 | 2,888 |
+
+**Why NuScenes-QA over ScanQA?**
+- ✅ No registration required (direct HuggingFace download)
+- ✅ Pre-processed and ready to use
+- ✅ Multi-modal: LiDAR + 6 camera views
+- ⚠️ Smaller dataset (~6K vs 41K)
+- ⚠️ Different domain (outdoor driving vs indoor scenes)
+
+**Experiment Scripts**:
+- Training: `train_nuscenes_qa_composition.py`
+- SLURM: `experiments/nuscenes_qa_composition/scripts/train_qa.sh`
+
+| Condition | Status | Exact Match | Notes |
+|-----------|--------|-------------|-------|
+| Image only | ⏳ Ready | | Frozen LLaVA baseline |
+| Point cloud only | ⏳ Ready | | Train SAFE adapter |
+| **PC + Image** | ⏳ Ready | | True composition |
+
+**Architecture (True Composition)**:
+```
+LLaVA: processes input_ids + pixel_values (native image path)
+SAFE: injects PC tokens as residuals at layers [1,5,9,13,17,21]
+Both modalities contribute in single forward pass
+```
+
+**Quick Start**:
+```bash
+# Test dataset (downloads automatically)
+python -c "from safe.data.nuscenes_qa_dataset import NuScenesQADataset; d = NuScenesQADataset(split='train'); print(len(d))"
+
+# Train composition
+python train_nuscenes_qa_composition.py --modality both --scene-type day --output-dir outputs/nuscenes_qa
+```
+
+**Completion Criteria**:
+- [ ] All three conditions evaluated
+- [ ] Day vs night scene comparison
+- [ ] Clear evidence of composition benefit (or lack thereof)
+
+---
+
+### 4C. ScanQA 3D Question Answering (PC + Image) [Alternative - requires registration]
+
+**Dataset**: ScanQA
+- 41,363 QA pairs from 800 ScanNet scenes
+- Question types: spatial, color, counting, object identification
+- Evaluation: BLEU-1/4, METEOR, exact match
+
+**Note**: Requires ScanNet registration (http://www.scan-net.org/)
+
+**Experiment Scripts**:
+- Preprocess: `experiments/scanqa_composition/scripts/preprocess_scanqa.py`
+- Training: `experiments/scanqa_composition/scripts/train_qa.sh`
+
+| Condition | Status | BLEU-4 | METEOR | Notes |
+|-----------|--------|--------|--------|-------|
+| Image only | ⏳ Blocked | | | Needs ScanNet access |
+| Point cloud only | ⏳ Blocked | | | Needs ScanNet access |
+| **PC + Image** | ⏳ Blocked | | | Needs ScanNet access |
+
+**Completion Criteria**:
+- [ ] All three conditions evaluated
+- [ ] Question-type breakdown analysis
+- [ ] Clear evidence of composition benefit (or lack thereof)
+
+### 4D. Key Questions
+
+1. Does adding point cloud to image improve accuracy/metrics?
+2. Does adding image to point cloud improve accuracy/metrics?
+3. Is there interference or synergy between modalities?
+4. Which question types benefit most from composition?
 
 ---
 
@@ -270,23 +357,34 @@ If captioning doesn't work well with our architecture, consider:
 
 ## Current Focus
 
-**Active Phase**: Phase 1A - Audio Classification
+**Active Phase**: Phase 1B (Point Cloud Classification) + Phase 4 (Composition)
 
-**Current Experiment**: ESC-50 5-fold CV (baseline) + ablation planning
+**Completed**:
+- ✅ Phase 1A: ESC-50 Audio Classification - **97.35% ± 0.45%** (near-SOTA)
+- ✅ NuScenes-QA composition infrastructure (ready to run!)
+
+**Current Experiments**:
+1. **ModelNet40 Point Cloud Classification** - Training in progress
+   - Current: ~81% accuracy with cosine LR
+   - Config: 500 epochs, constant LR, full augmentation
+   - Target: 90%+ accuracy
+
+2. **NuScenes-QA Composition** - Ready to run! (NO REGISTRATION REQUIRED)
+   - Dataset: ~5.8K QA pairs (day + night driving scenes)
+   - Modalities: 5D LiDAR + 6-view cameras
+   - Training script: `train_nuscenes_qa_composition.py`
+
+3. **ScanNet/ScanQA Composition** - Blocked (optional, larger dataset)
+   - Requires ScanNet registration (http://www.scan-net.org/)
 
 **Blocking Issues**:
-- None
+- ScanNet requires registration (use NuScenes-QA instead!)
 
 **Next Steps**:
-1. ✅ ~~Download ESC-50 dataset~~
-2. ✅ ~~Run baseline single-fold (94.50% on fold 5)~~
-3. 🔄 Run full 5-fold CV: `sbatch experiments/esc50_classification/scripts/train_5fold.sh`
-4. Plan ablations to push above 94.5%:
-   - More fusion layers (10 instead of 6)
-   - Higher SAFE LR (2e-4)
-   - Label smoothing (0.1)
-   - SpecAugment
-   - Unfreeze CLAP encoder
+1. 🔄 Complete ModelNet40 training runs, push to 90%+
+2. ✅ Run NuScenes-QA composition experiments (no registration needed!)
+3. ⏳ Analyze composition results by question type
+4. ⏳ (Optional) Register for ScanNet for larger-scale experiments
 
 ---
 
@@ -301,6 +399,32 @@ If captioning doesn't work well with our architecture, consider:
 ---
 
 ## Experiment Log
+
+### Week of 02/03/2026
+
+**Completed**:
+- ESC-50 5-fold CV complete: **97.35% ± 0.45%** (kitchen_sink config)
+- ModelNet40 baseline experiments started
+- ScanNet composition experiment infrastructure created
+- ScanQA QA composition experiment infrastructure created
+- **NuScenes-QA composition infrastructure created** (no registration required!)
+  - Dataset loader: `safe/data/nuscenes_qa_dataset.py`
+  - Training script: `train_nuscenes_qa_composition.py`
+  - SLURM script: `experiments/nuscenes_qa_composition/scripts/train_qa.sh`
+
+**In Progress**:
+- ModelNet40 training with constant LR (targeting 90%+)
+- NuScenes-QA composition experiments ready to run
+
+**Blocked**:
+- ScanNet requires registration (but NuScenes-QA is ready as alternative!)
+
+**Learnings**:
+- ESC-50: Mixup + label smoothing + unfreezing CLAP gave best results
+- ModelNet40: Cosine LR scheduler caused plateau at ~81% (LR decayed too fast)
+- Changed to constant LR with 500 epochs for point cloud experiments
+- QA tasks may be better for demonstrating composition benefits than classification
+- NuScenes-QA is excellent alternative to ScanQA - no registration, HuggingFace hosted
 
 ### Week of 01/30/2026
 
@@ -351,22 +475,21 @@ If captioning doesn't work well with our architecture, consider:
 |-------|----------|-------|
 | BEATs | 98.1% | Current SOTA |
 | **SAFE (ours)** | **97.35% ± 0.45%** | **Beats CLAP by 0.65%** |
-| CLAP | 96.7% | Our encoder (frozen) |
-| AST | 95.7% | |
-| Human | 81.3% |
-| **SAFE (ours)** | ____% |
+| CLAP | 96.7% | Our encoder (frozen in baseline) |
+| AST | 95.7% | Audio Spectrogram Transformer |
+| Human | 81.3% | Human baseline |
 
-**Best Configuration**:
+**Best Configuration (kitchen_sink_8tok)**:
 ```
-Encoder: CLAP (frozen/unfrozen: ___)
-Fusion layers:
-Num tokens:
-Learning rate (projector):
-Learning rate (adapter):
-Epochs:
-Batch size:
-Gradient accumulation:
-Other settings:
+Encoder: CLAP (unfreeze last 2 layers)
+Fusion layers: 1,5,9,13,17,21 (6 layers)
+Num tokens: 8
+Learning rate (SAFE): 6e-5
+Learning rate (head): 1e-3
+Epochs: 50
+Batch size: 16
+Mixup alpha: 0.3
+Label smoothing: 0.1
 ```
 
 **Ablation Results**:

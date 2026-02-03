@@ -345,10 +345,17 @@ class SAFEPointCloudModel(nn.Module):
         labels: Optional[torch.Tensor] = None,
         pointcloud: Optional[Union[torch.Tensor, List]] = None,
         pointcloud_tokens: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
         Forward pass with point cloud fusion.
+
+        Supports three modes:
+        - PC only: input_ids + pointcloud (text-only input, PC fusion)
+        - Image only: input_ids + pixel_values (LLaVA native, no PC fusion)
+        - Both (composition): input_ids + pixel_values + pointcloud
+          LLaVA processes image+text, SAFE adds PC residuals via fusion
 
         Args:
             input_ids: Text input token IDs
@@ -356,6 +363,7 @@ class SAFEPointCloudModel(nn.Module):
             labels: Target labels for loss computation
             pointcloud: Raw point cloud input
             pointcloud_tokens: Pre-computed point cloud tokens
+            pixel_values: Image pixel values for LLaVA (enables composition)
 
         Returns:
             Dictionary with logits and optional loss
@@ -374,17 +382,8 @@ class SAFEPointCloudModel(nn.Module):
             print(f"[DEBUG] PC tokens: shape={tuple(pointcloud_tokens.shape)}, "
                   f"finite={pc_finite}, min={pc_min:.4f}, max={pc_max:.4f}, mean={pc_mean:.4f}", flush=True)
 
-        # Get text embeddings
-        inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
-
-        # Debug: check input embeddings
-        if not hasattr(self, '_embed_debug_logged'):
-            self._embed_debug_logged = True
-            emb_finite = torch.isfinite(inputs_embeds).all()
-            emb_min = inputs_embeds.min().item()
-            emb_max = inputs_embeds.max().item()
-            print(f"[DEBUG] Input embeds: shape={tuple(inputs_embeds.shape)}, "
-                  f"finite={emb_finite}, min={emb_min:.4f}, max={emb_max:.4f}", flush=True)
+        # Determine if we're doing composition (image + PC)
+        use_composition = pixel_values is not None
 
         # Determine fusion mode
         use_midlayer_hooks = (
@@ -395,13 +394,7 @@ class SAFEPointCloudModel(nn.Module):
         )
 
         if use_midlayer_hooks:
-            # Align dtypes
-            pointcloud_tokens = pointcloud_tokens.to(
-                device=inputs_embeds.device,
-                dtype=inputs_embeds.dtype,
-            )
-
-            # Set up fusion layers mapping (mirrors audio SAFE)
+            # Set up fusion layers mapping
             fusion_layers = {"pointcloud": self.fusion_layer_indices}
             modality_tokens = {"pointcloud": pointcloud_tokens}
 
@@ -412,6 +405,15 @@ class SAFEPointCloudModel(nn.Module):
                 fusion_layers=fusion_layers,
                 injection_point=self.fusion_injection_point,
             )
+
+            # Align PC tokens dtype with model
+            target_dtype = next(self.base_vl.llm.parameters()).dtype
+            pointcloud_tokens = pointcloud_tokens.to(
+                device=input_ids.device,
+                dtype=target_dtype,
+            )
+            modality_tokens = {"pointcloud": pointcloud_tokens}
+
             hook_manager.register_hooks(
                 modality_tokens=modality_tokens,
                 modality_masks=None,
@@ -423,17 +425,32 @@ class SAFEPointCloudModel(nn.Module):
             # Debug: log hook info once
             if not hasattr(self, '_hook_debug_logged'):
                 self._hook_debug_logged = True
-                print(f"[DEBUG] Hooks registered: num_hooks={hook_manager.num_hooks}, "
+                mode = "composition (image+PC)" if use_composition else "PC-only"
+                print(f"[DEBUG] Hooks registered ({mode}): num_hooks={hook_manager.num_hooks}, "
                       f"layers={fusion_layers}, injection={self.fusion_injection_point}", flush=True)
 
             try:
-                outputs = self.base_vl.llm(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                    use_cache=False,
-                    **kwargs,
-                )
+                if use_composition:
+                    # COMPOSITION MODE: Let LLaVA process image+text natively,
+                    # while SAFE hooks inject PC tokens as residuals
+                    outputs = self.base_vl.llm(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        pixel_values=pixel_values,
+                        labels=labels,
+                        use_cache=False,
+                        **kwargs,
+                    )
+                else:
+                    # PC-ONLY MODE: Use text embeddings directly (no image)
+                    inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                    outputs = self.base_vl.llm(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                        use_cache=False,
+                        **kwargs,
+                    )
             finally:
                 hook_manager.remove_hooks()
 
@@ -454,22 +471,46 @@ class SAFEPointCloudModel(nn.Module):
             )
 
             # KV augmentation wrapper does not support caching in forward.
-            outputs = self.base_vl.llm(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                labels=labels,
-                use_cache=False,
-                **kwargs,
-            )
+            if use_composition:
+                outputs = self.base_vl.llm(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    labels=labels,
+                    use_cache=False,
+                    **kwargs,
+                )
+            else:
+                inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                outputs = self.base_vl.llm(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    use_cache=False,
+                    **kwargs,
+                )
         else:
-            # No fusion or unsupported fusion type
-            outputs = self.base_vl.llm(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                labels=labels,
-                use_cache=False,
-                **kwargs,
-            )
+            # No PC fusion - just process image+text or text-only
+            if use_composition:
+                # Image + text through LLaVA (no PC)
+                outputs = self.base_vl.llm(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    labels=labels,
+                    use_cache=False,
+                    **kwargs,
+                )
+            else:
+                # Text-only
+                inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                outputs = self.base_vl.llm(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    use_cache=False,
+                    **kwargs,
+                )
 
         # Debug: check outputs
         if not hasattr(self, '_output_debug_logged'):
@@ -513,18 +554,25 @@ class SAFEPointCloudModel(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         pointcloud: Optional[Union[torch.Tensor, List]] = None,
         pointcloud_tokens: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
         max_new_tokens: int = 50,
         num_beams: int = 5,
         **generate_kwargs,
     ) -> torch.Tensor:
         """
-        Generate text conditioned on point cloud.
+        Generate text conditioned on point cloud (and optionally images).
+
+        Supports:
+        - PC only: input_ids + pointcloud
+        - Composition: input_ids + pixel_values + pointcloud
+          (LLaVA processes image+text, SAFE injects PC residuals)
 
         Args:
             input_ids: Input token IDs (prompt)
             attention_mask: Attention mask
             pointcloud: Raw point cloud input
             pointcloud_tokens: Pre-computed tokens
+            pixel_values: Image pixel values for composition mode
             max_new_tokens: Maximum new tokens to generate
             num_beams: Beam search width
 
@@ -535,8 +583,8 @@ class SAFEPointCloudModel(nn.Module):
         if pointcloud_tokens is None and pointcloud is not None:
             pointcloud_tokens = self.encode_pointcloud(pointcloud)
 
-        # Get embeddings
-        inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+        # Determine if we're doing composition (image + PC)
+        use_composition = pixel_values is not None
 
         # Determine fusion mode
         use_midlayer_hooks = (
@@ -548,9 +596,10 @@ class SAFEPointCloudModel(nn.Module):
 
         if use_midlayer_hooks:
             # Align dtypes
+            target_dtype = next(self.base_vl.llm.parameters()).dtype
             pointcloud_tokens = pointcloud_tokens.to(
-                device=inputs_embeds.device,
-                dtype=inputs_embeds.dtype,
+                device=input_ids.device,
+                dtype=target_dtype,
             )
 
             # Set up fusion layers mapping
@@ -573,13 +622,26 @@ class SAFEPointCloudModel(nn.Module):
             )
 
             try:
-                outputs = self.base_vl.llm.generate(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attention_mask,
-                    max_new_tokens=max_new_tokens,
-                    num_beams=num_beams,
-                    **generate_kwargs,
-                )
+                if use_composition:
+                    # COMPOSITION: LLaVA processes image+text, SAFE adds PC residuals
+                    outputs = self.base_vl.llm.generate(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        pixel_values=pixel_values,
+                        max_new_tokens=max_new_tokens,
+                        num_beams=num_beams,
+                        **generate_kwargs,
+                    )
+                else:
+                    # PC-only: use text embeddings directly
+                    inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                    outputs = self.base_vl.llm.generate(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=attention_mask,
+                        max_new_tokens=max_new_tokens,
+                        num_beams=num_beams,
+                        **generate_kwargs,
+                    )
             finally:
                 hook_manager.remove_hooks()
 
@@ -600,22 +662,46 @@ class SAFEPointCloudModel(nn.Module):
                 generate_kwargs = dict(generate_kwargs)
                 generate_kwargs["use_cache"] = False
 
-            outputs = self.base_vl.llm.generate(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                num_beams=num_beams,
-                **generate_kwargs,
-            )
+            if use_composition:
+                outputs = self.base_vl.llm.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    max_new_tokens=max_new_tokens,
+                    num_beams=num_beams,
+                    **generate_kwargs,
+                )
+            else:
+                inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                outputs = self.base_vl.llm.generate(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    max_new_tokens=max_new_tokens,
+                    num_beams=num_beams,
+                    **generate_kwargs,
+                )
         else:
-            # No fusion
-            outputs = self.base_vl.llm.generate(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                num_beams=num_beams,
-                **generate_kwargs,
-            )
+            # No PC fusion
+            if use_composition:
+                # Image + text through LLaVA (no PC)
+                outputs = self.base_vl.llm.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    max_new_tokens=max_new_tokens,
+                    num_beams=num_beams,
+                    **generate_kwargs,
+                )
+            else:
+                # Text only
+                inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                outputs = self.base_vl.llm.generate(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    max_new_tokens=max_new_tokens,
+                    num_beams=num_beams,
+                    **generate_kwargs,
+                )
 
         return outputs
 

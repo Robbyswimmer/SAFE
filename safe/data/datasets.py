@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Dataset helpers and dataloaders for SAFE training."""
 
 from __future__ import annotations
@@ -35,8 +36,8 @@ class LazyJSONLReader:
     """
     Memory-efficient JSONL reader that stores only line offsets, not full data.
 
-    Instead of loading all JSON objects into memory (~500 bytes each × 400K = 200MB),
-    we store only byte offsets (~8 bytes each × 400K = 3.2MB) and read on demand.
+    Instead of loading all JSON objects into memory (~500 bytes each x 400K = 200MB),
+    we store only byte offsets (~8 bytes each x 400K = 3.2MB) and read on demand.
 
     This reduces memory by ~60x for large datasets like WavCaps.
     """
