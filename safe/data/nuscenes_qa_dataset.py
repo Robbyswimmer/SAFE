@@ -64,6 +64,7 @@ class NuScenesQADataset(Dataset):
         augment: bool = None,
         transform=None,
         cache_dir: Optional[str] = None,
+        use_streaming: bool = True,  # Use streaming to avoid Arrow file issues
     ):
         """
         Initialize NuScenes-QA dataset.
@@ -79,6 +80,7 @@ class NuScenesQADataset(Dataset):
             augment: Whether to apply augmentation (default: True for train)
             transform: Optional image transform
             cache_dir: Optional Hugging Face cache directory
+            use_streaming: Use streaming mode to avoid Arrow file corruption issues
         """
         if not HF_AVAILABLE:
             raise ImportError(
@@ -95,6 +97,7 @@ class NuScenesQADataset(Dataset):
         self.camera_view = camera_view
         self.augment = augment if augment is not None else (self.split == "train")
         self.transform = transform
+        self.use_streaming = use_streaming
 
         # Camera views available
         self.camera_views = [
@@ -104,14 +107,31 @@ class NuScenesQADataset(Dataset):
 
         # Load from Hugging Face
         print(f"[NuScenes-QA] Loading {self.scene_type} {self.split} from Hugging Face...")
-        self.hf_dataset = hf_load_dataset(
-            "KevinNotSmile/nuscenes-qa-mini",
-            self.scene_type,
-            split=self.split,
-            cache_dir=cache_dir,
-        )
 
-        print(f"[NuScenes-QA] Loaded {len(self.hf_dataset)} samples ({self.scene_type}, {self.split}, modality={modality})")
+        if use_streaming:
+            # Use streaming mode to avoid Arrow file corruption issues
+            print("[NuScenes-QA] Using streaming mode (converting to list)...")
+            streaming_dataset = hf_load_dataset(
+                "KevinNotSmile/nuscenes-qa-mini",
+                self.scene_type,
+                split=self.split,
+                streaming=True,
+                cache_dir=cache_dir,
+            )
+            # Convert streaming dataset to list for random access
+            self.samples = list(streaming_dataset)
+            self.hf_dataset = None
+            print(f"[NuScenes-QA] Loaded {len(self.samples)} samples ({self.scene_type}, {self.split}, modality={modality})")
+        else:
+            # Try normal loading (may fail with Arrow file issues)
+            self.hf_dataset = hf_load_dataset(
+                "KevinNotSmile/nuscenes-qa-mini",
+                self.scene_type,
+                split=self.split,
+                cache_dir=cache_dir,
+            )
+            self.samples = None
+            print(f"[NuScenes-QA] Loaded {len(self.hf_dataset)} samples ({self.scene_type}, {self.split}, modality={modality})")
 
         # Build answer vocabulary
         self._build_answer_vocab()
@@ -119,7 +139,8 @@ class NuScenesQADataset(Dataset):
     def _build_answer_vocab(self):
         """Build mapping of answers to indices."""
         unique_answers = set()
-        for sample in self.hf_dataset:
+        data_source = self.samples if self.samples is not None else self.hf_dataset
+        for sample in data_source:
             unique_answers.add(sample["answer"])
         self.answer_to_idx = {a: i for i, a in enumerate(sorted(unique_answers))}
         self.idx_to_answer = {i: a for a, i in self.answer_to_idx.items()}
@@ -127,6 +148,8 @@ class NuScenesQADataset(Dataset):
         print(f"[NuScenes-QA] Found {len(self.ANSWER_CLASSES)} unique answer classes")
 
     def __len__(self) -> int:
+        if self.samples is not None:
+            return len(self.samples)
         return len(self.hf_dataset)
 
     def _process_pointcloud(self, lidar_data: List) -> np.ndarray:
@@ -225,7 +248,10 @@ class NuScenesQADataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """Get a sample."""
-        sample = self.hf_dataset[idx]
+        if self.samples is not None:
+            sample = self.samples[idx]
+        else:
+            sample = self.hf_dataset[idx]
 
         result = {
             "sample_id": sample.get("token", f"{self.scene_type}_{idx}"),
@@ -267,7 +293,10 @@ class NuScenesQADataset(Dataset):
 
     def get_all_camera_views(self, idx: int) -> Dict[str, Image.Image]:
         """Get all 6 camera views for a sample."""
-        sample = self.hf_dataset[idx]
+        if self.samples is not None:
+            sample = self.samples[idx]
+        else:
+            sample = self.hf_dataset[idx]
         views = {}
         for view in self.camera_views:
             img_data = sample.get(view)
@@ -317,8 +346,13 @@ def collate_nuscenes_qa_batch(batch: List[Dict]) -> Dict[str, Any]:
     return result
 
 
-def download_nuscenes_qa(cache_dir: Optional[str] = None):
-    """Download NuScenes-QA dataset from Hugging Face."""
+def download_nuscenes_qa(cache_dir: Optional[str] = None, use_streaming: bool = True):
+    """Download NuScenes-QA dataset from Hugging Face.
+
+    Args:
+        cache_dir: Optional cache directory for HuggingFace
+        use_streaming: Use streaming mode to avoid Arrow file corruption issues
+    """
     if not HF_AVAILABLE:
         raise ImportError(
             "Hugging Face datasets required. Install with: pip install datasets"
@@ -326,17 +360,33 @@ def download_nuscenes_qa(cache_dir: Optional[str] = None):
 
     print("Downloading NuScenes-QA dataset from Hugging Face...")
     print("This dataset is freely available - no registration required!")
+    if use_streaming:
+        print("Using streaming mode to avoid Arrow file issues...")
     print()
 
     for scene_type in ["day", "night"]:
         for split in ["train", "validation"]:
-            print(f"  Downloading {scene_type}/{split}...")
-            hf_load_dataset(
-                "KevinNotSmile/nuscenes-qa-mini",
-                scene_type,
-                split=split,
-                cache_dir=cache_dir,
-            )
+            print(f"  Loading {scene_type}/{split}...")
+            if use_streaming:
+                ds = hf_load_dataset(
+                    "KevinNotSmile/nuscenes-qa-mini",
+                    scene_type,
+                    split=split,
+                    streaming=True,
+                    cache_dir=cache_dir,
+                )
+                # Iterate to verify it works
+                count = 0
+                for _ in ds:
+                    count += 1
+                print(f"    -> {count} samples")
+            else:
+                hf_load_dataset(
+                    "KevinNotSmile/nuscenes-qa-mini",
+                    scene_type,
+                    split=split,
+                    cache_dir=cache_dir,
+                )
 
     print()
     print("Download complete!")
