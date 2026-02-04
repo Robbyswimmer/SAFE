@@ -119,7 +119,13 @@ class NuScenesQADataset(Dataset):
                 cache_dir=cache_dir,
             )
             # Convert streaming dataset to list for random access
-            self.samples = list(streaming_dataset)
+            # Use try/except to handle corrupted metadata files at end of stream
+            self.samples = []
+            try:
+                for sample in streaming_dataset:
+                    self.samples.append(sample)
+            except Exception as e:
+                print(f"[NuScenes-QA] Stopped streaming after {len(self.samples)} samples ({type(e).__name__})")
             self.hf_dataset = None
             print(f"[NuScenes-QA] Loaded {len(self.samples)} samples ({self.scene_type}, {self.split}, modality={modality})")
         else:
