@@ -723,6 +723,12 @@ Other settings:
 - Compare `pre_ffn` vs `kv_augment` under the same QA task and data manifest.
 - Measure modality utilization by evaluating `both`, `image`, and `audio` modes.
 
+**ECCV Dataset Lock (Pre-FFN Only)**:
+- Primary composition benchmark: `MUSIC-AVQA` (main table for ECCV).
+- Secondary composition benchmark: `EPIC-SOUNDS AVQA` (egocentric transfer/realism track).
+- Supplemental benchmark: `General AVQA` (appendix or robustness table if time allows).
+- KV-augment runs are excluded from ECCV main claims and tracked for NeurIPS follow-up.
+
 **Experiment Package**:
 - `experiments/epic_sounds_avqa_composition/README.md`
 - `experiments/epic_sounds_avqa_composition/train_epic_sounds_avqa.py`
@@ -814,7 +820,7 @@ Updated: 2026-02-06
 
 **Scope Lock (by February 10, 2026)**
 - [ ] Freeze ECCV method scope to Pre-FFN residual only (no new architecture additions).
-- [ ] Freeze ECCV datasets/tasks: ESC-50, ModelNet40, and one composition QA track.
+- [ ] Freeze ECCV datasets/tasks: ESC-50, ModelNet40, MUSIC-AVQA (primary composition), EPIC-SOUNDS AVQA (secondary composition).
 - [ ] Freeze evaluation metrics and prompt formats for all ECCV tables.
 
 **Experiment Lock (by February 12, 2026)**
