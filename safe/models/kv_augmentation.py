@@ -749,6 +749,32 @@ class KVAugmentationHookManager:
         self.original_attentions: Dict[int, nn.Module] = {}
         self.wrapped_attentions: Dict[int, KVAugmentedAttention] = {}
         self._is_wrapped = False
+        # Diagnostics alerting (helps catch collapse/dominance early)
+        self._alerts_enabled: bool = True
+        self._alert_log_every: int = 100
+        self._alert_counter: int = 0
+        self._rms_ratio_low: float = 0.01
+        self._rms_ratio_high: float = 0.40
+        self._entropy_low: float = 0.15
+        self._entropy_high: float = 0.98
+
+    def configure_alerts(
+        self,
+        *,
+        enabled: bool = True,
+        log_every: int = 100,
+        rms_ratio_low: float = 0.01,
+        rms_ratio_high: float = 0.40,
+        entropy_low: float = 0.15,
+        entropy_high: float = 0.98,
+    ) -> None:
+        """Configure threshold-based diagnostics alerts."""
+        self._alerts_enabled = bool(enabled)
+        self._alert_log_every = max(1, int(log_every))
+        self._rms_ratio_low = float(rms_ratio_low)
+        self._rms_ratio_high = float(rms_ratio_high)
+        self._entropy_low = float(entropy_low)
+        self._entropy_high = float(entropy_high)
 
     def _discover_layer_modules(self, model: nn.Module) -> Dict[int, nn.Module]:
         """
@@ -923,7 +949,7 @@ class KVAugmentationHookManager:
         - text_rms: RMS of text attention output
         - audio_rms: RMS of gated audio output
         - rms_ratio: audio_rms / text_rms (want 1%-10%)
-        - audio_attn_mass: mean attention mass to audio tokens
+        - normalized_entropy: mean normalized entropy of audio attention
         - gate: current gate value
         """
         diagnostics = {}
@@ -981,6 +1007,35 @@ class KVAugmentationHookManager:
         if dq_ratios:
             log_dict[f"{prefix}mean/delta_q_ratio"] = sum(dq_ratios) / len(dq_ratios)
 
+        # Alert metrics and sparse console warnings
+        self._alert_counter += 1
+        mean_rms = log_dict.get(f"{prefix}mean/rms_ratio")
+        mean_entropy = log_dict.get(f"{prefix}mean/normalized_entropy")
+        if mean_rms is not None:
+            log_dict[f"{prefix}alert/rms_too_low"] = float(mean_rms < self._rms_ratio_low)
+            log_dict[f"{prefix}alert/rms_too_high"] = float(mean_rms > self._rms_ratio_high)
+        if mean_entropy is not None:
+            log_dict[f"{prefix}alert/entropy_too_low"] = float(mean_entropy < self._entropy_low)
+            log_dict[f"{prefix}alert/entropy_too_high"] = float(mean_entropy > self._entropy_high)
+
+        if (
+            self._alerts_enabled
+            and (self._alert_counter % self._alert_log_every) == 0
+            and mean_rms is not None
+            and mean_entropy is not None
+        ):
+            warn_parts = []
+            if mean_rms < self._rms_ratio_low:
+                warn_parts.append(f"rms_ratio too low ({mean_rms:.4f} < {self._rms_ratio_low:.4f})")
+            if mean_rms > self._rms_ratio_high:
+                warn_parts.append(f"rms_ratio too high ({mean_rms:.4f} > {self._rms_ratio_high:.4f})")
+            if mean_entropy < self._entropy_low:
+                warn_parts.append(f"entropy too low ({mean_entropy:.4f} < {self._entropy_low:.4f})")
+            if mean_entropy > self._entropy_high:
+                warn_parts.append(f"entropy too high ({mean_entropy:.4f} > {self._entropy_high:.4f})")
+            if warn_parts:
+                print(f"[KVAugmentAlert] {'; '.join(warn_parts)}", flush=True)
+
         return log_dict
 
 
@@ -1001,11 +1056,21 @@ class MinAudioAttentionLoss(nn.Module):
         min_attention: float = 0.1,
         loss_weight: float = 1.0,
         answer_tokens_k: int = 8,  # Only apply to last k tokens (answer-decision)
+        min_entropy: float = 0.20,
+        max_entropy: float = 0.98,
+        max_token_attention: float = 0.95,
+        entropy_weight: float = 1.0,
+        dominance_weight: float = 0.5,
     ):
         super().__init__()
         self.min_attention = min_attention
         self.loss_weight = loss_weight
         self.answer_tokens_k = answer_tokens_k
+        self.min_entropy = min_entropy
+        self.max_entropy = max_entropy
+        self.max_token_attention = max_token_attention
+        self.entropy_weight = entropy_weight
+        self.dominance_weight = dominance_weight
 
         # For curriculum scheduling
         self._initial_min_attention = min_attention
@@ -1062,14 +1127,8 @@ class MinAudioAttentionLoss(nn.Module):
         for layer_idx, attn in attention_weights.items():
             bsz, heads, q_len, k_len = attn.shape
 
-            # Extract attention to audio positions
-            # Note: with separate branches, audio attention is over n_audio tokens only
-            # so we take all of it, not last n_audio
-            audio_attn = attn  # (bsz, heads, q_len, n_audio) - already just audio attention
-
-            # Sum attention to audio per query position (should sum to ~1.0 per position)
-            # Use sum not mean since softmax sums to 1
-            sum_audio_attn = audio_attn.sum(dim=-1)  # (bsz, heads, q_len)
+            # In KV separate-branch mode, `attn` is already attention over audio tokens.
+            audio_attn = attn  # (bsz, heads, q_len, n_audio)
 
             # Create mask for answer-decision tokens (last k positions)
             if supervised_mask is not None:
@@ -1080,13 +1139,36 @@ class MinAudioAttentionLoss(nn.Module):
                 k = min(self.answer_tokens_k, q_len)
                 mask[:, :, -k:] = 1.0
 
-            # Apply mask - only penalize on answer-decision tokens
-            masked_attn = sum_audio_attn * mask
-            denom = mask.sum() * heads  # num answer positions * heads
+            # Per-position valid count (answer tokens only)
+            denom = (mask.sum() * heads).clamp(min=1.0)
 
-            # Hinge loss: penalize if below minimum
-            deficit = F.relu(self.min_attention - masked_attn)
-            layer_loss = deficit.sum() / max(denom, 1)
+            # 1) Entropy-band regularization to avoid collapse or full-uniform attention.
+            # Normalize by log(K) so thresholds are stable across token counts.
+            p = audio_attn.clamp(min=1e-8)
+            entropy = -(p * p.log()).sum(dim=-1)  # (bsz, heads, q_len)
+            norm_denom = math.log(float(max(k_len, 2)))
+            normalized_entropy = entropy / norm_denom
+            entropy_low = F.relu(self.min_entropy - normalized_entropy)
+            entropy_high = F.relu(normalized_entropy - self.max_entropy)
+            entropy_loss = ((entropy_low + entropy_high) * mask).sum() / denom
+
+            # 2) Dominance regularization: discourage single-token takeover.
+            max_token_mass = audio_attn.max(dim=-1).values  # (bsz, heads, q_len)
+            dominance_deficit = F.relu(max_token_mass - self.max_token_attention)
+            dominance_loss = (dominance_deficit * mask).sum() / denom
+
+            # 3) Legacy minimum-attention term (kept for backward compatibility).
+            # In separate-branch mode sum(attn)=1, so this contributes only when
+            # users set min_attention > 1 or custom wrappers change behavior.
+            sum_audio_attn = audio_attn.sum(dim=-1)
+            min_attn_deficit = F.relu(self.min_attention - sum_audio_attn)
+            min_attn_loss = (min_attn_deficit * mask).sum() / denom
+
+            layer_loss = (
+                min_attn_loss
+                + self.entropy_weight * entropy_loss
+                + self.dominance_weight * dominance_loss
+            )
 
             total_loss = total_loss + layer_loss
             count += 1
@@ -1101,6 +1183,11 @@ class MinAudioAttentionLoss(nn.Module):
         return {
             "min_audio_attention": self.min_attention,
             "min_audio_attention_weight": self.loss_weight,
+            "min_audio_entropy": self.min_entropy,
+            "max_audio_entropy": self.max_entropy,
+            "max_audio_token_attention": self.max_token_attention,
+            "entropy_weight": self.entropy_weight,
+            "dominance_weight": self.dominance_weight,
         }
 
 

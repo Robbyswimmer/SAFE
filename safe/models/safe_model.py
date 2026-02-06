@@ -220,6 +220,7 @@ class SAFEModel(nn.Module):
         self.kv_adapters = None
         self.kv_hook_manager = None
         self.min_audio_attention_loss = None
+        self.kv_modality_dropout_prob = 0.0
 
         if self.enable_kv_augmentation:
             print(f"[SAFE] Initializing KV Augmentation adapters...", flush=True)
@@ -294,8 +295,22 @@ class SAFEModel(nn.Module):
                 self.min_audio_attention_loss = MinAudioAttentionLoss(
                     min_attention=min_audio_attn,
                     loss_weight=fusion_config.get("min_audio_attention_weight", 0.1),
+                    min_entropy=fusion_config.get("min_audio_attention_entropy_min", 0.20),
+                    max_entropy=fusion_config.get("min_audio_attention_entropy_max", 0.98),
+                    max_token_attention=fusion_config.get("max_audio_token_attention", 0.95),
+                    entropy_weight=fusion_config.get("audio_attention_entropy_weight", 1.0),
+                    dominance_weight=fusion_config.get("audio_attention_dominance_weight", 0.5),
                 )
                 print(f"[SAFE] ✓ Min audio attention regularization enabled (ε={min_audio_attn})", flush=True)
+
+            # Training robustness: randomly mask audio for a subset of samples.
+            # This is modality dropout at the attention-mask level.
+            self.kv_modality_dropout_prob = float(fusion_config.get("kv_modality_dropout_prob", 0.0) or 0.0)
+            if self.kv_modality_dropout_prob > 0:
+                print(
+                    f"[SAFE] ✓ KV modality dropout enabled (p={self.kv_modality_dropout_prob:.3f})",
+                    flush=True,
+                )
 
             print(f"[SAFE] ✓ KV Augmentation adapters initialized at layers {kv_fusion_layers}", flush=True)
 
@@ -304,6 +319,14 @@ class SAFEModel(nn.Module):
                 model=self.base_vl.llm,
                 kv_adapters=self.kv_adapters,
                 fusion_layer_indices=self._kv_fusion_layers,
+            )
+            self.kv_hook_manager.configure_alerts(
+                enabled=bool(fusion_config.get("kv_alerts_enabled", True)),
+                log_every=int(fusion_config.get("kv_alert_log_every", 100) or 100),
+                rms_ratio_low=float(fusion_config.get("kv_alert_rms_ratio_low", 0.01) or 0.01),
+                rms_ratio_high=float(fusion_config.get("kv_alert_rms_ratio_high", 0.40) or 0.40),
+                entropy_low=float(fusion_config.get("kv_alert_entropy_low", 0.15) or 0.15),
+                entropy_high=float(fusion_config.get("kv_alert_entropy_high", 0.98) or 0.98),
             )
             self.kv_hook_manager.wrap_attention_modules()
             print(f"[SAFE] ✓ KV hook manager initialized and attention modules wrapped", flush=True)
@@ -1692,6 +1715,24 @@ class SAFEModel(nn.Module):
                 and torch.is_tensor(audio_attention_mask)
                 and audio_attention_mask.dim() == 2
             ):
+                # KV modality dropout: randomly disable audio for a subset of samples
+                # during training to reduce over-reliance on any single modality.
+                if (
+                    self.training
+                    and self.enable_kv_augmentation
+                    and self.kv_modality_dropout_prob > 0.0
+                ):
+                    drop_mask = (
+                        torch.rand(
+                            (audio_attention_mask.size(0),),
+                            device=audio_attention_mask.device,
+                        )
+                        < self.kv_modality_dropout_prob
+                    )
+                    if drop_mask.any():
+                        audio_attention_mask = audio_attention_mask.clone()
+                        audio_attention_mask[drop_mask] = 0
+
                 mask_on_device = audio_attention_mask.to(device=inputs_embeds.device)
                 silent_mask = mask_on_device.sum(dim=1) <= 0
                 if silent_mask.any():

@@ -810,6 +810,76 @@ Updated: 2026-02-06
 
 ---
 
+## ECCV Finalization Checklist (Current -> Submission)
+
+**Scope Lock (by February 10, 2026)**
+- [ ] Freeze ECCV method scope to Pre-FFN residual only (no new architecture additions).
+- [ ] Freeze ECCV datasets/tasks: ESC-50, ModelNet40, and one composition QA track.
+- [ ] Freeze evaluation metrics and prompt formats for all ECCV tables.
+
+**Experiment Lock (by February 12, 2026)**
+- [ ] Define final run matrix with exact configs/seeds in one file (`configs/` + script args).
+- [ ] Define run IDs and output directories for every main table row.
+- [ ] Define ablation subsets that are in-scope for ECCV and defer all others.
+
+**Phase 1A Audio (Finalize by February 18, 2026)**
+- [ ] Fill final ESC-50 5-fold mean ± std in `Phase 1A` table.
+- [ ] Fill per-fold table fully (fold1..fold5) and best-epoch metadata.
+- [ ] Fill ablation table deltas (layers/tokens/unfreeze/mixup/label smoothing).
+- [ ] Archive training curves under `experiments/esc50_classification/outputs/`.
+
+**Phase 1B Point Cloud (Finalize by February 22, 2026)**
+- [ ] Fill final ModelNet40 test accuracy in `Phase 1B` section.
+- [ ] Fill point cloud ablation table with deltas and training-time notes.
+- [ ] Select one final config and mark all non-winning runs as exploratory.
+
+**Composition QA (Finalize by February 26, 2026)**
+- [ ] Run composition matrix with controlled modalities (image/audio/both).
+- [ ] Fill composition table with exact metrics and sample counts.
+- [ ] Add qualitative examples that explicitly demonstrate cross-modal grounding.
+- [ ] Confirm at least one “object + action” success case in outputs.
+
+**Statistical and Robustness Checks (by February 28, 2026)**
+- [ ] Add confidence intervals or seed variance for primary claims.
+- [ ] Run significance tests for core comparisons and fill p-value table.
+- [ ] Document known failure modes and one negative result case.
+
+**Paper Assets Freeze (by March 2, 2026)**
+- [ ] Export final figures (architecture, curves, qualitative grid).
+- [ ] Export final tables (main + appendix) from run artifacts, not manual edits.
+- [ ] Generate one reproducibility manifest (configs, seeds, checkpoints, commit hash).
+
+**Writing and Internal Review (March 3, 2026 to March 13, 2026)**
+- [ ] Draft complete narrative around Pre-FFN contribution and limitations.
+- [ ] Add related work positioning specific to residual fusion and multimodal adapters.
+- [ ] Complete appendix: hyperparameters, compute budget, dataset prep details.
+- [ ] Perform one full internal technical review pass and resolve all blocking comments.
+
+**Submission Readiness (March 16, 2026 to March 20, 2026)**
+- [ ] Freeze all ECCV numbers and lock manuscript.
+- [ ] Verify every claim maps to a table/figure or appendix citation.
+- [ ] Verify anonymity and supplementary package completeness.
+- [ ] Submit ECCV package.
+
+**Owner Execution Board**
+
+| Workstream | Output Artifact | Status |
+|------------|------------------|--------|
+| Audio classification final | `docs/RESEARCH_AGENDA.md` Phase 1A tables filled | ⬜ |
+| Point cloud classification final | `docs/RESEARCH_AGENDA.md` Phase 1B tables filled | ⬜ |
+| Composition QA final | `docs/RESEARCH_AGENDA.md` Phase 4 table + examples | ⬜ |
+| Statistical validation | p-value table + variance notes | ⬜ |
+| Paper assets | figures/tables + reproducibility manifest | ⬜ |
+| Manuscript | full draft + appendix + final polish | ⬜ |
+
+**Definition of Done for ECCV**
+- [ ] Every placeholder in Phase 1A/1B/4 tables is replaced with a final number.
+- [ ] Main claim is supported by at least one statistically validated comparison.
+- [ ] Reproducibility manifest is complete and points to exact run artifacts.
+- [ ] Final PDF is submission-ready with no TODO markers.
+
+---
+
 ## Final Summary
 
 **Best Audio Pipeline**:

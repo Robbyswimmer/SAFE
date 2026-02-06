@@ -250,6 +250,12 @@ def parse_args() -> argparse.Namespace:
     # Output
     parser.add_argument("--output-dir", type=str, default="./checkpoints/pointcloud")
     parser.add_argument("--save-every", type=int, default=5)
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume from (e.g., best_latest.pt or checkpoint_latest.pt)",
+    )
 
     # Hardware
     parser.add_argument("--device", type=str, default="cuda")
@@ -1380,6 +1386,7 @@ def evaluate_captioning(
 def save_checkpoint(
     model: SAFEPointCloudModel,
     optimizer: torch.optim.Optimizer,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     epoch: int,
     metrics: Dict,
     output_dir: Path,
@@ -1399,6 +1406,7 @@ def save_checkpoint(
         "epoch": epoch,
         "model_state_dict": trainable_state,
         "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
         "metrics": metrics,
     }
 
@@ -1409,6 +1417,45 @@ def save_checkpoint(
     # Also save as latest
     latest_path = output_dir / f"{name}_latest.pt"
     torch.save(checkpoint, latest_path)
+
+
+def load_checkpoint(
+    model: nn.Module,
+    optimizer: Optional[torch.optim.Optimizer],
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
+    checkpoint_path: str,
+    device: str,
+) -> Dict[str, Any]:
+    """Load checkpoint and restore model/optimizer/scheduler state when possible."""
+    ckpt = torch.load(checkpoint_path, map_location=device)
+
+    model_state = ckpt.get("model_state_dict", ckpt)
+    missing, unexpected = model.load_state_dict(model_state, strict=False)
+    if missing:
+        print(f"[Resume] Missing keys ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}", flush=True)
+    if unexpected:
+        print(f"[Resume] Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}", flush=True)
+
+    if optimizer is not None and "optimizer_state_dict" in ckpt:
+        try:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            print("[Resume] Loaded optimizer state", flush=True)
+        except Exception as exc:
+            print(f"[Resume] Warning: could not load optimizer state: {exc}", flush=True)
+
+    if scheduler is not None and ckpt.get("scheduler_state_dict") is not None:
+        try:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            print("[Resume] Loaded scheduler state", flush=True)
+        except Exception as exc:
+            print(f"[Resume] Warning: could not load scheduler state: {exc}", flush=True)
+
+    start_epoch = int(ckpt.get("epoch", -1)) + 1
+    metrics = ckpt.get("metrics", {})
+    print(f"[Resume] Loaded checkpoint: {checkpoint_path}", flush=True)
+    print(f"[Resume] Starting from epoch index {start_epoch}", flush=True)
+
+    return {"start_epoch": start_epoch, "metrics": metrics}
 
 
 def main():
@@ -1603,10 +1650,28 @@ def main():
     best_metric = 0.0
     epochs_without_improvement = 0
     best_epoch = 0
+    start_epoch = 0
 
-    for epoch in range(args.num_epochs):
+    if args.resume:
+        resume_info = load_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            checkpoint_path=args.resume,
+            device=args.device,
+        )
+        start_epoch = int(resume_info.get("start_epoch", 0))
+        prev_metrics = resume_info.get("metrics", {}) or {}
+        if args.phase == "classification":
+            best_metric = float(prev_metrics.get("accuracy", best_metric))
+            best_epoch = max(0, start_epoch)
+
+    end_epoch = start_epoch + args.num_epochs
+    print(f"[Train] epoch_range=[{start_epoch + 1}..{end_epoch}] ({args.num_epochs} additional epochs)", flush=True)
+
+    for epoch in range(start_epoch, end_epoch):
         print(f"\n{'='*40}")
-        print(f"Epoch {epoch + 1}/{args.num_epochs}")
+        print(f"Epoch {epoch + 1}/{end_epoch}")
         print(f"{'='*40}")
 
         # Train
@@ -1657,7 +1722,7 @@ def main():
                     best_metric = eval_metrics["accuracy"]
                     best_epoch = epoch + 1
                     epochs_without_improvement = 0
-                    save_checkpoint(model, optimizer, epoch, eval_metrics, output_dir, "best")
+                    save_checkpoint(model, optimizer, scheduler, epoch, eval_metrics, output_dir, "best")
                 else:
                     epochs_without_improvement += 1
 
@@ -1689,7 +1754,7 @@ def main():
         # Save periodic checkpoint
         if (epoch + 1) % args.save_every == 0:
             save_checkpoint(
-                model, optimizer, epoch,
+                model, optimizer, scheduler, epoch,
                 {"train_loss": train_metrics["loss"]},
                 output_dir, "checkpoint"
             )
@@ -1700,7 +1765,7 @@ def main():
     if args.phase == "classification":
         print(f"Best Accuracy: {best_metric:.4f} ({best_metric*100:.2f}%)")
         print(f"Best Epoch: {best_epoch}")
-    print(f"Total Epochs: {epoch + 1}")
+    print(f"Total Epochs Reached: {epoch + 1}")
     print(f"Checkpoints saved to: {output_dir}")
     print("=" * 60)
 

@@ -53,6 +53,7 @@ MIN_LR=${MIN_LR:-1e-6}
 
 # Encoder unfreezing (0 = fully frozen)
 UNFREEZE_ENCODER=${UNFREEZE_ENCODER:-0}
+RESUME_CHECKPOINT=${RESUME_CHECKPOINT:-""}
 
 # Pre-trained PointBERT checkpoint
 ENCODER_CHECKPOINT="${ENCODER_CHECKPOINT:-$SAFE_ROOT/checkpoints/pointbert/pointbert_modelnet40_1024.pt}"
@@ -82,6 +83,7 @@ echo "Mixup alpha: $MIXUP_ALPHA"
 echo "LR scheduler: $LR_SCHEDULER"
 echo "Min LR: $MIN_LR"
 echo "Unfreeze encoder layers: $UNFREEZE_ENCODER"
+echo "Resume checkpoint: ${RESUME_CHECKPOINT:-none}"
 echo "Encoder checkpoint: $ENCODER_CHECKPOINT"
 echo "W&B tags: $WANDB_TAGS"
 echo "========================================"
@@ -104,6 +106,11 @@ cd "$SAFE_ROOT"
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$SAFE_ROOT/logs"
 
+RESUME_ARGS=()
+if [ -n "$RESUME_CHECKPOINT" ]; then
+    RESUME_ARGS=(--resume "$RESUME_CHECKPOINT")
+fi
+
 # Run training
 python train_pointcloud.py \
     --config modelnet40 \
@@ -125,6 +132,7 @@ python train_pointcloud.py \
     --min-lr "$MIN_LR" \
     --unfreeze-encoder-last-n "$UNFREEZE_ENCODER" \
     --encoder-checkpoint "$ENCODER_CHECKPOINT" \
+    "${RESUME_ARGS[@]}" \
     --max-eval-batches 999 \
     --eval-every 1 \
     --fp16 \

@@ -337,6 +337,21 @@ KV_AUGMENT_CONFIG = {
         "min_audio_attention_weight": 0.05,
         "min_audio_attention_warmup_steps": 1000,
         "min_audio_attention_ramp_steps": 4000,
+        # Attention-shape regularization (stability against collapse/dominance)
+        "min_audio_attention_entropy_min": 0.20,
+        "min_audio_attention_entropy_max": 0.98,
+        "max_audio_token_attention": 0.95,
+        "audio_attention_entropy_weight": 1.0,
+        "audio_attention_dominance_weight": 0.5,
+        # Modality dropout (randomly disable audio rows during training)
+        "kv_modality_dropout_prob": 0.10,
+        # Alert thresholds for KV diagnostics (logged via kv_hook_manager)
+        "kv_alerts_enabled": True,
+        "kv_alert_log_every": 100,
+        "kv_alert_rms_ratio_low": 0.01,
+        "kv_alert_rms_ratio_high": 0.40,
+        "kv_alert_entropy_low": 0.15,
+        "kv_alert_entropy_high": 0.98,
 
         # Modality configuration (for compatibility with existing code)
         "modalities": {

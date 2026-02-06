@@ -100,6 +100,15 @@ python3 experiments/epic_sounds_avqa_composition/scripts/summarize_epic_sounds_r
   --update-research-agenda
 ```
 
+Calibrate KV fusion gate post-training (validation sweep):
+
+```bash
+python3 experiments/epic_sounds_avqa_composition/scripts/calibrate_kv_gate.py \
+  --checkpoint checkpoints/epic_sounds_avqa/kv_augment/best_model.pt \
+  --architecture kv_augment \
+  --objective av_composition_exact
+```
+
 ## Success Criteria
 
 - `both` outperforms single-modality (`audio` / `image`) on `av_composition`
