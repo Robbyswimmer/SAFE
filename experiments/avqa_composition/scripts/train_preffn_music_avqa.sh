@@ -12,7 +12,7 @@ set -euo pipefail
 
 # Resolve SAFE root from this script location (not submit dir).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SAFE_ROOT="${SAFE_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+SAFE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 CONDA_ENV=${CONDA_ENV:-safe-env}
 if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
