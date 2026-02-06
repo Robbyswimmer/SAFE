@@ -161,7 +161,8 @@ def download_videos(
         start = batch_idx * batch_size
         end = min(len(video_ids), start + batch_size)
         ids_batch = video_ids[start:end]
-        cmd = list(base_cmd) + ["--specific-videos"] + ids_batch
+        batch_arg = ",".join(ids_batch)
+        cmd = list(base_cmd) + ["--specific-videos", batch_arg]
 
         print(
             f"[download-batch] {batch_idx + 1}/{total_batches} "
