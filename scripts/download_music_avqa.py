@@ -48,11 +48,33 @@ logger = logging.getLogger(__name__)
 class AVQADownloader:
     """Download MUSIC-AVQA dataset with YouTube throttling protection."""
 
-    # MUSIC-AVQA GitHub URLs
-    METADATA_URLS = {
-        "avqa-train": "https://raw.githubusercontent.com/gewu-lab/MUSIC-AVQA/main/data/avqa-train.json",
-        "avqa-val": "https://raw.githubusercontent.com/gewu-lab/MUSIC-AVQA/main/data/avqa-val.json",
-        "avqa-test": "https://raw.githubusercontent.com/gewu-lab/MUSIC-AVQA/main/data/avqa-test.json",
+    # MUSIC-AVQA metadata URL candidates.
+    # Upstream paths have changed across mirrors/forks/branches over time.
+    METADATA_URL_CANDIDATES = {
+        "avqa-train": [
+            "https://raw.githubusercontent.com/GeWu-Lab/MUSIC-AVQA/main/data/avqa-train.json",
+            "https://raw.githubusercontent.com/GeWu-Lab/MUSIC-AVQA/master/data/avqa-train.json",
+            "https://raw.githubusercontent.com/gewu-lab/MUSIC-AVQA/main/data/avqa-train.json",
+            "https://raw.githubusercontent.com/gewu-lab/MUSIC-AVQA/master/data/avqa-train.json",
+            "https://raw.githubusercontent.com/GeWu-Lab/MUSIC-AVQA/main/data/json/avqa-train.json",
+            "https://raw.githubusercontent.com/GeWu-Lab/MUSIC-AVQA/master/data/json/avqa-train.json",
+        ],
+        "avqa-val": [
+            "https://raw.githubusercontent.com/GeWu-Lab/MUSIC-AVQA/main/data/avqa-val.json",
+            "https://raw.githubusercontent.com/GeWu-Lab/MUSIC-AVQA/master/data/avqa-val.json",
+            "https://raw.githubusercontent.com/gewu-lab/MUSIC-AVQA/main/data/avqa-val.json",
+            "https://raw.githubusercontent.com/gewu-lab/MUSIC-AVQA/master/data/avqa-val.json",
+            "https://raw.githubusercontent.com/GeWu-Lab/MUSIC-AVQA/main/data/json/avqa-val.json",
+            "https://raw.githubusercontent.com/GeWu-Lab/MUSIC-AVQA/master/data/json/avqa-val.json",
+        ],
+        "avqa-test": [
+            "https://raw.githubusercontent.com/GeWu-Lab/MUSIC-AVQA/main/data/avqa-test.json",
+            "https://raw.githubusercontent.com/GeWu-Lab/MUSIC-AVQA/master/data/avqa-test.json",
+            "https://raw.githubusercontent.com/gewu-lab/MUSIC-AVQA/main/data/avqa-test.json",
+            "https://raw.githubusercontent.com/gewu-lab/MUSIC-AVQA/master/data/avqa-test.json",
+            "https://raw.githubusercontent.com/GeWu-Lab/MUSIC-AVQA/main/data/json/avqa-test.json",
+            "https://raw.githubusercontent.com/GeWu-Lab/MUSIC-AVQA/master/data/json/avqa-test.json",
+        ],
     }
 
     def __init__(
@@ -174,23 +196,32 @@ class AVQADownloader:
 
         all_metadata = {}
 
-        for split_name, url in self.METADATA_URLS.items():
+        for split_name, url_candidates in self.METADATA_URL_CANDIDATES.items():
             logger.info(f"Downloading {split_name}...")
+            if isinstance(url_candidates, str):
+                url_candidates = [url_candidates]
 
-            try:
-                response = requests.get(url, timeout=30)
-                response.raise_for_status()
+            loaded = False
+            for url in url_candidates:
+                try:
+                    response = requests.get(url, timeout=30)
+                    response.raise_for_status()
+                    payload = response.json()
 
-                # Save raw JSON
-                metadata_file = self.metadata_dir / f"{split_name}.json"
-                with open(metadata_file, 'w') as f:
-                    json.dump(response.json(), f, indent=2)
+                    metadata_file = self.metadata_dir / f"{split_name}.json"
+                    with open(metadata_file, 'w') as f:
+                        json.dump(payload, f, indent=2)
 
-                all_metadata[split_name] = response.json()
-                logger.info(f"✓ Saved {split_name} metadata: {len(response.json())} samples")
+                    all_metadata[split_name] = payload
+                    logger.info(f"✓ Saved {split_name} metadata: {len(payload)} samples")
+                    logger.info(f"  source: {url}")
+                    loaded = True
+                    break
+                except Exception as e:
+                    logger.warning(f"  candidate failed: {url} ({e})")
 
-            except Exception as e:
-                logger.error(f"✗ Failed to download {split_name}: {e}")
+            if not loaded:
+                logger.error(f"✗ Failed to download {split_name} from all URL candidates")
                 continue
 
         return all_metadata
