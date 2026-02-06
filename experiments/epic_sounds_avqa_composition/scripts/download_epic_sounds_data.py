@@ -126,9 +126,11 @@ def download_videos(
         text=True,
     )
 
+    # When running with cwd=downloader_repo, call script by filename
+    # so we don't accidentally duplicate the repo path.
     base_cmd = [
         sys.executable,
-        str(script),
+        script.name,
         "--videos",
     ]
 
