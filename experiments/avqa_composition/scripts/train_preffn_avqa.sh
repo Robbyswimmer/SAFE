@@ -10,13 +10,9 @@
 
 set -euo pipefail
 
-# Resolve SAFE root robustly for sbatch launches from arbitrary directories.
-if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
-  SAFE_ROOT="$SLURM_SUBMIT_DIR"
-else
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  SAFE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-fi
+# Resolve SAFE root from this script location (not submit dir).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SAFE_ROOT="${SAFE_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 
 CONDA_ENV=${CONDA_ENV:-safe-env}
 if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
@@ -34,10 +30,19 @@ FUSION_LAYERS=${FUSION_LAYERS:-1,5,9,13,17,21}
 NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-8}
 TRAIN_MODALITY=${TRAIN_MODALITY:-both}
 EVAL_MODALITIES=${EVAL_MODALITIES:-both,audio,image}
+WANDB=${WANDB:-1}
+WANDB_PROJECT=${WANDB_PROJECT:-SAFE-AVQA-Composition}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-avqa_preffn_${SLURM_JOB_ID:-local}}
+WANDB_TAGS=${WANDB_TAGS:-avqa,preffn}
 
 mkdir -p logs "$OUTPUT_DIR"
 
 cd "$SAFE_ROOT"
+
+WANDB_ARGS=()
+if [[ "$WANDB" == "1" ]]; then
+  WANDB_ARGS+=(--wandb --wandb-project "$WANDB_PROJECT" --wandb-run-name "$WANDB_RUN_NAME" --wandb-tags "$WANDB_TAGS")
+fi
 
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset avqa \
@@ -52,4 +57,5 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --num-audio-tokens "$NUM_AUDIO_TOKENS" \
   --train-modality "$TRAIN_MODALITY" \
   --eval-modalities "$EVAL_MODALITIES" \
-  --fp16
+  --fp16 \
+  "${WANDB_ARGS[@]}"

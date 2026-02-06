@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -27,8 +28,17 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from configs.model_configs import get_config
 from safe.models.safe_model import SAFEModel
+
+try:
+    import wandb  # type: ignore
+except Exception:
+    wandb = None
 
 
 def set_seed(seed: int) -> None:
@@ -343,6 +353,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fp16", action="store_true")
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--wandb", action="store_true")
+    p.add_argument("--wandb-project", type=str, default="SAFE-AVQA-Composition")
+    p.add_argument("--wandb-run-name", type=str, default=None)
+    p.add_argument("--wandb-tags", type=str, default="")
     return p.parse_args()
 
 
@@ -357,6 +371,34 @@ def main() -> None:
     train_ds = ManifestAVQADataset(args.train_manifest, args.media_root)
     val_ds = ManifestAVQADataset(args.val_manifest, args.media_root)
     print(f"[info] train_samples={len(train_ds)} val_samples={len(val_ds)}")
+
+    wandb_run = None
+    if args.wandb:
+        if wandb is None:
+            print("[warn] --wandb requested but wandb is not installed. Continuing without wandb.")
+        else:
+            tags = [t.strip() for t in args.wandb_tags.split(",") if t.strip()]
+            wandb_run = wandb.init(
+                project=args.wandb_project,
+                name=args.wandb_run_name,
+                tags=tags if tags else None,
+                config={
+                    "dataset": args.dataset,
+                    "architecture": "pre_ffn",
+                    "train_modality": args.train_modality,
+                    "eval_modalities": args.eval_modalities,
+                    "fusion_layers": args.fusion_layers,
+                    "num_audio_tokens": args.num_audio_tokens,
+                    "batch_size": args.batch_size,
+                    "num_epochs": args.num_epochs,
+                    "learning_rate": args.learning_rate,
+                    "weight_decay": args.weight_decay,
+                    "gradient_accumulation_steps": args.gradient_accumulation_steps,
+                    "seed": args.seed,
+                    "train_manifest": str(args.train_manifest),
+                    "val_manifest": str(args.val_manifest),
+                },
+            )
 
     train_loader = DataLoader(
         train_ds,
@@ -403,6 +445,16 @@ def main() -> None:
             print(f"  [eval:{modality}] exact={metrics['exact_match']:.2f} f1={metrics['token_f1']:.2f} n={metrics['num_samples']}")
 
         history.append(epoch_result)
+        if wandb_run is not None:
+            log_payload: Dict[str, Any] = {
+                "epoch": epoch + 1,
+                "train/loss": float(train_loss),
+            }
+            for modality, metrics in epoch_result["eval"].items():
+                log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
+                log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
+            wandb_run.log(log_payload, step=epoch + 1)
+
         score = epoch_result["eval"].get("both", {}).get("exact_match", -1.0)
         if score > best_score:
             best_score = score
@@ -427,7 +479,11 @@ def main() -> None:
         json.dump(results, f, indent=2)
     print("[summary] " + json.dumps(results, indent=2))
 
+    if wandb_run is not None:
+        wandb_run.summary["best_both_exact_match"] = best_score
+        wandb_run.summary["results_path"] = str(args.output_dir / "results.json")
+        wandb_run.finish()
+
 
 if __name__ == "__main__":
     main()
-
