@@ -10,6 +10,14 @@
 
 set -euo pipefail
 
+# Resolve SAFE root robustly for sbatch launches from arbitrary directories.
+if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+  SAFE_ROOT="$SLURM_SUBMIT_DIR"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  SAFE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+fi
+
 CONDA_ENV=${CONDA_ENV:-safe-env}
 if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
   source "$HOME/miniconda3/etc/profile.d/conda.sh"
@@ -29,7 +37,9 @@ EVAL_MODALITIES=${EVAL_MODALITIES:-both,audio,image}
 
 mkdir -p logs "$OUTPUT_DIR"
 
-python3 experiments/avqa_composition/train_avqa_composition.py \
+cd "$SAFE_ROOT"
+
+python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --train-manifest "$DATA_ROOT/manifests/train.jsonl" \
   --val-manifest "$DATA_ROOT/manifests/validation.jsonl" \
@@ -43,4 +53,3 @@ python3 experiments/avqa_composition/train_avqa_composition.py \
   --train-modality "$TRAIN_MODALITY" \
   --eval-modalities "$EVAL_MODALITIES" \
   --fp16
-
