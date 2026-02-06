@@ -66,6 +66,7 @@ def _resolve_path(
     root: Optional[Path],
     fallback_dirs: List[Path],
     exts: Tuple[str, ...],
+    stem_index: Optional[Dict[str, str]] = None,
 ) -> str:
     if not rel_or_abs and root is None and not fallback_dirs:
         return ""
@@ -92,15 +93,38 @@ def _resolve_path(
                 c = d / f"{stem}{ext}"
                 if c.exists():
                     return str(c)
+        if stem_index is not None and stem in stem_index:
+            return stem_index[stem]
     return ""
 
 
 def _video_id(row: Dict[str, Any]) -> str:
-    for key in ("video_id", "video", "youtube_id", "vid", "id"):
+    for key in ("video_id", "video", "youtube_id", "vid", "id", "video_name", "videoId", "clip_id"):
         value = row.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
     return ""
+
+
+def _build_stem_index(roots: List[Path], exts: Tuple[str, ...]) -> Dict[str, str]:
+    """
+    Build a basename-stem -> absolute path index recursively.
+    Useful when metadata has only IDs and media files are nested.
+    """
+    out: Dict[str, str] = {}
+    wanted = {e.lower() for e in exts}
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in wanted:
+                continue
+            stem = path.stem
+            if stem and stem not in out:
+                out[stem] = str(path.resolve())
+    return out
 
 
 def normalize_rows(
@@ -119,6 +143,9 @@ def normalize_rows(
         image_dirs.extend([media_root / "images", media_root / "frames"])
     audio_dirs = [p for p in audio_dirs if p is not None]
     image_dirs = [p for p in image_dirs if p is not None]
+
+    audio_index = _build_stem_index(audio_dirs, (".wav", ".mp3", ".flac", ".m4a"))
+    image_index = _build_stem_index(image_dirs, (".jpg", ".jpeg", ".png"))
 
     for i, row in enumerate(rows):
         q = _first_nonempty(row, ("question", "question_content", "question_text"))
@@ -139,8 +166,20 @@ def normalize_rows(
         if not raw_image and vid:
             raw_image = vid
 
-        audio_path = _resolve_path(raw_audio, media_root, audio_dirs, (".wav", ".mp3", ".flac", ".m4a"))
-        image_path = _resolve_path(raw_image, media_root, image_dirs, (".jpg", ".jpeg", ".png"))
+        audio_path = _resolve_path(
+            raw_audio,
+            media_root,
+            audio_dirs,
+            (".wav", ".mp3", ".flac", ".m4a"),
+            stem_index=audio_index,
+        )
+        image_path = _resolve_path(
+            raw_image,
+            media_root,
+            image_dirs,
+            (".jpg", ".jpeg", ".png"),
+            stem_index=image_index,
+        )
         qtype = _first_nonempty(row, ("question_type", "type", "task", "category")) or "unknown"
 
         if require_both and (not audio_path or not image_path):
@@ -219,4 +258,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
