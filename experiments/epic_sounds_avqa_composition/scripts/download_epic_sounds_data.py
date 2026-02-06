@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Iterable, List, Set
 from urllib.request import urlretrieve
@@ -95,9 +96,44 @@ def _validate_video_ids(video_ids: Iterable[str]) -> tuple[list[str], list[str]]
     return valid, invalid
 
 
-def _run(cmd: List[str], cwd: Path | None = None) -> None:
+def _format_seconds(total_seconds: float) -> str:
+    total = int(max(0, total_seconds))
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+def _run(
+    cmd: List[str],
+    cwd: Path | None = None,
+    *,
+    status_every_seconds: int = 60,
+    status_label: str | None = None,
+) -> None:
     print("[run] " + " ".join(cmd))
-    subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
+    process = subprocess.Popen(cmd, cwd=str(cwd) if cwd else None)
+    start = time.time()
+    last_status = start
+    label = status_label or cmd[0]
+
+    while True:
+        returncode = process.poll()
+        now = time.time()
+        if returncode is not None:
+            if returncode != 0:
+                raise subprocess.CalledProcessError(returncode, cmd)
+            elapsed = now - start
+            print(f"[done] {label} elapsed={_format_seconds(elapsed)}", flush=True)
+            return
+
+        if status_every_seconds > 0 and (now - last_status) >= status_every_seconds:
+            elapsed = now - start
+            print(f"[status] {label} still running elapsed={_format_seconds(elapsed)}", flush=True)
+            last_status = now
+        time.sleep(2.0)
 
 
 def _progress(iterable, total: int, desc: str):
@@ -169,8 +205,16 @@ def download_videos(
 
     batch_size = max(1, int(chunksize))
     total_batches = (len(video_ids) + batch_size - 1) // batch_size
+    overall_start = time.time()
+    completed_videos = 0
+
+    print(
+        f"[download-plan] total_videos={len(video_ids)} batch_size={batch_size} total_batches={total_batches}",
+        flush=True,
+    )
 
     for batch_idx in _progress(range(total_batches), total_batches, desc="download-batches"):
+        batch_start = time.time()
         start = batch_idx * batch_size
         end = min(len(video_ids), start + batch_size)
         ids_batch = video_ids[start:end]
@@ -189,7 +233,26 @@ def download_videos(
 
         # Run from downloader repo so its relative data paths resolve
         # (e.g., data/epic_55_splits.csv, data/epic_100_splits.csv).
-        _run(cmd, cwd=downloader_repo)
+        _run(
+            cmd,
+            cwd=downloader_repo,
+            status_every_seconds=60,
+            status_label=f"batch {batch_idx + 1}/{total_batches}",
+        )
+        batch_elapsed = time.time() - batch_start
+        completed_videos += len(ids_batch)
+        overall_elapsed = time.time() - overall_start
+        avg_sec_per_batch = overall_elapsed / max(1, batch_idx + 1)
+        remaining_batches = total_batches - (batch_idx + 1)
+        eta_seconds = remaining_batches * avg_sec_per_batch
+        print(
+            f"[progress] completed_batches={batch_idx + 1}/{total_batches} "
+            f"completed_videos={completed_videos}/{len(video_ids)} "
+            f"batch_elapsed={_format_seconds(batch_elapsed)} "
+            f"overall_elapsed={_format_seconds(overall_elapsed)} "
+            f"eta={_format_seconds(eta_seconds)}",
+            flush=True,
+        )
 
 
 def parse_args() -> argparse.Namespace:
