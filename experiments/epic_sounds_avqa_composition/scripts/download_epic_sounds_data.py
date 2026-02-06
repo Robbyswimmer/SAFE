@@ -25,6 +25,10 @@ from pathlib import Path
 from typing import Iterable, List, Set
 from urllib.request import urlretrieve
 
+try:
+    from tqdm import tqdm
+except Exception:  # pragma: no cover
+    tqdm = None
 
 EPIC_SOUNDS_URLS = {
     "train": "https://raw.githubusercontent.com/epic-kitchens/epic-sounds-annotations/master/EPIC_Sounds_train.csv",
@@ -96,6 +100,13 @@ def _run(cmd: List[str], cwd: Path | None = None) -> None:
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
 
 
+def _progress(iterable, total: int, desc: str):
+    """Use tqdm when available, otherwise return iterable unchanged."""
+    if tqdm is None:
+        return iterable
+    return tqdm(iterable, total=total, desc=desc)
+
+
 def maybe_clone_download_repo(repo_dir: Path) -> None:
     if repo_dir.exists():
         print(f"[info] downloader repo already exists: {repo_dir}")
@@ -159,7 +170,7 @@ def download_videos(
     batch_size = max(1, int(chunksize))
     total_batches = (len(video_ids) + batch_size - 1) // batch_size
 
-    for batch_idx in range(total_batches):
+    for batch_idx in _progress(range(total_batches), total_batches, desc="download-batches"):
         start = batch_idx * batch_size
         end = min(len(video_ids), start + batch_size)
         ids_batch = video_ids[start:end]
