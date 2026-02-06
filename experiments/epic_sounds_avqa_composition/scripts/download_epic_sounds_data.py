@@ -92,19 +92,35 @@ def download_videos(
     if not script.exists():
         raise FileNotFoundError(f"Downloader script not found: {script}")
 
+    # The downloader CLI differs across versions. Probe --help and use supported flags.
+    help_text = subprocess.check_output(
+        [sys.executable, str(script), "--help"],
+        text=True,
+    )
+
     cmd = [
         sys.executable,
         str(script),
         "--videos",
         "--specific-videos",
         str(videos_file),
-        "--download-path",
-        str(output_dir),
-        "--num-workers",
-        str(num_workers),
-        "--chunksize",
-        str(chunksize),
     ]
+
+    if "--download-path" in help_text:
+        cmd.extend(["--download-path", str(output_dir)])
+    elif "--output-path" in help_text:
+        cmd.extend(["--output-path", str(output_dir)])
+    else:
+        raise RuntimeError(
+            "Could not find a supported output directory flag in epic_downloader.py help "
+            "(expected --download-path or --output-path)."
+        )
+
+    # Optional perf flags only if supported by installed downloader version
+    if "--num-workers" in help_text:
+        cmd.extend(["--num-workers", str(num_workers)])
+    if "--chunksize" in help_text:
+        cmd.extend(["--chunksize", str(chunksize)])
 
     if dry_run:
         print("[dry-run] " + " ".join(cmd))
