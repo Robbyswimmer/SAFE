@@ -18,6 +18,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -61,6 +62,23 @@ def _write_lines(path: Path, values: Iterable[str]) -> None:
     with path.open("w", encoding="utf-8") as f:
         for value in values:
             f.write(f"{value}\n")
+
+
+def _validate_video_ids(video_ids: Iterable[str]) -> tuple[list[str], list[str]]:
+    """
+    EPIC downloader expects IDs like PXX_YY or PXX_YYY.
+    Returns (valid_ids, invalid_ids).
+    """
+    pattern = re.compile(r"^P\d{2}_\d{2,3}$")
+    valid: list[str] = []
+    invalid: list[str] = []
+    for raw in video_ids:
+        vid = raw.strip().upper()
+        if pattern.match(vid):
+            valid.append(vid)
+        else:
+            invalid.append(raw)
+    return valid, invalid
 
 
 def _run(cmd: List[str], cwd: Path | None = None) -> None:
@@ -175,11 +193,21 @@ def main() -> None:
     videos_file = args.data_root / "required_videos.txt"
     _write_lines(videos_file, all_ids)
 
+    valid_ids, invalid_ids = _validate_video_ids(all_ids)
+    filtered_videos_file = args.data_root / "required_videos_filtered.txt"
+    _write_lines(filtered_videos_file, sorted(set(valid_ids)))
+    invalid_file = args.data_root / "invalid_video_ids.txt"
+    _write_lines(invalid_file, invalid_ids)
+
     summary = {
         "num_train_video_ids": len(train_ids),
         "num_val_video_ids": len(val_ids),
         "num_unique_video_ids": len(all_ids),
         "required_videos_file": str(videos_file),
+        "required_videos_filtered_file": str(filtered_videos_file),
+        "num_valid_video_ids": len(set(valid_ids)),
+        "num_invalid_video_ids": len(invalid_ids),
+        "invalid_video_ids_file": str(invalid_file),
     }
     with (args.data_root / "download_summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
@@ -191,9 +219,15 @@ def main() -> None:
         maybe_clone_download_repo(args.downloader_repo)
         output_dir = args.data_root / "raw_videos"
         output_dir.mkdir(parents=True, exist_ok=True)
+        if invalid_ids:
+            print(
+                "[warn] Some video IDs are not in downloader format and will be skipped. "
+                f"See: {invalid_file}",
+                flush=True,
+            )
         download_videos(
             downloader_repo=args.downloader_repo,
-            videos_file=videos_file,
+            videos_file=filtered_videos_file,
             output_dir=output_dir,
             num_workers=args.num_workers,
             chunksize=args.chunksize,
