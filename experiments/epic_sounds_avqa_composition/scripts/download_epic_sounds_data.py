@@ -174,7 +174,9 @@ def download_videos(
             print("[dry-run] " + " ".join(cmd))
             continue
 
-        _run(cmd)
+        # Run from downloader repo so its relative data paths resolve
+        # (e.g., data/epic_55_splits.csv, data/epic_100_splits.csv).
+        _run(cmd, cwd=downloader_repo)
 
 
 def parse_args() -> argparse.Namespace:
