@@ -716,6 +716,64 @@ Other settings:
 
 > Only fill in after Phases 1-4 complete
 
+### Phase 5A: EPIC-SOUNDS Vision-Language-Audio QA Composition
+
+**Objective**:
+- Validate vision+language+audio composition on egocentric kitchen videos.
+- Compare `pre_ffn` vs `kv_augment` under the same QA task and data manifest.
+- Measure modality utilization by evaluating `both`, `image`, and `audio` modes.
+
+**Experiment Package**:
+- `experiments/epic_sounds_avqa_composition/README.md`
+- `experiments/epic_sounds_avqa_composition/train_epic_sounds_avqa.py`
+- `experiments/epic_sounds_avqa_composition/scripts/download_epic_sounds_data.py`
+- `experiments/epic_sounds_avqa_composition/scripts/prepare_epic_sounds_avqa.py`
+
+**Task**: QA (captioning avoided for stability reasons)
+- `audio_event`: \"What sound do you hear?\" -> sound class
+- `vision_object`: \"Which object is being handled?\" -> noun
+- `av_composition`: \"What is happening to the {noun}?\" -> \"{noun} is being {verb}\"
+
+**Run Matrix (Architectures x Modalities)**:
+
+| Run ID | Architecture | Train Modality | Eval Modalities | Status | Notes |
+|--------|--------------|----------------|-----------------|--------|-------|
+| epic_preffn_v1 | pre_ffn | both | both,audio,image | Planned | Baseline composition run |
+| epic_kvaug_v1 | kv_augment | both | both,audio,image | Planned | KV augmentation run |
+| epic_preffn_audio_only_v1 | pre_ffn | audio | audio | Planned | Shortcut/control |
+| epic_preffn_image_only_v1 | pre_ffn | image | image | Planned | Shortcut/control |
+
+**Primary Metrics**:
+- Exact Match (%)
+- Token F1 (%)
+- Per-question-type Exact Match/F1 for:
+- `audio_event`
+- `vision_object`
+- `av_composition`
+
+**Result Log**:
+
+| Date | Run ID | EM (both) | F1 (both) | EM (av_composition) | F1 (av_composition) | Artifact Path | Notes |
+|------|--------|-----------|-----------|----------------------|----------------------|---------------|-------|
+| 2026-02-06 | epic_preffn_v1 | TBA | TBA | TBA | TBA | `checkpoints/epic_sounds_avqa/preffn` | Pending run |
+| 2026-02-06 | epic_kvaug_v1 | TBA | TBA | TBA | TBA | `checkpoints/epic_sounds_avqa/kv_augment` | Pending run |
+
+**Success Criteria for Composition**:
+- `both` outperforms `audio` and `image` on `av_composition` QA.
+- Qualitative predictions include both object + action grounding (e.g., \"tomato is being washed\").
+- Architecture comparison is based on matched data, prompt format, and evaluation settings.
+
+<!-- EPIC_AVQA_RESULTS_START -->
+### Phase 5A EPIC-SOUNDS Result Snapshot
+
+Updated: 2026-02-06
+
+| Run | Architecture | Best Epoch | EM (both) | F1 (both) | EM (av_composition) | F1 (av_composition) | EM (audio eval) | EM (image eval) | Artifact |
+|-----|--------------|------------|-----------|-----------|----------------------|----------------------|------------------|------------------|----------|
+| epic_preffn | pre_ffn | TBA | TBA | TBA | TBA | TBA | TBA | TBA | `checkpoints/epic_sounds_avqa/preffn` |
+| epic_kvaug | kv_augment | TBA | TBA | TBA | TBA | TBA | TBA | TBA | `checkpoints/epic_sounds_avqa/kv_augment` |
+<!-- EPIC_AVQA_RESULTS_END -->
+
 **Classification Comparison**:
 
 | Task | Pre-FFN | KV-Aug | Winner |
