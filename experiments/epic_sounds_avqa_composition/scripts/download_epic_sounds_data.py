@@ -64,6 +64,16 @@ def _write_lines(path: Path, values: Iterable[str]) -> None:
             f.write(f"{value}\n")
 
 
+def _read_lines(path: Path) -> list[str]:
+    values: list[str] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            value = line.strip()
+            if value:
+                values.append(value)
+    return values
+
+
 def _validate_video_ids(video_ids: Iterable[str]) -> tuple[list[str], list[str]]:
     """
     EPIC downloader expects IDs like PXX_YY or PXX_YYY.
@@ -116,18 +126,16 @@ def download_videos(
         text=True,
     )
 
-    cmd = [
+    base_cmd = [
         sys.executable,
         str(script),
         "--videos",
-        "--specific-videos",
-        str(videos_file),
     ]
 
     if "--download-path" in help_text:
-        cmd.extend(["--download-path", str(output_dir)])
+        base_cmd.extend(["--download-path", str(output_dir)])
     elif "--output-path" in help_text:
-        cmd.extend(["--output-path", str(output_dir)])
+        base_cmd.extend(["--output-path", str(output_dir)])
     else:
         raise RuntimeError(
             "Could not find a supported output directory flag in epic_downloader.py help "
@@ -136,15 +144,36 @@ def download_videos(
 
     # Optional perf flags only if supported by installed downloader version
     if "--num-workers" in help_text:
-        cmd.extend(["--num-workers", str(num_workers)])
+        base_cmd.extend(["--num-workers", str(num_workers)])
     if "--chunksize" in help_text:
-        cmd.extend(["--chunksize", str(chunksize)])
+        base_cmd.extend(["--chunksize", str(chunksize)])
 
-    if dry_run:
-        print("[dry-run] " + " ".join(cmd))
-        return
+    # IMPORTANT: this downloader version expects IDs directly after --specific-videos,
+    # not a file path. So we read the file and submit in batches.
+    video_ids = _read_lines(videos_file)
+    if not video_ids:
+        raise RuntimeError(f"No video IDs found in {videos_file}")
 
-    _run(cmd)
+    batch_size = max(1, int(chunksize))
+    total_batches = (len(video_ids) + batch_size - 1) // batch_size
+
+    for batch_idx in range(total_batches):
+        start = batch_idx * batch_size
+        end = min(len(video_ids), start + batch_size)
+        ids_batch = video_ids[start:end]
+        cmd = list(base_cmd) + ["--specific-videos"] + ids_batch
+
+        print(
+            f"[download-batch] {batch_idx + 1}/{total_batches} "
+            f"videos={len(ids_batch)} first={ids_batch[0]} last={ids_batch[-1]}",
+            flush=True,
+        )
+
+        if dry_run:
+            print("[dry-run] " + " ".join(cmd))
+            continue
+
+        _run(cmd)
 
 
 def parse_args() -> argparse.Namespace:
