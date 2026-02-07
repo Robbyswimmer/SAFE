@@ -464,7 +464,9 @@ def main() -> None:
                 log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
             wandb_run.log(log_payload, step=epoch + 1)
 
-        score = epoch_result["eval"].get("both", {}).get("exact_match", -1.0)
+        # Track best score for the actual train modality
+        score_key = args.train_modality  # "both", "audio", or "image"
+        score = epoch_result["eval"].get(score_key, {}).get("exact_match", -1.0)
         if score > best_score:
             best_score = score
             ckpt_path = args.output_dir / "best_model.pt"
@@ -481,7 +483,8 @@ def main() -> None:
         "architecture": "pre_ffn",
         "train_modality": args.train_modality,
         "eval_modalities": eval_modalities,
-        "best_both_exact_match": best_score,
+        "best_exact_match": best_score,
+        "best_modality": args.train_modality,
         "history_path": str(args.output_dir / "history.json"),
     }
     with (args.output_dir / "results.json").open("w", encoding="utf-8") as f:
@@ -489,7 +492,7 @@ def main() -> None:
     print("[summary] " + json.dumps(results, indent=2))
 
     if wandb_run is not None:
-        wandb_run.summary["best_both_exact_match"] = best_score
+        wandb_run.summary["best_exact_match"] = best_score
         wandb_run.summary["results_path"] = str(args.output_dir / "results.json")
         wandb_run.finish()
 
