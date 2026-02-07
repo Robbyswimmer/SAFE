@@ -112,31 +112,47 @@ Label smoothing: 0.1
 
 | Experiment | Status | Accuracy | Notes |
 |------------|--------|----------|-------|
-| Baseline (cosine LR) | 🔄 Running | ~81% | Plateaued, LR decaying too fast |
-| Constant LR (500 epochs) | 🔄 Running | TBD | New default config |
-| Full augmentation | 🔄 Running | TBD | rotate+scale+jitter+translate |
-| More fusion layers (10) | ⏳ Pending | | Based on ESC-50 results |
-| More tokens (16 → 32) | ⏳ Pending | | |
-| Unfreeze last 2 encoder blocks | ⏳ Pending | | |
-| Label smoothing + mixup | ⏳ Pending | | Based on ESC-50 success |
+| Baseline (cosine LR) | ✅ Done | ~81% | Plateaued, LR decaying too fast |
+| Constant LR (500 epochs) | ✅ Done | ~84% | Best with kitchen_sink settings |
+| kitchen_sink_1000ep | 🔄 Running | ~84% plateau | 1000 epochs, linear head, last pooling, 16 tok |
+| **target_90plus** | 🔄 Running | TBD | MLP head + mean pool + 32 tok + cosine + 10 layers |
 
-**Current Configuration** (updated):
+**Previous Best Configuration (84% plateau)**:
 ```
-Script: train_pointcloud.py
-Encoder: PointBERT (frozen)
+Script: train_pointcloud.py --llm-probe-head
+Head: linear (5120 → 40)
+Pooling: last token
+Encoder: PointBERT (unfreeze last 8 blocks)
 LLM: LLaVA-1.5-13B (frozen)
 Fusion: Pre-FFN residual
-Fusion layers: 1,5,9,13,17,21 (6 layers)
-Num tokens: 8
-Num points: 1024
+Fusion layers: 1,5,9,13,17,21 (6 layers, first half only)
+Num tokens: 16
 Batch size: 16
-Epochs: 500 (increased from 100)
-LR scheduler: constant (changed from cosine)
-SAFE LR: 6e-5
-Head LR: 1e-3
-Augmentation: rotation, scale, jitter, translate (enabled)
-Label smoothing: 0.1
+Epochs: 1000
+LR scheduler: constant
+SAFE LR: 6e-5 | Head LR: 1e-3
+Augmentation: rotate+scale+jitter+translate, label smoothing 0.1, mixup 0.3
 FP16: enabled
+```
+
+**Current Run: target_90plus** (submitted 2026-02-07):
+```
+Script: scripts/train_pointcloud_90plus.sh
+Head: MLP (4-layer, GELU + 0.1 dropout)          ← was linear
+Pooling: mean (all non-pad tokens)                ← was last
+Encoder: PointBERT (unfreeze last 8 blocks)
+LLM: LLaVA-1.5-13B (frozen)
+Fusion: Pre-FFN residual
+Fusion layers: 1,5,9,13,17,21,25,29,33,37 (10 layers, full network) ← was 6 layers
+Num tokens: 32                                    ← was 16
+Batch size: 16
+Epochs: 1000 (early stopping patience: 150)
+LR scheduler: cosine (200-step warmup)            ← was constant
+SAFE LR: 6e-5 | Head LR: 1e-3
+Weight decay: 0.01 (head: 0.01)                   ← head was 0
+Augmentation: rotate+scale+jitter+translate+point_dropout, label smoothing 0.1, mixup 0.3
+FP16: enabled
+W&B: ModelNet40-Classification / target_90plus_mlp_mean_32tok
 ```
 
 **Completion Criteria**:
