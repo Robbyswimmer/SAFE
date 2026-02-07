@@ -49,6 +49,11 @@ def _extract_answer(row: Dict[str, Any]) -> str:
     if value is None:
         value = row.get("label")
 
+    # MUSIC-AVQA: answer is an index into multi_choice array
+    multi_choice = row.get("multi_choice")
+    if isinstance(value, int) and isinstance(multi_choice, list) and 0 <= value < len(multi_choice):
+        return str(multi_choice[value]).strip()
+
     if isinstance(value, list):
         if not value:
             return ""
@@ -99,7 +104,8 @@ def _resolve_path(
 
 
 def _video_id(row: Dict[str, Any]) -> str:
-    for key in ("video_id", "video", "youtube_id", "vid", "id", "video_name", "videoId", "clip_id"):
+    # Prefer video_name (actual filename stem) over video_id (numeric index)
+    for key in ("video_name", "video", "youtube_id", "vid", "clip_id", "videoId"):
         value = row.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
