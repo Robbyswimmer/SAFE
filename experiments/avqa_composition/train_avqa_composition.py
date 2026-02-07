@@ -87,6 +87,7 @@ class ManifestAVQADataset(Dataset):
                 if not line:
                     continue
                 self.rows.append(json.loads(line))
+        self.media_stats = self._compute_media_stats(max_samples=512)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -112,6 +113,32 @@ class ManifestAVQADataset(Dataset):
                 if c.exists():
                     return c
         return None
+
+    def _compute_media_stats(self, max_samples: int = 512) -> Dict[str, int]:
+        """
+        Lightweight sanity stats to verify manifest/media alignment before training.
+        Uses path resolution only (no audio/image decoding).
+        """
+        n = min(len(self.rows), max_samples)
+        audio_ok = 0
+        image_ok = 0
+        both_ok = 0
+        for i in range(n):
+            row = self.rows[i]
+            has_audio = self._resolve_media_path(row.get("audio_path", "")) is not None
+            has_image = self._resolve_media_path(row.get("image_path", "")) is not None
+            if has_audio:
+                audio_ok += 1
+            if has_image:
+                image_ok += 1
+            if has_audio and has_image:
+                both_ok += 1
+        return {
+            "checked_samples": n,
+            "audio_paths_found": audio_ok,
+            "image_paths_found": image_ok,
+            "both_paths_found": both_ok,
+        }
 
     def _load_image(self, path_value: str) -> Optional[Image.Image]:
         image_path = self._resolve_media_path(path_value)
@@ -231,10 +258,18 @@ def train_epoch(
     for step, batch in enumerate(dataloader):
         mm = resolve_modality_batch(batch, args.train_modality)
 
-        # Debug: log first batch audio status
-        if step == 0 and mm["audio"] is not None:
-            audio_ok = sum(1 for a in mm["audio"] if a is not None)
-            print(f"  [debug] batch 0: {audio_ok}/{len(mm['audio'])} samples have audio", flush=True)
+        # Debug: log first batch modality presence
+        if step == 0:
+            if mm["audio"] is None:
+                print("  [debug] batch 0: audio input disabled by train_modality", flush=True)
+            else:
+                audio_ok = sum(1 for a in mm["audio"] if a is not None)
+                print(f"  [debug] batch 0: {audio_ok}/{len(mm['audio'])} samples have audio", flush=True)
+            if mm["images"] is None:
+                print("  [debug] batch 0: image input disabled by train_modality", flush=True)
+            else:
+                image_ok = sum(1 for img in mm["images"] if img is not None)
+                print(f"  [debug] batch 0: {image_ok}/{len(mm['images'])} samples have images", flush=True)
 
         inputs = model.prepare_multimodal_inputs(
             text=batch["questions"],
@@ -247,6 +282,12 @@ def train_epoch(
 
         audio_tokens = inputs.pop("audio_tokens", None)
         audio_mask = inputs.pop("audio_attention_mask", None)
+        if step == 0:
+            pv = inputs.get("pixel_values")
+            if pv is None:
+                print("  [debug] batch 0: pixel_values=None (vision not entering model)", flush=True)
+            else:
+                print(f"  [debug] batch 0: pixel_values shape={tuple(pv.shape)}", flush=True)
 
         with autocast(enabled=args.fp16):
             outputs = model(
@@ -347,12 +388,12 @@ def evaluate(
             count += 1
 
             by_type[qtype]["exact"] += exact
+            by_type[qtype]["f1"] += f1
+            by_type[qtype]["n"] += 1.0
 
         if (eval_step + 1) % eval_log_every == 0:
             running_em = 100.0 * exact_total / max(1, count)
             print(f"  [eval:{modality}] step {eval_step + 1}/{eval_batches} running_em={running_em:.2f}%", flush=True)
-            by_type[qtype]["f1"] += f1
-            by_type[qtype]["n"] += 1.0
 
     result = {
         "modality": modality,
@@ -417,6 +458,8 @@ def main() -> None:
     train_ds = ManifestAVQADataset(args.train_manifest, args.media_root)
     val_ds = ManifestAVQADataset(args.val_manifest, args.media_root)
     print(f"[info] train_samples={len(train_ds)} val_samples={len(val_ds)}")
+    print(f"[info] train_media_stats={train_ds.media_stats}")
+    print(f"[info] val_media_stats={val_ds.media_stats}")
 
     wandb_run = None
     if args.wandb:
