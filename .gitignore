@@ -186,6 +186,10 @@ config/secrets.json
 # MSR Fellowship files
 MSR Fellowship/
 
+# Paper templates (cloned git repos)
+paper/eccv2026/template/
+paper/eccv2026/rebuttal-template/
+
 # Large files
 *.tar
 *.tar.gz

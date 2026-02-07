@@ -1,0 +1,194 @@
+\documentclass[runningheads]{llncs}
+
+% ---------------------------------------------------------------
+% ECCV 2026 package
+% TODO REVIEW: Insert your submission number below by replacing '*****'
+% TODO FINAL: Comment out the following line for the camera-ready version
+\usepackage[review,year=2026,ID=*****]{eccv}
+% TODO FINAL: Un-comment the following line for the camera-ready version
+%\usepackage{eccv}
+
+% ---------------------------------------------------------------
+% Other packages
+\usepackage{eccvabbrv}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{multirow}
+\usepackage{subcaption}
+\usepackage[accsupp]{axessibility}
+
+% ---------------------------------------------------------------
+% Hyperref
+% TODO FINAL: Comment out the following line for the camera-ready version
+%\usepackage[pagebackref,breaklinks,colorlinks,citecolor=eccvblue]{hyperref}
+% TODO FINAL: Un-comment the following line for the camera-ready version
+\usepackage{hyperref}
+
+\usepackage{orcidlink}
+
+% Custom commands
+\newcommand{\safe}{\textsc{Safe}}
+\newcommand{\preffn}{Pre-FFN}
+\newcommand{\kvaugment}{KV-Aug}
+
+\begin{document}
+
+% ---------------------------------------------------------------
+\title{SAFE: Sensory Adapter Fusion for Enhanced\\Multimodal Understanding}
+
+\titlerunning{SAFE: Sensory Adapter Fusion}
+
+% TODO FINAL: Replace with your author list
+\author{Anonymous ECCV 2026 Submission}
+\authorrunning{Anonymous}
+\institute{Anonymous Institution}
+
+\maketitle
+
+% ===============================================================
+\begin{abstract}
+Large vision-language models (LVLMs) excel at image-text reasoning but remain limited to their native modalities.
+Extending these models to additional sensory inputs---audio, 3D point clouds, and beyond---typically requires costly retraining or modality-specific architectures.
+We introduce \safe{} (\textbf{S}ensory \textbf{A}dapter \textbf{F}usion for \textbf{E}nhanced multimodal understanding), a lightweight, modality-agnostic framework that composes new sensory streams into frozen LVLMs via residual adapter fusion.
+\safe{} projects arbitrary sensory inputs into the LVLM's hidden space through small learned adapters and fuses them as additive residuals at selected transformer layers, preserving the model's original vision-language capabilities while enabling new modalities with minimal trainable parameters.
+We evaluate \safe{} on audio classification (ESC-50), 3D shape recognition (ModelNet40), and audio-visual question answering (MUSIC-AVQA), demonstrating that residual fusion achieves competitive or superior performance to modality-specific baselines while enabling true cross-modal composition in a single forward pass.
+
+\keywords{Multimodal Learning \and Adapter Fusion \and Vision-Language Models \and Audio-Visual Understanding \and 3D Understanding}
+\end{abstract}
+
+% ===============================================================
+\section{Introduction}
+\label{sec:intro}
+
+% TODO: Write introduction
+% Key points:
+% - LVLMs are powerful but locked to vision+language
+% - Adding new modalities is expensive (full retraining) or brittle (separate models)
+% - We propose SAFE: lightweight adapter fusion into frozen LVLMs
+% - Key insight: additive residual injection at transformer layers
+% - Works across modalities: audio, 3D, and their compositions with vision
+% - Contributions: (1) SAFE framework, (2) Pre-FFN fusion mechanism, (3) composition results
+
+% ===============================================================
+\section{Related Work}
+\label{sec:related}
+
+% TODO: Write related work
+% Sections to cover:
+% 2.1 Large Vision-Language Models (LLaVA, InstructBLIP, etc.)
+% 2.2 Multimodal Adapters and Fusion (LoRA, prefix tuning, adapter layers)
+% 2.3 Audio-Visual Learning (LAVISH, APE, CAV-MAE)
+% 2.4 3D Understanding with Language Models (PointBERT, Point-LLM, etc.)
+% 2.5 Modality Composition
+
+\subsection{Large Vision-Language Models}
+
+\subsection{Multimodal Adapter Methods}
+
+\subsection{Audio-Visual Learning}
+
+\subsection{3D Understanding with Language Models}
+
+% ===============================================================
+\section{Method}
+\label{sec:method}
+
+% TODO: Write method section
+% 3.1 Overview / Problem Formulation
+% 3.2 Sensory Encoder and Projection
+% 3.3 Pre-FFN Residual Fusion
+% 3.4 Modality Composition
+% 3.5 Training Objective
+
+\subsection{Overview}
+\label{sec:method-overview}
+
+% Architecture overview figure should go here
+% \begin{figure}[tb]
+%   \centering
+%   \includegraphics[width=\linewidth]{figures/safe_architecture}
+%   \caption{Overview of \safe{}.}
+%   \label{fig:architecture}
+% \end{figure}
+
+\subsection{Sensory Encoder and Projection}
+\label{sec:method-encoder}
+
+\subsection{\preffn{} Residual Fusion}
+\label{sec:method-preffn}
+
+\subsection{Modality Composition}
+\label{sec:method-composition}
+
+\subsection{Training Objective}
+\label{sec:method-training}
+
+% ===============================================================
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+\label{sec:exp-setup}
+
+% TODO: Datasets, metrics, implementation details
+% Datasets: ESC-50, ModelNet40, MUSIC-AVQA
+% Base model: LLaVA-1.5-13B (frozen)
+% Encoders: CLAP (audio), PointBERT (3D)
+
+\subsection{Audio Classification: ESC-50}
+\label{sec:exp-esc50}
+
+% TODO: ESC-50 results
+% 5-fold CV, comparison to SOTA
+% Current result: 97.35% accuracy
+
+\subsection{3D Shape Recognition: ModelNet40}
+\label{sec:exp-modelnet}
+
+% TODO: ModelNet40 results
+% Classification accuracy, comparison to PointBERT/Point-LLM
+
+\subsection{Audio-Visual Question Answering: MUSIC-AVQA}
+\label{sec:exp-avqa}
+
+% TODO: AVQA composition results
+% This is the KEY experiment for the paper
+% Conditions: both (composition), audio-only, image-only
+% Metrics: Exact Match, Token F1, per-question-type breakdown
+
+\subsection{Ablation Studies}
+\label{sec:exp-ablations}
+
+% TODO: Ablation studies
+% - Fusion layer selection
+% - Number of projected tokens
+% - Fusion mechanism (Pre-FFN vs alternatives)
+% - Encoder freezing strategy
+
+% ===============================================================
+\section{Analysis}
+\label{sec:analysis}
+
+% TODO: Deeper analysis
+% - Visualization of attention patterns
+% - What does composition learn?
+% - Failure cases
+% - Computational cost analysis
+
+% ===============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+% TODO: Write conclusion
+
+% ===============================================================
+\section*{Acknowledgements}
+% TODO FINAL: Add acknowledgements (omit for review)
+
+% ---- Bibliography ----
+\bibliographystyle{splncs04}
+\bibliography{main}
+
+\end{document}
