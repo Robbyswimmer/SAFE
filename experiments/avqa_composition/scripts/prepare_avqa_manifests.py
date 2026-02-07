@@ -45,6 +45,8 @@ def _first_nonempty(row: Dict[str, Any], keys: Iterable[str]) -> str:
 def _extract_answer(row: Dict[str, Any]) -> str:
     value = row.get("answer")
     if value is None:
+        value = row.get("anser")  # MUSIC-AVQA typo in original dataset
+    if value is None:
         value = row.get("answers")
     if value is None:
         value = row.get("label")
@@ -104,8 +106,8 @@ def _resolve_path(
 
 
 def _video_id(row: Dict[str, Any]) -> str:
-    # Prefer video_name (actual filename stem) over video_id (numeric index)
-    for key in ("video_name", "video", "youtube_id", "vid", "clip_id", "videoId"):
+    # Prefer video_name (filename stem) when available, fall back to video_id
+    for key in ("video_name", "video_id", "video", "youtube_id", "vid", "clip_id", "videoId"):
         value = row.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
