@@ -57,8 +57,8 @@ for video in "$VIDEO_DIR"/*.mp4; do
     fi
 
     count=$((count + 1))
-    if [ $((count % 500)) -eq 0 ]; then
-        echo "  Processed $count / $total"
+    if [ $((count % 100)) -eq 0 ]; then
+        echo "  Processed $count / $total (audio: $(ls "$AUDIO_DIR"/*.wav 2>/dev/null | wc -l), frames: $(ls "$FRAMES_DIR"/*.jpg 2>/dev/null | wc -l))"
     fi
 done
 

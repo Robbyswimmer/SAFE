@@ -208,9 +208,52 @@ If captioning doesn't work well with our architecture, consider:
 
 ## Phase 4: Modality Composition (Pre-FFN)
 
-**Goal**: Test how point cloud + image interact when combined. Does composition help?
+**Goal**: Test how multiple modalities interact when combined via SAFE fusion. Does composition help?
 
-### 4A. ScanNet Scene Classification (PC + Image)
+### 4A. MUSIC-AVQA Audio-Visual QA (Audio + Image) [PRIMARY ECCV BENCHMARK]
+
+**Dataset**: MUSIC-AVQA (Li et al., CVPR 2022)
+- 9,288 videos (7,422 Real + 1,866 Synthetic music performances)
+- 45,867 QA pairs
+- 22 instrument classes
+- Question types: existential, counting, location, comparative, temporal
+
+**Data Preparation**:
+1. Raw videos obtained from MUSIC-AVQA authors
+2. Audio extracted: 16kHz mono WAV via ffmpeg (standard for audio models)
+3. Visual frames: single keyframe (middle frame) as JPEG per video
+4. Manifests: standardized JSONL with `--require-both` (paired audio+image only)
+
+**Data Preparation Script**: `scripts/prepare_music_avqa.sh`
+**Training Script**: `experiments/avqa_composition/scripts/train_preffn_music_avqa.sh`
+**Full Documentation**: `experiments/avqa_composition/README.md`
+
+| Condition | Status | EM (%) | F1 (%) | Notes |
+|-----------|--------|--------|--------|-------|
+| Audio only | ⏳ Ready | | | Ablation: audio sufficiency |
+| Image only | ⏳ Ready | | | Ablation: image sufficiency |
+| **Both (composition)** | ⏳ Ready | | | True composition |
+
+**Architecture (True Composition)**:
+```
+LLaVA: processes input_ids + pixel_values (native image path)
+SAFE: injects audio tokens as Pre-FFN residuals at layers [1,5,9,13,17,21]
+Both modalities contribute in single forward pass
+```
+
+**Training Config**: LLaVA-1.5-13B (frozen), CLAP audio encoder (frozen), 8 audio tokens, LR 5e-5, 10 epochs, batch 2, FP16
+
+**Hypothesis**: Questions about sound sources ("Which instrument is playing?") need audio; questions about visual arrangement ("Where is the violin?") need image; composition should help on questions requiring both modalities.
+
+**Completion Criteria**:
+- [ ] All three conditions evaluated
+- [ ] Per-question-type breakdown analysis
+- [ ] Composition outperforms single-modality on cross-modal questions
+- [ ] Qualitative examples demonstrating audio-visual grounding
+
+---
+
+### 4B. ScanNet Scene Classification (PC + Image)
 
 **Dataset**: ScanNet
 - 1,513 indoor scenes (1,201 train / 312 val)
@@ -361,30 +404,37 @@ python train_nuscenes_qa_composition.py --modality both --scene-type day --outpu
 
 **Completed**:
 - ✅ Phase 1A: ESC-50 Audio Classification - **97.35% ± 0.45%** (near-SOTA)
+- ✅ MUSIC-AVQA data on cluster (9,288 videos: 7,422 Real + 1,866 Synthetic)
 - ✅ NuScenes-QA composition infrastructure (ready to run!)
 
 **Current Experiments**:
 1. **ModelNet40 Point Cloud Classification** - Training in progress
-   - Current: ~81% accuracy with cosine LR
-   - Config: 500 epochs, constant LR, full augmentation
+   - Current: ~84% accuracy, stalling
+   - Running 1000-epoch kitchen_sink + ablations (MLP head, mean pooling, 32 tokens)
    - Target: 90%+ accuracy
 
-2. **NuScenes-QA Composition** - Ready to run! (NO REGISTRATION REQUIRED)
+2. **MUSIC-AVQA Composition** [PRIMARY ECCV BENCHMARK] - Data prep in progress
+   - 9,288 videos on cluster, extracting audio + frames
+   - Prep script: `scripts/prepare_music_avqa.sh`
+   - Training: `experiments/avqa_composition/scripts/train_preffn_music_avqa.sh`
+
+3. **NuScenes-QA Composition** - Ready to run (supplementary)
    - Dataset: ~5.8K QA pairs (day + night driving scenes)
-   - Modalities: 5D LiDAR + 6-view cameras
    - Training script: `train_nuscenes_qa_composition.py`
 
-3. **ScanNet/ScanQA Composition** - Blocked (optional, larger dataset)
+4. **ScanNet/ScanQA Composition** - Registration submitted, waiting
    - Requires ScanNet registration (http://www.scan-net.org/)
 
 **Blocking Issues**:
-- ScanNet requires registration (use NuScenes-QA instead!)
+- ModelNet40 accuracy plateau at ~84%
+- ScanNet registration pending
 
 **Next Steps**:
-1. 🔄 Complete ModelNet40 training runs, push to 90%+
-2. ✅ Run NuScenes-QA composition experiments (no registration needed!)
-3. ⏳ Analyze composition results by question type
-4. ⏳ (Optional) Register for ScanNet for larger-scale experiments
+1. 🔄 Complete ModelNet40 ablations, push past 84%
+2. 🔄 Finish MUSIC-AVQA data prep (audio extraction + manifests)
+3. ⏳ Run MUSIC-AVQA composition: both, audio-only, image-only
+4. ⏳ Analyze composition results by question type
+5. ⏳ Run NuScenes-QA as supplementary composition benchmark
 
 ---
 
@@ -400,6 +450,27 @@ python train_nuscenes_qa_composition.py --modality both --scene-type day --outpu
 
 ## Experiment Log
 
+### Week of 02/07/2026
+
+**Completed**:
+- MUSIC-AVQA videos transferred to cluster (9,288 videos: 7,422 Real + 1,866 Synthetic)
+- NuScenes-QA dataset loader working (streaming mode, handles HF Arrow corruption)
+- ModelNet40 1000-epoch run submitted + 4 ablation runs (MLP head, mean pooling, 32 tokens, combo)
+- Data prep pipeline for MUSIC-AVQA created (`scripts/prepare_music_avqa.sh`)
+- Updated experiment documentation with full methodology
+
+**In Progress**:
+- MUSIC-AVQA audio/frame extraction + manifest preparation
+- ModelNet40 ablations running (targeting >84%)
+- NuScenes-QA data download (streaming to pickle)
+- ScanNet registration submitted
+
+**Learnings**:
+- MUSIC-AVQA is primary ECCV composition benchmark (Audio+Image QA)
+- ModelNet40 plateau at ~84% likely due to: linear head, last-token pooling, or token count
+- Single-frame extraction from video is standard practice in AV-QA (LAVISH, APE methods)
+- HuggingFace datasets Arrow corruption workaround: use streaming=True + try/except
+
 ### Week of 02/03/2026
 
 **Completed**:
@@ -407,10 +478,7 @@ python train_nuscenes_qa_composition.py --modality both --scene-type day --outpu
 - ModelNet40 baseline experiments started
 - ScanNet composition experiment infrastructure created
 - ScanQA QA composition experiment infrastructure created
-- **NuScenes-QA composition infrastructure created** (no registration required!)
-  - Dataset loader: `safe/data/nuscenes_qa_dataset.py`
-  - Training script: `train_nuscenes_qa_composition.py`
-  - SLURM script: `experiments/nuscenes_qa_composition/scripts/train_qa.sh`
+- NuScenes-QA composition infrastructure created (no registration required!)
 
 **In Progress**:
 - ModelNet40 training with constant LR (targeting 90%+)
