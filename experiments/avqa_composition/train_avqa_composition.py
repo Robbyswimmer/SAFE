@@ -169,6 +169,7 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
         cfg["llm_model_name"] = args.llm_model
 
     cfg["num_audio_tokens"] = args.num_audio_tokens
+    cfg["fusion_type"] = "multilayer"  # Required for mid-layer hook-based Pre-FFN fusion
     cfg["fusion_layer_indices"] = [int(x) for x in args.fusion_layers.split(",")]
     cfg["freeze_base_vl"] = True
     cfg["freeze_audio_encoder"] = args.freeze_audio_encoder
@@ -215,6 +216,12 @@ def train_epoch(
 
     for step, batch in enumerate(pbar):
         mm = resolve_modality_batch(batch, args.train_modality)
+
+        # Debug: log first batch audio status
+        if step == 0 and mm["audio"] is not None:
+            audio_ok = sum(1 for a in mm["audio"] if a is not None)
+            print(f"  [debug] batch 0: {audio_ok}/{len(mm['audio'])} samples have audio", flush=True)
+
         inputs = model.prepare_multimodal_inputs(
             text=batch["questions"],
             images=mm["images"],
@@ -238,6 +245,13 @@ def train_epoch(
                 gate=args.fusion_gate,
             )
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
+
+            # Skip batch if loss has no gradient (e.g., all audio failed to load)
+            if loss is None or not loss.requires_grad:
+                if step == 0:
+                    print("  [warn] first batch loss has no grad — check audio/image loading", flush=True)
+                continue
+
             loss = loss / args.gradient_accumulation_steps
 
         scaler.scale(loss).backward()
