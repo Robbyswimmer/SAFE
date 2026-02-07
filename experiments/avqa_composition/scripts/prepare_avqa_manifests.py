@@ -91,7 +91,7 @@ def _resolve_path(
 
     for c in candidates:
         if c.exists():
-            return str(c)
+            return str(c.resolve())
 
     if rel_or_abs:
         stem = Path(rel_or_abs).stem

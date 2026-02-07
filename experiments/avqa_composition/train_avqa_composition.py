@@ -95,10 +95,23 @@ class ManifestAVQADataset(Dataset):
         if not path_value:
             return None
         p = Path(path_value).expanduser()
+        # Try absolute path as-is
         if p.is_absolute():
-            return p if p.exists() else None
+            if p.exists():
+                return p
+            return None
+        # Try relative to media_root
         candidate = self.media_root / p
-        return candidate if candidate.exists() else None
+        if candidate.exists():
+            return candidate
+        # Try just the filename under media_root subdirs (audio/, frames/)
+        stem = p.stem
+        for subdir in ("audio", "frames", "images"):
+            for ext in (".wav", ".mp3", ".jpg", ".jpeg", ".png"):
+                c = self.media_root / subdir / f"{stem}{ext}"
+                if c.exists():
+                    return c
+        return None
 
     def _load_image(self, path_value: str) -> Optional[Image.Image]:
         image_path = self._resolve_media_path(path_value)
