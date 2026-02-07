@@ -179,10 +179,16 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
     fusion_cfg.setdefault("use_bottleneck", True)
     fusion_cfg.setdefault("bottleneck_dim", 256)
     cfg["fusion_config"] = fusion_cfg
-    # Remove keys that SAFEModel doesn't accept
-    for k in ("name", "description"):
-        cfg.pop(k, None)
-    return cfg
+    # Only pass keys that SAFEModel.__init__ accepts
+    valid_keys = {
+        "llm_model_name", "vision_model_name",
+        "audio_encoder_type", "audio_encoder_config",
+        "projector_type", "num_audio_tokens", "projector_config",
+        "fusion_type", "fusion_layer_indices", "lora_rank", "fusion_config",
+        "freeze_base_vl", "freeze_audio_encoder", "label_smoothing",
+        "llm_hidden_size", "audio_embed_dim",
+    }
+    return {k: v for k, v in cfg.items() if k in valid_keys}
 
 
 def resolve_modality_batch(batch: Dict[str, Any], modality: str) -> Dict[str, Any]:
