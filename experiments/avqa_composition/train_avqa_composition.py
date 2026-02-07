@@ -179,6 +179,9 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
     fusion_cfg.setdefault("use_bottleneck", True)
     fusion_cfg.setdefault("bottleneck_dim", 256)
     cfg["fusion_config"] = fusion_cfg
+    # Remove keys that SAFEModel doesn't accept
+    for k in ("name", "description"):
+        cfg.pop(k, None)
     return cfg
 
 
