@@ -19,7 +19,7 @@ if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
 fi
 
 DATA_ROOT=${DATA_ROOT:-data/avqa}
-MEDIA_ROOT=${MEDIA_ROOT:-$DATA_ROOT}
+MEDIA_ROOT=${MEDIA_ROOT:-$SAFE_ROOT}
 OUTPUT_DIR=${OUTPUT_DIR:-checkpoints/avqa_composition/preffn}
 BATCH_SIZE=${BATCH_SIZE:-2}
 EPOCHS=${EPOCHS:-10}

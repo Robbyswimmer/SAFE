@@ -105,13 +105,26 @@ class ManifestAVQADataset(Dataset):
         candidate = self.media_root / p
         if candidate.exists():
             return candidate
-        # Try just the filename under media_root subdirs (audio/, frames/)
+        # Try relative to repo root (common when manifests store repo-relative paths)
+        repo_candidate = REPO_ROOT / p
+        if repo_candidate.exists():
+            return repo_candidate
+        # Try just the filename under common AVQA/MUSIC-AVQA subdirs.
         stem = p.stem
-        for subdir in ("audio", "frames", "images"):
-            for ext in (".wav", ".mp3", ".jpg", ".jpeg", ".png"):
+        for subdir in ("audio", "audio_old", "frames", "image", "image_31", "images"):
+            for ext in (".wav", ".mp3", ".m4a", ".flac", ".jpg", ".jpeg", ".png"):
                 c = self.media_root / subdir / f"{stem}{ext}"
                 if c.exists():
                     return c
+        # Try recursive stem search as last resort for heterogeneous layouts.
+        for subdir in ("audio", "audio_old", "frames", "image", "image_31", "images"):
+            base = self.media_root / subdir
+            if not base.exists():
+                continue
+            for ext in (".wav", ".mp3", ".m4a", ".flac", ".jpg", ".jpeg", ".png"):
+                matches = list(base.rglob(f"{stem}{ext}"))
+                if matches:
+                    return matches[0]
         return None
 
     def _compute_media_stats(self, max_samples: int = 512) -> Dict[str, int]:
