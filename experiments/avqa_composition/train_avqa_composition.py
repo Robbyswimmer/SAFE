@@ -26,7 +26,7 @@ from PIL import Image
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
+# tqdm removed — use explicit print logging for clean stdout/stderr separation
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -224,10 +224,11 @@ def train_epoch(
     model.train()
     total_loss = 0.0
     total_batches = 0
-    pbar = tqdm(dataloader, desc="train")
+    num_batches = len(dataloader)
+    log_every = max(1, num_batches // 20)  # Log ~20 times per epoch
     optimizer.zero_grad()
 
-    for step, batch in enumerate(pbar):
+    for step, batch in enumerate(dataloader):
         mm = resolve_modality_batch(batch, args.train_modality)
 
         # Debug: log first batch audio status
@@ -278,7 +279,10 @@ def train_epoch(
 
         total_loss += loss.item() * args.gradient_accumulation_steps
         total_batches += 1
-        pbar.set_postfix(loss=f"{total_loss / max(total_batches, 1):.4f}")
+
+        if (step + 1) % log_every == 0 or step == 0:
+            avg_loss = total_loss / max(total_batches, 1)
+            print(f"  [train] step {step + 1}/{num_batches} loss={avg_loss:.4f}", flush=True)
 
     return total_loss / max(total_batches, 1)
 
@@ -299,7 +303,9 @@ def evaluate(
     count = 0
     by_type: Dict[str, Dict[str, float]] = defaultdict(lambda: {"exact": 0.0, "f1": 0.0, "n": 0.0})
 
-    for batch in tqdm(dataloader, desc=f"eval:{modality}"):
+    eval_batches = len(dataloader)
+    eval_log_every = max(1, eval_batches // 5)  # Log ~5 times per eval
+    for eval_step, batch in enumerate(dataloader):
         mm = resolve_modality_batch(batch, modality)
         inputs = model.prepare_multimodal_inputs(
             text=batch["questions"],
@@ -341,6 +347,10 @@ def evaluate(
             count += 1
 
             by_type[qtype]["exact"] += exact
+
+        if (eval_step + 1) % eval_log_every == 0:
+            running_em = 100.0 * exact_total / max(1, count)
+            print(f"  [eval:{modality}] step {eval_step + 1}/{eval_batches} running_em={running_em:.2f}%", flush=True)
             by_type[qtype]["f1"] += f1
             by_type[qtype]["n"] += 1.0
 
