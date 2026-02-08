@@ -51,7 +51,59 @@ def set_seed(seed: int) -> None:
 
 def normalize_answer(text: str) -> str:
     text = (text or "").strip().lower()
+    # Strip common LLM preamble patterns
+    for prefix in ("the answer is", "answer:", "a:", "it is", "this is"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    text = text.strip().rstrip(".")
     return " ".join(text.split())
+
+
+# Known MUSIC-AVQA answer vocabulary (from official dataset)
+AVQA_ANSWER_VOCAB = [
+    "yes", "no",
+    "zero", "one", "two", "three", "four", "five", "six", "seven",
+    "left", "right",
+    "accordion", "acoustic_guitar", "bagpipe", "banjo", "bassoon",
+    "cello", "clarinet", "congas", "drum", "electric_bass", "erhu",
+    "flute", "guzheng", "piano", "pipa", "saxophone", "trumpet",
+    "tuba", "ukulele", "violin", "xylophone",
+]
+
+# Aliases: common LLM outputs that map to canonical answers
+_ANSWER_ALIASES = {
+    "0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+    "5": "five", "6": "six", "7": "seven",
+    "guitar": "acoustic_guitar", "electric guitar": "electric_bass",
+    "drums": "drum", "conga": "congas",
+}
+
+
+def extract_answer(raw_pred: str, vocab: List[str] = AVQA_ANSWER_VOCAB) -> str:
+    """Extract the best matching answer from generated text against known vocabulary."""
+    norm = normalize_answer(raw_pred)
+    # Exact match first
+    if norm in vocab:
+        return norm
+    # Check aliases
+    if norm in _ANSWER_ALIASES:
+        return _ANSWER_ALIASES[norm]
+    # Check if any vocab answer appears as substring in the prediction
+    # Prefer longer matches (e.g., "acoustic_guitar" over "guitar")
+    found = []
+    for ans in vocab:
+        # Match with underscores replaced by spaces too
+        ans_space = ans.replace("_", " ")
+        if ans in norm or ans_space in norm:
+            found.append(ans)
+    if found:
+        return max(found, key=len)
+    # Check aliases as substrings
+    for alias, canonical in _ANSWER_ALIASES.items():
+        if alias in norm:
+            return canonical
+    # No match — return normalized prediction as-is
+    return norm
 
 
 def token_f1(pred: str, ref: str) -> float:
@@ -353,9 +405,10 @@ def evaluate(
     model.eval()
 
     exact_total = 0.0
+    extracted_total = 0.0
     f1_total = 0.0
     count = 0
-    by_type: Dict[str, Dict[str, float]] = defaultdict(lambda: {"exact": 0.0, "f1": 0.0, "n": 0.0})
+    by_type: Dict[str, Dict[str, float]] = defaultdict(lambda: {"exact": 0.0, "extracted": 0.0, "f1": 0.0, "n": 0.0})
 
     eval_batches = len(dataloader)
     eval_log_every = max(1, eval_batches // 5)  # Log ~5 times per eval
@@ -394,23 +447,32 @@ def evaluate(
             ref = batch["answers"][i]
             qtype = batch["question_types"][i] if "question_types" in batch else "unknown"
 
-            exact = float(normalize_answer(pred) == normalize_answer(ref))
+            norm_ref = normalize_answer(ref)
+            norm_pred = normalize_answer(pred)
+            exact = float(norm_pred == norm_ref)
+            # Extracted match: map generated text to closest known answer
+            extracted_pred = extract_answer(pred)
+            extracted = float(extracted_pred == norm_ref)
             f1 = token_f1(pred, ref)
             exact_total += exact
+            extracted_total += extracted
             f1_total += f1
             count += 1
 
             by_type[qtype]["exact"] += exact
+            by_type[qtype]["extracted"] += extracted
             by_type[qtype]["f1"] += f1
             by_type[qtype]["n"] += 1.0
 
         if (eval_step + 1) % eval_log_every == 0:
             running_em = 100.0 * exact_total / max(1, count)
-            print(f"  [eval:{modality}] step {eval_step + 1}/{eval_batches} running_em={running_em:.2f}%", flush=True)
+            running_ext = 100.0 * extracted_total / max(1, count)
+            print(f"  [eval:{modality}] step {eval_step + 1}/{eval_batches} raw_em={running_em:.2f}% extracted_em={running_ext:.2f}%", flush=True)
 
     result = {
         "modality": modality,
         "exact_match": 100.0 * exact_total / max(1, count),
+        "extracted_match": 100.0 * extracted_total / max(1, count),
         "token_f1": 100.0 * f1_total / max(1, count),
         "num_samples": count,
         "by_question_type": {},
@@ -419,6 +481,7 @@ def evaluate(
         n = max(1.0, v["n"])
         result["by_question_type"][k] = {
             "exact_match": 100.0 * v["exact"] / n,
+            "extracted_match": 100.0 * v["extracted"] / n,
             "token_f1": 100.0 * v["f1"] / n,
             "num_samples": int(v["n"]),
         }
@@ -447,7 +510,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--gradient-accumulation-steps", type=int, default=8)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
-    p.add_argument("--max-answer-tokens", type=int, default=16)
+    p.add_argument("--max-answer-tokens", type=int, default=5)
 
     p.add_argument("--freeze-audio-encoder", action="store_true")
     p.add_argument("--fp16", action="store_true")
@@ -544,13 +607,14 @@ def main() -> None:
         for modality in eval_modalities:
             metrics = evaluate(model, val_loader, tokenizer, device, modality, args)
             epoch_result["eval"][modality] = metrics
-            print(f"  [eval:{modality}] exact={metrics['exact_match']:.2f} f1={metrics['token_f1']:.2f} n={metrics['num_samples']}")
+            print(f"  [eval:{modality}] raw_em={metrics['exact_match']:.2f} extracted_em={metrics['extracted_match']:.2f} f1={metrics['token_f1']:.2f} n={metrics['num_samples']}")
         history.append(epoch_result)
-        best_score = epoch_result["eval"].get("image", {}).get("exact_match", -1.0)
+        best_score = epoch_result["eval"].get("image", {}).get("extracted_match", -1.0)
         if wandb_run is not None:
             log_payload: Dict[str, Any] = {"epoch": 0}
             for modality, metrics in epoch_result["eval"].items():
                 log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
+                log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
                 log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
             wandb_run.log(log_payload, step=0)
     else:
@@ -562,7 +626,7 @@ def main() -> None:
             for modality in eval_modalities:
                 metrics = evaluate(model, val_loader, tokenizer, device, modality, args)
                 epoch_result["eval"][modality] = metrics
-                print(f"  [eval:{modality}] exact={metrics['exact_match']:.2f} f1={metrics['token_f1']:.2f} n={metrics['num_samples']}")
+                print(f"  [eval:{modality}] raw_em={metrics['exact_match']:.2f} extracted_em={metrics['extracted_match']:.2f} f1={metrics['token_f1']:.2f} n={metrics['num_samples']}")
 
             history.append(epoch_result)
             if wandb_run is not None:
@@ -572,12 +636,13 @@ def main() -> None:
                 }
                 for modality, metrics in epoch_result["eval"].items():
                     log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
+                    log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
                     log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
                 wandb_run.log(log_payload, step=epoch + 1)
 
-            # Track best score for the actual train modality
+            # Track best score using extracted_match (more fair for generative models)
             score_key = args.train_modality  # "both" or "audio"
-            score = epoch_result["eval"].get(score_key, {}).get("exact_match", -1.0)
+            score = epoch_result["eval"].get(score_key, {}).get("extracted_match", -1.0)
             if score > best_score:
                 best_score = score
                 ckpt_path = args.output_dir / "best_model.pt"

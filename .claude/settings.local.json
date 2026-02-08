@@ -11,7 +11,8 @@
       "Bash(python3:*)",
       "Bash(grep:*)",
       "Bash(ls:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ],
     "deny": []
   }

@@ -42,6 +42,18 @@ def _first_nonempty(row: Dict[str, Any], keys: Iterable[str]) -> str:
     return ""
 
 
+def _resolve_template(question: str, templ_values: Any) -> str:
+    """Replace template placeholders like <LRer> with values from templ_values."""
+    if not templ_values or not isinstance(templ_values, list):
+        return question
+    import re
+    placeholders = re.findall(r"<[^>]+>", question)
+    for i, ph in enumerate(placeholders):
+        if i < len(templ_values):
+            question = question.replace(ph, str(templ_values[i]), 1)
+    return question
+
+
 def _extract_answer(row: Dict[str, Any]) -> str:
     value = row.get("answer")
     if value is None:
@@ -157,6 +169,7 @@ def normalize_rows(
 
     for i, row in enumerate(rows):
         q = _first_nonempty(row, ("question", "question_content", "question_text"))
+        q = _resolve_template(q, row.get("templ_values"))
         a = _extract_answer(row)
         if not q or not a:
             continue
@@ -188,7 +201,14 @@ def normalize_rows(
             (".jpg", ".jpeg", ".png"),
             stem_index=image_index,
         )
-        qtype = _first_nonempty(row, ("question_type", "type", "task", "category")) or "unknown"
+        # question_type: MUSIC-AVQA uses "type" as a list like ["Audio", "Counting"]
+        raw_type = row.get("question_type") or row.get("type") or row.get("task") or row.get("category")
+        if isinstance(raw_type, list):
+            qtype = "_".join(str(t).strip() for t in raw_type if str(t).strip()) or "unknown"
+        elif isinstance(raw_type, str) and raw_type.strip():
+            qtype = raw_type.strip()
+        else:
+            qtype = "unknown"
 
         if require_both and (not audio_path or not image_path):
             continue

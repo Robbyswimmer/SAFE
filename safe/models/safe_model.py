@@ -1137,23 +1137,13 @@ class SAFEModel(nn.Module):
             # Audio captioning needs full descriptions, VQA needs short answers
             has_image = i < len(pil_images) and pil_images[i] is not None
 
+            # Short-answer instruction for AVQA-style tasks
+            instruction = "Answer with a single word or number."
+
             if has_image:
-                # VQA task: Add instruction for short-form answers (critical for VQA accuracy)
-                instruction = "Answer in one word or a number."
-                full_question = f"{instruction} Question: {question}"
-                prompt = f"USER: {image_token}\n{full_question} ASSISTANT:"
+                prompt = f"USER: {image_token}\n{instruction} {question} ASSISTANT:"
             else:
-                # Audio-only task: No short-answer instruction (audio captioning needs descriptions)
-                # Format options:
-                # - question (default): USER: Question: <question> ASSISTANT:
-                # - plain: USER: <question> ASSISTANT:
-                # The "Question:" tag can trigger refusal/helpfulness priors in instruction-tuned LLaVA;
-                # for evaluation captioning we often prefer "plain".
-                style = str(llava_audio_prompt_style or "question").strip().lower()
-                if style == "plain":
-                    prompt = f"USER: {question} ASSISTANT:"
-                else:
-                    prompt = f"USER: Question: {question} ASSISTANT:"
+                prompt = f"USER: {instruction} {question} ASSISTANT:"
 
             prompts.append(prompt)
         
