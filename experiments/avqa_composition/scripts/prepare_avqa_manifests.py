@@ -42,15 +42,32 @@ def _first_nonempty(row: Dict[str, Any], keys: Iterable[str]) -> str:
     return ""
 
 
+def _parse_list_field(value: Any) -> Optional[List]:
+    """Parse a field that may be a list or a JSON string of a list."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if value.startswith("["):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return parsed
+            except (json.JSONDecodeError, ValueError):
+                pass
+    return None
+
+
 def _resolve_template(question: str, templ_values: Any) -> str:
     """Replace template placeholders like <LRer> with values from templ_values."""
-    if not templ_values or not isinstance(templ_values, list):
+    vals = _parse_list_field(templ_values)
+    if not vals:
         return question
     import re
     placeholders = re.findall(r"<[^>]+>", question)
     for i, ph in enumerate(placeholders):
-        if i < len(templ_values):
-            question = question.replace(ph, str(templ_values[i]), 1)
+        if i < len(vals):
+            question = question.replace(ph, str(vals[i]), 1)
     return question
 
 
@@ -203,8 +220,9 @@ def normalize_rows(
         )
         # question_type: MUSIC-AVQA uses "type" as a list like ["Audio", "Counting"]
         raw_type = row.get("question_type") or row.get("type") or row.get("task") or row.get("category")
-        if isinstance(raw_type, list):
-            qtype = "_".join(str(t).strip() for t in raw_type if str(t).strip()) or "unknown"
+        parsed_type = _parse_list_field(raw_type)
+        if parsed_type is not None:
+            qtype = "_".join(str(t).strip() for t in parsed_type if str(t).strip()) or "unknown"
         elif isinstance(raw_type, str) and raw_type.strip():
             qtype = raw_type.strip()
         else:
