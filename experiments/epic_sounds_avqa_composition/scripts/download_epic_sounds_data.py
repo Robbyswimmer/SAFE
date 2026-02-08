@@ -7,6 +7,13 @@ This script does three things:
 2. Produces `required_videos.txt` from EPIC-SOUNDS annotations.
 3. Optionally invokes `epic-kitchens-download-scripts/epic_downloader.py` to fetch videos.
 
+Features:
+- Resume support: automatically skips already-downloaded videos
+- Parallel batch downloads via concurrent.futures
+- Real-time subprocess output streaming
+- Frequent progress updates with disk usage, speed, and ETA
+- Per-video file tracking in output directory
+
 Notes:
 - Actual video downloads may require accepted terms and credentials depending on source host.
 - This helper keeps all downloaded artifacts under a single experiment data root.
@@ -15,21 +22,19 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Iterable, List, Set
 from urllib.request import urlretrieve
 
-try:
-    from tqdm import tqdm
-except Exception:  # pragma: no cover
-    tqdm = None
 
 EPIC_SOUNDS_URLS = {
     "train": "https://raw.githubusercontent.com/epic-kitchens/epic-sounds-annotations/master/EPIC_Sounds_train.csv",
@@ -106,53 +111,173 @@ def _format_seconds(total_seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
-def _run(
+def _format_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < 1024.0:
+            return f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} PB"
+
+
+def _dir_size(path: Path) -> tuple[int, int]:
+    """Return (total_bytes, file_count) for a directory tree."""
+    total = 0
+    count = 0
+    if not path.exists():
+        return 0, 0
+    for f in path.rglob("*"):
+        if f.is_file():
+            total += f.stat().st_size
+            count += 1
+    return total, count
+
+
+def _find_downloaded_videos(output_dir: Path) -> set[str]:
+    """Scan output dir for already-downloaded video files and return their IDs."""
+    downloaded: set[str] = set()
+    if not output_dir.exists():
+        return downloaded
+    video_exts = {".mp4", ".avi", ".mkv", ".webm", ".mov"}
+    for f in output_dir.rglob("*"):
+        if f.is_file() and f.suffix.lower() in video_exts and f.stat().st_size > 0:
+            # Extract video ID from filename (e.g., P01_01.MP4 -> P01_01)
+            downloaded.add(f.stem.upper())
+    return downloaded
+
+
+def _run_streaming(
     cmd: List[str],
     cwd: Path | None = None,
     *,
-    status_every_seconds: int = 60,
+    status_every_seconds: int = 15,
     status_label: str | None = None,
+    output_dir: Path | None = None,
 ) -> None:
-    print("[run] " + " ".join(cmd))
-    process = subprocess.Popen(cmd, cwd=str(cwd) if cwd else None)
+    """Run a subprocess with streamed output and periodic disk-usage status."""
+    label = status_label or cmd[0]
+    print(f"[run] {label}: " + " ".join(cmd), flush=True)
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
     start = time.time()
     last_status = start
-    label = status_label or cmd[0]
+    initial_bytes, initial_files = _dir_size(output_dir) if output_dir else (0, 0)
+
+    # Stream subprocess output in a thread so we can also print status
+    output_lines: list[str] = []
+    lock = threading.Lock()
+
+    def _reader():
+        for line in process.stdout:
+            stripped = line.rstrip()
+            with lock:
+                output_lines.append(stripped)
+            # Print significant lines from the downloader
+            lower = stripped.lower()
+            if any(kw in lower for kw in ("download", "error", "fail", "complet", "skip", "start")):
+                print(f"  [{label}] {stripped}", flush=True)
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
 
     while True:
         returncode = process.poll()
         now = time.time()
+
         if returncode is not None:
-            if returncode != 0:
-                raise subprocess.CalledProcessError(returncode, cmd)
+            reader_thread.join(timeout=5)
             elapsed = now - start
-            print(f"[done] {label} elapsed={_format_seconds(elapsed)}", flush=True)
+            if output_dir:
+                final_bytes, final_files = _dir_size(output_dir)
+                new_bytes = final_bytes - initial_bytes
+                new_files = final_files - initial_files
+                speed = new_bytes / max(1, elapsed)
+                print(
+                    f"[done] {label} elapsed={_format_seconds(elapsed)} "
+                    f"new_files={new_files} new_data={_format_bytes(new_bytes)} "
+                    f"avg_speed={_format_bytes(speed)}/s",
+                    flush=True,
+                )
+            else:
+                print(f"[done] {label} elapsed={_format_seconds(elapsed)}", flush=True)
+            if returncode != 0:
+                with lock:
+                    last_lines = output_lines[-20:]
+                print(f"[error] {label} exited with code {returncode}. Last output:", flush=True)
+                for line in last_lines:
+                    print(f"  {line}", flush=True)
+                raise subprocess.CalledProcessError(returncode, cmd)
             return
 
-        if status_every_seconds > 0 and (now - last_status) >= status_every_seconds:
+        if (now - last_status) >= status_every_seconds:
             elapsed = now - start
-            print(f"[status] {label} still running elapsed={_format_seconds(elapsed)}", flush=True)
+            status_parts = [f"elapsed={_format_seconds(elapsed)}"]
+            if output_dir:
+                cur_bytes, cur_files = _dir_size(output_dir)
+                new_bytes = cur_bytes - initial_bytes
+                new_files = cur_files - initial_files
+                speed = new_bytes / max(1, elapsed)
+                status_parts.extend([
+                    f"new_files={new_files}",
+                    f"new_data={_format_bytes(new_bytes)}",
+                    f"speed={_format_bytes(speed)}/s",
+                    f"total_disk={_format_bytes(cur_bytes)}",
+                ])
+            print(f"[status] {label} {' '.join(status_parts)}", flush=True)
             last_status = now
-        time.sleep(2.0)
-
-
-def _progress(iterable, total: int, desc: str):
-    """Use tqdm when available, otherwise return iterable unchanged."""
-    if tqdm is None:
-        return iterable
-    return tqdm(iterable, total=total, desc=desc)
+        time.sleep(1.0)
 
 
 def maybe_clone_download_repo(repo_dir: Path) -> None:
     if repo_dir.exists():
         print(f"[info] downloader repo already exists: {repo_dir}")
         return
-    _run([
+    print(f"[clone] epic-kitchens-download-scripts -> {repo_dir}", flush=True)
+    subprocess.check_call([
         "git",
         "clone",
         "https://github.com/epic-kitchens/epic-kitchens-download-scripts.git",
         str(repo_dir),
     ])
+
+
+def _run_batch(
+    batch_idx: int,
+    total_batches: int,
+    ids_batch: list[str],
+    base_cmd: list[str],
+    downloader_repo: Path,
+    output_dir: Path,
+    dry_run: bool,
+) -> tuple[int, float, int]:
+    """Download a single batch. Returns (batch_idx, elapsed, num_videos)."""
+    batch_arg = ",".join(ids_batch)
+    cmd = list(base_cmd) + ["--specific-videos", batch_arg]
+
+    print(
+        f"[batch {batch_idx + 1}/{total_batches}] "
+        f"videos={len(ids_batch)} range={ids_batch[0]}..{ids_batch[-1]}",
+        flush=True,
+    )
+
+    if dry_run:
+        print("[dry-run] " + " ".join(cmd), flush=True)
+        return batch_idx, 0.0, len(ids_batch)
+
+    batch_start = time.time()
+    _run_streaming(
+        cmd,
+        cwd=downloader_repo,
+        status_every_seconds=15,
+        status_label=f"batch {batch_idx + 1}/{total_batches}",
+        output_dir=output_dir,
+    )
+    return batch_idx, time.time() - batch_start, len(ids_batch)
 
 
 def download_videos(
@@ -162,6 +287,7 @@ def download_videos(
     num_workers: int,
     chunksize: int,
     dry_run: bool,
+    parallel_batches: int = 1,
 ) -> None:
     script = downloader_repo / "epic_downloader.py"
     if not script.exists():
@@ -199,60 +325,112 @@ def download_videos(
 
     # IMPORTANT: this downloader version expects IDs directly after --specific-videos,
     # not a file path. So we read the file and submit in batches.
-    video_ids = _read_lines(videos_file)
-    if not video_ids:
+    all_video_ids = _read_lines(videos_file)
+    if not all_video_ids:
         raise RuntimeError(f"No video IDs found in {videos_file}")
 
+    # Resume: skip already-downloaded videos
+    already_downloaded = _find_downloaded_videos(output_dir)
+    video_ids = [vid for vid in all_video_ids if vid.upper() not in already_downloaded]
+    skipped = len(all_video_ids) - len(video_ids)
+
+    if skipped > 0:
+        print(
+            f"[resume] skipping {skipped} already-downloaded videos, "
+            f"{len(video_ids)} remaining out of {len(all_video_ids)} total",
+            flush=True,
+        )
+
+    if not video_ids:
+        print("[done] all videos already downloaded!", flush=True)
+        return
+
     batch_size = max(1, int(chunksize))
-    total_batches = (len(video_ids) + batch_size - 1) // batch_size
+    batches: list[list[str]] = []
+    for i in range(0, len(video_ids), batch_size):
+        batches.append(video_ids[i : i + batch_size])
+    total_batches = len(batches)
+
     overall_start = time.time()
     completed_videos = 0
+    initial_bytes, initial_files = _dir_size(output_dir)
 
     print(
-        f"[download-plan] total_videos={len(video_ids)} batch_size={batch_size} total_batches={total_batches}",
+        f"[download-plan] total_videos={len(video_ids)} skipped={skipped} "
+        f"batch_size={batch_size} total_batches={total_batches} "
+        f"parallel_batches={parallel_batches} "
+        f"existing_disk={_format_bytes(initial_bytes)} existing_files={initial_files}",
         flush=True,
     )
 
-    for batch_idx in _progress(range(total_batches), total_batches, desc="download-batches"):
-        batch_start = time.time()
-        start = batch_idx * batch_size
-        end = min(len(video_ids), start + batch_size)
-        ids_batch = video_ids[start:end]
-        batch_arg = ",".join(ids_batch)
-        cmd = list(base_cmd) + ["--specific-videos", batch_arg]
+    if parallel_batches <= 1:
+        # Serial execution (original behavior, but with better progress)
+        for batch_idx, ids_batch in enumerate(batches):
+            _, batch_elapsed, n = _run_batch(
+                batch_idx, total_batches, ids_batch, base_cmd,
+                downloader_repo, output_dir, dry_run,
+            )
+            completed_videos += n
+            overall_elapsed = time.time() - overall_start
+            cur_bytes, cur_files = _dir_size(output_dir)
+            new_bytes = cur_bytes - initial_bytes
+            speed = new_bytes / max(1, overall_elapsed)
+            avg_sec_per_batch = overall_elapsed / max(1, batch_idx + 1)
+            remaining_batches = total_batches - (batch_idx + 1)
+            eta_seconds = remaining_batches * avg_sec_per_batch
+            print(
+                f"[progress] batches={batch_idx + 1}/{total_batches} "
+                f"videos={completed_videos}/{len(video_ids)} ({skipped} skipped) "
+                f"downloaded={_format_bytes(new_bytes)} speed={_format_bytes(speed)}/s "
+                f"batch_time={_format_seconds(batch_elapsed)} "
+                f"elapsed={_format_seconds(overall_elapsed)} "
+                f"eta={_format_seconds(eta_seconds)}",
+                flush=True,
+            )
+    else:
+        # Parallel batch execution
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_batches) as executor:
+            futures = {
+                executor.submit(
+                    _run_batch, i, total_batches, batch, base_cmd,
+                    downloader_repo, output_dir, dry_run,
+                ): i
+                for i, batch in enumerate(batches)
+            }
+            completed_batches = 0
+            for future in concurrent.futures.as_completed(futures):
+                batch_idx, batch_elapsed, n = future.result()
+                completed_batches += 1
+                completed_videos += n
+                overall_elapsed = time.time() - overall_start
+                cur_bytes, cur_files = _dir_size(output_dir)
+                new_bytes = cur_bytes - initial_bytes
+                speed = new_bytes / max(1, overall_elapsed)
+                avg_sec_per_batch = overall_elapsed / max(1, completed_batches)
+                remaining_batches = total_batches - completed_batches
+                # ETA based on throughput with parallelism
+                eta_seconds = (remaining_batches / parallel_batches) * avg_sec_per_batch
+                print(
+                    f"[progress] batches={completed_batches}/{total_batches} "
+                    f"videos={completed_videos}/{len(video_ids)} ({skipped} skipped) "
+                    f"downloaded={_format_bytes(new_bytes)} speed={_format_bytes(speed)}/s "
+                    f"elapsed={_format_seconds(overall_elapsed)} "
+                    f"eta={_format_seconds(eta_seconds)}",
+                    flush=True,
+                )
 
-        print(
-            f"[download-batch] {batch_idx + 1}/{total_batches} "
-            f"videos={len(ids_batch)} first={ids_batch[0]} last={ids_batch[-1]}",
-            flush=True,
-        )
-
-        if dry_run:
-            print("[dry-run] " + " ".join(cmd))
-            continue
-
-        # Run from downloader repo so its relative data paths resolve
-        # (e.g., data/epic_55_splits.csv, data/epic_100_splits.csv).
-        _run(
-            cmd,
-            cwd=downloader_repo,
-            status_every_seconds=60,
-            status_label=f"batch {batch_idx + 1}/{total_batches}",
-        )
-        batch_elapsed = time.time() - batch_start
-        completed_videos += len(ids_batch)
-        overall_elapsed = time.time() - overall_start
-        avg_sec_per_batch = overall_elapsed / max(1, batch_idx + 1)
-        remaining_batches = total_batches - (batch_idx + 1)
-        eta_seconds = remaining_batches * avg_sec_per_batch
-        print(
-            f"[progress] completed_batches={batch_idx + 1}/{total_batches} "
-            f"completed_videos={completed_videos}/{len(video_ids)} "
-            f"batch_elapsed={_format_seconds(batch_elapsed)} "
-            f"overall_elapsed={_format_seconds(overall_elapsed)} "
-            f"eta={_format_seconds(eta_seconds)}",
-            flush=True,
-        )
+    # Final summary
+    final_bytes, final_files = _dir_size(output_dir)
+    total_elapsed = time.time() - overall_start
+    total_new = final_bytes - initial_bytes
+    print(
+        f"\n[download-complete] "
+        f"videos={completed_videos} skipped={skipped} "
+        f"downloaded={_format_bytes(total_new)} total_disk={_format_bytes(final_bytes)} "
+        f"files={final_files} elapsed={_format_seconds(total_elapsed)} "
+        f"avg_speed={_format_bytes(total_new / max(1, total_elapsed))}/s",
+        flush=True,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -276,6 +454,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--chunksize", type=int, default=25)
+    parser.add_argument(
+        "--parallel-batches",
+        type=int,
+        default=2,
+        help="Number of download batches to run concurrently (default: 2)",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -340,6 +524,7 @@ def main() -> None:
             num_workers=args.num_workers,
             chunksize=args.chunksize,
             dry_run=args.dry_run,
+            parallel_batches=args.parallel_batches,
         )
 
 
