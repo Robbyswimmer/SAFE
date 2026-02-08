@@ -536,41 +536,60 @@ def main() -> None:
     history: List[Dict[str, Any]] = []
     eval_modalities = [m.strip() for m in args.eval_modalities.split(",") if m.strip()]
 
-    for epoch in range(args.num_epochs):
-        print(f"\n[epoch {epoch + 1}/{args.num_epochs}]")
-        train_loss = train_epoch(model, train_loader, optimizer, scaler, device, args)
-        epoch_result: Dict[str, Any] = {"epoch": epoch + 1, "train_loss": float(train_loss), "eval": {}}
-
+    # Image-only = eval-only baseline (frozen LLaVA, no trainable params touch loss)
+    if args.train_modality == "image":
+        print("\n[image-only] No trainable params in image path — running eval-only baseline")
+        model.eval()
+        epoch_result: Dict[str, Any] = {"epoch": 0, "train_loss": 0.0, "eval": {}}
         for modality in eval_modalities:
             metrics = evaluate(model, val_loader, tokenizer, device, modality, args)
             epoch_result["eval"][modality] = metrics
             print(f"  [eval:{modality}] exact={metrics['exact_match']:.2f} f1={metrics['token_f1']:.2f} n={metrics['num_samples']}")
-
         history.append(epoch_result)
+        best_score = epoch_result["eval"].get("image", {}).get("exact_match", -1.0)
         if wandb_run is not None:
-            log_payload: Dict[str, Any] = {
-                "epoch": epoch + 1,
-                "train/loss": float(train_loss),
-            }
+            log_payload: Dict[str, Any] = {"epoch": 0}
             for modality, metrics in epoch_result["eval"].items():
                 log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
                 log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
-            wandb_run.log(log_payload, step=epoch + 1)
+            wandb_run.log(log_payload, step=0)
+    else:
+        for epoch in range(args.num_epochs):
+            print(f"\n[epoch {epoch + 1}/{args.num_epochs}]")
+            train_loss = train_epoch(model, train_loader, optimizer, scaler, device, args)
+            epoch_result = {"epoch": epoch + 1, "train_loss": float(train_loss), "eval": {}}
 
-        # Track best score for the actual train modality
-        score_key = args.train_modality  # "both", "audio", or "image"
-        score = epoch_result["eval"].get(score_key, {}).get("exact_match", -1.0)
-        if score > best_score:
-            best_score = score
-            ckpt_path = args.output_dir / "best_model.pt"
-            torch.save(model.state_dict(), ckpt_path)
-            print(f"  [save] best checkpoint -> {ckpt_path}")
+            for modality in eval_modalities:
+                metrics = evaluate(model, val_loader, tokenizer, device, modality, args)
+                epoch_result["eval"][modality] = metrics
+                print(f"  [eval:{modality}] exact={metrics['exact_match']:.2f} f1={metrics['token_f1']:.2f} n={metrics['num_samples']}")
 
-        with (args.output_dir / "history.json").open("w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2)
+            history.append(epoch_result)
+            if wandb_run is not None:
+                log_payload = {
+                    "epoch": epoch + 1,
+                    "train/loss": float(train_loss),
+                }
+                for modality, metrics in epoch_result["eval"].items():
+                    log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
+                    log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
+                wandb_run.log(log_payload, step=epoch + 1)
 
-    final_path = args.output_dir / "final_model.pt"
-    torch.save(model.state_dict(), final_path)
+            # Track best score for the actual train modality
+            score_key = args.train_modality  # "both" or "audio"
+            score = epoch_result["eval"].get(score_key, {}).get("exact_match", -1.0)
+            if score > best_score:
+                best_score = score
+                ckpt_path = args.output_dir / "best_model.pt"
+                torch.save(model.state_dict(), ckpt_path)
+                print(f"  [save] best checkpoint -> {ckpt_path}")
+
+            with (args.output_dir / "history.json").open("w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2)
+
+        final_path = args.output_dir / "final_model.pt"
+        torch.save(model.state_dict(), final_path)
+
     results = {
         "dataset": args.dataset,
         "architecture": "pre_ffn",
@@ -582,6 +601,8 @@ def main() -> None:
     }
     with (args.output_dir / "results.json").open("w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
+    with (args.output_dir / "history.json").open("w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)
     print("[summary] " + json.dumps(results, indent=2))
 
     if wandb_run is not None:
