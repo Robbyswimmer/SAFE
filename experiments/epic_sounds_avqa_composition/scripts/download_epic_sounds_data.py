@@ -132,16 +132,22 @@ def _dir_size(path: Path) -> tuple[int, int]:
     return total, count
 
 
-def _find_downloaded_videos(output_dir: Path) -> set[str]:
-    """Scan output dir for already-downloaded video files and return their IDs."""
+def _find_downloaded_videos(output_dir: Path, downloader_repo: Path | None = None) -> set[str]:
+    """Scan output dir (and any misplaced nested copies) for already-downloaded videos."""
     downloaded: set[str] = set()
-    if not output_dir.exists():
-        return downloaded
+    search_dirs = [output_dir]
+    # Also check the path-doubled location inside the downloader repo
+    if downloader_repo is not None:
+        nested = downloader_repo / output_dir
+        if nested.exists():
+            search_dirs.append(nested)
     video_exts = {".mp4", ".avi", ".mkv", ".webm", ".mov"}
-    for f in output_dir.rglob("*"):
-        if f.is_file() and f.suffix.lower() in video_exts and f.stat().st_size > 0:
-            # Extract video ID from filename (e.g., P01_01.MP4 -> P01_01)
-            downloaded.add(f.stem.upper())
+    for search_dir in search_dirs:
+        if not search_dir.exists():
+            continue
+        for f in search_dir.rglob("*"):
+            if f.is_file() and f.suffix.lower() in video_exts and f.stat().st_size > 0:
+                downloaded.add(f.stem.upper())
     return downloaded
 
 
@@ -307,10 +313,12 @@ def download_videos(
         "--videos",
     ]
 
+    # CRITICAL: use absolute path since we run with cwd=downloader_repo
+    abs_output_dir = str(output_dir.resolve())
     if "--download-path" in help_text:
-        base_cmd.extend(["--download-path", str(output_dir)])
+        base_cmd.extend(["--download-path", abs_output_dir])
     elif "--output-path" in help_text:
-        base_cmd.extend(["--output-path", str(output_dir)])
+        base_cmd.extend(["--output-path", abs_output_dir])
     else:
         raise RuntimeError(
             "Could not find a supported output directory flag in epic_downloader.py help "
@@ -329,8 +337,8 @@ def download_videos(
     if not all_video_ids:
         raise RuntimeError(f"No video IDs found in {videos_file}")
 
-    # Resume: skip already-downloaded videos
-    already_downloaded = _find_downloaded_videos(output_dir)
+    # Resume: skip already-downloaded videos (check both correct path and doubled path)
+    already_downloaded = _find_downloaded_videos(output_dir, downloader_repo)
     video_ids = [vid for vid in all_video_ids if vid.upper() not in already_downloaded]
     skipped = len(all_video_ids) - len(video_ids)
 
