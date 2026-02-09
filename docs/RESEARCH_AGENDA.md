@@ -457,54 +457,299 @@ python train_nuscenes_qa_composition.py --modality both --scene-type day --outpu
 
 ---
 
-## Current Focus
+## ECCV Experiment Execution Plan (Ground Truth)
 
-**Active Phase**: Phase 1B (Point Cloud Classification) + Phase 4 (Composition)
-
-**Completed**:
-- ✅ Phase 1A: ESC-50 Audio Classification - **97.35% ± 0.45%** (near-SOTA)
-- ✅ Phase 4A: MUSIC-AVQA Composition - **67.23% extracted EM** (both), **+14.7% over single-modality**
-- ✅ MUSIC-AVQA data on cluster (9,288 videos: 7,422 Real + 1,866 Synthetic)
-- ✅ MUSIC-AVQA evaluation methodology (answer extraction, calibrated metrics)
-- ✅ NuScenes-QA composition infrastructure (ready to run!)
-
-**Current Experiments**:
-1. **ModelNet40 Point Cloud Classification** - 5000ep full unfreeze running
-   - Current best: ~83-84% accuracy (plateau across multiple configs)
-   - Running: 5000 epochs, all 12 PointBERT blocks unfrozen, constant LR
-   - Target: 90%+ accuracy
-
-2. **MUSIC-AVQA 16 Audio Token Ablation** - Running
-   - Testing whether more audio tokens improve composition
-   - Baseline (8 tokens): 67.23% extracted EM
-
-3. **Epic Sounds Download** - In progress
-   - 78.4K segments, 44 classes, 100 hours
-   - Videos downloading from University of Bristol (~2.3 MB/s)
-
-4. **NuScenes-QA Composition** - Ready to run (supplementary)
-   - Dataset: ~5.8K QA pairs (day + night driving scenes)
-
-**Blocking Issues**:
-- ModelNet40 accuracy plateau at ~83-84% (multiple configs tried)
-
-**Next Steps**:
-1. 🔄 Push ModelNet40 past 84% with full encoder unfreeze (5000ep run)
-2. 🔄 Complete MUSIC-AVQA 16-token ablation
-3. ⏳ Per-question-type breakdown analysis for MUSIC-AVQA
-4. ⏳ Qualitative examples from MUSIC-AVQA composition
-5. ⏳ Finish Epic Sounds download + prepare AVQA manifests
-6. ⏳ Run NuScenes-QA as supplementary composition benchmark
+> **This is the authoritative list of experiments needed for the ECCV 2026 submission.**
+> Each experiment has clear requirements, expected findings, and paper role.
+> Status: ✅ Done | 🔄 Running | ⏳ Next | 📋 Planned | ❌ Cut
 
 ---
 
-## Rules for This Agenda
+### EXP-1: ESC-50 Audio Classification (5-fold CV) ✅ DONE
 
-1. **No skipping phases** - Complete each phase before moving on
-2. **No parallel experiments across phases** - Focus on one phase at a time
-3. **Document everything** - Fill in tables as experiments complete
-4. **Push for best results** - Try multiple tricks before declaring "done"
-5. **Weekly check-in** - Review this doc weekly, update status
+**Paper Role**: Table 1 — single-modality baseline proving audio adapter works
+**Script**: `experiments/esc50_classification/scripts/train_5fold.sh`
+**Result**: **97.35% ± 0.45%** (5-fold mean ± std)
+
+| Requirement | Status | Notes |
+|------------|--------|-------|
+| 5-fold CV with mean ± std | ✅ | 97.35% ± 0.45% |
+| SOTA comparison table | ✅ | Beats CLAP (96.7%), near BEATs (98.1%) |
+| Best config documented | ✅ | kitchen_sink_8tok: unfreeze 2 + mixup + label smoothing |
+| Per-fold results | ✅ | Fold 1-5 documented above |
+
+**Remaining**:
+| Task | Status | Effort | Notes |
+|------|--------|--------|-------|
+| Compile ablation table (baseline → +layers → +tokens → +unfreeze → +augmentation) | ⏳ | Low | Data exists from fold 5 single-fold runs, just needs table |
+
+---
+
+### EXP-2: ModelNet40 Point Cloud Classification 🔄 RUNNING
+
+**Paper Role**: Table 1 — single-modality baseline proving PC adapter works
+**Script**: `scripts/train_pointcloud_5000ep_16tok.sh`
+**Current Best**: ~83-84%
+**Target**: 87%+ (defensible; SOTA is 94% PointNeXt)
+
+| Requirement | Status | Notes |
+|------------|--------|-------|
+| Test accuracy on standard split | 🔄 | Best ~83-84% across configs |
+| SOTA comparison table | ✅ | PointNeXt 94%, PointBERT 93.2%, PointNet++ 91.9% |
+| Best config documented | 🔄 | Pending 5000ep run |
+
+**Current Run**: 5000ep, all 12 PointBERT blocks unfrozen, 16 tokens, constant LR, 10 fusion layers
+**Previous Attempts**: cosine LR (~81%), constant LR (~84%), MLP head (~83%), 32 tokens (~83%)
+
+**Remaining**:
+| Task | Status | Effort | Notes |
+|------|--------|--------|-------|
+| Wait for 5000ep run results | 🔄 | - | Running on cluster |
+| If <87%: try higher LR for encoder, or different encoder (Point-MAE) | 📋 | Medium | Contingency plan |
+| Document best config + ablation | ⏳ | Low | After best run identified |
+
+**Acceptable Outcome**: Even 85% is publishable — the point is to show the adapter works for 3D, not to beat SOTA. The composition story is the main contribution.
+
+---
+
+### EXP-3: MUSIC-AVQA Composition (Audio + Image + Text) ✅ CORE RESULT
+
+**Paper Role**: **Table 2 (MAIN TABLE)** — composition is the core contribution
+**Script**: `experiments/avqa_composition/scripts/train_preffn_music_avqa.sh`
+
+**Results (best epoch, 8 audio tokens)**:
+
+| Condition | Extracted EM (%) | Token F1 (%) |
+|-----------|------------------|--------------|
+| Image + Text | 52.56 | 31.17 |
+| Audio + Text | 51.08 | 46.78 |
+| **Audio + Image + Text** | **69.75** | **63.26** |
+
+**Composition gain**: **+17.2%** over best single-modality
+
+| Requirement | Status | Notes |
+|------------|--------|-------|
+| Three-condition comparison (image/audio/both) | ✅ | All three evaluated |
+| Composition outperforms single-modality | ✅ | +17.2% EM |
+| SOTA comparison | ✅ | Sparsify 81.8%, LAVISH 76.1%, AVST 71.6% (all cls-head) |
+| Evaluation methodology documented | ✅ | Answer extraction from generative output |
+| Bar chart figure | ✅ | `paper/eccv2026/figures/mavqa_modality_composition_v2.png` |
+
+**Remaining**:
+| Task | Status | Effort | Notes |
+|------|--------|--------|-------|
+| Per-question-type breakdown | ⏳ **NEXT** | Low | Already computed in history.json on cluster — just extract and tabulate |
+| Qualitative examples (3-5 cherry-picked) | ⏳ | Low | Need to log per-sample predictions, extract examples where both>single |
+| Let current run finish all 10 epochs | 🔄 | - | May improve further |
+
+---
+
+### EXP-4: MUSIC-AVQA Token Ablation (8 vs 16) ✅ DONE
+
+**Paper Role**: Table 3 or appendix — ablation showing token efficiency
+**Script**: Same as EXP-3 with `NUM_AUDIO_TOKENS=16`
+
+**Results**:
+
+| Tokens | Both EM | Audio EM | Image EM |
+|--------|---------|----------|----------|
+| 8 | 69.75% | 51.08% | 52.56% |
+| 16 | 70.05% | 51.29% | 52.56% |
+
+**Finding**: Doubling tokens gives +0.3% — negligible. 8 tokens sufficient.
+**Chart**: `paper/eccv2026/figures/mavqa_token_ablation.png`
+
+| Requirement | Status | Notes |
+|------------|--------|-------|
+| Side-by-side comparison | ✅ | Chart and table done |
+| Conclusion | ✅ | 8 tokens is optimal (lightweight adapter) |
+
+---
+
+### EXP-5: MUSIC-AVQA Audio-Only Training → Composition Eval ⏳ NEXT
+
+**Paper Role**: Table 2 or Section 4.3 — tests whether composition helps even without joint training
+**Script**: Same as EXP-3 with `TRAIN_MODALITY=audio`
+
+**Hypothesis**: If we train the adapter on audio-only, does adding image at eval time still improve performance? This would show SAFE enables zero-shot composition — the adapter learns audio representations that are compatible with LLaVA's image path without explicit joint training.
+
+**Command**:
+```bash
+TRAIN_MODALITY=audio EVAL_MODALITIES=both,audio,image \
+OUTPUT_DIR=checkpoints/avqa_composition/music_preffn_audio_trained \
+WANDB_RUN_NAME=music_avqa_audio_trained \
+WANDB_TAGS=music_avqa,preffn,audio_trained \
+sbatch --gres=gpu:1 experiments/avqa_composition/scripts/train_preffn_music_avqa.sh
+```
+
+| Requirement | Status | Notes |
+|------------|--------|-------|
+| Train audio-only, eval all three conditions | ⏳ | Ready to submit |
+| Compare "audio-trained both" vs "both-trained both" | ⏳ | Shows joint training benefit |
+| Compare "audio-trained both" vs "audio-trained audio" | ⏳ | Shows zero-shot composition benefit |
+
+**Expected Findings**:
+- "audio-trained + eval both" should beat "audio-trained + eval audio" → free composition boost
+- "both-trained + eval both" should beat "audio-trained + eval both" → joint training still helps
+- If composition boost is large, this is a very strong result (zero-shot modality transfer)
+
+---
+
+### EXP-6: MUSIC-AVQA Per-Question-Type Analysis ⏳ NEXT
+
+**Paper Role**: Table 2b or Figure 3 — breakdown showing which question types benefit from composition
+**Source**: `history.json` from EXP-3 run (already contains `by_question_type` data)
+
+**MUSIC-AVQA Question Types**:
+- Existential: "Is there a violin playing?" (yes/no)
+- Counting: "How many instruments?" (number)
+- Location: "Where is the drum?" (left/right)
+- Comparative: "Which instrument is louder?"
+- Temporal: "What instrument played first?"
+
+| Requirement | Status | Notes |
+|------------|--------|-------|
+| Extract by_question_type from history.json | ⏳ | Low effort — data already computed |
+| Table: per-type EM for image/audio/both | ⏳ | Key finding: which types need composition |
+| Bar chart by question type | ⏳ | Strong visual for paper |
+
+**Expected Findings**:
+- Location questions → image helps most
+- Instrument identification → audio helps most
+- Counting/comparative → composition helps most (needs both modalities)
+
+---
+
+### EXP-7: NuScenes-QA PC + Image Composition ⏳ NEXT (HIGH PRIORITY)
+
+**Paper Role**: Table 4 — second composition experiment proving generality across modality pairs
+**Script**: `experiments/nuscenes_qa_composition/scripts/train_qa.sh`
+**Dataset**: ~5.8K QA pairs, LiDAR point clouds + camera images, autonomous driving
+
+**Why This Is Critical**: Without a second modality combination, reviewers will say "you only showed audio+image — how do we know this works for other modalities?" NuScenes-QA gives us PC+image composition with no registration required.
+
+**Three runs needed**:
+```bash
+# Run 1: Image only (LLaVA baseline)
+MODALITY=image sbatch --gres=gpu:1 experiments/nuscenes_qa_composition/scripts/train_qa.sh
+
+# Run 2: Point cloud only (SAFE adapter)
+MODALITY=pointcloud sbatch --gres=gpu:1 experiments/nuscenes_qa_composition/scripts/train_qa.sh
+
+# Run 3: Both (composition)
+MODALITY=both sbatch --gres=gpu:1 experiments/nuscenes_qa_composition/scripts/train_qa.sh
+```
+
+| Requirement | Status | Notes |
+|------------|--------|-------|
+| Image-only baseline | ⏳ | Ready to submit |
+| PC-only baseline | ⏳ | Ready to submit |
+| Both (composition) | ⏳ | Ready to submit |
+| Composition outperforms single-modality | ⏳ | Needed to confirm generality |
+| BLEU/METEOR/EM metrics | ⏳ | Already in training script |
+
+**Expected Findings**:
+- Image should be strong for visual questions (object recognition, color)
+- PC should help for spatial/distance questions ("How far is the car?")
+- Both should outperform either alone on spatial + visual questions
+- Even a modest composition gain (+3-5%) is sufficient for the paper's generality claim
+
+**Risk**: If composition doesn't help for PC+image, this weakens the generality claim. Mitigation: still publishable as a negative result ("composition helps for audio+image but not PC+image, suggesting modality complementarity matters").
+
+---
+
+### EXP-8: MUSIC-AVQA Qualitative Examples 📋 PLANNED
+
+**Paper Role**: Figure 4 — cherry-picked examples showing composition in action
+**Source**: Need to log per-sample predictions from EXP-3 best checkpoint
+
+| Requirement | Status | Notes |
+|------------|--------|-------|
+| Log per-sample: question, GT answer, pred (image), pred (audio), pred (both) | 📋 | Small code change to eval loop |
+| Select 3-5 examples where both > either single | 📋 | Manual curation |
+| Select 1-2 failure cases | 📋 | Honest paper, reviewers appreciate this |
+
+**Example format for paper**:
+> Q: "How many instruments are playing on the left?"
+> Image only: "two" ❌ (GT: three)
+> Audio only: "three" ✅ but "Which instrument?" wrong
+> Both: "three" ✅
+
+---
+
+### EXP-9: ESC-50 Ablation Table 📋 PLANNED
+
+**Paper Role**: Table 1b or appendix — contribution of each component
+**Source**: Existing fold-5 single-fold runs
+
+| Setting | Accuracy | Delta |
+|---------|----------|-------|
+| Baseline (frozen CLAP, 6 layers, 8 tokens) | 94.50% | — |
+| + Larger batch (32) | 95.75% | +1.25% |
+| + More layers (10) | 95.75% | +1.25% |
+| + Higher LR (2e-4) | 95.50% | +1.00% |
+| + Unfreeze 2 CLAP layers | ~96.00% | +1.50% |
+| + Label smoothing (0.1) | ~97.50% | +3.00% |
+| + Mixup (0.3) | ~97.00% | +2.50% |
+| **kitchen_sink (all combined)** | **97.35%** | **+2.85%** |
+
+| Requirement | Status | Notes |
+|------------|--------|-------|
+| Compile from existing runs | 📋 | Data exists, need to verify exact numbers |
+| Present as clean table | 📋 | Low effort |
+
+---
+
+### EXP-10: Epic Sounds AVQA Composition 📋 PLANNED (SUPPLEMENTARY)
+
+**Paper Role**: Appendix or supplementary — second audio+image benchmark (egocentric domain)
+**Dataset**: Epic Sounds (78.4K segments, 44 classes, kitchen videos)
+**Script**: `experiments/epic_sounds_avqa_composition/scripts/train_preffn.sh`
+
+| Requirement | Status | Notes |
+|------------|--------|-------|
+| Download videos | 🔄 | In progress (~2.3 MB/s) |
+| Extract audio + frames | 📋 | After download |
+| Prepare manifests | 📋 | Script exists |
+| Three-condition evaluation | 📋 | After data prep |
+
+**Priority**: LOW — this is supplementary. Only run if time permits after EXP 1-9. MUSIC-AVQA is the primary composition benchmark.
+
+---
+
+### Summary: Experiment Status & Priority
+
+| # | Experiment | Paper Role | Status | Priority |
+|---|-----------|------------|--------|----------|
+| 1 | ESC-50 Classification | Table 1 | ✅ Done (need ablation table) | - |
+| 2 | ModelNet40 Classification | Table 1 | 🔄 Running | Medium |
+| 3 | MUSIC-AVQA Composition | **Table 2 (MAIN)** | ✅ Core result in hand | - |
+| 4 | MUSIC-AVQA Token Ablation | Table 3 / Appendix | ✅ Done | - |
+| 5 | MUSIC-AVQA Audio-Only Train | Table 2 / Section 4.3 | ⏳ **Submit now** | **HIGH** |
+| 6 | MUSIC-AVQA Per-Type Breakdown | Table 2b / Figure 3 | ⏳ **Extract now** | **HIGH** |
+| 7 | NuScenes-QA PC+Image Composition | Table 4 | ⏳ **Submit now** | **HIGH** |
+| 8 | MUSIC-AVQA Qualitative Examples | Figure 4 | 📋 After EXP-3 finishes | Medium |
+| 9 | ESC-50 Ablation Table | Table 1b / Appendix | 📋 Compile from data | Low |
+| 10 | Epic Sounds AVQA | Appendix | 📋 If time permits | Low |
+
+---
+
+### Immediate Next Actions (submit in this order)
+
+**Batch 1 — Submit today** (no dependencies):
+1. `EXP-5`: MUSIC-AVQA audio-only training (1 GPU, ~24h)
+2. `EXP-7`: NuScenes-QA all three conditions (3 GPUs, ~24h each)
+
+**Batch 2 — Do today** (no GPU needed, analysis only):
+3. `EXP-6`: Extract per-question-type data from MUSIC-AVQA history.json
+4. `EXP-9`: Compile ESC-50 ablation table from existing runs
+
+**Batch 3 — After EXP-3 finishes** (needs best checkpoint):
+5. `EXP-8`: Run per-sample eval for qualitative examples
+
+**Ongoing** (already running):
+6. `EXP-2`: ModelNet40 5000ep run
+7. `EXP-10`: Epic Sounds download
 
 ---
 
@@ -635,16 +880,28 @@ Mixup alpha: 0.3
 Label smoothing: 0.1
 ```
 
-**Ablation Results**:
+**Ablation Results** (Appendix Table):
 
-| Setting | Accuracy (mean ± std) | Delta | Notes |
-|---------|----------------------|-------|-------|
-| Baseline | | - | |
-| + More layers | | | |
-| + More tokens | | | |
-| + Unfreeze encoder | | | |
-| + Data augmentation | | | |
-| **Best combo** | | | |
+All single-component ablations measured on fold 5; regularization ablations on fold 1; best config is 5-fold mean ± std. Baseline: frozen CLAP, 6 fusion layers, 8 tokens, batch 16, LR 6e-5.
+
+| Setting | Change from Baseline | Accuracy | Delta | Fold |
+|---------|---------------------|----------|-------|------|
+| Baseline | — | 94.50% | — | 5 |
+| + Larger batch | batch 16 → 32 | 95.75% | +1.25 | 5 |
+| + More fusion layers | 6 → 10 layers | 95.75% | +1.25 | 5 |
+| + Higher LR | 6e-5 → 2e-4 | 95.50% | +1.00 | 5 |
+| + Layers + higher LR | 10 layers + 2e-4 | 95.25% | +0.75 | 5 |
+| + Label smoothing | ε = 0.1 | 97.50% | +3.00 | 1 |
+| + Mixup | α = 0.3 | 97.00% | +2.50 | 1 |
+| + Unfreeze encoder | last 2 CLAP blocks | 96.00% | +1.50 | 1 |
+| **Kitchen sink (all)** | **unfreeze + mixup + label smooth** | **97.35% ± 0.45%** | **+2.85** | **5-fold** |
+
+**Key observations**:
+- Regularization (label smoothing, mixup) provides the largest individual gains (+2.5–3.0%)
+- Architectural changes (layers, tokens, batch) give modest gains (+1.0–1.25%)
+- Combining layers + higher LR actually hurt vs layers alone (95.25% < 95.75%) — higher LR causes instability
+- Kitchen sink combines the top 3 tricks (unfreeze + mixup + label smoothing) for best result
+- Note: fold 1 and fold 5 results are not directly comparable; kitchen sink 5-fold is the authoritative number
 
 **Per-Fold Results** (baseline config, batch=16):
 
