@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=PC-5k-16tok
-#SBATCH --output=logs/pointcloud_5000ep_16tok_%j.txt
-#SBATCH --error=logs/pointcloud_5000ep_16tok_%j.err
+#SBATCH --job-name=PC-5k-full
+#SBATCH --output=logs/pointcloud_5000ep_full_%j.txt
+#SBATCH --error=logs/pointcloud_5000ep_full_%j.err
 #SBATCH --time=168:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
@@ -18,9 +18,9 @@ source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate safe-env
 
 echo "========================================"
-echo "ModelNet40 - 5000 Epochs, 16 Tokens, Fixed LR"
+echo "ModelNet40 - 5000 Epochs, Full Encoder Unfreeze"
 echo "========================================"
-echo "16 tokens, fixed LR (no scheduler), 5000 epochs"
+echo "16 tokens, full encoder unfrozen, constant LR, 10 fusion layers"
 echo "Job ID: ${SLURM_JOB_ID:-local}"
 echo "Node: $(hostname)"
 echo "Started: $(date)"
@@ -35,7 +35,7 @@ python /data/SalmanAsif/RobbyMoseley/SAFE/SAFE/train_pointcloud.py \
     --probe-pooling mean \
     --probe-head-type mlp \
     --data-path /data/SalmanAsif/RobbyMoseley/SAFE/SAFE/data \
-    --output-dir /data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/modelnet40_classification/outputs/5000ep_16tok_fixedlr \
+    --output-dir /data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/modelnet40_classification/outputs/5000ep_full_unfreeze \
     --fusion-layer-indices 1,5,9,13,17,21,25,29,33,37 \
     --num-pointcloud-tokens 16 \
     --batch-size 16 \
@@ -46,8 +46,8 @@ python /data/SalmanAsif/RobbyMoseley/SAFE/SAFE/train_pointcloud.py \
     --head-weight-decay 0.01 \
     --label-smoothing 0.1 \
     --mixup-alpha 0.3 \
-    --lr-scheduler none \
-    --unfreeze-encoder-last-n 8 \
+    --lr-scheduler constant \
+    --unfreeze-encoder-last-n 12 \
     --encoder-checkpoint /data/SalmanAsif/RobbyMoseley/SAFE/SAFE/checkpoints/pointbert/pointbert_modelnet40_1024.pt \
     --aug-dropout \
     --max-eval-batches 999 \
@@ -56,8 +56,8 @@ python /data/SalmanAsif/RobbyMoseley/SAFE/SAFE/train_pointcloud.py \
     --fp16 \
     --wandb \
     --wandb-project ModelNet40-Classification \
-    --wandb-run-name 5000ep_16tok_fixedlr \
-    --wandb-tags modelnet40,target90,mlp,mean,16tok,fixedlr,10layers,5000ep
+    --wandb-run-name 5000ep_full_unfreeze \
+    --wandb-tags modelnet40,target90,mlp,mean,16tok,fixedlr,10layers,5000ep,full_unfreeze
 
 echo "========================================"
 echo "Finished: $(date)"
