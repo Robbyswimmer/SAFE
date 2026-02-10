@@ -596,7 +596,16 @@ def main() -> None:
     trainable_params = list(model.get_trainable_parameters())
     print(f"[info] trainable_parameters={sum(p.numel() for p in trainable_params if p.requires_grad):,}")
     optimizer = AdamW(trainable_params, lr=args.learning_rate, weight_decay=args.weight_decay)
-    scaler = GradScaler(enabled=args.fp16)
+
+    # Disable fp16 GradScaler for bf16 models (InternVL, Qwen) — GradScaler is incompatible with bf16
+    use_fp16 = args.fp16
+    if use_fp16:
+        base_dtype = next(model.base_vl.llm.parameters()).dtype
+        if base_dtype == torch.bfloat16:
+            print("[info] Model uses bfloat16 — disabling fp16 GradScaler (incompatible)", flush=True)
+            use_fp16 = False
+    args.fp16 = use_fp16  # Update so train_epoch sees corrected value
+    scaler = GradScaler(enabled=use_fp16)
 
     best_score = -1.0
     history: List[Dict[str, Any]] = []
