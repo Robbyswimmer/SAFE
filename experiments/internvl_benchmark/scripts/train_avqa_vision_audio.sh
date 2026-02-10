@@ -57,6 +57,9 @@ OUTPUT_DIR=${OUTPUT_DIR:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/visio
 BATCH_SIZE=${BATCH_SIZE:-1}
 NUM_EPOCHS=${NUM_EPOCHS:-10}
 LEARNING_RATE=${LEARNING_RATE:-5e-5}
+LR_SCHEDULER=${LR_SCHEDULER:-cosine}
+WARMUP_RATIO=${WARMUP_RATIO:-0.03}
+MIN_LR_RATIO=${MIN_LR_RATIO:-0.1}
 GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-8}
 FUSION_LAYERS=${FUSION_LAYERS:-"1,5,9,13,17,21"}
 NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-8}
@@ -88,6 +91,7 @@ echo "========================================"
 echo "Batch size: $BATCH_SIZE"
 echo "Epochs: $NUM_EPOCHS"
 echo "Learning rate: $LEARNING_RATE"
+echo "LR scheduler: $LR_SCHEDULER (warmup_ratio=$WARMUP_RATIO, min_lr_ratio=$MIN_LR_RATIO)"
 echo "Gradient accumulation: $GRADIENT_ACCUMULATION"
 echo "Fusion layers: $FUSION_LAYERS"
 echo "Audio tokens: $NUM_AUDIO_TOKENS"
@@ -131,6 +135,9 @@ python3 experiments/avqa_composition/train_avqa_composition.py \
     --batch-size "$BATCH_SIZE" \
     --num-epochs "$NUM_EPOCHS" \
     --learning-rate "$LEARNING_RATE" \
+    --lr-scheduler "$LR_SCHEDULER" \
+    --warmup-ratio "$WARMUP_RATIO" \
+    --min-lr-ratio "$MIN_LR_RATIO" \
     --gradient-accumulation-steps "$GRADIENT_ACCUMULATION" \
     --freeze-audio-encoder \
     --num-workers 2 \

@@ -24,10 +24,14 @@ OUTPUT_DIR=${OUTPUT_DIR:-checkpoints/avqa_composition/preffn}
 BATCH_SIZE=${BATCH_SIZE:-2}
 EPOCHS=${EPOCHS:-10}
 LR=${LR:-5e-5}
+LR_SCHEDULER=${LR_SCHEDULER:-cosine}
+WARMUP_RATIO=${WARMUP_RATIO:-0.03}
+MIN_LR_RATIO=${MIN_LR_RATIO:-0.1}
 FUSION_LAYERS=${FUSION_LAYERS:-1,5,9,13,17,21}
 NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-8}
 TRAIN_MODALITY=${TRAIN_MODALITY:-both}
 EVAL_MODALITIES=${EVAL_MODALITIES:-both,audio,image}
+FUSION_GATE=${FUSION_GATE:-0.2}
 WANDB=${WANDB:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-SAFE-AVQA-Composition}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-avqa_preffn_${SLURM_JOB_ID:-local}}
@@ -51,9 +55,13 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --batch-size "$BATCH_SIZE" \
   --num-epochs "$EPOCHS" \
   --learning-rate "$LR" \
+  --lr-scheduler "$LR_SCHEDULER" \
+  --warmup-ratio "$WARMUP_RATIO" \
+  --min-lr-ratio "$MIN_LR_RATIO" \
   --fusion-layers "$FUSION_LAYERS" \
   --num-audio-tokens "$NUM_AUDIO_TOKENS" \
   --train-modality "$TRAIN_MODALITY" \
   --eval-modalities "$EVAL_MODALITIES" \
+  --fusion-gate "$FUSION_GATE" \
   --fp16 \
   "${WANDB_ARGS[@]}"

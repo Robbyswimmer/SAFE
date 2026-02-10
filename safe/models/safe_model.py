@@ -27,22 +27,22 @@ class SAFEModel(nn.Module):
         # Base VL configuration
         llm_model_name: str = "microsoft/DialoGPT-medium",
         vision_model_name: str = "openai/clip-vit-large-patch14",
-        
+
         # Audio configuration
         audio_encoder_type: str = "clap",  # "clap", "whisper", "multimodal"
         audio_encoder_config: dict = None,
-        
+
         # Projector configuration
         projector_type: str = "standard",  # "standard", "adaptive"
         num_audio_tokens: int = 8,
         projector_config: dict = None,
-        
+
         # Fusion configuration
         fusion_type: str = "lora",  # "lora", "multilayer", "gated"
         fusion_layer_indices: List[int] = None,
         lora_rank: int = 8,
         fusion_config: dict = None,
-        
+
         # Training configuration
         freeze_base_vl: bool = True,
         freeze_audio_encoder: bool = True,
@@ -51,6 +51,11 @@ class SAFEModel(nn.Module):
         # Model dimensions
         llm_hidden_size: int = 1024,
         audio_embed_dim: int = 512,
+
+        # Vision projector configuration (for composition experiment)
+        vision_embed_dim: int = 1024,
+        num_vision_tokens: int = 8,
+        vision_projector_config: dict = None,
     ):
         super().__init__()
         
@@ -151,6 +156,43 @@ class SAFEModel(nn.Module):
         actual_output_dim = getattr(self.audio_projector, 'output_dim', llm_hidden_size)
         print(f"[SAFE] ✓ Audio projector initialized (output_dim={actual_output_dim})", flush=True)
         sys.stdout.flush()
+
+        # Composition mode: only active for text-only backbones (Qwen) with an
+        # explicit vision modality configured in fusion_config.
+        self.composition_mode = (
+            getattr(self.base_vl, "model_type", None) == "qwen"
+            and isinstance(fusion_config, dict)
+            and isinstance(fusion_config.get("modalities", None), dict)
+            and "vision" in fusion_config.get("modalities", {})
+        )
+
+        # Initialize vision projector for composition experiment.
+        self.vision_projector = None
+        self.num_vision_tokens = 0
+        if (
+            self.composition_mode
+            and getattr(self.base_vl, 'vision_encoder', None) is not None
+            and vision_model_name
+            and vision_model_name != "built-in"
+        ):
+            _clip_hidden = getattr(self.base_vl.vision_encoder.config, 'hidden_size', vision_embed_dim)
+            _num_vt = (fusion_config or {}).get("modalities", {}).get("vision", {}).get("num_tokens", num_vision_tokens)
+            _vp_cfg = dict(vision_projector_config) if vision_projector_config else {}
+            from .projectors import TokenSetProjector
+            self.vision_projector = TokenSetProjector(
+                input_dim=_clip_hidden,
+                num_tokens=_num_vt,
+                output_dim=llm_hidden_size,
+                dropout=_vp_cfg.get("dropout", 0.1),
+                bottleneck_dim=_vp_cfg.get("bottleneck_dim", 1024),
+                use_positional_embedding=_vp_cfg.get("use_positional_embedding", True),
+            )
+            self.num_vision_tokens = _num_vt
+            print(
+                f"[SAFE] ✓ Vision projector initialized (CLIP {_clip_hidden}→{_num_vt} tokens×{llm_hidden_size})",
+                flush=True,
+            )
+            sys.stdout.flush()
 
         # Initialize fusion adapter
 
@@ -620,6 +662,11 @@ class SAFEModel(nn.Module):
         for param in self.audio_projector.parameters():
             yield param
 
+        # Vision projector parameters (composition experiment)
+        if self.vision_projector is not None:
+            for param in self.vision_projector.parameters():
+                yield param
+
         # Fusion adapter parameters (if not using KV augmentation)
         if self.fusion_adapter is not None:
             for param in self.fusion_adapter.parameters():
@@ -636,9 +683,12 @@ class SAFEModel(nn.Module):
                 yield param
     
     def enable_audio_training(self):
-        """Enable training mode for audio components while keeping base VL frozen."""
+        """Enable training mode for audio/vision adapter components while keeping base VL frozen."""
         # Set audio components to training mode
         self.audio_projector.train()
+        # Vision projector (composition experiment)
+        if self.vision_projector is not None:
+            self.vision_projector.train()
         if self.fusion_adapter is not None:
             self.fusion_adapter.train()
         # KV augmentation adapters
@@ -667,7 +717,56 @@ class SAFEModel(nn.Module):
         super().eval()
         self.base_vl.eval()
         return self
-    
+
+    def load_modality_adapters(self, checkpoint_path: str, modality: str) -> int:
+        """Load only the specified modality's adapter weights from a checkpoint.
+
+        Args:
+            checkpoint_path: Path to a saved state_dict checkpoint.
+            modality: One of ``"audio"`` or ``"vision"``.
+
+        Returns:
+            Number of parameter tensors loaded.
+        """
+        if modality not in {"audio", "vision"}:
+            raise ValueError(f"Unsupported modality '{modality}'. Expected 'audio' or 'vision'.")
+
+        state = torch.load(checkpoint_path, map_location="cpu")
+        if isinstance(state, dict):
+            # Handle wrapped checkpoints.
+            if "state_dict" in state and isinstance(state["state_dict"], dict):
+                state = state["state_dict"]
+            elif "model_state_dict" in state and isinstance(state["model_state_dict"], dict):
+                state = state["model_state_dict"]
+            elif "model" in state and isinstance(state["model"], dict):
+                state = state["model"]
+
+        if not isinstance(state, dict):
+            raise ValueError(f"Checkpoint format not supported: {type(state).__name__}")
+
+        prefix_map = {
+            "audio": [
+                "audio_projector.",
+                "fusion_adapter.fusion_adapters.audio:",
+                "fusion_adapter.layer_gates.audio:",
+            ],
+            "vision": [
+                "vision_projector.",
+                "fusion_adapter.fusion_adapters.vision:",
+                "fusion_adapter.layer_gates.vision:",
+            ],
+        }
+        prefixes = prefix_map.get(modality, [])
+        filtered = {k: v for k, v in state.items() if any(k.startswith(p) for p in prefixes)}
+        if not filtered:
+            raise ValueError(
+                f"No '{modality}' adapter parameters found in {checkpoint_path}. "
+                f"Checked prefixes: {prefixes}"
+            )
+        self.load_state_dict(filtered, strict=False)
+        print(f"[SAFE] Loaded {len(filtered)} {modality} adapter params from {checkpoint_path}", flush=True)
+        return len(filtered)
+
     def encode_audio(
         self,
         audio: Union[torch.Tensor, List[str], List],
@@ -987,13 +1086,37 @@ class SAFEModel(nn.Module):
             }
             
             # Process vision if provided
-            if images is not None:
+            if (
+                images is not None
+                and self.composition_mode
+                and self.vision_projector is not None
+                and getattr(self.base_vl, 'image_processor', None) is not None
+            ):
+                # Composition experiment: process images with CLIP image processor.
+                # Keep batch order stable even when some samples have missing images.
+                image_items = images if isinstance(images, list) else [images]
+                pil_images = [self._convert_to_pil(img) for img in image_items]
+                valid_indices = [idx for idx, img in enumerate(pil_images) if img is not None]
+                if valid_indices:
+                    valid_images = [pil_images[idx] for idx in valid_indices]
+                    processed = self.base_vl.image_processor(images=valid_images, return_tensors="pt")
+                    pixel_values = processed["pixel_values"]
+                    if len(valid_indices) < len(pil_images):
+                        full_pixel_values = torch.zeros(
+                            (len(pil_images),) + tuple(pixel_values.shape[1:]),
+                            dtype=pixel_values.dtype,
+                        )
+                        for src_idx, dst_idx in enumerate(valid_indices):
+                            full_pixel_values[dst_idx] = pixel_values[src_idx]
+                        pixel_values = full_pixel_values
+                    result["pixel_values"] = pixel_values.to(device)
+            elif images is not None:
                 images = self._ensure_image_batch(images)
                 if images is not None:
                     images = images.to(device)
                     vision_features = self.base_vl.encode_images(images)
                     result["vision_features"] = vision_features
-        
+
         # Process audio if provided (same for all model types)
         audio_to_encode = audio
         audio_indices = None
@@ -1806,6 +1929,30 @@ class SAFEModel(nn.Module):
             audio_attention_mask = kwargs.pop("audio_attention_mask", None)
             filtered_kwargs = kwargs
 
+            # Encode CLIP features through vision projector (composition experiment)
+            vision_tokens = None
+            if (
+                self.composition_mode
+                and self.base_vl.model_type == "qwen"
+                and pixel_values is not None
+                and self.vision_projector is not None
+            ):
+                base_dtype = next(self.base_vl.llm.parameters()).dtype
+                with torch.no_grad():
+                    clip_out = self.base_vl.vision_encoder(
+                        pixel_values.to(
+                            device=self.base_vl.vision_encoder.device
+                            if hasattr(self.base_vl.vision_encoder, 'device')
+                            else next(self.base_vl.vision_encoder.parameters()).device,
+                            dtype=next(self.base_vl.vision_encoder.parameters()).dtype,
+                        )
+                    )
+                    clip_features = clip_out.last_hidden_state  # (B, 257, 1024)
+                vision_tokens = self.vision_projector(clip_features, out_dtype=base_dtype)
+                # Composition mode uses projected vision tokens; Qwen does not
+                # consume pixel_values directly.
+                pixel_values = None
+
             if attention_mask is None:
                 if input_ids is None:
                     raise ValueError(
@@ -1845,19 +1992,22 @@ class SAFEModel(nn.Module):
                     pixel_values = None
 
             # ==================== VL PASSTHROUGH CHECK ====================
-            # If no audio is present, use true VL passthrough:
+            # If no modality tokens are present, use true VL passthrough:
             # Call base model with input_ids directly to avoid embedding contamination
-            # Gate value is irrelevant when there's no audio to fuse
+            # Gate value is irrelevant when there's nothing to fuse
             no_audio = (audio_tokens is None or audio_tokens.numel() == 0)
+            no_modality_to_fuse = no_audio and vision_tokens is None
 
             # DEBUG: Log passthrough decision
             if self.debug_logging:
                 print(
-                    f"[PassthroughDebug-forward] audio_tokens type: {type(audio_tokens)}, is None: {audio_tokens is None}, numel: {audio_tokens.numel() if audio_tokens is not None else 'N/A'}, no_audio: {no_audio}, gate: {gate}",
+                    f"[PassthroughDebug-forward] audio_tokens is None: {audio_tokens is None}, "
+                    f"vision_tokens is None: {vision_tokens is None}, "
+                    f"no_modality_to_fuse: {no_modality_to_fuse}, gate: {gate}",
                     flush=True,
                 )
 
-            if no_audio:
+            if no_modality_to_fuse:
                 # TRUE VL PASSTHROUGH: No audio fusion needed.
                 # For InternVL with pixel_values: use full model with input_ids + pixel_values
                 # so InternVL's built-in vision pipeline handles image embedding.
@@ -2067,8 +2217,9 @@ class SAFEModel(nn.Module):
             if bool(filtered_kwargs.get("output_hidden_states", False)):
                 model_inputs["output_hidden_states"] = True
 
+            has_any_modality = (audio_tokens is not None) or (vision_tokens is not None)
             use_midlayer_hooks = (
-                audio_tokens is not None
+                has_any_modality
                 and gate_scalar > 0.0
                 and self.enable_midlayer_fusion
                 and self.fusion_adapter is not None
@@ -2086,14 +2237,26 @@ class SAFEModel(nn.Module):
             _cast_dtype = inputs_embeds.dtype if inputs_embeds is not None else base_dtype
 
             if use_midlayer_hooks:
-                assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens before fusion"
+                if audio_tokens is not None:
+                    assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens before fusion"
 
-                audio_tokens = audio_tokens.to(
-                    device=_cast_device,
-                    dtype=_cast_dtype,
-                )
-                if audio_attention_mask is not None:
-                    audio_attention_mask = audio_attention_mask.to(_cast_device)
+                # Build modality_tokens dict with all available modalities
+                modality_tokens = {}
+                modality_masks = {}
+
+                if audio_tokens is not None:
+                    audio_tokens = audio_tokens.to(device=_cast_device, dtype=_cast_dtype)
+                    modality_tokens["audio"] = audio_tokens
+                    if audio_attention_mask is not None:
+                        audio_attention_mask = audio_attention_mask.to(_cast_device)
+                        modality_masks["audio"] = audio_attention_mask
+
+                if vision_tokens is not None:
+                    vision_tokens = vision_tokens.to(device=_cast_device, dtype=_cast_dtype)
+                    modality_tokens["vision"] = vision_tokens
+
+                if not modality_masks:
+                    modality_masks = None
 
                 # NOTE: Do NOT resolve to a submodule here. We intentionally register hooks
                 # on the top-level HF model (`self.base_vl.llm`) so they fire regardless of
@@ -2102,13 +2265,6 @@ class SAFEModel(nn.Module):
                 fusion_layers = self._resolve_fusion_layers()
                 if not any(fusion_layers.values()):
                     use_midlayer_hooks = False
-                else:
-                    modality_tokens = {"audio": audio_tokens}
-                    modality_masks = (
-                        {"audio": audio_attention_mask}
-                        if audio_attention_mask is not None
-                        else None
-                    )
 
             else:
                 if audio_tokens is not None:
@@ -2118,6 +2274,12 @@ class SAFEModel(nn.Module):
                     )
                 if audio_attention_mask is not None:
                     audio_attention_mask = audio_attention_mask.to(_cast_device)
+
+            # Build per-modality gate dict (all present modalities use same gate)
+            _modality_gate = {}
+            if modality_tokens is not None:
+                for _mk in modality_tokens:
+                    _modality_gate[_mk] = effective_gate
 
             def run_with_hooks(run_inputs: Dict[str, torch.Tensor]) -> Any:
                 hook_manager = LayerHookManager(
@@ -2129,7 +2291,7 @@ class SAFEModel(nn.Module):
                 hook_manager.register_hooks(
                     modality_tokens=modality_tokens,
                     modality_masks=modality_masks,
-                    gate={"audio": effective_gate},
+                    gate=_modality_gate,
                     supervised_mask=supervised_mask,
                 )
                 try:
@@ -2575,17 +2737,40 @@ class SAFEModel(nn.Module):
         """Generate text response given multimodal inputs."""
         # Low-level API: direct tensor inputs
         if input_ids is not None:
+            # Encode CLIP features through vision projector (composition experiment)
+            vision_tokens = None
+            if (
+                self.composition_mode
+                and self.base_vl.model_type == "qwen"
+                and pixel_values is not None
+                and self.vision_projector is not None
+            ):
+                base_dtype = next(self.base_vl.llm.parameters()).dtype
+                with torch.no_grad():
+                    clip_out = self.base_vl.vision_encoder(
+                        pixel_values.to(
+                            device=next(self.base_vl.vision_encoder.parameters()).device,
+                            dtype=next(self.base_vl.vision_encoder.parameters()).dtype,
+                        )
+                    )
+                    clip_features = clip_out.last_hidden_state
+                vision_tokens = self.vision_projector(clip_features, out_dtype=base_dtype)
+                pixel_values = None  # Composition path uses vision tokens, not raw pixel inputs
+
             # VL PASSTHROUGH CHECK for generation (same as forward)
             no_audio = (audio_tokens is None) or (audio_tokens is not None and audio_tokens.numel() == 0)
+            no_modality_to_fuse = no_audio and vision_tokens is None
 
             # DEBUG: Log passthrough decision
             if self.debug_logging:
                 print(
-                    f"[PassthroughDebug-generate] audio_tokens type: {type(audio_tokens)}, is None: {audio_tokens is None}, numel: {audio_tokens.numel() if audio_tokens is not None else 'N/A'}, no_audio: {no_audio}",
+                    f"[PassthroughDebug-generate] audio_tokens is None: {audio_tokens is None}, "
+                    f"vision_tokens is None: {vision_tokens is None}, "
+                    f"no_modality_to_fuse: {no_modality_to_fuse}",
                     flush=True,
                 )
 
-            if no_audio:
+            if no_modality_to_fuse:
                 # TRUE VL PASSTHROUGH: Use base_vl.llm.generate directly with input_ids
                 # This bypasses SAFE's contaminated embedding layer entirely
                 # Using inputs_embeds causes HF generate to return ONLY new tokens (breaks decoding)
@@ -2695,8 +2880,9 @@ class SAFEModel(nn.Module):
                 if pixel_values is not None:
                     base_inputs["pixel_values"] = pixel_values
 
+            has_any_modality_gen = (audio_tokens is not None) or (vision_tokens is not None)
             use_midlayer_hooks = (
-                audio_tokens is not None
+                has_any_modality_gen
                 and gate_scalar > 0.0
                 and self.enable_midlayer_fusion
                 and self.fusion_adapter is not None
@@ -2713,10 +2899,9 @@ class SAFEModel(nn.Module):
             # Debug: log generation fusion state (once)
             if not hasattr(self, '_gen_fusion_logged'):
                 print(f"[GEN FUSION DEBUG] audio_tokens is not None: {audio_tokens is not None}", flush=True)
+                print(f"[GEN FUSION DEBUG] vision_tokens is not None: {vision_tokens is not None}", flush=True)
                 print(f"[GEN FUSION DEBUG] gate_scalar: {gate_scalar}", flush=True)
                 print(f"[GEN FUSION DEBUG] enable_midlayer_fusion: {self.enable_midlayer_fusion}", flush=True)
-                print(f"[GEN FUSION DEBUG] enable_kv_augmentation: {self.enable_kv_augmentation}", flush=True)
-                print(f"[GEN FUSION DEBUG] has apply_fusion_at_layer: {self.fusion_adapter is not None and hasattr(self.fusion_adapter, 'apply_fusion_at_layer')}", flush=True)
                 print(f"[GEN FUSION DEBUG] use_midlayer_hooks: {use_midlayer_hooks}", flush=True)
                 self._gen_fusion_logged = True
 
@@ -2726,24 +2911,31 @@ class SAFEModel(nn.Module):
             modality_masks = None
 
             if use_midlayer_hooks:
-                assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens before generation fusion"
+                if audio_tokens is not None:
+                    assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens before generation fusion"
 
-                audio_tokens = audio_tokens.to(device=_gen_device, dtype=base_dtype)
-                audio_attention = None
-                if audio_attention_mask is not None:
-                    audio_attention = audio_attention_mask.to(_gen_device)
+                # Build modality_tokens dict with all available modalities
+                modality_tokens = {}
+                modality_masks = {}
+
+                if audio_tokens is not None:
+                    audio_tokens = audio_tokens.to(device=_gen_device, dtype=base_dtype)
+                    modality_tokens["audio"] = audio_tokens
+                    if audio_attention_mask is not None:
+                        audio_attention = audio_attention_mask.to(_gen_device)
+                        modality_masks["audio"] = audio_attention
+
+                if vision_tokens is not None:
+                    vision_tokens = vision_tokens.to(device=_gen_device, dtype=base_dtype)
+                    modality_tokens["vision"] = vision_tokens
+
+                if not modality_masks:
+                    modality_masks = None
 
                 language_model = self._resolve_language_model(self.base_vl.llm)
                 fusion_layers = self._resolve_fusion_layers()
                 if not any(fusion_layers.values()):
                     use_midlayer_hooks = False
-                else:
-                    modality_tokens = {"audio": audio_tokens}
-                    modality_masks = (
-                        {"audio": audio_attention}
-                        if audio_attention is not None
-                        else None
-                    )
             else:
                 if audio_tokens is not None:
                     audio_tokens = audio_tokens.to(device=_gen_device, dtype=base_dtype)
@@ -2795,6 +2987,12 @@ class SAFEModel(nn.Module):
                     self.kv_hook_manager.clear_audio()
                     self.kv_hook_manager.unwrap_attention_modules()
 
+            # Build per-modality gate dict for generate
+            _gen_modality_gate = {}
+            if modality_tokens is not None:
+                for _mk in modality_tokens:
+                    _gen_modality_gate[_mk] = effective_gate
+
             if use_midlayer_hooks:
                 hook_manager = LayerHookManager(
                     model=language_model,
@@ -2805,7 +3003,7 @@ class SAFEModel(nn.Module):
                 hook_manager.register_hooks(
                     modality_tokens=modality_tokens,
                     modality_masks=modality_masks,
-                    gate={"audio": effective_gate},
+                    gate=_gen_modality_gate,
                 )
                 # For InternVL without images, use language_model (Qwen3).
                 # With images, use full model so vision tower is active.
@@ -2858,7 +3056,7 @@ class SAFEModel(nn.Module):
                         hook_manager.register_hooks(
                             modality_tokens=modality_tokens,
                             modality_masks=modality_masks,
-                            gate={"audio": effective_gate},
+                            gate=_gen_modality_gate,
                         )
                         try:
                             return fallback_gen_model.generate(**retry_inputs)
@@ -2934,7 +3132,11 @@ class SAFEModel(nn.Module):
         
         self.audio_encoder = self.audio_encoder.to(device)
         self.audio_projector = self.audio_projector.to(device=device)  # Device only, keep fp32
-        
+
+        # Vision projector (composition experiment)
+        if self.vision_projector is not None:
+            self.vision_projector = self.vision_projector.to(device=device)
+
         if hasattr(self, 'fusion_adapter') and self.fusion_adapter is not None:
             self.fusion_adapter = self.fusion_adapter.to(device=device)  # Device only, keep fp32
 

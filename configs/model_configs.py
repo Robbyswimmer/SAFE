@@ -518,6 +518,86 @@ INTERNVL_CONFIG = {
     "gradient_accumulation_steps": 8,
 }
 
+# Symmetric Composition Configuration
+# Validates the hypothesis that SAFE aligns modalities with underlying textual
+# spaces by training separate vision and audio SAFE adapter branches on
+# text-only Qwen3-8B, then composing both at inference time without joint training.
+COMPOSITION_CONFIG = {
+    "name": "composition",
+    "description": "Symmetric composition: CLIP + CLAP as SAFE adapters on text-only Qwen3-8B",
+    "eval_prompt": "Answer with a single word or number.",
+
+    # Base LLM - Qwen3-8B (text-only, no native vision)
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/Qwen_Qwen3-8B"),
+    # CLIP loaded by BaseVL as separate vision encoder (not built-in)
+    "vision_model_name": "openai/clip-vit-large-patch14",
+
+    # Audio configuration (same as Qwen config)
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0,
+    },
+
+    # Model dimensions
+    "llm_hidden_size": 4096,
+    "audio_embed_dim": 512,
+    "vision_embed_dim": 1024,  # CLIP ViT-L hidden dim
+
+    # Audio projector configuration (same as Qwen config)
+    "projector_type": "standard",
+    "num_audio_tokens": 8,
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    # Vision projector settings (TokenSetProjector for CLIP spatial tokens)
+    "num_vision_tokens": 8,
+    "vision_projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_positional_embedding": True,
+    },
+
+    # Fusion: audio AND vision at same decoder layers
+    "fusion_type": "multilayer",
+    # Qwen-3 8B has 32 layers; proportionally [10, 19, 29]
+    "fusion_layer_indices": [10, 19, 29],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "use_bottleneck": True,
+        "bottleneck_dim": 256,
+        "num_attention_heads": 32,
+        "dropout": 0.1,
+        "modalities": {
+            "audio": {
+                "layer_indices": [10, 19, 29],
+                "num_tokens": 8,
+            },
+            "vision": {
+                "layer_indices": [10, 19, 29],
+                "num_tokens": 8,
+            },
+        },
+    },
+
+    # Training configuration
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+
+    # Memory and compute
+    "expected_vram_gb": 38,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+}
+
 # Available configurations
 CONFIGS = {
     "demo": DEMO_CONFIG,
@@ -531,6 +611,7 @@ CONFIGS = {
     "internvl": INTERNVL_CONFIG,
     "internvl3.5": INTERNVL_CONFIG,
     "internvl_8b": INTERNVL_CONFIG,
+    "composition": COMPOSITION_CONFIG,
 }
 
 def get_config(config_name: str):

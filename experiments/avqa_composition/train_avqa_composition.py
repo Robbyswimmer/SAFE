@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 from collections import defaultdict
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -25,6 +27,7 @@ import torch
 from PIL import Image
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset
 # tqdm removed — use explicit print logging for clean stdout/stderr separation
 
@@ -292,6 +295,8 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
         cfg["fusion_layer_indices"] = [int(x) for x in args.fusion_layers.split(",")]
     cfg["freeze_base_vl"] = True
     cfg["freeze_audio_encoder"] = args.freeze_audio_encoder
+    if args.label_smoothing is not None:
+        cfg["label_smoothing"] = args.label_smoothing
 
     fusion_cfg = dict(cfg.get("fusion_config", {}))
     fusion_cfg["fusion_mode"] = "residual"
@@ -311,6 +316,7 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
         "fusion_type", "fusion_layer_indices", "lora_rank", "fusion_config",
         "freeze_base_vl", "freeze_audio_encoder", "label_smoothing",
         "llm_hidden_size", "audio_embed_dim",
+        "vision_embed_dim", "num_vision_tokens", "vision_projector_config",
     }
     return {k: v for k, v in cfg.items() if k in valid_keys}
 
@@ -321,6 +327,62 @@ def resolve_modality_batch(batch: Dict[str, Any], modality: str) -> Dict[str, An
     if modality == "image":
         return {"audio": None, "images": batch["images"]}
     return {"audio": batch["audio"], "images": batch["images"]}
+
+
+def build_optimizer(model: SAFEModel, args: argparse.Namespace) -> AdamW:
+    """
+    Use parameter-grouped weight decay:
+    - no decay on bias/norm parameters
+    - decay on matrix weights
+    """
+    no_decay_terms = ("bias", "norm.weight", "layer_norm.weight", "LayerNorm.weight")
+    decay_params: List[torch.nn.Parameter] = []
+    no_decay_params: List[torch.nn.Parameter] = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(term in name for term in no_decay_terms):
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    param_groups = [
+        {"params": decay_params, "weight_decay": args.weight_decay},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
+    return AdamW(param_groups, lr=args.learning_rate, betas=(0.9, 0.95), eps=1e-8)
+
+
+def build_lr_scheduler(
+    optimizer: AdamW,
+    total_update_steps: int,
+    args: argparse.Namespace,
+) -> tuple[Optional[LambdaLR], int]:
+    if args.lr_scheduler == "none" or total_update_steps <= 0:
+        return None, 0
+
+    if args.warmup_steps > 0:
+        warmup_steps = args.warmup_steps
+    else:
+        warmup_steps = int(total_update_steps * args.warmup_ratio)
+    warmup_steps = max(0, min(warmup_steps, max(0, total_update_steps - 1)))
+
+    def lr_lambda(step: int) -> float:
+        if warmup_steps > 0 and step < warmup_steps:
+            return float(step + 1) / float(max(1, warmup_steps))
+
+        progress = float(step - warmup_steps) / float(max(1, total_update_steps - warmup_steps))
+        progress = min(max(progress, 0.0), 1.0)
+
+        if args.lr_scheduler == "linear":
+            return max(args.min_lr_ratio, 1.0 - progress)
+        if args.lr_scheduler == "cosine":
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return args.min_lr_ratio + (1.0 - args.min_lr_ratio) * cosine
+        return 1.0
+
+    return LambdaLR(optimizer, lr_lambda=lr_lambda), warmup_steps
 
 
 def log_gradient_attribution(
@@ -402,9 +464,11 @@ def train_epoch(
     model: SAFEModel,
     dataloader: DataLoader,
     optimizer: AdamW,
+    scheduler: Optional[LambdaLR],
     scaler: GradScaler,
     device: torch.device,
     args: argparse.Namespace,
+    use_bf16_amp: bool = False,
     wandb_run: Any = None,
     global_step: int = 0,
 ) -> tuple:
@@ -414,6 +478,7 @@ def train_epoch(
     num_batches = len(dataloader)
     log_every = max(1, min(100, num_batches // 20))  # Log at least every 100 steps
     optimizer.zero_grad()
+    trainable_for_clip = [p for p in model.parameters() if p.requires_grad]
 
     pending_accum_steps = 0
     for step, batch in enumerate(dataloader):
@@ -450,7 +515,19 @@ def train_epoch(
             else:
                 print(f"  [debug] batch 0: pixel_values shape={tuple(pv.shape)}", flush=True)
 
-        with autocast(enabled=args.fp16):
+        gate_value = args.fusion_gate
+        if args.gate_warmup_steps > 0:
+            progress = min(1.0, float(global_step + 1) / float(max(1, args.gate_warmup_steps)))
+            gate_value = args.fusion_gate * progress
+
+        if args.fp16 and torch.cuda.is_available():
+            amp_ctx = autocast(enabled=True, dtype=torch.float16)
+        elif use_bf16_amp and torch.cuda.is_available():
+            amp_ctx = autocast(enabled=True, dtype=torch.bfloat16)
+        else:
+            amp_ctx = nullcontext()
+
+        with amp_ctx:
             outputs = model(
                 input_ids=inputs["input_ids"],
                 attention_mask=inputs.get("attention_mask"),
@@ -458,7 +535,7 @@ def train_epoch(
                 pixel_values=inputs.get("pixel_values"),
                 audio_tokens=audio_tokens,
                 audio_attention_mask=audio_mask,
-                gate=args.fusion_gate,
+                gate=gate_value,
             )
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
 
@@ -481,9 +558,11 @@ def train_epoch(
                     log_gradient_attribution(model, global_step, wandb_run)
 
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.get_trainable_parameters(), args.max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(trainable_for_clip, args.max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
+            if scheduler is not None:
+                scheduler.step()
             optimizer.zero_grad()
             global_step += 1
             pending_accum_steps = 0
@@ -493,14 +572,21 @@ def train_epoch(
 
         if (step + 1) % log_every == 0 or step == 0:
             avg_loss = total_loss / max(total_batches, 1)
-            print(f"  [train] step {step + 1}/{num_batches} loss={avg_loss:.4f}", flush=True)
+            current_lr = optimizer.param_groups[0]["lr"]
+            print(
+                f"  [train] step {step + 1}/{num_batches} "
+                f"loss={avg_loss:.4f} lr={current_lr:.2e} gate={gate_value:.3f}",
+                flush=True,
+            )
 
     # Flush remainder gradients if epoch length is not divisible by grad accumulation.
     if pending_accum_steps > 0:
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.get_trainable_parameters(), args.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(trainable_for_clip, args.max_grad_norm)
         scaler.step(optimizer)
         scaler.update()
+        if scheduler is not None:
+            scheduler.step()
         optimizer.zero_grad()
         global_step += 1
 
@@ -641,15 +727,25 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--train-modality", type=str, default="both", choices=["audio", "image", "both"])
     p.add_argument("--eval-modalities", type=str, default="both,audio,image")
-    p.add_argument("--fusion-gate", type=float, default=1.0)
+    p.add_argument("--fusion-gate", type=float, default=0.2)
+    p.add_argument("--gate-warmup-steps", type=int, default=0,
+                   help="Linearly warm fusion gate from 0 to --fusion-gate over N optimizer steps")
 
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--num-epochs", type=int, default=10)
     p.add_argument("--learning-rate", type=float, default=5e-5)
     p.add_argument("--weight-decay", type=float, default=0.01)
+    p.add_argument("--lr-scheduler", type=str, default="cosine", choices=["none", "cosine", "linear"])
+    p.add_argument("--warmup-ratio", type=float, default=0.03)
+    p.add_argument("--warmup-steps", type=int, default=0,
+                   help="Override warmup ratio with explicit warmup steps")
+    p.add_argument("--min-lr-ratio", type=float, default=0.1,
+                   help="Final LR = min_lr_ratio * base_lr for cosine/linear schedulers")
     p.add_argument("--gradient-accumulation-steps", type=int, default=8)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
-    p.add_argument("--max-answer-tokens", type=int, default=5)
+    p.add_argument("--max-answer-tokens", type=int, default=8)
+    p.add_argument("--label-smoothing", type=float, default=None,
+                   help="Override model config label smoothing")
 
     p.add_argument("--freeze-audio-encoder", action="store_true")
     p.add_argument("--fp16", action="store_true")
@@ -663,10 +759,19 @@ def parse_args() -> argparse.Namespace:
                    help="Initial value for learned gate params (tanh-squashed, 0.0=gate off)")
 
     # Gradient attribution study
-    p.add_argument("--grad-attribution", action="store_true",
+    p.add_argument("--grad-attribution", dest="grad_attribution", action="store_true",
                    help="Log per-layer gradient norms for fusion layer selection study")
-    p.add_argument("--grad-log-every", type=int, default=200,
+    p.add_argument("--no-grad-attribution", dest="grad_attribution", action="store_false",
+                   help="Disable per-layer gradient attribution logging")
+    p.add_argument("--grad-log-every", type=int, default=100,
                    help="Log gradient attribution every N steps")
+    p.set_defaults(grad_attribution=True)
+
+    # Composition experiment: load separate modality checkpoints for zero-shot composition eval
+    p.add_argument("--compose-audio-ckpt", type=Path, default=None,
+                   help="Path to audio-only adapter checkpoint for composition eval")
+    p.add_argument("--compose-vision-ckpt", type=Path, default=None,
+                   help="Path to vision-only adapter checkpoint for composition eval")
 
     p.add_argument("--max-samples", type=int, default=0,
                    help="Limit train/val to N samples for quick sanity runs (0=unlimited)")
@@ -716,10 +821,17 @@ def main() -> None:
                     "num_epochs": args.num_epochs,
                     "learning_rate": args.learning_rate,
                     "weight_decay": args.weight_decay,
+                    "lr_scheduler": args.lr_scheduler,
+                    "warmup_ratio": args.warmup_ratio,
+                    "warmup_steps": args.warmup_steps,
+                    "min_lr_ratio": args.min_lr_ratio,
                     "gradient_accumulation_steps": args.gradient_accumulation_steps,
                     "seed": args.seed,
                     "train_manifest": str(args.train_manifest),
                     "val_manifest": str(args.val_manifest),
+                    "fusion_gate": args.fusion_gate,
+                    "gate_warmup_steps": args.gate_warmup_steps,
+                    "label_smoothing": args.label_smoothing,
                 },
             )
 
@@ -748,27 +860,57 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Composition experiment: load separate modality checkpoints for zero-shot eval
+    composition_eval_only = False
+    if args.compose_audio_ckpt and args.compose_vision_ckpt:
+        model.load_modality_adapters(str(args.compose_audio_ckpt), "audio")
+        model.load_modality_adapters(str(args.compose_vision_ckpt), "vision")
+        composition_eval_only = True
+        print("[composition] Loaded both modality checkpoints — running eval-only", flush=True)
+
     trainable_params = list(model.get_trainable_parameters())
     print(f"[info] trainable_parameters={sum(p.numel() for p in trainable_params if p.requires_grad):,}")
-    optimizer = AdamW(trainable_params, lr=args.learning_rate, weight_decay=args.weight_decay)
+    optimizer = build_optimizer(model, args)
 
     # Disable fp16 GradScaler for bf16 models (InternVL, Qwen) — GradScaler is incompatible with bf16
     use_fp16 = args.fp16
+    use_bf16_amp = False
     if use_fp16:
         base_dtype = next(model.base_vl.llm.parameters()).dtype
         if base_dtype == torch.bfloat16:
             print("[info] Model uses bfloat16 — disabling fp16 GradScaler (incompatible)", flush=True)
             use_fp16 = False
+            use_bf16_amp = True
+    else:
+        if next(model.base_vl.llm.parameters()).dtype == torch.bfloat16:
+            use_bf16_amp = True
     args.fp16 = use_fp16  # Update so train_epoch sees corrected value
     scaler = GradScaler(enabled=use_fp16)
+    if use_bf16_amp:
+        print("[info] bfloat16 autocast enabled", flush=True)
 
     best_score = -1.0
     history: List[Dict[str, Any]] = []
     eval_modalities = [m.strip() for m in args.eval_modalities.split(",") if m.strip()]
+    updates_per_epoch = math.ceil(len(train_loader) / max(1, args.gradient_accumulation_steps))
+    total_update_steps = updates_per_epoch * max(0, args.num_epochs)
+    scheduler, warmup_steps = build_lr_scheduler(optimizer, total_update_steps, args)
+    if scheduler is not None:
+        print(
+            f"[info] lr_scheduler={args.lr_scheduler} total_update_steps={total_update_steps} "
+            f"warmup_steps={warmup_steps} min_lr_ratio={args.min_lr_ratio}",
+            flush=True,
+        )
 
-    # Image-only = eval-only baseline (frozen LLaVA, no trainable params touch loss)
-    if args.train_modality == "image":
-        print("\n[image-only] No trainable params in image path — running eval-only baseline")
+    # Eval-only modes:
+    # 1. Composition eval: both modality checkpoints loaded, skip training
+    # 2. Image-only baseline: no trainable vision projector (frozen LLaVA), eval only
+    eval_only = composition_eval_only or (
+        args.train_modality == "image" and model.vision_projector is None
+    )
+    if eval_only:
+        reason = "composition" if composition_eval_only else "image-only baseline (no trainable vision projector)"
+        print(f"\n[eval-only] {reason} — running eval-only")
         model.eval()
         epoch_result: Dict[str, Any] = {"epoch": 0, "train_loss": 0.0, "eval": {}}
         for modality in eval_modalities:
@@ -776,7 +918,7 @@ def main() -> None:
             epoch_result["eval"][modality] = metrics
             print(f"  [eval:{modality}] raw_em={metrics['exact_match']:.2f} extracted_em={metrics['extracted_match']:.2f} f1={metrics['token_f1']:.2f} n={metrics['num_samples']}")
         history.append(epoch_result)
-        best_score = epoch_result["eval"].get("image", {}).get("extracted_match", -1.0)
+        best_score = epoch_result["eval"].get(args.train_modality, epoch_result["eval"].get("image", {})).get("extracted_match", -1.0)
         if wandb_run is not None:
             log_payload: Dict[str, Any] = {"epoch": 0}
             for modality, metrics in epoch_result["eval"].items():
@@ -789,7 +931,8 @@ def main() -> None:
         for epoch in range(args.num_epochs):
             print(f"\n[epoch {epoch + 1}/{args.num_epochs}]")
             train_loss, global_step = train_epoch(
-                model, train_loader, optimizer, scaler, device, args,
+                model, train_loader, optimizer, scheduler, scaler, device, args,
+                use_bf16_amp=use_bf16_amp,
                 wandb_run=wandb_run, global_step=global_step,
             )
             epoch_result = {"epoch": epoch + 1, "train_loss": float(train_loss), "eval": {}}
@@ -809,6 +952,7 @@ def main() -> None:
                 log_payload = {
                     "epoch": epoch + 1,
                     "train/loss": float(train_loss),
+                    "train/lr": optimizer.param_groups[0]["lr"],
                 }
                 for modality, metrics in epoch_result["eval"].items():
                     log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
