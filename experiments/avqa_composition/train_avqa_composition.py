@@ -289,16 +289,28 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
     if args.llm_model:
         cfg["llm_model_name"] = args.llm_model
 
+    fusion_cfg = dict(cfg.get("fusion_config", {}))
+
     cfg["num_audio_tokens"] = args.num_audio_tokens
     cfg["fusion_type"] = "multilayer"  # Required for mid-layer hook-based Pre-FFN fusion
     if args.fusion_layers is not None:
-        cfg["fusion_layer_indices"] = [int(x) for x in args.fusion_layers.split(",")]
+        layer_indices = [int(x) for x in args.fusion_layers.split(",") if x.strip()]
+        cfg["fusion_layer_indices"] = layer_indices
+        # Keep modality-specific fusion layers in sync when config provides them.
+        # MultiLayerFusionAdapter prioritizes fusion_config.modalities over
+        # top-level fusion_layer_indices.
+        modalities = fusion_cfg.get("modalities")
+        if isinstance(modalities, dict):
+            for modality, mcfg in modalities.items():
+                if isinstance(mcfg, dict):
+                    mcfg["layer_indices"] = list(layer_indices)
+                elif isinstance(mcfg, (list, tuple)):
+                    modalities[modality] = {"layer_indices": list(layer_indices)}
     cfg["freeze_base_vl"] = True
     cfg["freeze_audio_encoder"] = args.freeze_audio_encoder
     if args.label_smoothing is not None:
         cfg["label_smoothing"] = args.label_smoothing
 
-    fusion_cfg = dict(cfg.get("fusion_config", {}))
     fusion_cfg["fusion_mode"] = "residual"
     fusion_cfg["injection_point"] = "pre_ffn"
     fusion_cfg.setdefault("use_bottleneck", True)
@@ -856,6 +868,10 @@ def main() -> None:
     model = SAFEModel(**model_cfg)
     model.enable_audio_training()
     model.to_device(device)
+    if hasattr(model, "fusion_adapter") and model.fusion_adapter is not None:
+        layers = getattr(model.fusion_adapter, "fusion_layer_indices", None)
+        if layers is not None:
+            print(f"[info] effective_fusion_layers={list(layers)}", flush=True)
     tokenizer = model.base_vl.tokenizer
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
