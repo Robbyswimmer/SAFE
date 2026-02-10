@@ -1343,6 +1343,12 @@ class SAFEModel(nn.Module):
         image_token_id = getattr(model_config, "image_token_id", 151667)
         image_seq_length = getattr(model_config, "image_seq_length", 256)
 
+        # Use the model's img_context_token_id if available (custom model sets this)
+        # It may differ from config's image_token_id
+        actual_img_token_id = getattr(self.base_vl.llm, "img_context_token_id", None)
+        if actual_img_token_id is not None:
+            image_token_id = actual_img_token_id
+
         # Normalize text to list
         if isinstance(text, str):
             texts = [text]
@@ -1367,46 +1373,41 @@ class SAFEModel(nn.Module):
             pil_images.append(None)
         pil_images = pil_images[:batch_size]
 
-        # Build the image placeholder string (image_seq_length tokens per image)
-        # InternVL uses a specific token_id; we look up its string representation
-        # or fall back to constructing the token sequence manually.
-        img_placeholder_str = None
-        try:
-            img_placeholder_str = tokenizer.decode([image_token_id] * image_seq_length)
-        except Exception:
-            pass
-        if not img_placeholder_str:
-            # Fallback: use the token directly repeated
-            single_tok = tokenizer.decode([image_token_id])
-            img_placeholder_str = single_tok * image_seq_length
-
         # Short-answer instruction for AVQA-style tasks
         instruction = "Answer with a single word or number."
 
-        # Build prompts with/without image placeholders
-        prompts = []
-        valid_pixel_images = []  # Only images that are not None
-        image_indices = []  # Track which batch items have images
+        # Build input_ids by directly inserting image placeholder token IDs.
+        # Avoids string encode/decode roundtrip which loses special tokens.
+        valid_pixel_images = []
+        image_indices = []
+        all_input_ids = []
         for i, question in enumerate(texts):
             has_image = pil_images[i] is not None and image_processor is not None
+            # Tokenize text part
+            text_part = f"\n{instruction} {question}" if has_image else f"{instruction} {question}"
+            text_ids = tokenizer.encode(text_part, add_special_tokens=False)
+
             if has_image:
-                prompt = f"{img_placeholder_str}\n{instruction} {question}"
+                # Prepend image_seq_length placeholder tokens
+                img_ids = [image_token_id] * image_seq_length
+                sample_ids = img_ids + text_ids
                 valid_pixel_images.append(pil_images[i])
                 image_indices.append(i)
             else:
-                prompt = f"{instruction} {question}"
-            prompts.append(prompt)
+                sample_ids = text_ids
 
-        # Tokenize all prompts
-        encodings = tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=2048,
-        )
-        input_ids = encodings["input_ids"].to(device)
-        attention_mask = encodings["attention_mask"].to(device)
+            all_input_ids.append(torch.tensor(sample_ids, dtype=torch.long))
+
+        # Pad to same length
+        max_len = max(ids.size(0) for ids in all_input_ids)
+        pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        input_ids = torch.full((batch_size, max_len), pad_id, dtype=torch.long)
+        attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
+        for i, ids in enumerate(all_input_ids):
+            input_ids[i, :ids.size(0)] = ids
+            attention_mask[i, :ids.size(0)] = 1
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
 
         result: Dict[str, torch.Tensor] = {
             "input_ids": input_ids,
