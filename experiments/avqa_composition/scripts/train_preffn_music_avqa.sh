@@ -61,6 +61,6 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --num-audio-tokens "$NUM_AUDIO_TOKENS" \
   --train-modality "$TRAIN_MODALITY" \
   --eval-modalities "$EVAL_MODALITIES" \
-  --fp16 \
+  ${FP16_FLAG:---fp16} \
   "${FUSION_ARGS[@]}" \
   "${WANDB_ARGS[@]}"
