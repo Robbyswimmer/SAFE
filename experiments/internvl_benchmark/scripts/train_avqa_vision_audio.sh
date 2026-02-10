@@ -6,7 +6,7 @@
 #SBATCH --mem=96G
 #SBATCH --cpus-per-task=8
 #SBATCH -p gpu
-# pass --gres=gpu:1 at submit time
+#SBATCH --gres=gpu:1
 
 # InternVL 3.5-8B Vision+Audio Training with SAFE
 #
