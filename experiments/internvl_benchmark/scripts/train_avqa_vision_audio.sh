@@ -50,8 +50,8 @@ TRAIN_MODALITY=${TRAIN_MODALITY:-both}
 EVAL_MODALITIES=${EVAL_MODALITIES:-"both,audio,image"}
 
 # Training configuration
-TRAIN_MANIFEST=${TRAIN_MANIFEST:-$SAFE_ROOT/data/music_avqa/train.jsonl}
-VAL_MANIFEST=${VAL_MANIFEST:-$SAFE_ROOT/data/music_avqa/val.jsonl}
+TRAIN_MANIFEST=${TRAIN_MANIFEST:-$SAFE_ROOT/data/music_avqa/manifests/train.jsonl}
+VAL_MANIFEST=${VAL_MANIFEST:-$SAFE_ROOT/data/music_avqa/manifests/validation.jsonl}
 MEDIA_ROOT=${MEDIA_ROOT:-$SAFE_ROOT/data/music_avqa}
 OUTPUT_DIR=${OUTPUT_DIR:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/vision_audio}
 BATCH_SIZE=${BATCH_SIZE:-1}
