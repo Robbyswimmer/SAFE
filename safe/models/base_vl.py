@@ -473,6 +473,9 @@ class BaseVLModel(nn.Module):
         Returns:
             vision_features: (batch_size, num_vision_tokens, llm_hidden_size)
         """
+        if self.vision_encoder is None:
+            # InternVL/Qwen: vision encoder not loaded separately (built-in or audio-only)
+            return None
         if self.model_type in ["llava", "blip2", "internvl"]:
             # For LLaVA/BLIP2/InternVL, we'll let the model handle vision encoding internally
             # This method is mainly for compatibility
