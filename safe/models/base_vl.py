@@ -4,6 +4,8 @@ from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
     AutoModel,
+    AutoModelForImageTextToText,
+    AutoImageProcessor,
     CLIPVisionModel,
     CLIPImageProcessor,
     AutoConfig,
@@ -49,8 +51,9 @@ class BaseVLModel(nn.Module):
         self.num_vision_tokens = num_vision_tokens
 
         # Load vision encoder (frozen) - skip if None (e.g., audio-only Qwen)
+        # or "built-in" (e.g., InternVL with integrated InternViT)
         import sys
-        if vision_model_name:
+        if vision_model_name and vision_model_name != "built-in":
             print(f"[BaseVL] Loading vision encoder: {vision_model_name}...", flush=True)
             sys.stdout.flush()
             self.vision_encoder = CLIPVisionModel.from_pretrained(
@@ -69,7 +72,10 @@ class BaseVLModel(nn.Module):
                 for param in self.vision_encoder.parameters():
                     param.requires_grad = False
         else:
-            print(f"[BaseVL] Skipping vision encoder (audio-only mode)", flush=True)
+            if vision_model_name == "built-in":
+                print(f"[BaseVL] Skipping separate vision encoder (built-in to main model)", flush=True)
+            else:
+                print(f"[BaseVL] Skipping vision encoder (audio-only mode)", flush=True)
             sys.stdout.flush()
             self.vision_encoder = None
             self.image_processor = None
@@ -215,9 +221,11 @@ class BaseVLModel(nn.Module):
         elif "internvl" in llm_model_name.lower():
             print(f"[BaseVL] Detected InternVL model type", flush=True)
             sys.stdout.flush()
-            # InternVL uses AutoModel (not AutoModelForCausalLM) because
-            # InternVLChatModel is a multimodal wrapper, not a plain causal LM.
-            # It requires trust_remote_code=True for custom model classes.
+            # InternVL: prefer built-in InternVLForConditionalGeneration via
+            # AutoModelForImageTextToText. This class natively handles
+            # input_ids + pixel_values + labels and has built-in weight key
+            # conversion (_checkpoint_conversion_mapping).
+            # Fallback: AutoModel with trust_remote_code for older weights.
             internvl_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
             # Env overrides (same as Qwen for consistency)
@@ -237,7 +245,21 @@ class BaseVLModel(nn.Module):
             if prefer_flash_attention_2 and torch.cuda.is_available():
                 attn_impl = os.environ.get("SAFE_ATTN_IMPL", "flash_attention_2")
 
-            def _try_load_internvl(quant_cfg, torch_dtype, attn_implementation):
+            def _try_load_internvl_builtin(quant_cfg, torch_dtype, attn_implementation):
+                """Load via built-in InternVLForConditionalGeneration (no trust_remote_code)."""
+                kwargs = {
+                    "low_cpu_mem_usage": True,
+                }
+                if quant_cfg is not None:
+                    kwargs["quantization_config"] = quant_cfg
+                if torch_dtype is not None:
+                    kwargs["torch_dtype"] = torch_dtype
+                if attn_implementation is not None:
+                    kwargs["attn_implementation"] = attn_implementation
+                return AutoModelForImageTextToText.from_pretrained(llm_model_name, **kwargs)
+
+            def _try_load_internvl_custom(quant_cfg, torch_dtype, attn_implementation):
+                """Fallback: load via AutoModel with trust_remote_code (legacy path)."""
                 kwargs = {
                     "low_cpu_mem_usage": True,
                     "trust_remote_code": True,
@@ -264,27 +286,43 @@ class BaseVLModel(nn.Module):
             except Exception:
                 quant_cfgs = []
 
-            # Try: flash2+quant, quant, flash2+bf16, bf16
-            attempts = []
+            # Build attempt list: flash2+quant, quant, flash2+bf16, bf16
+            attempt_params = []
             for name, cfg in quant_cfgs:
-                attempts.append((f"{name}+{attn_impl or 'noattn'}", cfg, None, attn_impl))
-                attempts.append((name, cfg, None, None))
-            attempts.append((f"bf16+{attn_impl or 'noattn'}", None, internvl_dtype, attn_impl))
-            attempts.append(("bf16", None, internvl_dtype, None))
+                attempt_params.append((f"{name}+{attn_impl or 'noattn'}", cfg, None, attn_impl))
+                attempt_params.append((name, cfg, None, None))
+            attempt_params.append((f"bf16+{attn_impl or 'noattn'}", None, internvl_dtype, attn_impl))
+            attempt_params.append(("bf16", None, internvl_dtype, None))
 
-            for name, cfg, td, ai in attempts:
-                try:
-                    print(f"[BaseVL] InternVL load attempt: {name}", flush=True)
-                    llm = _try_load_internvl(cfg, td, ai)
+            # Try built-in classes first, then fallback to trust_remote_code
+            for loader_name, loader_fn in [
+                ("built-in", _try_load_internvl_builtin),
+                ("custom(trust_remote_code)", _try_load_internvl_custom),
+            ]:
+                if llm is not None:
                     break
-                except Exception as e:
-                    tried.append(f"{name}: {type(e).__name__}")
-                    continue
+                for name, cfg, td, ai in attempt_params:
+                    try:
+                        label = f"{loader_name}/{name}"
+                        print(f"[BaseVL] InternVL load attempt: {label}", flush=True)
+                        llm = loader_fn(cfg, td, ai)
+                        print(f"[BaseVL] InternVL loaded via {label}", flush=True)
+                        break
+                    except Exception as e:
+                        tried.append(f"{loader_name}/{name}: {type(e).__name__}: {e}")
+                        continue
 
             if llm is None:
                 raise RuntimeError(f"[BaseVL] Failed to load InternVL after attempts: {tried}")
 
             self.llm = llm
+
+            # Verify vision tower accessibility (built-in classes expose get_image_features)
+            if hasattr(self.llm, 'get_image_features'):
+                print(f"[BaseVL] ✓ InternVL vision tower accessible (get_image_features)", flush=True)
+            else:
+                print(f"[BaseVL] InternVL loaded without built-in vision pipeline "
+                      f"(type: {type(self.llm).__name__})", flush=True)
 
             # Disable KV cache and enable hidden states for adapter training
             try:
@@ -315,15 +353,25 @@ class BaseVLModel(nn.Module):
             print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
             sys.stdout.flush()
 
-            # Store InternVL's image processor for future multimodal use
+            # Load InternVL's image processor via AutoImageProcessor (avoids tokenizer
+            # dependency that causes "Qwen2TokenizerFast has no attribute
+            # start_image_token" when using AutoProcessor).
             try:
-                self.internvl_image_processor = AutoProcessor.from_pretrained(
-                    llm_model_name, trust_remote_code=True
+                self.internvl_image_processor = AutoImageProcessor.from_pretrained(
+                    llm_model_name
                 )
-                print(f"[BaseVL] ✓ InternVL image processor loaded", flush=True)
+                print(f"[BaseVL] ✓ InternVL image processor loaded (AutoImageProcessor)", flush=True)
             except Exception as e:
-                print(f"[BaseVL] Warning: could not load InternVL image processor: {e}", flush=True)
-                self.internvl_image_processor = None
+                print(f"[BaseVL] Warning: AutoImageProcessor failed: {e}", flush=True)
+                # Fallback: try AutoProcessor with trust_remote_code
+                try:
+                    self.internvl_image_processor = AutoProcessor.from_pretrained(
+                        llm_model_name, trust_remote_code=True
+                    )
+                    print(f"[BaseVL] ✓ InternVL image processor loaded (AutoProcessor fallback)", flush=True)
+                except Exception as e2:
+                    print(f"[BaseVL] Warning: could not load InternVL image processor: {e2}", flush=True)
+                    self.internvl_image_processor = None
 
             self.model_type = "internvl"
         else:

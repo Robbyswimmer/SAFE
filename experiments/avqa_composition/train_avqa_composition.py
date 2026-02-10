@@ -318,7 +318,7 @@ def train_epoch(
     total_loss = 0.0
     total_batches = 0
     num_batches = len(dataloader)
-    log_every = max(1, num_batches // 20)  # Log ~20 times per epoch
+    log_every = max(1, min(100, num_batches // 20))  # Log at least every 100 steps
     optimizer.zero_grad()
 
     for step, batch in enumerate(dataloader):

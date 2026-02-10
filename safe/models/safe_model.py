@@ -932,7 +932,7 @@ class SAFEModel(nn.Module):
 
         # Removed excessive PrepDebug logging
 
-        # For LLaVA/BLIP2, use proper multimodal input preparation
+        # For LLaVA/BLIP2/InternVL, use proper multimodal input preparation
         if self.base_vl.model_type == "llava":
             # LLaVA-specific handling with chat templates and proper <image> token insertion
             result = self._prepare_llava_inputs(
@@ -940,6 +940,19 @@ class SAFEModel(nn.Module):
                 images=images,
                 device=device,
                 llava_audio_prompt_style=llava_audio_prompt_style,
+            )
+        elif self.base_vl.model_type == "internvl" and images is not None:
+            # InternVL with images: use dedicated pipeline that inserts
+            # image placeholder tokens and produces pixel_values for the
+            # built-in InternVLForConditionalGeneration vision tower.
+            # When images=None (audio-only), fall through to generic path
+            # to preserve current working audio-only behavior.
+            result = self._prepare_internvl_inputs(
+                text=text,
+                images=images,
+                answers=answers,
+                device=device,
+                training_mode=training_mode,
             )
         elif self.base_vl.model_type == "blip2":
             # BLIP2-specific handling
@@ -1301,7 +1314,145 @@ class SAFEModel(nn.Module):
         """
         # Use the existing base VL preparation for BLIP2
         return self.base_vl.prepare_inputs_for_training(text, images, device)
-    
+
+    def _prepare_internvl_inputs(
+        self,
+        text: Union[str, List[str]],
+        images: Optional[Union[torch.Tensor, List]] = None,
+        answers: Optional[Union[str, Sequence[Any]]] = None,
+        device: str = "cuda",
+        training_mode: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Prepare inputs for InternVL with built-in vision pipeline.
+
+        Uses InternVL's image processor to create pixel_values and builds
+        input_ids with image placeholder tokens so InternVLForConditionalGeneration
+        can perform its own vision embedding via get_image_features + masked_scatter.
+        """
+        from PIL import Image as PILImage
+
+        tokenizer = self.base_vl.tokenizer
+        image_processor = getattr(self.base_vl, "internvl_image_processor", None)
+
+        # Get vision config from model
+        model_config = self.base_vl.llm.config
+        image_token_id = getattr(model_config, "image_token_id", 151667)
+        image_seq_length = getattr(model_config, "image_seq_length", 256)
+
+        # Normalize text to list
+        if isinstance(text, str):
+            texts = [text]
+        else:
+            texts = list(text)
+
+        batch_size = len(texts)
+
+        # Convert images to PIL format
+        pil_images: List[Optional[PILImage.Image]] = []
+        if images is not None:
+            if isinstance(images, list):
+                for img in images:
+                    pil_images.append(self._convert_to_pil(img))
+            elif isinstance(images, torch.Tensor) and images.dim() == 4:
+                for i in range(images.shape[0]):
+                    pil_images.append(self._convert_to_pil(images[i]))
+            else:
+                pil_images = [self._convert_to_pil(images)]
+        # Pad/trim to batch_size
+        while len(pil_images) < batch_size:
+            pil_images.append(None)
+        pil_images = pil_images[:batch_size]
+
+        # Build the image placeholder string (image_seq_length tokens per image)
+        # InternVL uses a specific token_id; we look up its string representation
+        # or fall back to constructing the token sequence manually.
+        img_placeholder_str = None
+        try:
+            img_placeholder_str = tokenizer.decode([image_token_id] * image_seq_length)
+        except Exception:
+            pass
+        if not img_placeholder_str:
+            # Fallback: use the token directly repeated
+            single_tok = tokenizer.decode([image_token_id])
+            img_placeholder_str = single_tok * image_seq_length
+
+        # Short-answer instruction for AVQA-style tasks
+        instruction = "Answer with a single word or number."
+
+        # Build prompts with/without image placeholders
+        prompts = []
+        valid_pixel_images = []  # Only images that are not None
+        image_indices = []  # Track which batch items have images
+        for i, question in enumerate(texts):
+            has_image = pil_images[i] is not None and image_processor is not None
+            if has_image:
+                prompt = f"{img_placeholder_str}\n{instruction} {question}"
+                valid_pixel_images.append(pil_images[i])
+                image_indices.append(i)
+            else:
+                prompt = f"{instruction} {question}"
+            prompts.append(prompt)
+
+        # Tokenize all prompts
+        encodings = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=2048,
+        )
+        input_ids = encodings["input_ids"].to(device)
+        attention_mask = encodings["attention_mask"].to(device)
+
+        result: Dict[str, torch.Tensor] = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+
+        # Process images through InternVL's image processor
+        if valid_pixel_images and image_processor is not None:
+            try:
+                pixel_inputs = image_processor(
+                    images=valid_pixel_images,
+                    return_tensors="pt",
+                )
+                pixel_values = pixel_inputs["pixel_values"]  # (N_images, C, H, W)
+
+                # If not all samples have images, we need to scatter into
+                # a full-batch tensor (zeros for missing images).
+                if len(valid_pixel_images) < batch_size:
+                    full_pv = torch.zeros(
+                        (batch_size,) + tuple(pixel_values.shape[1:]),
+                        dtype=pixel_values.dtype,
+                    )
+                    for pv_idx, batch_idx in enumerate(image_indices):
+                        full_pv[batch_idx] = pixel_values[pv_idx]
+                    pixel_values = full_pv
+
+                result["pixel_values"] = pixel_values.to(device)
+            except Exception as e:
+                print(f"[InternVLPrep] Warning: image processing failed: {e}", flush=True)
+
+        # Verify image tokens are present in input_ids when we have images
+        if valid_pixel_images:
+            has_img_tokens = (input_ids == image_token_id).any()
+            if not has_img_tokens:
+                print(f"[InternVLPrep] WARNING: No image placeholder tokens "
+                      f"(id={image_token_id}) found in input_ids", flush=True)
+            else:
+                n_img_tokens = (input_ids == image_token_id).sum().item()
+                expected = len(valid_pixel_images) * image_seq_length
+                if n_img_tokens != expected:
+                    print(f"[InternVLPrep] Image token count: {n_img_tokens} "
+                          f"(expected {expected})", flush=True)
+
+        # Labels: default to input_ids clone; _apply_answers_to_inputs will
+        # handle proper answer-supervised labeling if training_mode is on.
+        result["labels"] = input_ids.clone()
+
+        return result
+
     def _convert_to_pil(self, image):
         """
         Convert various image formats to PIL Image.
@@ -1626,31 +1777,50 @@ class SAFEModel(nn.Module):
                 )
 
             if no_audio:
-                # TRUE VL PASSTHROUGH: Use base embeddings + pixel_values (matches working fusion path)
-                # Get embeddings from BASE model's embedding layer (not custom get_input_embeddings)
-                # This avoids contamination while using the proven working path
-                base_embeddings_layer = self.base_vl.llm.get_input_embeddings()
-                inputs_embeds = base_embeddings_layer(input_ids)  # Clean base embeddings, no sanitization
+                # TRUE VL PASSTHROUGH: No audio fusion needed.
+                # For InternVL with pixel_values: use full model with input_ids + pixel_values
+                # so InternVL's built-in vision pipeline handles image embedding.
+                # For InternVL without pixel_values (audio-only): route to language_model.
+                # For other models: use inputs_embeds path (proven working).
+                internvl_with_vision = (
+                    self.base_vl.model_type == "internvl"
+                    and pixel_values is not None
+                    and hasattr(self.base_vl.llm, "get_image_features")
+                )
 
-                # Ensure correct dtype
-                base_dtype = next(self.base_vl.llm.parameters()).dtype
-                inputs_embeds = inputs_embeds.to(base_dtype)
+                if internvl_with_vision:
+                    # Full InternVL VL passthrough: pass input_ids + pixel_values
+                    # InternVL handles vision internally (embed → get_image_features → masked_scatter)
+                    base_inputs = {
+                        "input_ids": input_ids,
+                        "pixel_values": pixel_values,
+                        "attention_mask": attention_mask,
+                        "labels": labels,
+                        **filtered_kwargs,
+                    }
+                    _passthrough_model = self.base_vl.llm  # Full InternVL model
+                else:
+                    # Other models or InternVL audio-only: use inputs_embeds path
+                    base_embeddings_layer = self.base_vl.llm.get_input_embeddings()
+                    inputs_embeds = base_embeddings_layer(input_ids)
 
-                # Use same format as fusion path: inputs_embeds + pixel_values
-                base_inputs = {
-                    "inputs_embeds": inputs_embeds,  # Use embeddings (not input_ids) for proper vision merge
-                    "attention_mask": attention_mask,
-                    "labels": labels,
-                    **filtered_kwargs,
-                }
-                if pixel_values is not None:
-                    base_inputs["pixel_values"] = pixel_values
+                    base_dtype = next(self.base_vl.llm.parameters()).dtype
+                    inputs_embeds = inputs_embeds.to(base_dtype)
 
-                # Call LLM with embeddings + vision (same as fusion path)
-                # For InternVL, route to inner language_model (Qwen3)
-                _passthrough_model = self.base_vl.llm
-                if self.base_vl.model_type == "internvl":
-                    _passthrough_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
+                    base_inputs = {
+                        "inputs_embeds": inputs_embeds,
+                        "attention_mask": attention_mask,
+                        "labels": labels,
+                        **filtered_kwargs,
+                    }
+                    if pixel_values is not None:
+                        base_inputs["pixel_values"] = pixel_values
+
+                    # For InternVL without vision, route to inner language_model (Qwen3)
+                    _passthrough_model = self.base_vl.llm
+                    if self.base_vl.model_type == "internvl":
+                        _passthrough_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
+
                 outputs = _passthrough_model(**base_inputs)
                 logits = outputs.logits
                 loss = outputs.loss if labels is not None else None
@@ -1670,14 +1840,28 @@ class SAFEModel(nn.Module):
                 return {"logits": logits, "loss": loss, "hidden_states": hidden_state_out}
             # ==================== END VL PASSTHROUGH ====================
 
-            # FUSION PATH: Convert to inputs_embeds only when audio fusion is needed
-            inputs_embeds = self.get_input_embeddings(input_ids)
+            # Detect InternVL with vision: pass input_ids + pixel_values to
+            # the full InternVL model so its built-in vision pipeline fires.
+            # Audio hooks on decoder layers still work because InternVL internally
+            # calls language_model(inputs_embeds=...) which traverses the hooked layers.
+            internvl_with_vision = (
+                self.base_vl.model_type == "internvl"
+                and pixel_values is not None
+                and hasattr(self.base_vl.llm, "get_image_features")
+            )
 
-            # Determine base dtype from the language model weights
-            base_dtype = next(self.base_vl.llm.parameters()).dtype
-
-            # Ensure inputs_embeds matches base dtype
-            inputs_embeds = inputs_embeds.to(base_dtype)
+            # FUSION PATH: Prepare inputs_embeds (skip for InternVL with vision)
+            if internvl_with_vision:
+                # InternVL handles embedding + vision merge internally.
+                # We still need a reference device/dtype for audio token casting.
+                base_dtype = next(self.base_vl.llm.parameters()).dtype
+                inputs_embeds = None  # Not used; InternVL uses input_ids
+                _embed_device = input_ids.device
+            else:
+                inputs_embeds = self.get_input_embeddings(input_ids)
+                base_dtype = next(self.base_vl.llm.parameters()).dtype
+                inputs_embeds = inputs_embeds.to(base_dtype)
+                _embed_device = inputs_embeds.device
 
             # IMPORTANT: HuggingFace gradient checkpointing requires at least one input
             # tensor with requires_grad=True; otherwise it will skip building an autograd
@@ -1686,14 +1870,15 @@ class SAFEModel(nn.Module):
             #
             # When the base LLM and embeddings are frozen, inputs_embeds will not require
             # grad by default, so we force it on when gradient checkpointing is enabled.
-            try:
-                llm_gc = getattr(self.base_vl.llm, "is_gradient_checkpointing", False) or getattr(
-                    self.base_vl.llm, "gradient_checkpointing", False
-                )
-                if self.training and llm_gc and not inputs_embeds.requires_grad:
-                    inputs_embeds.requires_grad_(True)
-            except Exception:
-                pass
+            if inputs_embeds is not None:
+                try:
+                    llm_gc = getattr(self.base_vl.llm, "is_gradient_checkpointing", False) or getattr(
+                        self.base_vl.llm, "gradient_checkpointing", False
+                    )
+                    if self.training and llm_gc and not inputs_embeds.requires_grad:
+                        inputs_embeds.requires_grad_(True)
+                except Exception:
+                    pass
 
             # If audio_attention_mask marks a sample as silent, we must ensure
             # audio fusion is a true bypass for that sample. We do this by
@@ -1727,18 +1912,18 @@ class SAFEModel(nn.Module):
                         audio_attention_mask = audio_attention_mask.clone()
                         audio_attention_mask[drop_mask] = 0
 
-                mask_on_device = audio_attention_mask.to(device=inputs_embeds.device)
+                mask_on_device = audio_attention_mask.to(device=_embed_device)
                 silent_mask = mask_on_device.sum(dim=1) <= 0
                 if silent_mask.any():
                     if torch.is_tensor(effective_gate):
-                        g = effective_gate.to(device=inputs_embeds.device, dtype=torch.float32)
+                        g = effective_gate.to(device=_embed_device, dtype=torch.float32)
                         if g.dim() == 0:
                             g = g.expand(mask_on_device.size(0))
                     else:
                         g = torch.full(
                             (mask_on_device.size(0),),
                             float(effective_gate),
-                            device=inputs_embeds.device,
+                            device=_embed_device,
                             dtype=torch.float32,
                         )
                     g[silent_mask] = 0.0
@@ -1748,7 +1933,7 @@ class SAFEModel(nn.Module):
             # Log norms for monitoring (NO EMA UPDATES - letting gradients handle scale)
             # Raw text embeddings (norm ~0.8-1.0) are NOT what audio should match.
             # Audio norms of 8-11 are correct for LLaMA hidden state magnitudes.
-            if self.training and audio_tokens is not None:
+            if self.training and audio_tokens is not None and inputs_embeds is not None:
                 if not hasattr(self, '_norm_log_count'):
                     self._norm_log_count = 0
                 if self._norm_log_count < 5:
@@ -1768,28 +1953,38 @@ class SAFEModel(nn.Module):
 
             supervised_mask = None
             if labels is not None:
-                supervised_mask = (labels != -100).to(inputs_embeds.device)
+                supervised_mask = (labels != -100).to(_embed_device)
 
-            model_inputs = {
-                "inputs_embeds": inputs_embeds,
-                "attention_mask": attention_mask,
-                "labels": labels,
-                **filtered_kwargs,
-            }
+            # Build model_inputs differently for InternVL with vision vs other paths
+            if internvl_with_vision:
+                # Vision+Audio: pass input_ids + pixel_values to full InternVL model.
+                # InternVL handles vision internally (embed → get_image_features → masked_scatter).
+                # Audio hooks fire on language_model decoder layers during the internal forward.
+                model_inputs = {
+                    "input_ids": input_ids,
+                    "pixel_values": pixel_values,
+                    "attention_mask": attention_mask,
+                    "labels": labels,
+                    **filtered_kwargs,
+                }
+                _forward_model = self.base_vl.llm  # Full InternVL model
+            else:
+                model_inputs = {
+                    "inputs_embeds": inputs_embeds,
+                    "attention_mask": attention_mask,
+                    "labels": labels,
+                    **filtered_kwargs,
+                }
+                if pixel_values is not None:
+                    model_inputs["pixel_values"] = pixel_values
+                # For InternVL audio-only, route to inner language_model (Qwen3)
+                _forward_model = self.base_vl.llm
+                if self.base_vl.model_type == "internvl":
+                    _forward_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
 
             # Ensure hidden states are returned when requested by caller.
-            # Some wrappers/configurations can drop hidden states unless explicitly enabled.
             if bool(filtered_kwargs.get("output_hidden_states", False)):
                 model_inputs["output_hidden_states"] = True
-
-            if pixel_values is not None:
-                model_inputs["pixel_values"] = pixel_values
-
-            # For InternVL, the outer InternVLChatModel does not accept
-            # inputs_embeds; route to its inner language_model (Qwen3) instead.
-            _forward_model = self.base_vl.llm
-            if self.base_vl.model_type == "internvl":
-                _forward_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
 
             use_midlayer_hooks = (
                 audio_tokens is not None
@@ -1804,15 +1999,20 @@ class SAFEModel(nn.Module):
             modality_tokens = None
             modality_masks = None
 
+            # Determine target device/dtype for audio token casting.
+            # When InternVL with vision, inputs_embeds is None so use input_ids device + base_dtype.
+            _cast_device = inputs_embeds.device if inputs_embeds is not None else _embed_device
+            _cast_dtype = inputs_embeds.dtype if inputs_embeds is not None else base_dtype
+
             if use_midlayer_hooks:
                 assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens before fusion"
 
                 audio_tokens = audio_tokens.to(
-                    device=inputs_embeds.device,
-                    dtype=inputs_embeds.dtype,
+                    device=_cast_device,
+                    dtype=_cast_dtype,
                 )
                 if audio_attention_mask is not None:
-                    audio_attention_mask = audio_attention_mask.to(inputs_embeds.device)
+                    audio_attention_mask = audio_attention_mask.to(_cast_device)
 
                 # NOTE: Do NOT resolve to a submodule here. We intentionally register hooks
                 # on the top-level HF model (`self.base_vl.llm`) so they fire regardless of
@@ -1832,11 +2032,11 @@ class SAFEModel(nn.Module):
             else:
                 if audio_tokens is not None:
                     audio_tokens = audio_tokens.to(
-                        device=inputs_embeds.device,
-                        dtype=inputs_embeds.dtype,
+                        device=_cast_device,
+                        dtype=_cast_dtype,
                     )
                 if audio_attention_mask is not None:
-                    audio_attention_mask = audio_attention_mask.to(inputs_embeds.device)
+                    audio_attention_mask = audio_attention_mask.to(_cast_device)
 
             def run_with_hooks(run_inputs: Dict[str, torch.Tensor]) -> Any:
                 hook_manager = LayerHookManager(
@@ -2029,7 +2229,10 @@ class SAFEModel(nn.Module):
             # Return hidden states if requested.
             hidden_state_out = None
             # Get expected batch size from inputs for validation
-            expected_batch_size = inputs_embeds.size(0)
+            expected_batch_size = (
+                inputs_embeds.size(0) if inputs_embeds is not None
+                else input_ids.size(0)
+            )
             if wants_hidden:
                 try:
                     hidden_state_out = hidden_capture.get("last")
@@ -2322,22 +2525,42 @@ class SAFEModel(nn.Module):
             # For correctness/stability during generation, force no-cache unless user overrides.
             if self.enable_kv_augmentation and "use_cache" not in generation_kwargs:
                 generation_kwargs["use_cache"] = False
+
+            # Detect InternVL with vision for generate path
+            internvl_with_vision_gen = (
+                self.base_vl.model_type == "internvl"
+                and pixel_values is not None
+                and hasattr(self.base_vl.llm, "get_image_features")
+            )
+
             base_inputs = {**generation_kwargs}
-            sanitized_ids = self.sanitize_input_ids_for_base(input_ids)
-            if sanitized_ids is not None:
-                sanitized_ids = sanitized_ids.to(input_ids.device)
-
-            token_source = input_ids
-            if sanitized_ids is not None and input_ids is not None and not torch.equal(sanitized_ids, input_ids):
-                token_source = input_ids
-            elif sanitized_ids is not None:
-                token_source = sanitized_ids
-
             base_dtype = next(self.base_vl.llm.parameters()).dtype
-            embeds = self.get_input_embeddings(token_source).to(base_dtype)
+
+            if internvl_with_vision_gen:
+                # InternVL Vision+Audio generate: pass input_ids + pixel_values
+                # to the full model. Audio hooks fire on decoder layers.
+                embeds = None  # Not used
+                base_inputs["input_ids"] = input_ids
+                if attention_mask is not None:
+                    base_inputs["attention_mask"] = attention_mask
+                if pixel_values is not None:
+                    base_inputs["pixel_values"] = pixel_values
+            else:
+                sanitized_ids = self.sanitize_input_ids_for_base(input_ids)
+                if sanitized_ids is not None:
+                    sanitized_ids = sanitized_ids.to(input_ids.device)
+
+                token_source = input_ids
+                if sanitized_ids is not None and input_ids is not None and not torch.equal(sanitized_ids, input_ids):
+                    token_source = input_ids
+                elif sanitized_ids is not None:
+                    token_source = sanitized_ids
+
+                embeds = self.get_input_embeddings(token_source).to(base_dtype)
 
             # Mirror forward(): if audio is silent for a sample, force its fusion
             # gate to zero so generation is a true bypass.
+            _gen_device = embeds.device if embeds is not None else input_ids.device
             effective_gate = gate
             gate_scalar = (
                 float(gate.max().item())
@@ -2349,34 +2572,36 @@ class SAFEModel(nn.Module):
                 and torch.is_tensor(audio_attention_mask)
                 and audio_attention_mask.dim() == 2
             ):
-                mask_on_device = audio_attention_mask.to(device=embeds.device)
+                mask_on_device = audio_attention_mask.to(device=_gen_device)
                 silent_mask = mask_on_device.sum(dim=1) <= 0
                 if silent_mask.any():
                     if torch.is_tensor(effective_gate):
-                        g = effective_gate.to(device=embeds.device, dtype=torch.float32)
+                        g = effective_gate.to(device=_gen_device, dtype=torch.float32)
                         if g.dim() == 0:
                             g = g.expand(mask_on_device.size(0))
                     else:
                         g = torch.full(
                             (mask_on_device.size(0),),
                             float(effective_gate),
-                            device=embeds.device,
+                            device=_gen_device,
                             dtype=torch.float32,
                         )
                     g[silent_mask] = 0.0
                     effective_gate = g
                     gate_scalar = float(g.max().item())
 
-            if sanitized_ids is not None:
-                base_inputs["input_ids"] = sanitized_ids
-            else:
-                base_inputs["input_ids"] = input_ids
+            if not internvl_with_vision_gen:
+                # Non-InternVL-vision path: populate base_inputs with embeds
+                if sanitized_ids is not None:
+                    base_inputs["input_ids"] = sanitized_ids
+                else:
+                    base_inputs["input_ids"] = input_ids
 
-            base_inputs["inputs_embeds"] = embeds
-            if attention_mask is not None:
-                base_inputs["attention_mask"] = attention_mask
-            if pixel_values is not None:
-                base_inputs["pixel_values"] = pixel_values
+                base_inputs["inputs_embeds"] = embeds
+                if attention_mask is not None:
+                    base_inputs["attention_mask"] = attention_mask
+                if pixel_values is not None:
+                    base_inputs["pixel_values"] = pixel_values
 
             use_midlayer_hooks = (
                 audio_tokens is not None
@@ -2411,10 +2636,10 @@ class SAFEModel(nn.Module):
             if use_midlayer_hooks:
                 assert torch.isfinite(audio_tokens).all(), "Non-finite audio_tokens before generation fusion"
 
-                audio_tokens = audio_tokens.to(device=embeds.device, dtype=base_dtype)
+                audio_tokens = audio_tokens.to(device=_gen_device, dtype=base_dtype)
                 audio_attention = None
                 if audio_attention_mask is not None:
-                    audio_attention = audio_attention_mask.to(embeds.device)
+                    audio_attention = audio_attention_mask.to(_gen_device)
 
                 language_model = self._resolve_language_model(self.base_vl.llm)
                 fusion_layers = self._resolve_fusion_layers()
@@ -2429,9 +2654,9 @@ class SAFEModel(nn.Module):
                     )
             else:
                 if audio_tokens is not None:
-                    audio_tokens = audio_tokens.to(device=embeds.device, dtype=base_dtype)
+                    audio_tokens = audio_tokens.to(device=_gen_device, dtype=base_dtype)
                 if audio_attention_mask is not None:
-                    audio_attention_mask = audio_attention_mask.to(embeds.device)
+                    audio_attention_mask = audio_attention_mask.to(_gen_device)
 
             # KV Augmentation path for generate
             if use_kv_augmentation_gen:
@@ -2444,8 +2669,8 @@ class SAFEModel(nn.Module):
                     )
 
                 # Ensure audio tokens are on correct device
-                audio_tokens = audio_tokens.to(device=embeds.device, dtype=base_dtype)
-                audio_attn = audio_attention_mask.to(embeds.device) if audio_attention_mask is not None else None
+                audio_tokens = audio_tokens.to(device=_gen_device, dtype=base_dtype)
+                audio_attn = audio_attention_mask.to(_gen_device) if audio_attention_mask is not None else None
 
                 # CRITICAL FIX: For KV augmentation, DON'T use inputs_embeds!
                 # Using inputs_embeds causes HF generate to return ONLY new tokens,
@@ -2459,8 +2684,9 @@ class SAFEModel(nn.Module):
                 # Force no-cache for KV augmentation generation (no past_key_values support).
                 kv_gen_inputs["use_cache"] = False
                 # Ensure we have the sanitized input_ids (audio tokens -> pad)
-                if sanitized_ids is not None:
-                    kv_gen_inputs["input_ids"] = sanitized_ids
+                _sanitized = locals().get("sanitized_ids", None)
+                if _sanitized is not None:
+                    kv_gen_inputs["input_ids"] = _sanitized
                 else:
                     kv_gen_inputs["input_ids"] = input_ids
 
@@ -2494,7 +2720,7 @@ class SAFEModel(nn.Module):
                 finally:
                     hook_manager.remove_hooks()
 
-            if audio_tokens is not None and gate_scalar > 0.0 and not self.enable_midlayer_fusion and self.fusion_adapter is not None:
+            if audio_tokens is not None and gate_scalar > 0.0 and not self.enable_midlayer_fusion and self.fusion_adapter is not None and embeds is not None:
                 fused_embeds = self.fusion_adapter(
                     hidden_states=embeds,
                     audio_tokens=audio_tokens,

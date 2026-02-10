@@ -459,7 +459,13 @@ INTERNVL_CONFIG = {
     # Base VL Model - InternVL 3.5-8B (has built-in InternViT-300M vision encoder)
     # Uses local path by default; set LLM_MODEL_PATH env var to override
     "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/OpenGVLab_InternVL3_5-8B"),
-    "vision_model_name": None,  # InternVL has built-in InternViT-300M
+    "vision_model_name": "built-in",  # InternVL has built-in InternViT-300M (not None)
+
+    # InternVL vision pipeline defaults (from InternVL 3.5-8B config)
+    "image_token_id": 151667,       # Token ID for image placeholder in vocabulary
+    "image_seq_length": 256,        # Number of placeholder tokens per image
+    "downsample_ratio": 0.5,        # Pixel shuffle downsample ratio
+    "image_size": [448, 448],       # Input image resolution
 
     # Audio configuration (same as Qwen/KV_AUGMENT)
     "audio_encoder_type": "clap",
