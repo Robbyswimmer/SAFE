@@ -2520,10 +2520,13 @@ class SAFEModel(nn.Module):
                 if pixel_values is not None:
                     base_inputs["pixel_values"] = pixel_values
 
-                # For InternVL without images, use language_model to avoid
-                # custom generate() asserting img_context_token_id is not None
-                if self.base_vl.model_type == "internvl" and pixel_values is None:
+                # For InternVL, always use language_model (Qwen3) to avoid
+                # custom generate() asserting img_context_token_id is not None.
+                # The custom InternVL generate() requires img_context_token_id
+                # which is not set when loading via trust_remote_code.
+                if self.base_vl.model_type == "internvl":
                     gen_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
+                    base_inputs.pop("pixel_values", None)
                 else:
                     gen_model = self.base_vl.llm
                 return gen_model.generate(**base_inputs)
@@ -2723,12 +2726,9 @@ class SAFEModel(nn.Module):
                     modality_masks=modality_masks,
                     gate={"audio": effective_gate},
                 )
-                # For InternVL audio-only (no pixel_values), generate from the
-                # language_model (Qwen3) to avoid InternVL's custom generate()
-                # which asserts img_context_token_id is not None.
-                if internvl_with_vision_gen:
-                    gen_model = self.base_vl.llm
-                elif self.base_vl.model_type == "internvl":
+                # For InternVL, always use language_model (Qwen3) to avoid
+                # custom generate() asserting img_context_token_id is not None.
+                if self.base_vl.model_type == "internvl":
                     gen_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
                     base_inputs.pop("pixel_values", None)
                 else:
@@ -2747,11 +2747,9 @@ class SAFEModel(nn.Module):
                 )
                 base_inputs["inputs_embeds"] = fused_embeds
 
-            # For InternVL audio-only (no pixel_values), use language_model
-            # to avoid custom generate() asserting img_context_token_id
-            if internvl_with_vision_gen:
-                fallback_gen_model = self.base_vl.llm
-            elif self.base_vl.model_type == "internvl":
+            # For InternVL, always use language_model (Qwen3) to avoid
+            # custom generate() asserting img_context_token_id
+            if self.base_vl.model_type == "internvl":
                 fallback_gen_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
                 base_inputs.pop("pixel_values", None)
             else:
