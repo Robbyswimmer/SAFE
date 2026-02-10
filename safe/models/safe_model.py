@@ -1373,7 +1373,7 @@ class SAFEModel(nn.Module):
             pil_images.append(None)
         pil_images = pil_images[:batch_size]
 
-        # Short-answer instruction for AVQA-style tasks
+        # Match LLaVA QA prompting strategy for fair apples-to-apples comparison.
         instruction = "Answer with a single word or number."
 
         # Build input_ids by directly inserting image placeholder token IDs.
@@ -1383,8 +1383,11 @@ class SAFEModel(nn.Module):
         all_input_ids = []
         for i, question in enumerate(texts):
             has_image = pil_images[i] is not None and image_processor is not None
-            # Tokenize text part
-            text_part = f"\n{instruction} {question}" if has_image else f"{instruction} {question}"
+            # Keep textual prompt template aligned with _prepare_llava_inputs:
+            # "USER: ... ASSISTANT:" format for both image and non-image paths.
+            # For InternVL with image, visual placeholders are inserted as token IDs
+            # (image_seq_length * image_token_id), so no textual <image> token needed.
+            text_part = f"USER: {instruction} {question} ASSISTANT:"
             text_ids = tokenizer.encode(text_part, add_special_tokens=False)
 
             if has_image:

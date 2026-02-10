@@ -76,6 +76,10 @@ _ANSWER_ALIASES = {
     "5": "five", "6": "six", "7": "seven",
     "guitar": "acoustic_guitar", "electric guitar": "electric_bass",
     "drums": "drum", "conga": "congas",
+    "acoustic guitar": "acoustic_guitar",
+    "electric bass": "electric_bass",
+    "sax": "saxophone",
+    "ukelele": "ukulele",
 }
 
 
@@ -126,6 +130,15 @@ def token_f1(pred: str, ref: str) -> float:
     precision = common / len(p)
     recall = common / len(r)
     return 2 * precision * recall / (precision + recall)
+
+
+def categorical_f1(pred: str, ref: str) -> float:
+    """
+    F1 over canonicalized categorical answers (useful for AVQA-style vocab answers).
+    """
+    p = extract_answer(pred)
+    r = extract_answer(ref)
+    return 1.0 if p == r else 0.0
 
 
 class ManifestAVQADataset(Dataset):
@@ -402,6 +415,7 @@ def train_epoch(
     log_every = max(1, min(100, num_batches // 20))  # Log at least every 100 steps
     optimizer.zero_grad()
 
+    pending_accum_steps = 0
     for step, batch in enumerate(dataloader):
         mm = resolve_modality_batch(batch, args.train_modality)
 
@@ -457,6 +471,7 @@ def train_epoch(
             loss = loss / args.gradient_accumulation_steps
 
         scaler.scale(loss).backward()
+        pending_accum_steps += 1
 
         if (step + 1) % args.gradient_accumulation_steps == 0:
             # Log gradient attribution BEFORE clipping (raw gradient signal)
@@ -471,6 +486,7 @@ def train_epoch(
             scaler.update()
             optimizer.zero_grad()
             global_step += 1
+            pending_accum_steps = 0
 
         total_loss += loss.item() * args.gradient_accumulation_steps
         total_batches += 1
@@ -478,6 +494,15 @@ def train_epoch(
         if (step + 1) % log_every == 0 or step == 0:
             avg_loss = total_loss / max(total_batches, 1)
             print(f"  [train] step {step + 1}/{num_batches} loss={avg_loss:.4f}", flush=True)
+
+    # Flush remainder gradients if epoch length is not divisible by grad accumulation.
+    if pending_accum_steps > 0:
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.get_trainable_parameters(), args.max_grad_norm)
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad()
+        global_step += 1
 
     return total_loss / max(total_batches, 1), global_step
 
@@ -496,8 +521,11 @@ def evaluate(
     exact_total = 0.0
     extracted_total = 0.0
     f1_total = 0.0
+    categorical_f1_total = 0.0
     count = 0
-    by_type: Dict[str, Dict[str, float]] = defaultdict(lambda: {"exact": 0.0, "extracted": 0.0, "f1": 0.0, "n": 0.0})
+    by_type: Dict[str, Dict[str, float]] = defaultdict(
+        lambda: {"exact": 0.0, "extracted": 0.0, "f1": 0.0, "categorical_f1": 0.0, "n": 0.0}
+    )
 
     eval_batches = len(dataloader)
     eval_log_every = max(1, eval_batches // 5)  # Log ~5 times per eval
@@ -555,16 +583,20 @@ def evaluate(
             exact = float(norm_pred == norm_ref)
             # Extracted match: map generated text to closest known answer
             extracted_pred = extract_answer(pred)
-            extracted = float(extracted_pred == norm_ref)
+            extracted_ref = extract_answer(ref)
+            extracted = float(extracted_pred == extracted_ref)
             f1 = token_f1(pred, ref)
+            cat_f1 = categorical_f1(pred, ref)
             exact_total += exact
             extracted_total += extracted
             f1_total += f1
+            categorical_f1_total += cat_f1
             count += 1
 
             by_type[qtype]["exact"] += exact
             by_type[qtype]["extracted"] += extracted
             by_type[qtype]["f1"] += f1
+            by_type[qtype]["categorical_f1"] += cat_f1
             by_type[qtype]["n"] += 1.0
 
         if (eval_step + 1) % eval_log_every == 0:
@@ -577,6 +609,7 @@ def evaluate(
         "exact_match": 100.0 * exact_total / max(1, count),
         "extracted_match": 100.0 * extracted_total / max(1, count),
         "token_f1": 100.0 * f1_total / max(1, count),
+        "categorical_f1": 100.0 * categorical_f1_total / max(1, count),
         "num_samples": count,
         "by_question_type": {},
     }
@@ -586,6 +619,7 @@ def evaluate(
             "exact_match": 100.0 * v["exact"] / n,
             "extracted_match": 100.0 * v["extracted"] / n,
             "token_f1": 100.0 * v["f1"] / n,
+            "categorical_f1": 100.0 * v["categorical_f1"] / n,
             "num_samples": int(v["n"]),
         }
     return result
@@ -763,7 +797,12 @@ def main() -> None:
             for modality in eval_modalities:
                 metrics = evaluate(model, val_loader, tokenizer, device, modality, args)
                 epoch_result["eval"][modality] = metrics
-                print(f"  [eval:{modality}] raw_em={metrics['exact_match']:.2f} extracted_em={metrics['extracted_match']:.2f} f1={metrics['token_f1']:.2f} n={metrics['num_samples']}")
+                print(
+                    f"  [eval:{modality}] raw_em={metrics['exact_match']:.2f} "
+                    f"extracted_em={metrics['extracted_match']:.2f} "
+                    f"cat_f1={metrics['categorical_f1']:.2f} "
+                    f"f1={metrics['token_f1']:.2f} n={metrics['num_samples']}"
+                )
 
             history.append(epoch_result)
             if wandb_run is not None:
@@ -775,6 +814,7 @@ def main() -> None:
                     log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
                     log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
                     log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
+                    log_payload[f"val/{modality}/categorical_f1"] = metrics["categorical_f1"]
                 wandb_run.log(log_payload, step=epoch + 1)
 
             # Track best score using extracted_match (more fair for generative models)
