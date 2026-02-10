@@ -269,13 +269,14 @@ def collate_avqa(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
-    cfg = get_config("phase1")
+    cfg = get_config(args.model_config)
     if args.llm_model:
         cfg["llm_model_name"] = args.llm_model
 
     cfg["num_audio_tokens"] = args.num_audio_tokens
     cfg["fusion_type"] = "multilayer"  # Required for mid-layer hook-based Pre-FFN fusion
-    cfg["fusion_layer_indices"] = [int(x) for x in args.fusion_layers.split(",")]
+    if args.fusion_layers is not None:
+        cfg["fusion_layer_indices"] = [int(x) for x in args.fusion_layers.split(",")]
     cfg["freeze_base_vl"] = True
     cfg["freeze_audio_encoder"] = args.freeze_audio_encoder
 
@@ -496,8 +497,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--media-root", type=Path, required=True)
     p.add_argument("--output-dir", type=Path, required=True)
 
+    p.add_argument("--model-config", type=str, default="phase1",
+                   help="Base model config name (e.g. phase1, internvl, qwen)")
     p.add_argument("--llm-model", type=str, default=None)
-    p.add_argument("--fusion-layers", type=str, default="1,5,9,13,17,21")
+    p.add_argument("--fusion-layers", type=str, default=None)
     p.add_argument("--num-audio-tokens", type=int, default=8)
 
     p.add_argument("--train-modality", type=str, default="both", choices=["audio", "image", "both"])
