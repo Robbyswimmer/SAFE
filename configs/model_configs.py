@@ -489,11 +489,10 @@ INTERNVL_CONFIG = {
         "use_positional_embedding": True,
     },
 
-    # Fusion configuration - residual mode (same as Qwen config)
+    # Fusion configuration - residual mode.
+    # Default schedule is aligned with Phase1/LLaVA recipe for parity studies.
     "fusion_type": "multilayer",
-    # InternVL 3.5-8B Qwen3 backbone has 36 layers (not 32)
-    # Proportional early/mid/late: [12, 24, 33]
-    "fusion_layer_indices": [12, 24, 33],
+    "fusion_layer_indices": [1, 5, 9, 13, 17, 21],
     "lora_rank": 8,
     "fusion_config": {
         "fusion_mode": "residual",
@@ -502,7 +501,7 @@ INTERNVL_CONFIG = {
         "dropout": 0.1,
         "modalities": {
             "audio": {
-                "layer_indices": [12, 24, 33],
+                "layer_indices": [1, 5, 9, 13, 17, 21],
                 "num_tokens": 8
             }
         },
@@ -516,7 +515,7 @@ INTERNVL_CONFIG = {
     # Memory and compute - InternVL 8B (InternViT + Qwen3-8B) in bf16
     "expected_vram_gb": 35,
     "recommended_batch_size": 1,
-    "gradient_accumulation_steps": 16,
+    "gradient_accumulation_steps": 8,
 }
 
 # Available configurations
