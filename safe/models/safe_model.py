@@ -944,12 +944,10 @@ class SAFEModel(nn.Module):
                 device=device,
                 llava_audio_prompt_style=llava_audio_prompt_style,
             )
-        elif self.base_vl.model_type == "internvl" and images is not None:
-            # InternVL with images: use dedicated pipeline that inserts
-            # image placeholder tokens and produces pixel_values for the
-            # built-in InternVLForConditionalGeneration vision tower.
-            # When images=None (audio-only), fall through to generic path
-            # to preserve current working audio-only behavior.
+        elif self.base_vl.model_type == "internvl":
+            # InternVL: always use dedicated prep so prompt template/tokenization
+            # is consistent across both image+audio and audio-only modes.
+            # The helper gracefully handles images=None (no pixel_values).
             result = self._prepare_internvl_inputs(
                 text=text,
                 images=images,
