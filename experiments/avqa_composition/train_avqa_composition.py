@@ -531,7 +531,21 @@ def evaluate(
         prompt_mask = inputs.get("attention_mask")
         for i in range(output_ids.size(0)):
             prompt_len = int(prompt_mask[i].sum().item()) if prompt_mask is not None else inputs["input_ids"].size(1)
-            gen = output_ids[i, prompt_len:]
+            seq = output_ids[i]
+            # Some model paths return full sequence (prompt + generation),
+            # while others return only newly generated tokens.
+            # InternVL vision path can differ from audio-only path here.
+            if seq.size(0) > prompt_len:
+                gen = seq[prompt_len:]
+            else:
+                # Fallback: treat returned tokens as generated tokens directly.
+                gen = seq
+                if eval_step == 0 and i == 0:
+                    print(
+                        f"  [eval:{modality}] decode fallback active "
+                        f"(seq_len={int(seq.size(0))} prompt_len={int(prompt_len)})",
+                        flush=True,
+                    )
             pred = tokenizer.decode(gen, skip_special_tokens=True).strip()
             ref = batch["answers"][i]
             qtype = batch["question_types"][i] if "question_types" in batch else "unknown"
