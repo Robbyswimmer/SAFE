@@ -1,0 +1,977 @@
+[
+  {
+    "epoch": 1,
+    "train_loss": 0.3867300769926602,
+    "eval": {
+      "both": {
+        "modality": "both",
+        "exact_match": 44.02611534276387,
+        "extracted_match": 67.22524483133841,
+        "token_f1": 60.84735165692697,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 42.48496993987976,
+            "extracted_match": 82.96593186372745,
+            "token_f1": 66.81201230299428,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 40.468227424749166,
+            "extracted_match": 56.8561872909699,
+            "token_f1": 51.66109253065776,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 43.32247557003257,
+            "extracted_match": 63.02931596091205,
+            "token_f1": 65.70318118363728,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 51.496062992125985,
+            "extracted_match": 72.5984251968504,
+            "token_f1": 64.96662917135372,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 26.08695652173913,
+            "extracted_match": 49.51690821256039,
+            "token_f1": 47.67101658406002,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 32.81553398058252,
+            "extracted_match": 72.62135922330097,
+            "token_f1": 60.336737695961034,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 36.7965367965368,
+            "extracted_match": 56.70995670995671,
+            "token_f1": 50.74211502782926,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 55.47576301615799,
+            "extracted_match": 62.83662477558348,
+            "token_f1": 60.29323758228605,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 56.833333333333336,
+            "extracted_match": 77.66666666666667,
+            "token_f1": 68.96124338624341,
+            "num_samples": 600
+          }
+        }
+      },
+      "audio": {
+        "modality": "audio",
+        "exact_match": 33.86289445048966,
+        "extracted_match": 51.22959738846572,
+        "token_f1": 46.939755565435966,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 41.482965931863724,
+            "extracted_match": 78.55711422845691,
+            "token_f1": 63.81268030566627,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 39.79933110367893,
+            "extracted_match": 55.18394648829432,
+            "token_f1": 50.37904124860648,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 20.19543973941368,
+            "extracted_match": 29.80456026058632,
+            "token_f1": 33.01834068935044,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 42.83464566929134,
+            "extracted_match": 60.0,
+            "token_f1": 53.6910386201726,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 16.42512077294686,
+            "extracted_match": 27.77777777777778,
+            "token_f1": 31.83344835518751,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 27.184466019417474,
+            "extracted_match": 60.0,
+            "token_f1": 50.1610557727062,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 23.376623376623378,
+            "extracted_match": 36.14718614718615,
+            "token_f1": 34.807084449941584,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 50.987432675044886,
+            "extracted_match": 58.16876122082585,
+            "token_f1": 55.685218432076596,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 39.0,
+            "extracted_match": 53.0,
+            "token_f1": 47.17619047619047,
+            "num_samples": 600
+          }
+        }
+      },
+      "image": {
+        "modality": "image",
+        "exact_match": 22.393906420021764,
+        "extracted_match": 52.557127312295975,
+        "token_f1": 31.170370434788378,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 38.07615230460922,
+            "extracted_match": 74.34869739478958,
+            "token_f1": 59.9611677567589,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 33.44481605351171,
+            "extracted_match": 48.16053511705686,
+            "token_f1": 43.618410574932334,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 19.381107491856678,
+            "extracted_match": 34.85342019543974,
+            "token_f1": 26.552401633834847,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 0.0,
+            "extracted_match": 58.74015748031496,
+            "token_f1": 0.0,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 8.454106280193237,
+            "extracted_match": 25.603864734299517,
+            "token_f1": 16.358408097538526,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 16.310679611650485,
+            "extracted_match": 64.27184466019418,
+            "token_f1": 34.111895655584995,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 20.346320346320347,
+            "extracted_match": 36.7965367965368,
+            "token_f1": 28.22562358276647,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 46.6786355475763,
+            "extracted_match": 51.526032315978455,
+            "token_f1": 50.104727707959306,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 24.5,
+            "extracted_match": 69.83333333333333,
+            "token_f1": 31.122619047619047,
+            "num_samples": 600
+          }
+        }
+      }
+    }
+  },
+  {
+    "epoch": 2,
+    "train_loss": 0.2892591334872536,
+    "eval": {
+      "both": {
+        "modality": "both",
+        "exact_match": 44.96191512513602,
+        "extracted_match": 68.20457018498368,
+        "token_f1": 61.78107722286145,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 42.88577154308617,
+            "extracted_match": 82.96593186372745,
+            "token_f1": 67.0124131045975,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 43.812709030100336,
+            "extracted_match": 59.197324414715716,
+            "token_f1": 54.44816053511705,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 43.97394136807818,
+            "extracted_match": 64.00651465798046,
+            "token_f1": 66.48132088685843,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 53.7007874015748,
+            "extracted_match": 75.43307086614173,
+            "token_f1": 67.52305961754794,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 24.63768115942029,
+            "extracted_match": 49.27536231884058,
+            "token_f1": 45.60961582700709,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 33.398058252427184,
+            "extracted_match": 73.39805825242719,
+            "token_f1": 61.00016811667299,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 37.22943722943723,
+            "extracted_match": 55.62770562770563,
+            "token_f1": 51.21349549920971,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 59.06642728904848,
+            "extracted_match": 66.42728904847397,
+            "token_f1": 63.97366846199879,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 55.833333333333336,
+            "extracted_match": 77.0,
+            "token_f1": 68.12791005291008,
+            "num_samples": 600
+          }
+        }
+      },
+      "audio": {
+        "modality": "audio",
+        "exact_match": 34.86398258977149,
+        "extracted_match": 51.77366702937976,
+        "token_f1": 47.51807411546288,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 39.67935871743487,
+            "extracted_match": 76.55310621242485,
+            "token_f1": 61.88215258355535,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 43.47826086956522,
+            "extracted_match": 56.8561872909699,
+            "token_f1": 52.775919732441466,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 21.98697068403909,
+            "extracted_match": 31.758957654723126,
+            "token_f1": 34.91158678455093,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 41.732283464566926,
+            "extracted_match": 59.05511811023622,
+            "token_f1": 52.71991001124875,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 14.251207729468598,
+            "extracted_match": 24.154589371980677,
+            "token_f1": 26.732229123533493,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 27.37864077669903,
+            "extracted_match": 59.80582524271845,
+            "token_f1": 50.195575729556246,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 24.025974025974026,
+            "extracted_match": 35.93073593073593,
+            "token_f1": 35.09053116195972,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 56.193895870736085,
+            "extracted_match": 62.657091561938955,
+            "token_f1": 60.50269299820468,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 41.666666666666664,
+            "extracted_match": 55.666666666666664,
+            "token_f1": 49.90634920634919,
+            "num_samples": 600
+          }
+        }
+      },
+      "image": {
+        "modality": "image",
+        "exact_match": 22.393906420021764,
+        "extracted_match": 52.557127312295975,
+        "token_f1": 31.170370434788378,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 38.07615230460922,
+            "extracted_match": 74.34869739478958,
+            "token_f1": 59.9611677567589,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 33.44481605351171,
+            "extracted_match": 48.16053511705686,
+            "token_f1": 43.618410574932334,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 19.381107491856678,
+            "extracted_match": 34.85342019543974,
+            "token_f1": 26.552401633834847,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 0.0,
+            "extracted_match": 58.74015748031496,
+            "token_f1": 0.0,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 8.454106280193237,
+            "extracted_match": 25.603864734299517,
+            "token_f1": 16.358408097538526,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 16.310679611650485,
+            "extracted_match": 64.27184466019418,
+            "token_f1": 34.111895655584995,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 20.346320346320347,
+            "extracted_match": 36.7965367965368,
+            "token_f1": 28.22562358276647,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 46.6786355475763,
+            "extracted_match": 51.526032315978455,
+            "token_f1": 50.104727707959306,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 24.5,
+            "extracted_match": 69.83333333333333,
+            "token_f1": 31.122619047619047,
+            "num_samples": 600
+          }
+        }
+      }
+    }
+  },
+  {
+    "epoch": 3,
+    "train_loss": 0.2588872478475631,
+    "eval": {
+      "both": {
+        "modality": "both",
+        "exact_match": 45.39717083786725,
+        "extracted_match": 68.96626768226334,
+        "token_f1": 62.28552634646182,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 40.28056112224449,
+            "extracted_match": 79.75951903807615,
+            "token_f1": 64.0159439758638,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 48.49498327759197,
+            "extracted_match": 63.54515050167224,
+            "token_f1": 58.907469342251936,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 43.648208469055376,
+            "extracted_match": 64.33224755700326,
+            "token_f1": 66.66409323575456,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 53.85826771653543,
+            "extracted_match": 74.33070866141732,
+            "token_f1": 66.82752155980513,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 26.08695652173913,
+            "extracted_match": 52.89855072463768,
+            "token_f1": 47.71069912374256,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 33.20388349514563,
+            "extracted_match": 72.81553398058253,
+            "token_f1": 60.6899508258732,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 38.095238095238095,
+            "extracted_match": 59.74025974025974,
+            "token_f1": 53.184051398337026,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 61.04129263913824,
+            "extracted_match": 68.58168761220826,
+            "token_f1": 66.20287253141831,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 55.833333333333336,
+            "extracted_match": 77.0,
+            "token_f1": 68.03981481481485,
+            "num_samples": 600
+          }
+        }
+      },
+      "audio": {
+        "modality": "audio",
+        "exact_match": 34.211099020674645,
+        "extracted_match": 51.86071817192601,
+        "token_f1": 47.15639891483228,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 40.480961923847694,
+            "extracted_match": 78.3567134268537,
+            "token_f1": 63.35843848869898,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 46.82274247491639,
+            "extracted_match": 61.53846153846154,
+            "token_f1": 56.900780379041244,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 21.335504885993487,
+            "extracted_match": 30.13029315960912,
+            "token_f1": 34.27369319063127,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 40.62992125984252,
+            "extracted_match": 57.32283464566929,
+            "token_f1": 51.11886014248229,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 13.768115942028986,
+            "extracted_match": 28.019323671497585,
+            "token_f1": 28.57106259280175,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 27.57281553398058,
+            "extracted_match": 60.38834951456311,
+            "token_f1": 50.588240238725604,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 21.645021645021647,
+            "extracted_match": 36.36363636363637,
+            "token_f1": 32.56751185322615,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 54.039497307001795,
+            "extracted_match": 60.861759425493716,
+            "token_f1": 58.64751645721127,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 40.166666666666664,
+            "extracted_match": 54.166666666666664,
+            "token_f1": 48.259523809523806,
+            "num_samples": 600
+          }
+        }
+      },
+      "image": {
+        "modality": "image",
+        "exact_match": 22.393906420021764,
+        "extracted_match": 52.557127312295975,
+        "token_f1": 31.170370434788378,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 38.07615230460922,
+            "extracted_match": 74.34869739478958,
+            "token_f1": 59.9611677567589,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 33.44481605351171,
+            "extracted_match": 48.16053511705686,
+            "token_f1": 43.618410574932334,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 19.381107491856678,
+            "extracted_match": 34.85342019543974,
+            "token_f1": 26.552401633834847,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 0.0,
+            "extracted_match": 58.74015748031496,
+            "token_f1": 0.0,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 8.454106280193237,
+            "extracted_match": 25.603864734299517,
+            "token_f1": 16.358408097538526,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 16.310679611650485,
+            "extracted_match": 64.27184466019418,
+            "token_f1": 34.111895655584995,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 20.346320346320347,
+            "extracted_match": 36.7965367965368,
+            "token_f1": 28.22562358276647,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 46.6786355475763,
+            "extracted_match": 51.526032315978455,
+            "token_f1": 50.104727707959306,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 24.5,
+            "extracted_match": 69.83333333333333,
+            "token_f1": 31.122619047619047,
+            "num_samples": 600
+          }
+        }
+      }
+    }
+  },
+  {
+    "epoch": 4,
+    "train_loss": 0.2330671788736143,
+    "eval": {
+      "both": {
+        "modality": "both",
+        "exact_match": 45.46245919477693,
+        "extracted_match": 68.44396082698586,
+        "token_f1": 62.35717081854156,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 40.6813627254509,
+            "extracted_match": 80.56112224448898,
+            "token_f1": 64.8647845140831,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 44.48160535117057,
+            "extracted_match": 60.20066889632107,
+            "token_f1": 55.43557891383977,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 44.299674267100976,
+            "extracted_match": 64.16938110749186,
+            "token_f1": 66.71566761143318,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 54.803149606299215,
+            "extracted_match": 74.96062992125984,
+            "token_f1": 67.73865766779166,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 27.053140096618357,
+            "extracted_match": 50.0,
+            "token_f1": 48.88334692682514,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 34.36893203883495,
+            "extracted_match": 75.14563106796116,
+            "token_f1": 62.42411633673773,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 37.878787878787875,
+            "extracted_match": 56.70995670995671,
+            "token_f1": 52.30828695114402,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 58.16876122082585,
+            "extracted_match": 65.1705565529623,
+            "token_f1": 63.00119688809096,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 57.5,
+            "extracted_match": 79.0,
+            "token_f1": 69.94457671957674,
+            "num_samples": 600
+          }
+        }
+      },
+      "audio": {
+        "modality": "audio",
+        "exact_match": 35.12513601741023,
+        "extracted_match": 52.20892274211099,
+        "token_f1": 48.07997008432288,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 37.274549098196395,
+            "extracted_match": 72.54509018036072,
+            "token_f1": 58.63565959758336,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 44.81605351170568,
+            "extracted_match": 59.86622073578595,
+            "token_f1": 54.92753623188403,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 22.964169381107492,
+            "extracted_match": 32.57328990228013,
+            "token_f1": 36.35761994068179,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 43.1496062992126,
+            "extracted_match": 58.58267716535433,
+            "token_f1": 52.94563179602562,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 17.14975845410628,
+            "extracted_match": 28.743961352657006,
+            "token_f1": 31.95422130204742,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 28.932038834951456,
+            "extracted_match": 62.71844660194175,
+            "token_f1": 52.41995544908163,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 22.943722943722943,
+            "extracted_match": 35.064935064935064,
+            "token_f1": 34.22816601388029,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 53.3213644524237,
+            "extracted_match": 60.14362657091562,
+            "token_f1": 58.00418910831837,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 42.666666666666664,
+            "extracted_match": 57.833333333333336,
+            "token_f1": 51.589682539682535,
+            "num_samples": 600
+          }
+        }
+      },
+      "image": {
+        "modality": "image",
+        "exact_match": 22.393906420021764,
+        "extracted_match": 52.557127312295975,
+        "token_f1": 31.170370434788378,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 38.07615230460922,
+            "extracted_match": 74.34869739478958,
+            "token_f1": 59.9611677567589,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 33.44481605351171,
+            "extracted_match": 48.16053511705686,
+            "token_f1": 43.618410574932334,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 19.381107491856678,
+            "extracted_match": 34.85342019543974,
+            "token_f1": 26.552401633834847,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 0.0,
+            "extracted_match": 58.74015748031496,
+            "token_f1": 0.0,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 8.454106280193237,
+            "extracted_match": 25.603864734299517,
+            "token_f1": 16.358408097538526,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 16.310679611650485,
+            "extracted_match": 64.27184466019418,
+            "token_f1": 34.111895655584995,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 20.346320346320347,
+            "extracted_match": 36.7965367965368,
+            "token_f1": 28.22562358276647,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 46.6786355475763,
+            "extracted_match": 51.526032315978455,
+            "token_f1": 50.104727707959306,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 24.5,
+            "extracted_match": 69.83333333333333,
+            "token_f1": 31.122619047619047,
+            "num_samples": 600
+          }
+        }
+      }
+    }
+  },
+  {
+    "epoch": 5,
+    "train_loss": 0.21040691022774727,
+    "eval": {
+      "both": {
+        "modality": "both",
+        "exact_match": 46.332970620239394,
+        "extracted_match": 69.74972796517955,
+        "token_f1": 63.25661293125897,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 42.48496993987976,
+            "extracted_match": 82.76553106212425,
+            "token_f1": 66.90505553231006,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 48.49498327759197,
+            "extracted_match": 64.21404682274247,
+            "token_f1": 59.186176142697875,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 43.159609120521175,
+            "extracted_match": 63.51791530944625,
+            "token_f1": 65.63712979022435,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 56.06299212598425,
+            "extracted_match": 77.48031496062993,
+            "token_f1": 69.71466066741671,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 25.845410628019323,
+            "extracted_match": 51.44927536231884,
+            "token_f1": 47.88380701424176,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 34.1747572815534,
+            "extracted_match": 73.98058252427184,
+            "token_f1": 61.84852687765314,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 37.66233766233766,
+            "extracted_match": 57.35930735930736,
+            "token_f1": 51.941695870267225,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 61.93895870736086,
+            "extracted_match": 68.76122082585279,
+            "token_f1": 66.62178336325553,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 58.166666666666664,
+            "extracted_match": 79.33333333333333,
+            "token_f1": 70.38425925925928,
+            "num_samples": 600
+          }
+        }
+      },
+      "audio": {
+        "modality": "audio",
+        "exact_match": 34.1240478781284,
+        "extracted_match": 51.07725788900979,
+        "token_f1": 46.78259716344622,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 40.480961923847694,
+            "extracted_match": 76.55310621242485,
+            "token_f1": 62.466654921564704,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 46.15384615384615,
+            "extracted_match": 61.20401337792642,
+            "token_f1": 56.34336677814937,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 18.892508143322477,
+            "extracted_match": 28.338762214983714,
+            "token_f1": 31.877112210988408,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 41.732283464566926,
+            "extracted_match": 55.43307086614173,
+            "token_f1": 50.527934008249055,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 16.183574879227052,
+            "extracted_match": 28.502415458937197,
+            "token_f1": 30.545203588681883,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 27.961165048543688,
+            "extracted_match": 60.0,
+            "token_f1": 50.51426890261837,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 20.77922077922078,
+            "extracted_match": 35.714285714285715,
+            "token_f1": 32.49467463753179,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 55.11669658886894,
+            "extracted_match": 62.118491921005386,
+            "token_f1": 59.874326750448844,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 38.833333333333336,
+            "extracted_match": 53.0,
+            "token_f1": 47.11269841269841,
+            "num_samples": 600
+          }
+        }
+      },
+      "image": {
+        "modality": "image",
+        "exact_match": 22.393906420021764,
+        "extracted_match": 52.557127312295975,
+        "token_f1": 31.170370434788378,
+        "num_samples": 4595,
+        "by_question_type": {
+          "Audio-Visual_Existential": {
+            "exact_match": 38.07615230460922,
+            "extracted_match": 74.34869739478958,
+            "token_f1": 59.9611677567589,
+            "num_samples": 499
+          },
+          "Audio_Comparative": {
+            "exact_match": 33.44481605351171,
+            "extracted_match": 48.16053511705686,
+            "token_f1": 43.618410574932334,
+            "num_samples": 299
+          },
+          "Visual_Location": {
+            "exact_match": 19.381107491856678,
+            "extracted_match": 34.85342019543974,
+            "token_f1": 26.552401633834847,
+            "num_samples": 614
+          },
+          "Audio-Visual_Counting": {
+            "exact_match": 0.0,
+            "extracted_match": 58.74015748031496,
+            "token_f1": 0.0,
+            "num_samples": 635
+          },
+          "Audio-Visual_Temporal": {
+            "exact_match": 8.454106280193237,
+            "extracted_match": 25.603864734299517,
+            "token_f1": 16.358408097538526,
+            "num_samples": 414
+          },
+          "Audio_Counting": {
+            "exact_match": 16.310679611650485,
+            "extracted_match": 64.27184466019418,
+            "token_f1": 34.111895655584995,
+            "num_samples": 515
+          },
+          "Audio-Visual_Location": {
+            "exact_match": 20.346320346320347,
+            "extracted_match": 36.7965367965368,
+            "token_f1": 28.22562358276647,
+            "num_samples": 462
+          },
+          "Audio-Visual_Comparative": {
+            "exact_match": 46.6786355475763,
+            "extracted_match": 51.526032315978455,
+            "token_f1": 50.104727707959306,
+            "num_samples": 557
+          },
+          "Visual_Counting": {
+            "exact_match": 24.5,
+            "extracted_match": 69.83333333333333,
+            "token_f1": 31.122619047619047,
+            "num_samples": 600
+          }
+        }
+      }
+    }
+  }
+]

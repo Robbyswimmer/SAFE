@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
 from transformers import (
-    AutoTokenizer, 
+    AutoTokenizer,
     AutoModelForCausalLM,
-    CLIPVisionModel, 
+    AutoModel,
+    CLIPVisionModel,
     CLIPImageProcessor,
     AutoConfig,
     LlavaForConditionalGeneration,
@@ -211,6 +212,120 @@ class BaseVLModel(nn.Module):
             print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
             sys.stdout.flush()
             self.model_type = "qwen"
+        elif "internvl" in llm_model_name.lower():
+            print(f"[BaseVL] Detected InternVL model type", flush=True)
+            sys.stdout.flush()
+            # InternVL uses AutoModel (not AutoModelForCausalLM) because
+            # InternVLChatModel is a multimodal wrapper, not a plain causal LM.
+            # It requires trust_remote_code=True for custom model classes.
+            internvl_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+            # Env overrides (same as Qwen for consistency)
+            env_quant = os.environ.get("SAFE_QWEN_QUANT", "").strip().lower()
+            if env_quant:
+                qwen_quantization = env_quant
+            env_ckpt = os.environ.get("SAFE_GRAD_CKPT", "").strip()
+            if env_ckpt:
+                enable_gradient_checkpointing = env_ckpt not in ["0", "false", "False", "no", "NO"]
+            if enable_gradient_checkpointing is None:
+                enable_gradient_checkpointing = torch.cuda.is_available()
+            env_flash = os.environ.get("SAFE_PREFER_FLASH2", "").strip()
+            if env_flash:
+                prefer_flash_attention_2 = env_flash not in ["0", "false", "False", "no", "NO"]
+
+            attn_impl = None
+            if prefer_flash_attention_2 and torch.cuda.is_available():
+                attn_impl = os.environ.get("SAFE_ATTN_IMPL", "flash_attention_2")
+
+            def _try_load_internvl(quant_cfg, torch_dtype, attn_implementation):
+                kwargs = {
+                    "low_cpu_mem_usage": True,
+                    "trust_remote_code": True,
+                }
+                if quant_cfg is not None:
+                    kwargs["quantization_config"] = quant_cfg
+                if torch_dtype is not None:
+                    kwargs["torch_dtype"] = torch_dtype
+                if attn_implementation is not None:
+                    kwargs["attn_implementation"] = attn_implementation
+                return AutoModel.from_pretrained(llm_model_name, **kwargs)
+
+            quant_mode = (qwen_quantization or "auto").lower()
+            tried = []
+            llm = None
+
+            quant_cfgs = []
+            try:
+                from transformers import BitsAndBytesConfig
+                if quant_mode in ["auto", "4bit"]:
+                    quant_cfgs.append(("4bit", BitsAndBytesConfig(load_in_4bit=True)))
+                if quant_mode in ["auto", "8bit"]:
+                    quant_cfgs.append(("8bit", BitsAndBytesConfig(load_in_8bit=True)))
+            except Exception:
+                quant_cfgs = []
+
+            # Try: flash2+quant, quant, flash2+bf16, bf16
+            attempts = []
+            for name, cfg in quant_cfgs:
+                attempts.append((f"{name}+{attn_impl or 'noattn'}", cfg, None, attn_impl))
+                attempts.append((name, cfg, None, None))
+            attempts.append((f"bf16+{attn_impl or 'noattn'}", None, internvl_dtype, attn_impl))
+            attempts.append(("bf16", None, internvl_dtype, None))
+
+            for name, cfg, td, ai in attempts:
+                try:
+                    print(f"[BaseVL] InternVL load attempt: {name}", flush=True)
+                    llm = _try_load_internvl(cfg, td, ai)
+                    break
+                except Exception as e:
+                    tried.append(f"{name}: {type(e).__name__}")
+                    continue
+
+            if llm is None:
+                raise RuntimeError(f"[BaseVL] Failed to load InternVL after attempts: {tried}")
+
+            self.llm = llm
+
+            # Disable KV cache and enable hidden states for adapter training
+            try:
+                self.llm.config.use_cache = False
+            except Exception:
+                pass
+            try:
+                self.llm.config.output_hidden_states = True
+            except Exception:
+                pass
+
+            # Enable gradient checkpointing if requested
+            if enable_gradient_checkpointing:
+                try:
+                    self.llm.gradient_checkpointing_enable()
+                    try:
+                        self.llm.config.use_cache = False
+                    except Exception:
+                        pass
+                    print(f"[BaseVL] InternVL gradient checkpointing enabled", flush=True)
+                except Exception as e:
+                    print(f"[BaseVL] Warning: could not enable gradient checkpointing: {e}", flush=True)
+
+            print(f"[BaseVL] ✓ LLM model loaded", flush=True)
+            sys.stdout.flush()
+
+            self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name, trust_remote_code=True)
+            print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
+            sys.stdout.flush()
+
+            # Store InternVL's image processor for future multimodal use
+            try:
+                self.internvl_image_processor = AutoProcessor.from_pretrained(
+                    llm_model_name, trust_remote_code=True
+                )
+                print(f"[BaseVL] ✓ InternVL image processor loaded", flush=True)
+            except Exception as e:
+                print(f"[BaseVL] Warning: could not load InternVL image processor: {e}", flush=True)
+                self.internvl_image_processor = None
+
+            self.model_type = "internvl"
         else:
             print(f"[BaseVL] Using AutoModel for custom LLM", flush=True)
             sys.stdout.flush()
@@ -358,8 +473,8 @@ class BaseVLModel(nn.Module):
         Returns:
             vision_features: (batch_size, num_vision_tokens, llm_hidden_size)
         """
-        if self.model_type in ["llava", "blip2"]:
-            # For LLaVA/BLIP2, we'll let the model handle vision encoding internally
+        if self.model_type in ["llava", "blip2", "internvl"]:
+            # For LLaVA/BLIP2/InternVL, we'll let the model handle vision encoding internally
             # This method is mainly for compatibility
             with torch.no_grad():
                 vision_outputs = self.vision_encoder(pixel_values=images)
@@ -404,7 +519,7 @@ class BaseVLModel(nn.Module):
             else:
                 has_valid_images = True
         
-        if self.model_type in ["llava", "blip2"] and has_valid_images:
+        if self.model_type in ["llava", "blip2", "internvl"] and has_valid_images:
             # For BLIP-2, we need to handle tokenization more carefully
             if self.model_type == "blip2":
                 # BLIP-2 expects text-only tokenization + separate pixel_values
@@ -518,8 +633,8 @@ class BaseVLModel(nn.Module):
         Returns:
             Dictionary with logits, loss, etc.
         """
-        if self.model_type in ["llava", "blip2", "qwen"]:
-            # Use native forward pass (works for LLaVA, BLIP2, and Qwen)
+        if self.model_type in ["llava", "blip2", "qwen", "internvl"]:
+            # Use native forward pass (works for LLaVA, BLIP2, Qwen, and InternVL)
             llm_kwargs = dict(attention_mask=attention_mask, labels=labels, **kwargs)
             if self.model_type == "blip2" and pixel_values is None:
                 base = input_ids if input_ids is not None else inputs_embeds
@@ -583,7 +698,7 @@ class BaseVLModel(nn.Module):
         inputs = self.prepare_inputs_for_training(text, images)
         
         with torch.no_grad():
-            if self.model_type in ["llava", "blip2"] and images is not None:
+            if self.model_type in ["llava", "blip2", "internvl"] and images is not None:
                 generated = self.llm.generate(
                     input_ids=inputs["input_ids"],
                     attention_mask=inputs["attention_mask"],

@@ -446,6 +446,72 @@ QWEN3_14B_CONFIG = {
     "fp16_mixed_precision": False,  # bf16 incompatible with fp16 scaler
 }
 
+# InternVL 3.5-8B Configuration
+# Uses InternVL 3.5-8B as base VLM (InternViT-300M + Qwen3-8B backbone)
+# This is a vision-language model with built-in vision encoder.
+# IMPORTANT: Run with these env vars:
+#   SAFE_QWEN_QUANT=none SAFE_GRAD_CKPT=0 FP16=0 BATCH_SIZE=1
+INTERNVL_CONFIG = {
+    "name": "internvl",
+    "description": "InternVL 3.5-8B VLM with SAFE audio adapters - vision+audio composition",
+    "eval_prompt": "Describe what you hear in one short sentence.",
+
+    # Base VL Model - InternVL 3.5-8B (has built-in InternViT-300M vision encoder)
+    # Uses local path by default; set LLM_MODEL_PATH env var to override
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/OpenGVLab_InternVL3_5-8B"),
+    "vision_model_name": None,  # InternVL has built-in InternViT-300M
+
+    # Audio configuration (same as Qwen/KV_AUGMENT)
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0
+    },
+
+    # Model dimensions - Qwen3-8B backbone inside InternVL
+    "llm_hidden_size": 4096,
+    "audio_embed_dim": 512,
+    "num_audio_tokens": 8,
+
+    # Projector configuration (same as Qwen config)
+    "projector_type": "standard",
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    # Fusion configuration - residual mode (same as Qwen config)
+    "fusion_type": "multilayer",
+    # Qwen3-8B backbone has 32 layers; proportional: [10, 19, 29]
+    "fusion_layer_indices": [10, 19, 29],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "num_attention_heads": 32,
+        "dropout": 0.1,
+        "modalities": {
+            "audio": {
+                "layer_indices": [10, 19, 29],
+                "num_tokens": 8
+            }
+        },
+    },
+
+    # Training configuration
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+
+    # Memory and compute - InternVL 8B (InternViT + Qwen3-8B) in bf16
+    "expected_vram_gb": 35,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+}
+
 # Available configurations
 CONFIGS = {
     "demo": DEMO_CONFIG,
@@ -456,6 +522,9 @@ CONFIGS = {
     "qwen3_14b": QWEN3_14B_CONFIG,  # Legacy alias (actually 8B now)
     "qwen3_8b": QWEN3_14B_CONFIG,
     "qwen": QWEN3_14B_CONFIG,  # Short alias
+    "internvl": INTERNVL_CONFIG,
+    "internvl3.5": INTERNVL_CONFIG,
+    "internvl_8b": INTERNVL_CONFIG,
 }
 
 def get_config(config_name: str):

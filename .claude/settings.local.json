@@ -12,7 +12,18 @@
       "Bash(grep:*)",
       "Bash(ls:*)",
       "Bash(wc:*)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(curl:*)",
+      "Bash(pip3 install:*)",
+      "Bash(for pdf in *.pdf)",
+      "Bash(do txt=\"$pdf%.pdf.txt\")",
+      "Bash(echo:*)",
+      "Bash(pdftotext:*)",
+      "Bash(done)",
+      "Bash(xargs:*)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(brew list:*)",
+      "Bash(chmod:*)"
     ],
     "deny": []
   }

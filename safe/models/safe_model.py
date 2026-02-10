@@ -1405,7 +1405,7 @@ class SAFEModel(nn.Module):
         image_processor = getattr(self.base_vl, "image_processor", None)
 
         try:
-            if self.base_vl.model_type in {"llava", "blip2"} and processor is not None:
+            if self.base_vl.model_type in {"llava", "blip2", "internvl"} and processor is not None:
                 processed = processor(images=pil_image, return_tensors="pt")
                 if "pixel_values" in processed:
                     return processed["pixel_values"]
@@ -1569,7 +1569,7 @@ class SAFEModel(nn.Module):
             gate = self._default_gate
         # For BLIP2/LLaVA/Qwen models, fuse audio by prefixing projected tokens
         # Qwen uses same LLaMA-style architecture so uses same path as LLaVA
-        if self.base_vl.model_type in ["blip2", "llava", "qwen"]:
+        if self.base_vl.model_type in ["blip2", "llava", "qwen", "internvl"]:
             pixel_values = kwargs.pop("pixel_values", None)
             audio_attention_mask = kwargs.pop("audio_attention_mask", None)
             filtered_kwargs = kwargs
@@ -2157,7 +2157,7 @@ class SAFEModel(nn.Module):
             hidden_states = self.base_vl.llm.transformer.ln_f(hidden_states)
             logits = self.base_vl.llm.lm_head(hidden_states)
         else:
-            if self.base_vl.model_type in ["blip2", "llava", "qwen"]:
+            if self.base_vl.model_type in ["blip2", "llava", "qwen", "internvl"]:
                 base_inputs = {
                     "attention_mask": attention_mask,
                     "labels": labels,
