@@ -61,6 +61,7 @@ GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-8}
 FUSION_LAYERS=${FUSION_LAYERS:-"1,5,9,13,17,21"}
 NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-8}
 FUSION_GATE=${FUSION_GATE:-1.0}
+SEED=${SEED:-42}
 
 # Architectural features
 LEARNED_GATE=${LEARNED_GATE:-0}          # 1 to enable per-layer learned gating
@@ -91,6 +92,7 @@ echo "Gradient accumulation: $GRADIENT_ACCUMULATION"
 echo "Fusion layers: $FUSION_LAYERS"
 echo "Audio tokens: $NUM_AUDIO_TOKENS"
 echo "Fusion gate: $FUSION_GATE"
+echo "Seed: $SEED"
 echo "========================================"
 
 cd "$SAFE_ROOT"
@@ -125,6 +127,7 @@ python3 experiments/avqa_composition/train_avqa_composition.py \
     --fusion-layers "$FUSION_LAYERS" \
     --num-audio-tokens "$NUM_AUDIO_TOKENS" \
     --fusion-gate "$FUSION_GATE" \
+    --seed "$SEED" \
     --batch-size "$BATCH_SIZE" \
     --num-epochs "$NUM_EPOCHS" \
     --learning-rate "$LEARNING_RATE" \
