@@ -67,6 +67,7 @@ LEARNED_GATE=${LEARNED_GATE:-0}          # 1 to enable per-layer learned gating
 LEARNED_GATE_INIT=${LEARNED_GATE_INIT:-1.5}
 GRAD_ATTRIBUTION=${GRAD_ATTRIBUTION:-0}  # 1 to log per-layer gradient norms
 GRAD_LOG_EVERY=${GRAD_LOG_EVERY:-200}
+MAX_SAMPLES=${MAX_SAMPLES:-0}             # >0 to limit samples for sanity runs
 
 # W&B settings
 WANDB_PROJECT=${WANDB_PROJECT:-"SAFE-InternVL-AVQA"}
@@ -106,6 +107,10 @@ fi
 if [ "$GRAD_ATTRIBUTION" = "1" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --grad-attribution --grad-log-every $GRAD_LOG_EVERY"
     echo "Gradient attribution: ON (every $GRAD_LOG_EVERY steps)"
+fi
+if [ "$MAX_SAMPLES" != "0" ] && [ -n "$MAX_SAMPLES" ]; then
+    EXTRA_FLAGS="$EXTRA_FLAGS --max-samples $MAX_SAMPLES"
+    echo "Max samples: $MAX_SAMPLES (sanity run)"
 fi
 
 python3 experiments/avqa_composition/train_avqa_composition.py \

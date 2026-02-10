@@ -620,6 +620,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--grad-log-every", type=int, default=200,
                    help="Log gradient attribution every N steps")
 
+    p.add_argument("--max-samples", type=int, default=0,
+                   help="Limit train/val to N samples for quick sanity runs (0=unlimited)")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", type=str, default="SAFE-AVQA-Composition")
     p.add_argument("--wandb-run-name", type=str, default=None)
@@ -637,6 +639,10 @@ def main() -> None:
 
     train_ds = ManifestAVQADataset(args.train_manifest, args.media_root)
     val_ds = ManifestAVQADataset(args.val_manifest, args.media_root)
+    if args.max_samples > 0:
+        train_ds.rows = train_ds.rows[:args.max_samples]
+        val_ds.rows = val_ds.rows[:args.max_samples]
+        print(f"[info] --max-samples={args.max_samples}: truncated datasets")
     print(f"[info] train_samples={len(train_ds)} val_samples={len(val_ds)}")
     print(f"[info] train_media_stats={train_ds.media_stats}")
     print(f"[info] val_media_stats={val_ds.media_stats}")
