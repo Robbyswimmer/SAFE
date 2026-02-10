@@ -2518,7 +2518,9 @@ class SAFEModel(nn.Module):
                 if attention_mask is not None:
                     base_inputs["attention_mask"] = attention_mask
                 if pixel_values is not None:
-                    base_inputs["pixel_values"] = pixel_values
+                    # Cast to model dtype (InternViT expects bfloat16, not float32)
+                    pv_dtype = next(self.base_vl.llm.parameters()).dtype
+                    base_inputs["pixel_values"] = pixel_values.to(dtype=pv_dtype)
 
                 # For InternVL without images, use language_model (Qwen3)
                 # to avoid issues with custom generate(). With images,
@@ -2536,10 +2538,12 @@ class SAFEModel(nn.Module):
                 generation_kwargs["use_cache"] = False
 
             # Detect InternVL with vision for generate path
+            # Check for both built-in (get_image_features) and custom (extract_feature) APIs
             internvl_with_vision_gen = (
                 self.base_vl.model_type == "internvl"
                 and pixel_values is not None
-                and hasattr(self.base_vl.llm, "get_image_features")
+                and (hasattr(self.base_vl.llm, "get_image_features")
+                     or hasattr(self.base_vl.llm, "extract_feature"))
             )
 
             base_inputs = {**generation_kwargs}
@@ -2553,7 +2557,8 @@ class SAFEModel(nn.Module):
                 if attention_mask is not None:
                     base_inputs["attention_mask"] = attention_mask
                 if pixel_values is not None:
-                    base_inputs["pixel_values"] = pixel_values
+                    # Cast to model dtype (InternViT expects bfloat16, not float32)
+                    base_inputs["pixel_values"] = pixel_values.to(dtype=base_dtype)
             else:
                 sanitized_ids = self.sanitize_input_ids_for_base(input_ids)
                 if sanitized_ids is not None:
