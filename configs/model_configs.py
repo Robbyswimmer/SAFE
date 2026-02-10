@@ -485,8 +485,9 @@ INTERNVL_CONFIG = {
 
     # Fusion configuration - residual mode (same as Qwen config)
     "fusion_type": "multilayer",
-    # Qwen3-8B backbone has 32 layers; proportional: [10, 19, 29]
-    "fusion_layer_indices": [10, 19, 29],
+    # InternVL 3.5-8B Qwen3 backbone has 36 layers (not 32)
+    # Proportional early/mid/late: [12, 24, 33]
+    "fusion_layer_indices": [12, 24, 33],
     "lora_rank": 8,
     "fusion_config": {
         "fusion_mode": "residual",
@@ -495,7 +496,7 @@ INTERNVL_CONFIG = {
         "dropout": 0.1,
         "modalities": {
             "audio": {
-                "layer_indices": [10, 19, 29],
+                "layer_indices": [12, 24, 33],
                 "num_tokens": 8
             }
         },

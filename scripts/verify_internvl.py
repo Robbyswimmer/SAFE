@@ -141,23 +141,26 @@ def main():
 
         # Create a minimal fusion adapter for the test
         if hidden_size and has_language_model and has_layers:
+            # Use proportional layer indices for the actual layer count
+            fusion_indices = [num_layers // 3, (num_layers * 2) // 3, num_layers - 3]
             adapter = MultiLayerFusionAdapter(
                 hidden_size=hidden_size,
                 audio_dim=512,
                 num_audio_tokens=8,
-                fusion_layer_indices=[10, 19, 29],
+                fusion_layer_indices=fusion_indices,
                 num_attention_heads=32,
             )
 
             lhm = LayerHookManager(
                 model=model.language_model,
                 fusion_adapter=adapter,
-                fusion_layers={10, 19, 29},
+                fusion_layers=fusion_indices,  # must be list, not set
             )
 
             discovered = lhm._discover_layer_modules(model.language_model)
             print(f"  Discovered {len(discovered)} layers")
             print(f"  Layer indices: {sorted(discovered.keys())[:5]}...{sorted(discovered.keys())[-3:]}")
+            print(f"  Fusion indices used: {fusion_indices}")
             print(f"  OK - Hook discovery works!")
         else:
             print(f"  SKIP - Cannot test hooks (missing architecture components)")
