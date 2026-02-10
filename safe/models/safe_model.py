@@ -1338,16 +1338,51 @@ class SAFEModel(nn.Module):
         tokenizer = self.base_vl.tokenizer
         image_processor = getattr(self.base_vl, "internvl_image_processor", None)
 
-        # Get vision config from model
+        # Get InternVL visual token config from model/tokenizer.
         model_config = self.base_vl.llm.config
         image_token_id = getattr(model_config, "image_token_id", 151667)
-        image_seq_length = getattr(model_config, "image_seq_length", 256)
 
-        # Use the model's img_context_token_id if available (custom model sets this)
-        # It may differ from config's image_token_id
+        # Prefer runtime value from model object when available.
         actual_img_token_id = getattr(self.base_vl.llm, "img_context_token_id", None)
-        if actual_img_token_id is not None:
+        if isinstance(actual_img_token_id, int) and actual_img_token_id >= 0:
             image_token_id = actual_img_token_id
+
+        # Resolve number of image context tokens per image.
+        image_seq_length = getattr(model_config, "image_seq_length", None)
+        runtime_image_tokens = getattr(self.base_vl.llm, "num_image_token", None)
+        if isinstance(runtime_image_tokens, int) and runtime_image_tokens > 0:
+            image_seq_length = runtime_image_tokens
+        elif isinstance(runtime_image_tokens, (list, tuple)) and runtime_image_tokens:
+            if isinstance(runtime_image_tokens[0], int) and runtime_image_tokens[0] > 0:
+                image_seq_length = runtime_image_tokens[0]
+        if not isinstance(image_seq_length, int) or image_seq_length <= 0:
+            image_seq_length = 256
+
+        def _lookup_token_id(config_names, token_candidates) -> Optional[int]:
+            for name in config_names:
+                value = getattr(model_config, name, None)
+                if isinstance(value, int) and value >= 0:
+                    return value
+            unk_id = getattr(tokenizer, "unk_token_id", None)
+            for token in token_candidates:
+                try:
+                    value = tokenizer.convert_tokens_to_ids(token)
+                except Exception:
+                    continue
+                if isinstance(value, list):
+                    value = value[0] if value else None
+                if isinstance(value, int) and value >= 0 and (unk_id is None or value != unk_id):
+                    return value
+            return None
+
+        image_start_token_id = _lookup_token_id(
+            ("img_start_token_id", "image_start_token_id", "vision_start_token_id"),
+            ("<img>", "<image_start>", "<|vision_start|>"),
+        )
+        image_end_token_id = _lookup_token_id(
+            ("img_end_token_id", "image_end_token_id", "vision_end_token_id"),
+            ("</img>", "<image_end>", "<|vision_end|>"),
+        )
 
         # Normalize text to list
         if isinstance(text, str):
@@ -1373,8 +1408,36 @@ class SAFEModel(nn.Module):
             pil_images.append(None)
         pil_images = pil_images[:batch_size]
 
-        # Match LLaVA QA prompting strategy for fair apples-to-apples comparison.
         instruction = "Answer with a single word or number."
+        newline_ids = tokenizer.encode("\n", add_special_tokens=False)
+
+        has_chat_template = bool(getattr(tokenizer, "chat_template", None)) and hasattr(
+            tokenizer, "apply_chat_template"
+        )
+
+        def _build_text_ids(question: str) -> List[int]:
+            user_text = f"{instruction} {question}".strip()
+            if has_chat_template:
+                try:
+                    message = [{"role": "user", "content": user_text}]
+                    prompt_ids = tokenizer.apply_chat_template(
+                        message,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                    )
+                    if torch.is_tensor(prompt_ids):
+                        prompt_ids = prompt_ids.tolist()
+                    if prompt_ids and isinstance(prompt_ids[0], list):
+                        prompt_ids = prompt_ids[0]
+                    if isinstance(prompt_ids, list) and prompt_ids:
+                        return [int(tok) for tok in prompt_ids]
+                except Exception:
+                    pass
+            # Fallback keeps prompt aligned with LLaVA path.
+            return tokenizer.encode(
+                f"USER: {user_text} ASSISTANT:",
+                add_special_tokens=True,
+            )
 
         # Build input_ids by directly inserting image placeholder token IDs.
         # Avoids string encode/decode roundtrip which loses special tokens.
@@ -1383,17 +1446,19 @@ class SAFEModel(nn.Module):
         all_input_ids = []
         for i, question in enumerate(texts):
             has_image = pil_images[i] is not None and image_processor is not None
-            # Keep textual prompt template aligned with _prepare_llava_inputs:
-            # "USER: ... ASSISTANT:" format for both image and non-image paths.
-            # For InternVL with image, visual placeholders are inserted as token IDs
-            # (image_seq_length * image_token_id), so no textual <image> token needed.
-            text_part = f"USER: {instruction} {question} ASSISTANT:"
-            text_ids = tokenizer.encode(text_part, add_special_tokens=False)
+            text_ids = _build_text_ids(question)
 
             if has_image:
-                # Prepend image_seq_length placeholder tokens
                 img_ids = [image_token_id] * image_seq_length
-                sample_ids = img_ids + text_ids
+                sample_ids = []
+                if image_start_token_id is not None:
+                    sample_ids.append(image_start_token_id)
+                sample_ids.extend(img_ids)
+                if image_end_token_id is not None:
+                    sample_ids.append(image_end_token_id)
+                if newline_ids:
+                    sample_ids.extend(newline_ids)
+                sample_ids.extend(text_ids)
                 valid_pixel_images.append(pil_images[i])
                 image_indices.append(i)
             else:
@@ -1401,14 +1466,16 @@ class SAFEModel(nn.Module):
 
             all_input_ids.append(torch.tensor(sample_ids, dtype=torch.long))
 
-        # Pad to same length
+        # Left-pad to align with decoder-only generation behavior.
         max_len = max(ids.size(0) for ids in all_input_ids)
         pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
         input_ids = torch.full((batch_size, max_len), pad_id, dtype=torch.long)
         attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
         for i, ids in enumerate(all_input_ids):
-            input_ids[i, :ids.size(0)] = ids
-            attention_mask[i, :ids.size(0)] = 1
+            length = ids.size(0)
+            start = max_len - length
+            input_ids[i, start:] = ids
+            attention_mask[i, start:] = 1
         input_ids = input_ids.to(device)
         attention_mask = attention_mask.to(device)
 
@@ -1453,6 +1520,15 @@ class SAFEModel(nn.Module):
                 if n_img_tokens != expected:
                     print(f"[InternVLPrep] Image token count: {n_img_tokens} "
                           f"(expected {expected})", flush=True)
+
+        if not hasattr(self, "_internvl_prep_logged"):
+            print(
+                f"[InternVLPrep] cfg image_token_id={image_token_id} image_seq_length={image_seq_length} "
+                f"img_start_id={image_start_token_id} img_end_id={image_end_token_id} "
+                f"chat_template={has_chat_template}",
+                flush=True,
+            )
+            self._internvl_prep_logged = True
 
         # Labels: default to input_ids clone; _apply_answers_to_inputs will
         # handle proper answer-supervised labeling if training_mode is on.
