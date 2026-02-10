@@ -353,6 +353,25 @@ class BaseVLModel(nn.Module):
             print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
             sys.stdout.flush()
 
+            # Set img_context_token_id for custom InternVL generate().
+            # The custom model's generate() asserts this is not None.
+            # Use image_token_id from config (151667), or look up <IMG_CONTEXT> in tokenizer.
+            if hasattr(self.llm, 'img_context_token_id') and self.llm.img_context_token_id is None:
+                img_token_id = getattr(self.llm.config, 'image_token_id', None)
+                if img_token_id is None:
+                    # Try tokenizer lookup
+                    try:
+                        img_token_id = self.tokenizer.convert_tokens_to_ids('<IMG_CONTEXT>')
+                        if img_token_id == self.tokenizer.unk_token_id:
+                            img_token_id = None
+                    except Exception:
+                        pass
+                if img_token_id is not None:
+                    self.llm.img_context_token_id = img_token_id
+                    print(f"[BaseVL] ✓ Set img_context_token_id={img_token_id}", flush=True)
+                else:
+                    print(f"[BaseVL] Warning: could not determine img_context_token_id", flush=True)
+
             # Load InternVL's image processor via AutoImageProcessor (avoids tokenizer
             # dependency that causes "Qwen2TokenizerFast has no attribute
             # start_image_token" when using AutoProcessor).
