@@ -1646,8 +1646,12 @@ class SAFEModel(nn.Module):
                 if pixel_values is not None:
                     base_inputs["pixel_values"] = pixel_values
 
-                # Call LlavaForConditionalGeneration with embeddings + vision (same as fusion path)
-                outputs = self.base_vl.llm(**base_inputs)
+                # Call LLM with embeddings + vision (same as fusion path)
+                # For InternVL, route to inner language_model (Qwen3)
+                _passthrough_model = self.base_vl.llm
+                if self.base_vl.model_type == "internvl":
+                    _passthrough_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
+                outputs = _passthrough_model(**base_inputs)
                 logits = outputs.logits
                 loss = outputs.loss if labels is not None else None
                 # If the caller requested hidden states, return the last hidden state as well.
@@ -1781,6 +1785,12 @@ class SAFEModel(nn.Module):
             if pixel_values is not None:
                 model_inputs["pixel_values"] = pixel_values
 
+            # For InternVL, the outer InternVLChatModel does not accept
+            # inputs_embeds; route to its inner language_model (Qwen3) instead.
+            _forward_model = self.base_vl.llm
+            if self.base_vl.model_type == "internvl":
+                _forward_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
+
             use_midlayer_hooks = (
                 audio_tokens is not None
                 and gate_scalar > 0.0
@@ -1842,7 +1852,7 @@ class SAFEModel(nn.Module):
                     supervised_mask=supervised_mask,
                 )
                 try:
-                    return self.base_vl.llm(**run_inputs)
+                    return _forward_model(**run_inputs)
                 finally:
                     hook_manager.remove_hooks()
 
@@ -1862,7 +1872,7 @@ class SAFEModel(nn.Module):
                     updated_inputs = dict(run_inputs)
                     updated_inputs["inputs_embeds"] = fused_embeds
                     run_inputs = updated_inputs
-                return self.base_vl.llm(**run_inputs)
+                return _forward_model(**run_inputs)
 
             def run_with_kv_augmentation(run_inputs: Dict[str, torch.Tensor]) -> Tuple[Any, Optional[torch.Tensor]]:
                 """
@@ -1906,7 +1916,7 @@ class SAFEModel(nn.Module):
                     if "use_cache" not in run_inputs:
                         run_inputs = dict(run_inputs)
                         run_inputs["use_cache"] = False
-                    outputs = self.base_vl.llm(**run_inputs)
+                    outputs = _forward_model(**run_inputs)
 
                     # Compute attention regularization loss if enabled
                     # Use LIVE attention weights (with gradients) for proper backprop
