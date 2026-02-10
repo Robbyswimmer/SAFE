@@ -64,7 +64,7 @@ FUSION_GATE=${FUSION_GATE:-1.0}
 
 # Architectural features
 LEARNED_GATE=${LEARNED_GATE:-0}          # 1 to enable per-layer learned gating
-LEARNED_GATE_INIT=${LEARNED_GATE_INIT:-0.0}
+LEARNED_GATE_INIT=${LEARNED_GATE_INIT:-1.5}
 GRAD_ATTRIBUTION=${GRAD_ATTRIBUTION:-0}  # 1 to log per-layer gradient norms
 GRAD_LOG_EVERY=${GRAD_LOG_EVERY:-200}
 
