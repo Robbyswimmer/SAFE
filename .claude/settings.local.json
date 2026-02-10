@@ -23,7 +23,8 @@
       "Bash(xargs:*)",
       "WebFetch(domain:arxiv.org)",
       "Bash(brew list:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "WebFetch(domain:openaccess.thecvf.com)"
     ],
     "deny": []
   }
