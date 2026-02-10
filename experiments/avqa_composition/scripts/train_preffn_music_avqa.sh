@@ -29,6 +29,7 @@ FUSION_LAYERS=${FUSION_LAYERS:-}
 NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-8}
 TRAIN_MODALITY=${TRAIN_MODALITY:-both}
 EVAL_MODALITIES=${EVAL_MODALITIES:-both,audio,image}
+USE_FP16=${USE_FP16:-1}
 WANDB=${WANDB:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-SAFE-AVQA-Composition}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-music_avqa_preffn_${SLURM_JOB_ID:-local}}
@@ -48,6 +49,11 @@ if [[ -n "$FUSION_LAYERS" ]]; then
   FUSION_ARGS+=(--fusion-layers "$FUSION_LAYERS")
 fi
 
+FP16_ARGS=()
+if [[ "$USE_FP16" == "1" ]]; then
+  FP16_ARGS+=(--fp16)
+fi
+
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --model-config "$MODEL_CONFIG" \
@@ -61,6 +67,6 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --num-audio-tokens "$NUM_AUDIO_TOKENS" \
   --train-modality "$TRAIN_MODALITY" \
   --eval-modalities "$EVAL_MODALITIES" \
-  ${FP16_FLAG:---fp16} \
+  "${FP16_ARGS[@]}" \
   "${FUSION_ARGS[@]}" \
   "${WANDB_ARGS[@]}"
