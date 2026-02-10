@@ -843,6 +843,8 @@ class MultiLayerFusionAdapter(nn.Module):
         use_ffn: bool = True,
         ffn_expansion: float = 2.0,
         use_pre_norm: bool = False,
+        use_learned_gate: bool = False,
+        learned_gate_init: float = 0.0,
         **unused_kwargs,
     ):
         super().__init__()
@@ -858,6 +860,7 @@ class MultiLayerFusionAdapter(nn.Module):
         self.use_ffn = use_ffn
         self.ffn_expansion = ffn_expansion
         self.use_pre_norm = use_pre_norm
+        self.use_learned_gate = bool(use_learned_gate)
         # Last recorded attention summary from any inner fusion adapter
         self.last_attention_summary: Optional[dict] = None
         self.extra_config = dict(unused_kwargs)
@@ -903,6 +906,31 @@ class MultiLayerFusionAdapter(nn.Module):
                         train_base_cross_attention=train_base_cross_attention,
                         use_tokenwise_gate=self.use_tokenwise_gate,
                     )
+
+        # Per-layer learned gating (Flamingo-style tanh gating)
+        # Each fusion layer gets a learnable scalar gate initialized near zero
+        # so the model starts as the original frozen LLM and gradually learns
+        # how much audio to inject at each layer.
+        self.layer_gates = nn.ParameterDict()
+        if self.use_learned_gate:
+            for modality, indices in self.fusion_layers.items():
+                for layer_idx in indices:
+                    key = self._adapter_key(modality, layer_idx)
+                    # Initialize to learned_gate_init (default 0.0)
+                    # tanh(0) = 0, so gate starts at 0 (no injection)
+                    # Gradients flow because tanh'(0) = 1
+                    self.layer_gates[key] = nn.Parameter(
+                        torch.tensor(float(learned_gate_init))
+                    )
+            print(f"[MultiLayerFusion] Learned per-layer gates: "
+                  f"{len(self.layer_gates)} gates, init={learned_gate_init}", flush=True)
+
+    def get_learned_gate_values(self) -> Dict[str, float]:
+        """Return current learned gate values (tanh-squashed) for logging."""
+        return {
+            key: float(torch.tanh(param).item())
+            for key, param in self.layer_gates.items()
+        }
 
     def forward(
         self,
@@ -969,6 +997,14 @@ class MultiLayerFusionAdapter(nn.Module):
                 modality_gate = gate.get(modality, 1.0)
             else:
                 modality_gate = gate
+
+            # Apply per-layer learned gate (Flamingo-style tanh gating)
+            if self.use_learned_gate and adapter_key in self.layer_gates:
+                learned_gate = torch.tanh(self.layer_gates[adapter_key])
+                if isinstance(modality_gate, torch.Tensor):
+                    modality_gate = modality_gate * learned_gate
+                else:
+                    modality_gate = float(modality_gate) * learned_gate
 
             output = adapter(
                 hidden_states=output,

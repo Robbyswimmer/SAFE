@@ -191,6 +191,9 @@ class SAFEModel(nn.Module):
                     use_ffn=fusion_config.get("use_ffn", True),
                     ffn_expansion=fusion_config.get("ffn_expansion", 2.0),
                     use_pre_norm=fusion_config.get("use_pre_norm", False),
+                    # Per-layer learned gating (Flamingo-style)
+                    use_learned_gate=fusion_config.get("use_learned_gate", False),
+                    learned_gate_init=fusion_config.get("learned_gate_init", 0.0),
                 )
             elif fusion_type == "gated":
                 self.fusion_adapter = GatedFusionAdapter(

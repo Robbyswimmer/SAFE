@@ -285,6 +285,10 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
     fusion_cfg["injection_point"] = "pre_ffn"
     fusion_cfg.setdefault("use_bottleneck", True)
     fusion_cfg.setdefault("bottleneck_dim", 256)
+    # Per-layer learned gating
+    if getattr(args, "learned_gate", False):
+        fusion_cfg["use_learned_gate"] = True
+        fusion_cfg["learned_gate_init"] = getattr(args, "learned_gate_init", 0.0)
     cfg["fusion_config"] = fusion_cfg
     # Only pass keys that SAFEModel.__init__ accepts
     valid_keys = {
@@ -306,6 +310,81 @@ def resolve_modality_batch(batch: Dict[str, Any], modality: str) -> Dict[str, An
     return {"audio": batch["audio"], "images": batch["images"]}
 
 
+def log_gradient_attribution(
+    model: SAFEModel,
+    step: int,
+    wandb_run: Any = None,
+) -> Dict[str, float]:
+    """
+    Log per-layer gradient norms for fusion adapter parameters.
+
+    This enables a principled study of which decoder layers benefit most
+    from audio fusion by comparing gradient flow across fusion layers.
+    Layers with higher gradient norms are contributing more to loss reduction,
+    suggesting they are more valuable injection points.
+
+    Returns dict of {layer_key: grad_norm} for external logging.
+    """
+    grad_norms: Dict[str, float] = {}
+    param_norms: Dict[str, float] = {}
+    gate_values: Dict[str, float] = {}
+
+    # Collect per-adapter gradient norms
+    if hasattr(model, "fusion_adapter") and model.fusion_adapter is not None:
+        adapter = model.fusion_adapter
+        if hasattr(adapter, "fusion_adapters"):
+            for key, sub_adapter in adapter.fusion_adapters.items():
+                total_grad_norm = 0.0
+                total_param_norm = 0.0
+                param_count = 0
+                for name, param in sub_adapter.named_parameters():
+                    if param.grad is not None:
+                        total_grad_norm += param.grad.data.norm(2).item() ** 2
+                    total_param_norm += param.data.norm(2).item() ** 2
+                    param_count += param.numel()
+                grad_norms[key] = total_grad_norm ** 0.5
+                param_norms[key] = total_param_norm ** 0.5
+
+        # Collect learned gate values
+        if hasattr(adapter, "get_learned_gate_values"):
+            gate_values = adapter.get_learned_gate_values()
+
+    # Collect projector gradient norm
+    if hasattr(model, "audio_projector"):
+        proj_grad = 0.0
+        for param in model.audio_projector.parameters():
+            if param.grad is not None:
+                proj_grad += param.grad.data.norm(2).item() ** 2
+        grad_norms["projector"] = proj_grad ** 0.5
+
+    # Log to stdout
+    if grad_norms:
+        parts = []
+        for key in sorted(grad_norms.keys()):
+            g = grad_norms[key]
+            entry = f"{key}={g:.4f}"
+            if key in gate_values:
+                entry += f"(gate={gate_values[key]:.3f})"
+            parts.append(entry)
+        print(f"  [grad_attribution] step={step} " + " | ".join(parts), flush=True)
+
+    # Log to wandb
+    if wandb_run is not None:
+        log_payload = {}
+        for key, norm in grad_norms.items():
+            safe_key = key.replace(":", "_")
+            log_payload[f"grad_norm/{safe_key}"] = norm
+        for key, val in gate_values.items():
+            safe_key = key.replace(":", "_")
+            log_payload[f"learned_gate/{safe_key}"] = val
+        for key, norm in param_norms.items():
+            safe_key = key.replace(":", "_")
+            log_payload[f"param_norm/{safe_key}"] = norm
+        wandb_run.log(log_payload, step=step)
+
+    return grad_norms
+
+
 def train_epoch(
     model: SAFEModel,
     dataloader: DataLoader,
@@ -313,7 +392,9 @@ def train_epoch(
     scaler: GradScaler,
     device: torch.device,
     args: argparse.Namespace,
-) -> float:
+    wandb_run: Any = None,
+    global_step: int = 0,
+) -> tuple:
     model.train()
     total_loss = 0.0
     total_batches = 0
@@ -378,11 +459,18 @@ def train_epoch(
         scaler.scale(loss).backward()
 
         if (step + 1) % args.gradient_accumulation_steps == 0:
+            # Log gradient attribution BEFORE clipping (raw gradient signal)
+            if getattr(args, "grad_attribution", False):
+                grad_log_every = getattr(args, "grad_log_every", 200)
+                if global_step % grad_log_every == 0:
+                    log_gradient_attribution(model, global_step, wandb_run)
+
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.get_trainable_parameters(), args.max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
+            global_step += 1
 
         total_loss += loss.item() * args.gradient_accumulation_steps
         total_batches += 1
@@ -391,7 +479,7 @@ def train_epoch(
             avg_loss = total_loss / max(total_batches, 1)
             print(f"  [train] step {step + 1}/{num_batches} loss={avg_loss:.4f}", flush=True)
 
-    return total_loss / max(total_batches, 1)
+    return total_loss / max(total_batches, 1), global_step
 
 
 @torch.no_grad()
@@ -519,6 +607,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fp16", action="store_true")
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=42)
+
+    # Learned gating
+    p.add_argument("--learned-gate", action="store_true",
+                   help="Enable per-layer learned gating (Flamingo-style tanh gates)")
+    p.add_argument("--learned-gate-init", type=float, default=0.0,
+                   help="Initial value for learned gate params (tanh-squashed, 0.0=gate off)")
+
+    # Gradient attribution study
+    p.add_argument("--grad-attribution", action="store_true",
+                   help="Log per-layer gradient norms for fusion layer selection study")
+    p.add_argument("--grad-log-every", type=int, default=200,
+                   help="Log gradient attribution every N steps")
+
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", type=str, default="SAFE-AVQA-Composition")
     p.add_argument("--wandb-run-name", type=str, default=None)
@@ -630,9 +731,13 @@ def main() -> None:
                 log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
             wandb_run.log(log_payload, step=0)
     else:
+        global_step = 0
         for epoch in range(args.num_epochs):
             print(f"\n[epoch {epoch + 1}/{args.num_epochs}]")
-            train_loss = train_epoch(model, train_loader, optimizer, scaler, device, args)
+            train_loss, global_step = train_epoch(
+                model, train_loader, optimizer, scaler, device, args,
+                wandb_run=wandb_run, global_step=global_step,
+            )
             epoch_result = {"epoch": epoch + 1, "train_loss": float(train_loss), "eval": {}}
 
             for modality in eval_modalities:

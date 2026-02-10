@@ -62,6 +62,12 @@ FUSION_LAYERS=${FUSION_LAYERS:-"12,24,33"}
 NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-8}
 FUSION_GATE=${FUSION_GATE:-1.0}
 
+# Architectural features
+LEARNED_GATE=${LEARNED_GATE:-0}          # 1 to enable per-layer learned gating
+LEARNED_GATE_INIT=${LEARNED_GATE_INIT:-0.0}
+GRAD_ATTRIBUTION=${GRAD_ATTRIBUTION:-0}  # 1 to log per-layer gradient norms
+GRAD_LOG_EVERY=${GRAD_LOG_EVERY:-200}
+
 # W&B settings
 WANDB_PROJECT=${WANDB_PROJECT:-"SAFE-InternVL-AVQA"}
 WANDB_NAME="internvl_va_${SLURM_JOB_ID:-local}"
@@ -91,6 +97,17 @@ cd "$SAFE_ROOT"
 mkdir -p "$OUTPUT_DIR"
 mkdir -p logs
 
+# Build optional flags
+EXTRA_FLAGS=""
+if [ "$LEARNED_GATE" = "1" ]; then
+    EXTRA_FLAGS="$EXTRA_FLAGS --learned-gate --learned-gate-init $LEARNED_GATE_INIT"
+    echo "Learned gating: ON (init=$LEARNED_GATE_INIT)"
+fi
+if [ "$GRAD_ATTRIBUTION" = "1" ]; then
+    EXTRA_FLAGS="$EXTRA_FLAGS --grad-attribution --grad-log-every $GRAD_LOG_EVERY"
+    echo "Gradient attribution: ON (every $GRAD_LOG_EVERY steps)"
+fi
+
 python3 experiments/avqa_composition/train_avqa_composition.py \
     --dataset music_avqa \
     --train-manifest "$TRAIN_MANIFEST" \
@@ -112,7 +129,8 @@ python3 experiments/avqa_composition/train_avqa_composition.py \
     --wandb \
     --wandb-project "$WANDB_PROJECT" \
     --wandb-run-name "$WANDB_NAME" \
-    --wandb-tags "$WANDB_TAGS"
+    --wandb-tags "$WANDB_TAGS" \
+    $EXTRA_FLAGS
 
 echo ""
 echo "========================================"
