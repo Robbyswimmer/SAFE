@@ -2730,6 +2730,7 @@ class SAFEModel(nn.Module):
                     gen_model = self.base_vl.llm
                 elif self.base_vl.model_type == "internvl":
                     gen_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
+                    base_inputs.pop("pixel_values", None)
                 else:
                     gen_model = self.base_vl.llm
                 try:
@@ -2752,6 +2753,7 @@ class SAFEModel(nn.Module):
                 fallback_gen_model = self.base_vl.llm
             elif self.base_vl.model_type == "internvl":
                 fallback_gen_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
+                base_inputs.pop("pixel_values", None)
             else:
                 fallback_gen_model = self.base_vl.llm
 
