@@ -1058,15 +1058,46 @@ class SAFEModel(nn.Module):
             # BLIP2-specific handling
             result = self._prepare_blip2_inputs(text, images, device)
         else:
-            # For custom models, use the original approach
-            text_with_modalities = text
-            
-            if images is not None:
-                text_with_modalities = f"{self.base_vl.vision_start_token}{self.base_vl.vision_end_token} {text_with_modalities}"
-                
-            if audio is not None and include_audio_tokens:
-                text_with_modalities = f"{self.audio_start_token}{self.audio_end_token} {text_with_modalities}"
-            
+            # Qwen path: explicitly frame as short-answer QA to avoid free-form continuation.
+            if self.base_vl.model_type == "qwen":
+                if isinstance(text, str):
+                    texts = [text]
+                else:
+                    texts = list(text)
+
+                instruction = (
+                    "Answer with exactly one short answer token "
+                    "(single word or number)."
+                )
+                has_chat_template = bool(
+                    getattr(self.base_vl.tokenizer, "chat_template", None)
+                ) and hasattr(self.base_vl.tokenizer, "apply_chat_template")
+
+                prompts = []
+                for question in texts:
+                    user_text = f"{instruction}\nQuestion: {question}\nAnswer:"
+                    if has_chat_template:
+                        try:
+                            message = [{"role": "user", "content": user_text}]
+                            prompt = self.base_vl.tokenizer.apply_chat_template(
+                                message,
+                                tokenize=False,
+                                add_generation_prompt=True,
+                            )
+                        except Exception:
+                            prompt = f"USER: {user_text}\nASSISTANT:"
+                    else:
+                        prompt = f"USER: {user_text}\nASSISTANT:"
+                    prompts.append(prompt)
+                text_with_modalities = prompts
+            else:
+                # For other text-only/custom models, keep legacy path.
+                text_with_modalities = text
+                if images is not None:
+                    text_with_modalities = f"{self.base_vl.vision_start_token}{self.base_vl.vision_end_token} {text_with_modalities}"
+                if audio is not None and include_audio_tokens:
+                    text_with_modalities = f"{self.audio_start_token}{self.audio_end_token} {text_with_modalities}"
+
             # Tokenize text
             inputs = self.base_vl.tokenizer(
                 text_with_modalities,
