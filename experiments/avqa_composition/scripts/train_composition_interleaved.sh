@@ -25,7 +25,7 @@ if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
   conda activate "$CONDA_ENV"
 fi
 
-MODEL_CONFIG=composition
+MODEL_CONFIG=${MODEL_CONFIG:-composition_study}
 DATA_ROOT=${DATA_ROOT:-data/music_avqa}
 MEDIA_ROOT=${MEDIA_ROOT:-$SAFE_ROOT}
 OUTPUT_DIR=${OUTPUT_DIR:-checkpoints/composition_interleaved}
@@ -42,6 +42,9 @@ WANDB_TAGS=${WANDB_TAGS:-composition,interleaved}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
 EVAL_DEBUG_SAMPLES=${EVAL_DEBUG_SAMPLES:-0}
 MAX_ANSWER_TOKENS=${MAX_ANSWER_TOKENS:-16}
+LAYER_ADDITIVITY_PROBE=${LAYER_ADDITIVITY_PROBE:-1}
+LAYER_PROBE_SAMPLES=${LAYER_PROBE_SAMPLES:-256}
+LAYER_PROBE_EVERY=${LAYER_PROBE_EVERY:-1}
 
 # Qwen-specific env vars
 export SAFE_QWEN_QUANT=none
@@ -71,6 +74,11 @@ if [[ "$EVAL_DEBUG_SAMPLES" != "0" ]]; then
   EVAL_DEBUG_ARGS+=(--eval-debug-samples "$EVAL_DEBUG_SAMPLES")
 fi
 
+LAYER_PROBE_ARGS=()
+if [[ "$LAYER_ADDITIVITY_PROBE" == "1" ]]; then
+  LAYER_PROBE_ARGS+=(--layer-additivity-probe --layer-probe-samples "$LAYER_PROBE_SAMPLES" --layer-probe-every "$LAYER_PROBE_EVERY")
+fi
+
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --model-config "$MODEL_CONFIG" \
@@ -88,4 +96,5 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --freeze-audio-encoder \
   "${MAX_SAMPLES_ARGS[@]}" \
   "${EVAL_DEBUG_ARGS[@]}" \
+  "${LAYER_PROBE_ARGS[@]}" \
   "${WANDB_ARGS[@]}"

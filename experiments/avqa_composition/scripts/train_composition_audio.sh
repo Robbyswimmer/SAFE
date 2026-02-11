@@ -22,7 +22,7 @@ if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
   conda activate "$CONDA_ENV"
 fi
 
-MODEL_CONFIG=composition
+MODEL_CONFIG=${MODEL_CONFIG:-composition_study}
 DATA_ROOT=${DATA_ROOT:-data/music_avqa}
 MEDIA_ROOT=${MEDIA_ROOT:-$SAFE_ROOT}
 OUTPUT_DIR=${OUTPUT_DIR:-checkpoints/composition_audio}

@@ -1965,6 +1965,7 @@ class SAFEModel(nn.Module):
         labels: Optional[torch.Tensor] = None,
         gate: Optional[float] = None,
         fusion_layer: Optional[int] = None,
+        active_fusion_layers: Optional[Sequence[int]] = None,
         **kwargs
     ) -> Dict[str, torch.Tensor]:
         """Forward pass through SAFE model."""
@@ -2341,6 +2342,7 @@ class SAFEModel(nn.Module):
                     modality_tokens=modality_tokens,
                     modality_masks=modality_masks,
                     gate=_modality_gate,
+                    active_layers=active_fusion_layers,
                     supervised_mask=supervised_mask,
                 )
                 try:
@@ -2781,6 +2783,7 @@ class SAFEModel(nn.Module):
         pixel_values: Optional[torch.Tensor] = None,
         audio_tokens: Optional[torch.Tensor] = None,
         audio_attention_mask: Optional[torch.Tensor] = None,
+        active_fusion_layers: Optional[Sequence[int]] = None,
         **generation_kwargs
     ) -> Union[str, torch.Tensor]:
         """Generate text response given multimodal inputs."""
@@ -3053,6 +3056,7 @@ class SAFEModel(nn.Module):
                     modality_tokens=modality_tokens,
                     modality_masks=modality_masks,
                     gate=_gen_modality_gate,
+                    active_layers=active_fusion_layers,
                 )
                 # For InternVL without images, use language_model (Qwen3).
                 # With images, use full model so vision tower is active.

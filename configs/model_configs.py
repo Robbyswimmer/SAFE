@@ -5,6 +5,7 @@ Provides both demo and full production configurations.
 """
 
 import os
+import copy
 
 # Demo configuration - lightweight for testing
 DEMO_CONFIG = {
@@ -598,6 +599,79 @@ COMPOSITION_CONFIG = {
     "gradient_accumulation_steps": 16,
 }
 
+# Composition Study Configuration
+# For deeper composition analysis:
+# - denser mid-layer placement
+# - learned per-layer scalar gates enabled by default
+COMPOSITION_STUDY_CONFIG = {
+    "name": "composition_study",
+    "description": "Composition study: mid-dense layers + learned per-layer gates on Qwen3-8B",
+    "eval_prompt": "Answer with a single word or number.",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/Qwen_Qwen3-8B"),
+    "vision_model_name": "openai/clip-vit-large-patch14",
+
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0,
+    },
+
+    "llm_hidden_size": 4096,
+    "audio_embed_dim": 512,
+    "vision_embed_dim": 1024,
+
+    "projector_type": "standard",
+    "num_audio_tokens": 8,
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    "num_vision_tokens": 8,
+    "vision_projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_positional_embedding": True,
+    },
+
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [8, 14, 20, 26],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "use_bottleneck": True,
+        "bottleneck_dim": 256,
+        "num_attention_heads": 32,
+        "dropout": 0.1,
+        "use_tokenwise_gate": False,
+        "use_learned_gate": True,
+        "learned_gate_init": 0.2,
+        "modalities": {
+            "audio": {
+                "layer_indices": [8, 14, 20, 26],
+                "num_tokens": 8,
+            },
+            "vision": {
+                "layer_indices": [8, 14, 20, 26],
+                "num_tokens": 8,
+            },
+        },
+    },
+
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+
+    "expected_vram_gb": 40,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+}
+
 # InternVL 3.5-14B: Qwen3-14B backbone (40 layers, hidden=5120)
 INTERNVL_14B_CONFIG = {
     "name": "internvl_14b",
@@ -738,6 +812,7 @@ CONFIGS = {
     "internvl_38b": INTERNVL_38B_CONFIG,
     "internvl3.5-38b": INTERNVL_38B_CONFIG,
     "composition": COMPOSITION_CONFIG,
+    "composition_study": COMPOSITION_STUDY_CONFIG,
 }
 
 def get_config(config_name: str):
@@ -746,7 +821,7 @@ def get_config(config_name: str):
         available = ", ".join(CONFIGS.keys())
         raise ValueError(f"Unknown config '{config_name}'. Available: {available}")
     
-    return CONFIGS[config_name].copy()
+    return copy.deepcopy(CONFIGS[config_name])
 
 def print_config_info():
     """Print information about available configurations."""

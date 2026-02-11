@@ -28,7 +28,7 @@ from PIL import Image
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 # tqdm removed — use explicit print logging for clean stdout/stderr separation
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -615,6 +615,8 @@ def evaluate(
     device: torch.device,
     modality: str,
     args: argparse.Namespace,
+    active_fusion_layers: Optional[Sequence[int]] = None,
+    silent: bool = False,
 ) -> Dict[str, Any]:
     model.eval()
 
@@ -650,6 +652,7 @@ def evaluate(
             pixel_values=inputs.get("pixel_values"),
             audio_tokens=audio_tokens,
             audio_attention_mask=audio_mask,
+            active_fusion_layers=active_fusion_layers,
             gate=args.fusion_gate,
             max_new_tokens=args.max_answer_tokens,
             do_sample=False,
@@ -673,11 +676,12 @@ def evaluate(
                 gen = seq
                 if eval_step == 0 and i == 0:
                     attn_prompt = int(prompt_mask[i].sum().item()) if prompt_mask is not None else prompt_width
-                    print(
-                        f"  [eval:{modality}] decode fallback active "
-                        f"(seq_len={int(seq.size(0))} prompt_width={prompt_width} attn_prompt={attn_prompt})",
-                        flush=True,
-                    )
+                    if not silent:
+                        print(
+                            f"  [eval:{modality}] decode fallback active "
+                            f"(seq_len={int(seq.size(0))} prompt_width={prompt_width} attn_prompt={attn_prompt})",
+                            flush=True,
+                        )
             pred = tokenizer.decode(gen, skip_special_tokens=True).strip()
             ref = batch["answers"][i]
             qtype = batch["question_types"][i] if "question_types" in batch else "unknown"
@@ -703,7 +707,7 @@ def evaluate(
             by_type[qtype]["categorical_f1"] += cat_f1
             by_type[qtype]["n"] += 1.0
 
-            if debug_print_budget > 0:
+            if debug_print_budget > 0 and not silent:
                 print(
                     f"  [eval:{modality}:sample] q={batch['questions'][i]!r} "
                     f"pred={pred!r} extracted={extracted_pred!r} ref={ref!r}",
@@ -711,7 +715,7 @@ def evaluate(
                 )
                 debug_print_budget -= 1
 
-        if (eval_step + 1) % eval_log_every == 0:
+        if (eval_step + 1) % eval_log_every == 0 and not silent:
             running_em = 100.0 * exact_total / max(1, count)
             running_ext = 100.0 * extracted_total / max(1, count)
             print(f"  [eval:{modality}] step {eval_step + 1}/{eval_batches} raw_em={running_em:.2f}% extracted_em={running_ext:.2f}%", flush=True)
@@ -735,6 +739,116 @@ def evaluate(
             "num_samples": int(v["n"]),
         }
     return result
+
+
+@torch.no_grad()
+def run_layer_additivity_probe(
+    model: SAFEModel,
+    dataset: Dataset,
+    tokenizer,
+    device: torch.device,
+    args: argparse.Namespace,
+) -> Optional[Dict[str, Any]]:
+    """
+    Automated per-layer additivity probe for composition analysis.
+
+    For each fusion layer l, computes extracted-match-based epsilon:
+      eps_l = |y0 - ya - yv + yav| / (|ya-y0| + |yv-y0| + eps)
+    where y0=text, ya=audio, yv=image, yav=both.
+    """
+    if not getattr(args, "layer_additivity_probe", False):
+        return None
+    if not hasattr(model, "fusion_adapter") or model.fusion_adapter is None:
+        return None
+
+    layers = sorted(getattr(model.fusion_adapter, "fusion_layer_indices", []))
+    if not layers:
+        return None
+
+    probe_n = int(getattr(args, "layer_probe_samples", 0) or 0)
+    if probe_n > 0 and probe_n < len(dataset):
+        probe_dataset: Dataset = Subset(dataset, list(range(probe_n)))
+    else:
+        probe_dataset = dataset
+
+    probe_loader = DataLoader(
+        probe_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate_avqa,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    text_metrics = evaluate(
+        model, probe_loader, tokenizer, device, "text", args, silent=True
+    )
+    y0 = text_metrics["extracted_match"] / 100.0
+
+    rows: List[Dict[str, Any]] = []
+    for layer in layers:
+        active = [int(layer)]
+        audio_metrics = evaluate(
+            model, probe_loader, tokenizer, device, "audio", args,
+            active_fusion_layers=active, silent=True,
+        )
+        image_metrics = evaluate(
+            model, probe_loader, tokenizer, device, "image", args,
+            active_fusion_layers=active, silent=True,
+        )
+        both_metrics = evaluate(
+            model, probe_loader, tokenizer, device, "both", args,
+            active_fusion_layers=active, silent=True,
+        )
+
+        ya = audio_metrics["extracted_match"] / 100.0
+        yv = image_metrics["extracted_match"] / 100.0
+        yav = both_metrics["extracted_match"] / 100.0
+
+        denom = abs(ya - y0) + abs(yv - y0) + 1e-6
+        eps_l = abs(y0 - ya - yv + yav) / denom
+        synergy = yav - (ya + yv - y0)
+        gain_vs_best_single = yav - max(ya, yv)
+
+        rows.append(
+            {
+                "layer": int(layer),
+                "text_extracted_match": 100.0 * y0,
+                "audio_extracted_match": 100.0 * ya,
+                "image_extracted_match": 100.0 * yv,
+                "both_extracted_match": 100.0 * yav,
+                "epsilon_additivity": float(eps_l),
+                "synergy": float(synergy),
+                "gain_vs_best_single": float(gain_vs_best_single),
+            }
+        )
+
+    # Lower epsilon is better additivity; use both score as tiebreaker.
+    ranking = sorted(
+        rows,
+        key=lambda r: (r["epsilon_additivity"], -r["both_extracted_match"]),
+    )
+
+    print(
+        f"  [additivity_probe] samples={len(probe_dataset)} text_extracted={100.0 * y0:.2f}",
+        flush=True,
+    )
+    for r in ranking:
+        print(
+            "  [additivity_probe] "
+            f"layer={r['layer']} eps={r['epsilon_additivity']:.4f} "
+            f"both={r['both_extracted_match']:.2f} "
+            f"audio={r['audio_extracted_match']:.2f} "
+            f"image={r['image_extracted_match']:.2f} "
+            f"gain_vs_best_single={100.0 * r['gain_vs_best_single']:+.2f}",
+            flush=True,
+        )
+
+    return {
+        "num_samples": len(probe_dataset),
+        "rows": rows,
+        "ranking": ranking,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -803,6 +917,12 @@ def parse_args() -> argparse.Namespace:
                    help="Limit train/val to N samples for quick sanity runs (0=unlimited)")
     p.add_argument("--eval-debug-samples", type=int, default=0,
                    help="Print first N eval predictions per run for decode/debug checks")
+    p.add_argument("--layer-additivity-probe", action="store_true",
+                   help="Run per-layer additivity probe (epsilon_l) during eval")
+    p.add_argument("--layer-probe-samples", type=int, default=256,
+                   help="Max validation samples for layer additivity probe (0=full val)")
+    p.add_argument("--layer-probe-every", type=int, default=1,
+                   help="Run layer additivity probe every N epochs")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", type=str, default="SAFE-AVQA-Composition")
     p.add_argument("--wandb-run-name", type=str, default=None)
@@ -860,6 +980,9 @@ def main() -> None:
                     "fusion_gate": args.fusion_gate,
                     "gate_warmup_steps": args.gate_warmup_steps,
                     "label_smoothing": args.label_smoothing,
+                    "layer_additivity_probe": args.layer_additivity_probe,
+                    "layer_probe_samples": args.layer_probe_samples,
+                    "layer_probe_every": args.layer_probe_every,
                 },
             )
 
@@ -954,6 +1077,10 @@ def main() -> None:
             metrics = evaluate(model, val_loader, tokenizer, device, modality, args)
             epoch_result["eval"][modality] = metrics
             print(f"  [eval:{modality}] raw_em={metrics['exact_match']:.2f} extracted_em={metrics['extracted_match']:.2f} f1={metrics['token_f1']:.2f} n={metrics['num_samples']}")
+        if args.layer_additivity_probe:
+            probe = run_layer_additivity_probe(model, val_ds, tokenizer, device, args)
+            if probe is not None:
+                epoch_result["layer_additivity_probe"] = probe
         history.append(epoch_result)
         best_score = epoch_result["eval"].get(args.train_modality, epoch_result["eval"].get("image", {})).get("extracted_match", -1.0)
         if wandb_run is not None:
@@ -962,6 +1089,12 @@ def main() -> None:
                 log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
                 log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
                 log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
+            probe = epoch_result.get("layer_additivity_probe")
+            if probe is not None and probe.get("ranking"):
+                top = probe["ranking"][0]
+                log_payload["probe/best_layer"] = top["layer"]
+                log_payload["probe/best_layer_epsilon"] = top["epsilon_additivity"]
+                log_payload["probe/best_layer_both_extracted"] = top["both_extracted_match"]
             wandb_run.log(log_payload, step=0)
     elif args.train_modality == "interleaved":
         # ── Interleaved composition training ──
@@ -985,6 +1118,10 @@ def main() -> None:
                 f"cat_f1={metrics['categorical_f1']:.2f} "
                 f"f1={metrics['token_f1']:.2f} n={metrics['num_samples']}"
             )
+        if args.layer_additivity_probe:
+            probe = run_layer_additivity_probe(model, val_ds, tokenizer, device, args)
+            if probe is not None:
+                epoch_result["layer_additivity_probe"] = probe
         text_em = epoch_result["eval"]["text"]["extracted_match"]
         print(f"  [baseline] text-only={text_em:.2f}")
         history.append(epoch_result)
@@ -995,6 +1132,12 @@ def main() -> None:
                 log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
                 log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
                 log_payload[f"val/{modality}/categorical_f1"] = metrics["categorical_f1"]
+            probe = epoch_result.get("layer_additivity_probe")
+            if probe is not None and probe.get("ranking"):
+                top = probe["ranking"][0]
+                log_payload["probe/best_layer"] = top["layer"]
+                log_payload["probe/best_layer_epsilon"] = top["epsilon_additivity"]
+                log_payload["probe/best_layer_both_extracted"] = top["both_extracted_match"]
             wandb_run.log(log_payload, step=0)
         with (args.output_dir / "history.json").open("w", encoding="utf-8") as f:
             json.dump(history, f, indent=2)
@@ -1041,6 +1184,11 @@ def main() -> None:
                     f"f1={metrics['token_f1']:.2f} n={metrics['num_samples']}"
                 )
 
+            if args.layer_additivity_probe and ((epoch + 1) % max(1, args.layer_probe_every) == 0):
+                probe = run_layer_additivity_probe(model, val_ds, tokenizer, device, args)
+                if probe is not None:
+                    epoch_result["layer_additivity_probe"] = probe
+
             # Composition summary line
             text_em_now = epoch_result["eval"]["text"]["extracted_match"]
             audio_em = epoch_result["eval"]["audio"]["extracted_match"]
@@ -1070,6 +1218,12 @@ def main() -> None:
                     log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
                     log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
                     log_payload[f"val/{modality}/categorical_f1"] = metrics["categorical_f1"]
+                probe = epoch_result.get("layer_additivity_probe")
+                if probe is not None and probe.get("ranking"):
+                    top = probe["ranking"][0]
+                    log_payload["probe/best_layer"] = top["layer"]
+                    log_payload["probe/best_layer_epsilon"] = top["epsilon_additivity"]
+                    log_payload["probe/best_layer_both_extracted"] = top["both_extracted_match"]
                 wandb_run.log(log_payload, step=epoch + 1)
 
             # Save per-epoch checkpoint (for post-hoc composition analysis)
@@ -1111,6 +1265,11 @@ def main() -> None:
                     f"f1={metrics['token_f1']:.2f} n={metrics['num_samples']}"
                 )
 
+            if args.layer_additivity_probe and ((epoch + 1) % max(1, args.layer_probe_every) == 0):
+                probe = run_layer_additivity_probe(model, val_ds, tokenizer, device, args)
+                if probe is not None:
+                    epoch_result["layer_additivity_probe"] = probe
+
             history.append(epoch_result)
             if wandb_run is not None:
                 log_payload = {
@@ -1123,6 +1282,12 @@ def main() -> None:
                     log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
                     log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
                     log_payload[f"val/{modality}/categorical_f1"] = metrics["categorical_f1"]
+                probe = epoch_result.get("layer_additivity_probe")
+                if probe is not None and probe.get("ranking"):
+                    top = probe["ranking"][0]
+                    log_payload["probe/best_layer"] = top["layer"]
+                    log_payload["probe/best_layer_epsilon"] = top["epsilon_additivity"]
+                    log_payload["probe/best_layer_both_extracted"] = top["both_extracted_match"]
                 wandb_run.log(log_payload, step=epoch + 1)
 
             # Track best score using extracted_match (more fair for generative models)

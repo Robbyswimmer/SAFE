@@ -215,11 +215,13 @@ class LayerHookManager:
         modality_tokens: Dict[str, torch.Tensor],
         modality_masks: Optional[Dict[str, torch.Tensor]] = None,
         gate: Any = 1.0,
+        active_layers: Optional[Union[List[int], set]] = None,
         supervised_mask: Optional[torch.Tensor] = None,
         debug_fusion: bool = False,
         debug_fusion_log_every: int = 50,
     ) -> None:
         self.remove_hooks()
+        active_set = set(active_layers) if active_layers is not None else None
         requested_layers = {idx for indices in self.fusion_layers.values() for idx in indices}
         available_layers = set(self.layer_modules.keys())
         missing_layers = sorted(requested_layers - available_layers)
@@ -235,6 +237,8 @@ class LayerHookManager:
         for idx, layer_module in self.layer_modules.items():
             modalities = self.layer_to_modalities.get(idx, [])
             if not modalities:
+                continue
+            if active_set is not None and idx not in active_set:
                 continue
 
             if self.injection_point == "pre_ffn":
