@@ -884,6 +884,9 @@ def main() -> None:
     model = SAFEModel(**model_cfg)
     model.enable_audio_training()
     model.to_device(device)
+    if hasattr(model, "get_runtime_device"):
+        device = model.get_runtime_device()
+        print(f"[info] runtime_device={device}", flush=True)
     if hasattr(model, "fusion_adapter") and model.fusion_adapter is not None:
         layers = getattr(model.fusion_adapter, "fusion_layer_indices", None)
         if layers is not None:

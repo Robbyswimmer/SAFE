@@ -41,6 +41,9 @@ export SAFE_QWEN_QUANT=none
 export SAFE_GRAD_CKPT=0
 export FP16=0
 export LLM_MODEL_PATH=${LLM_MODEL_PATH:-models/OpenGVLab_InternVL3_5-8B}
+export SAFE_DEVICE_MAP=${SAFE_DEVICE_MAP:-auto}
+export SAFE_MAX_MEMORY=${SAFE_MAX_MEMORY:-0=46GiB,1=46GiB,2=46GiB,cpu=160GiB}
+export SAFE_OFFLOAD_FOLDER=${SAFE_OFFLOAD_FOLDER:-$SAFE_ROOT/.hf_offload}
 
 # Model configuration
 MODEL_CONFIG=${MODEL_CONFIG:-internvl}
@@ -85,6 +88,8 @@ echo "Job ID: ${SLURM_JOB_ID:-local}"
 echo "SAFE root: $SAFE_ROOT"
 echo "Model path: $LLM_MODEL_PATH"
 echo "Model config: $MODEL_CONFIG"
+echo "SAFE_DEVICE_MAP: ${SAFE_DEVICE_MAP}"
+echo "SAFE_MAX_MEMORY: ${SAFE_MAX_MEMORY}"
 echo "Train modality: $TRAIN_MODALITY"
 echo "Eval modalities: $EVAL_MODALITIES"
 echo "========================================"
@@ -103,6 +108,7 @@ cd "$SAFE_ROOT"
 
 mkdir -p "$OUTPUT_DIR"
 mkdir -p logs
+mkdir -p "$SAFE_OFFLOAD_FOLDER"
 
 # Build optional flags
 EXTRA_FLAGS=""

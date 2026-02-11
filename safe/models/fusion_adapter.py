@@ -991,6 +991,19 @@ class MultiLayerFusionAdapter(nn.Module):
             if adapter_key not in self.fusion_adapters:
                 continue
             adapter = self.fusion_adapters[adapter_key]
+            target_device = output.device
+
+            # Sharded LLM support: align modality tensors and adapter to the
+            # decoder layer's device before applying fusion.
+            if torch.is_tensor(tokens) and tokens.device != target_device:
+                tokens = tokens.to(target_device, non_blocking=True)
+            if mask is not None and torch.is_tensor(mask) and mask.device != target_device:
+                mask = mask.to(target_device, non_blocking=True)
+
+            adapter_param = next(adapter.parameters(), None)
+            if adapter_param is not None and adapter_param.device != target_device:
+                adapter = adapter.to(target_device)
+                self.fusion_adapters[adapter_key] = adapter
 
             modality_gate: Union[float, torch.Tensor]
             if isinstance(gate, dict):
@@ -1000,8 +1013,13 @@ class MultiLayerFusionAdapter(nn.Module):
 
             # Apply per-layer learned gate (Flamingo-style tanh gating)
             if self.use_learned_gate and adapter_key in self.layer_gates:
-                learned_gate = torch.tanh(self.layer_gates[adapter_key])
+                gate_param = self.layer_gates[adapter_key]
+                if gate_param.device != target_device:
+                    gate_param.data = gate_param.data.to(target_device)
+                learned_gate = torch.tanh(gate_param)
                 if isinstance(modality_gate, torch.Tensor):
+                    if modality_gate.device != target_device:
+                        modality_gate = modality_gate.to(target_device)
                     modality_gate = modality_gate * learned_gate
                 else:
                     modality_gate = float(modality_gate) * learned_gate

@@ -3161,47 +3161,134 @@ class SAFEModel(nn.Module):
             )
         return outputs["logits"]
     
+    def _is_llm_dispatched(self) -> bool:
+        device_map = getattr(self.base_vl.llm, "hf_device_map", None)
+        return isinstance(device_map, dict) and len(device_map) > 0
+
+    def _get_runtime_device(self, default_device: torch.device) -> torch.device:
+        """
+        Pick a stable input device for tensors when the base model is sharded.
+        Prefer the first CUDA device in hf_device_map; fall back to default.
+        """
+        device_map = getattr(self.base_vl.llm, "hf_device_map", None)
+        if not isinstance(device_map, dict):
+            return default_device
+
+        values = list(device_map.values())
+        for v in values:
+            if isinstance(v, int):
+                return torch.device(f"cuda:{v}")
+            if isinstance(v, str) and v.startswith("cuda:"):
+                return torch.device(v)
+        for v in values:
+            if isinstance(v, str) and v in {"cpu", "mps"}:
+                return torch.device(v)
+        return default_device
+
+    def _infer_llm_layer_devices(self) -> Dict[int, torch.device]:
+        """
+        Infer decoder layer device placement for sharded models.
+        Supports common HF layer containers used by LLaMA/Qwen/InternVL wrappers.
+        """
+        layer_devices: Dict[int, torch.device] = {}
+        language_model = self.base_vl.llm
+        layers = None
+
+        if hasattr(language_model, "model") and hasattr(language_model.model, "layers"):
+            layers = language_model.model.layers
+        elif hasattr(language_model, "language_model") and hasattr(language_model.language_model, "model") and hasattr(language_model.language_model.model, "layers"):
+            layers = language_model.language_model.model.layers
+        elif hasattr(language_model, "transformer") and hasattr(language_model.transformer, "h"):
+            layers = language_model.transformer.h
+
+        if layers is None:
+            return layer_devices
+
+        for idx, layer in enumerate(layers):
+            first_param = next(layer.parameters(), None)
+            if first_param is None:
+                continue
+            layer_devices[idx] = first_param.device
+        return layer_devices
+
+    def _place_fusion_adapters_for_sharded_llm(self, fallback_device: torch.device) -> None:
+        if self.fusion_adapter is None or not hasattr(self.fusion_adapter, "fusion_adapters"):
+            if self.fusion_adapter is not None:
+                self.fusion_adapter = self.fusion_adapter.to(device=fallback_device)
+            return
+
+        layer_devices = self._infer_llm_layer_devices()
+        if not layer_devices:
+            self.fusion_adapter = self.fusion_adapter.to(device=fallback_device)
+            return
+
+        for key, adapter in self.fusion_adapter.fusion_adapters.items():
+            target_device = fallback_device
+            try:
+                _, layer_str = key.split(":", 1)
+                layer_idx = int(layer_str)
+                target_device = layer_devices.get(layer_idx, fallback_device)
+            except Exception:
+                target_device = fallback_device
+            self.fusion_adapter.fusion_adapters[key] = adapter.to(target_device)
+            if hasattr(self.fusion_adapter, "layer_gates") and key in self.fusion_adapter.layer_gates:
+                gate_param = self.fusion_adapter.layer_gates[key]
+                if gate_param.device != target_device:
+                    gate_param.data = gate_param.data.to(target_device)
+
     def to_device(self, device):
-        """Properly move all model components to specified device."""
+        """Properly move model components; preserve HF sharding when enabled."""
         print(f"[SAFEModel] Moving all components to device: {device}", flush=True)
-        
-        # Use .to() instead of .cuda() for proper device management
         device = torch.device(device)
-        
-        # Move main module
-        self.to(device)
-        
-        # Explicitly move all subcomponents with verification
-        # Move all components to device
-        self.base_vl = self.base_vl.to(device)
-        
+
+        llm_is_dispatched = self._is_llm_dispatched()
+        runtime_device = self._get_runtime_device(device)
+        self._runtime_device = runtime_device
+
+        if llm_is_dispatched:
+            print(
+                "[SAFEModel] Detected sharded/dispatched base model via hf_device_map. "
+                "Keeping base model placement and moving adapters only.",
+                flush=True,
+            )
+        else:
+            # Single-device path
+            self.to(device)
+            self.base_vl = self.base_vl.to(device)
+
         # Determine target dtype from base model embeddings for consistency
         base_embeddings = self.base_vl.llm.get_input_embeddings()
         target_dtype = base_embeddings.weight.dtype
-        
-        self.audio_encoder = self.audio_encoder.to(device)
-        self.audio_projector = self.audio_projector.to(device=device)  # Device only, keep fp32
 
-        # Vision projector (composition experiment)
+        # Keep encoder/projectors on runtime device (typically first CUDA shard)
+        self.audio_encoder = self.audio_encoder.to(runtime_device)
+        self.audio_projector = self.audio_projector.to(device=runtime_device)
+
         if self.vision_projector is not None:
-            self.vision_projector = self.vision_projector.to(device=device)
+            self.vision_projector = self.vision_projector.to(device=runtime_device)
 
-        if hasattr(self, 'fusion_adapter') and self.fusion_adapter is not None:
-            self.fusion_adapter = self.fusion_adapter.to(device=device)  # Device only, keep fp32
+        if hasattr(self, "fusion_adapter") and self.fusion_adapter is not None:
+            if llm_is_dispatched:
+                self._place_fusion_adapters_for_sharded_llm(runtime_device)
+            else:
+                self.fusion_adapter = self.fusion_adapter.to(device=runtime_device)
 
         # KV augmentation adapters
-        if hasattr(self, 'kv_adapters') and self.kv_adapters is not None:
-            self.kv_adapters = self.kv_adapters.to(device=device)
+        if hasattr(self, "kv_adapters") and self.kv_adapters is not None:
+            self.kv_adapters = self.kv_adapters.to(device=runtime_device)
 
-        if hasattr(self, 'audio_token_embeddings') and self.audio_token_embeddings is not None:
-            # Ensure audio token embeddings match base model dtype
-            self.audio_token_embeddings = self.audio_token_embeddings.to(device=device, dtype=target_dtype)
+        if hasattr(self, "audio_token_embeddings") and self.audio_token_embeddings is not None:
+            self.audio_token_embeddings = self.audio_token_embeddings.to(
+                device=runtime_device, dtype=target_dtype
+            )
 
-        # Final consistency check to ensure everything shares the target dtype
         self.ensure_dtype_consistency()
-        
-        print(f"Model moved to device: {device}", flush=True)
+
+        print(f"Model moved to device: {runtime_device}", flush=True)
         return self
+
+    def get_runtime_device(self) -> torch.device:
+        return getattr(self, "_runtime_device", torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     
     def ensure_dtype_consistency(self):
         """Ensure all model components use consistent dtypes."""

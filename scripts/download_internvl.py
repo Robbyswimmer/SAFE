@@ -26,9 +26,15 @@ from pathlib import Path
 
 INTERNVL_MODELS = {
     # InternVL 3.5 (latest)
-    "internvl3.5-8b": "OpenGVLab/InternVL3_5-8B",
-    "internvl3.5-4b": "OpenGVLab/InternVL3_5-4B",
     "internvl3.5-2b": "OpenGVLab/InternVL3_5-2B",
+    "internvl3.5-4b": "OpenGVLab/InternVL3_5-4B",
+    "internvl3.5-8b": "OpenGVLab/InternVL3_5-8B",
+    "internvl3.5-14b": "OpenGVLab/InternVL3_5-14B",
+    "internvl3.5-38b": "OpenGVLab/InternVL3_5-38B",
+    # InternVL 2.5
+    "internvl2.5-8b": "OpenGVLab/InternVL2_5-8B",
+    "internvl2.5-26b": "OpenGVLab/InternVL2_5-26B",
+    "internvl2.5-38b": "OpenGVLab/InternVL2_5-38B",
 }
 
 
@@ -164,9 +170,14 @@ Examples:
   python scripts/download_internvl.py --use-auth-token
 
 Available model shortcuts:
-  internvl3.5-8b  -> OpenGVLab/InternVL3_5-8B (17GB, recommended)
-  internvl3.5-4b  -> OpenGVLab/InternVL3_5-4B (8GB)
-  internvl3.5-2b  -> OpenGVLab/InternVL3_5-2B (4GB)
+  internvl3.5-2b   -> OpenGVLab/InternVL3_5-2B   (~4GB)
+  internvl3.5-4b   -> OpenGVLab/InternVL3_5-4B   (~8GB)
+  internvl3.5-8b   -> OpenGVLab/InternVL3_5-8B   (~17GB, default)
+  internvl3.5-14b  -> OpenGVLab/InternVL3_5-14B  (~30GB)
+  internvl3.5-38b  -> OpenGVLab/InternVL3_5-38B  (~76GB)
+  internvl2.5-8b   -> OpenGVLab/InternVL2_5-8B   (~17GB)
+  internvl2.5-26b  -> OpenGVLab/InternVL2_5-26B  (~52GB)
+  internvl2.5-38b  -> OpenGVLab/InternVL2_5-38B  (~76GB)
         """,
     )
     parser.add_argument(

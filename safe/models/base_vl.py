@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import json
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -50,6 +51,45 @@ class BaseVLModel(nn.Module):
         self.llm_hidden_size = llm_hidden_size
         self.num_vision_tokens = num_vision_tokens
 
+        # Optional multi-GPU sharding controls (HF accelerate device_map path).
+        # Env examples:
+        #   SAFE_DEVICE_MAP=auto
+        #   SAFE_MAX_MEMORY=0=46GiB,1=46GiB,2=46GiB,cpu=120GiB
+        #   SAFE_OFFLOAD_FOLDER=/path/to/offload
+        env_device_map = os.environ.get("SAFE_DEVICE_MAP", "").strip()
+        env_max_memory = os.environ.get("SAFE_MAX_MEMORY", "").strip()
+        env_offload_folder = os.environ.get("SAFE_OFFLOAD_FOLDER", "").strip()
+        env_multi_gpu = os.environ.get("SAFE_MULTI_GPU", "").strip().lower()
+
+        resolved_device_map = self._resolve_device_map_spec(env_device_map)
+        if (
+            resolved_device_map is None
+            and env_multi_gpu in {"1", "true", "yes", "on"}
+            and torch.cuda.is_available()
+            and torch.cuda.device_count() > 1
+        ):
+            resolved_device_map = "auto"
+
+        resolved_max_memory = self._parse_max_memory_spec(env_max_memory)
+        load_device_kwargs: Dict[str, Any] = {}
+        if resolved_device_map is not None:
+            load_device_kwargs["device_map"] = resolved_device_map
+        if resolved_max_memory:
+            load_device_kwargs["max_memory"] = resolved_max_memory
+        if env_offload_folder:
+            os.makedirs(env_offload_folder, exist_ok=True)
+            load_device_kwargs["offload_folder"] = env_offload_folder
+            load_device_kwargs["offload_state_dict"] = True
+
+        if load_device_kwargs:
+            print(
+                "[BaseVL] Sharded load enabled: "
+                f"device_map={load_device_kwargs.get('device_map')} "
+                f"max_memory={load_device_kwargs.get('max_memory')} "
+                f"offload_folder={load_device_kwargs.get('offload_folder', None)}",
+                flush=True,
+            )
+
         # Load vision encoder (frozen) - skip if None (e.g., audio-only Qwen)
         # or "built-in" (e.g., InternVL with integrated InternViT)
         import sys
@@ -94,7 +134,8 @@ class BaseVLModel(nn.Module):
                 llm_model_name,
                 torch_dtype=device_dtype,
                 low_cpu_mem_usage=True,
-                use_safetensors=True
+                use_safetensors=True,
+                **load_device_kwargs,
             )
             print(f"[BaseVL] ✓ LLM model loaded", flush=True)
             sys.stdout.flush()
@@ -108,7 +149,8 @@ class BaseVLModel(nn.Module):
                 llm_model_name,
                 torch_dtype=device_dtype,
                 low_cpu_mem_usage=True,
-                use_safetensors=True
+                use_safetensors=True,
+                **load_device_kwargs,
             )
             print(f"[BaseVL] ✓ LLM model loaded", flush=True)
             sys.stdout.flush()
@@ -143,6 +185,7 @@ class BaseVLModel(nn.Module):
                     "low_cpu_mem_usage": True,
                     "trust_remote_code": True,
                 }
+                kwargs.update(load_device_kwargs)
                 if quant_cfg is not None:
                     kwargs["quantization_config"] = quant_cfg
                 if torch_dtype is not None:
@@ -250,6 +293,7 @@ class BaseVLModel(nn.Module):
                 kwargs = {
                     "low_cpu_mem_usage": True,
                 }
+                kwargs.update(load_device_kwargs)
                 if quant_cfg is not None:
                     kwargs["quantization_config"] = quant_cfg
                 if torch_dtype is not None:
@@ -264,6 +308,7 @@ class BaseVLModel(nn.Module):
                     "low_cpu_mem_usage": True,
                     "trust_remote_code": True,
                 }
+                kwargs.update(load_device_kwargs)
                 if quant_cfg is not None:
                     kwargs["quantization_config"] = quant_cfg
                 if torch_dtype is not None:
@@ -398,7 +443,8 @@ class BaseVLModel(nn.Module):
             sys.stdout.flush()
             self.llm = AutoModelForCausalLM.from_pretrained(
                 llm_model_name,
-                use_safetensors=True
+                use_safetensors=True,
+                **load_device_kwargs,
             )
             print(f"[BaseVL] ✓ LLM model loaded", flush=True)
             sys.stdout.flush()
@@ -446,6 +492,57 @@ class BaseVLModel(nn.Module):
             # (Qwen uses audio fusion via SAFE, not vision tokens)
             self.vision_start_token = None
             self.vision_end_token = None
+
+    @staticmethod
+    def _resolve_device_map_spec(spec: str):
+        if not spec:
+            return None
+        s = spec.strip()
+        lower = s.lower()
+        if lower in {"none", "off", "false", "0"}:
+            return None
+        if lower in {"auto", "balanced", "balanced_low_0", "sequential"}:
+            return lower
+        if s.isdigit():
+            return {"": int(s)}
+        if lower.startswith("cuda:") or lower in {"cpu", "disk", "mps"}:
+            return {"": s}
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+        return s
+
+    @staticmethod
+    def _parse_max_memory_spec(spec: str) -> Optional[Dict[Any, str]]:
+        if not spec:
+            return None
+        out: Dict[Any, str] = {}
+        for raw_item in spec.split(","):
+            item = raw_item.strip()
+            if not item:
+                continue
+            if "=" not in item:
+                continue
+            key_raw, val = item.split("=", 1)
+            key = key_raw.strip()
+            val = val.strip()
+            if not key or not val:
+                continue
+            lower = key.lower()
+            parsed_key: Any
+            if key.isdigit():
+                parsed_key = int(key)
+            elif lower.startswith("cuda:") and key.split(":", 1)[1].isdigit():
+                parsed_key = int(key.split(":", 1)[1])
+            elif lower in {"cpu", "disk"}:
+                parsed_key = lower
+            else:
+                parsed_key = key
+            out[parsed_key] = val
+        return out or None
     
     def _set_padding_side_left(self, tokenizer, context: str) -> bool:
         """Utility to set padding_side to left if needed."""
