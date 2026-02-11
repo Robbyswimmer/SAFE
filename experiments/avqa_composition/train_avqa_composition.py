@@ -334,6 +334,8 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def resolve_modality_batch(batch: Dict[str, Any], modality: str) -> Dict[str, Any]:
+    if modality == "text":
+        return {"audio": None, "images": None}
     if modality == "audio":
         return {"audio": batch["audio"], "images": None}
     if modality == "image":
@@ -737,7 +739,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fusion-layers", type=str, default=None)
     p.add_argument("--num-audio-tokens", type=int, default=8)
 
-    p.add_argument("--train-modality", type=str, default="both", choices=["audio", "image", "both"])
+    p.add_argument("--train-modality", type=str, default="both", choices=["audio", "image", "both", "interleaved"])
     p.add_argument("--eval-modalities", type=str, default="both,audio,image")
     p.add_argument("--fusion-gate", type=float, default=0.2)
     p.add_argument("--gate-warmup-steps", type=int, default=0,
@@ -909,7 +911,9 @@ def main() -> None:
     history: List[Dict[str, Any]] = []
     eval_modalities = [m.strip() for m in args.eval_modalities.split(",") if m.strip()]
     updates_per_epoch = math.ceil(len(train_loader) / max(1, args.gradient_accumulation_steps))
-    total_update_steps = updates_per_epoch * max(0, args.num_epochs)
+    # Interleaved mode does 2 passes per epoch (audio + vision), so double the step count
+    passes_per_epoch = 2 if args.train_modality == "interleaved" else 1
+    total_update_steps = updates_per_epoch * passes_per_epoch * max(0, args.num_epochs)
     scheduler, warmup_steps = build_lr_scheduler(optimizer, total_update_steps, args)
     if scheduler is not None:
         print(
@@ -942,6 +946,133 @@ def main() -> None:
                 log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
                 log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
             wandb_run.log(log_payload, step=0)
+    elif args.train_modality == "interleaved":
+        # ── Interleaved composition training ──
+        # Each epoch: train audio adapters → train vision adapters → evaluate all 4:
+        #   text (baseline), audio+text, vision+text, audio+vision+text (composition)
+        # This trains both modalities independently within the same model,
+        # then evaluates composition (both) to track emergence over time.
+        interleaved_eval_modalities = ["text", "audio", "image", "both"]
+        global_step = 0
+        best_composed_score = -1.0
+
+        # Epoch 0: text-only baseline before any adapter training
+        print("\n[epoch 0/{}] (text-only baseline)".format(args.num_epochs))
+        epoch_result = {"epoch": 0, "audio_train_loss": 0.0, "vision_train_loss": 0.0, "eval": {}}
+        for modality in interleaved_eval_modalities:
+            metrics = evaluate(model, val_loader, tokenizer, device, modality, args)
+            epoch_result["eval"][modality] = metrics
+            print(
+                f"  [eval:{modality}] raw_em={metrics['exact_match']:.2f} "
+                f"extracted_em={metrics['extracted_match']:.2f} "
+                f"cat_f1={metrics['categorical_f1']:.2f} "
+                f"f1={metrics['token_f1']:.2f} n={metrics['num_samples']}"
+            )
+        text_em = epoch_result["eval"]["text"]["extracted_match"]
+        print(f"  [baseline] text-only={text_em:.2f}")
+        history.append(epoch_result)
+        if wandb_run is not None:
+            log_payload = {"epoch": 0}
+            for modality, metrics in epoch_result["eval"].items():
+                log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
+                log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
+                log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
+                log_payload[f"val/{modality}/categorical_f1"] = metrics["categorical_f1"]
+            wandb_run.log(log_payload, step=0)
+        with (args.output_dir / "history.json").open("w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+
+        for epoch in range(args.num_epochs):
+            print(f"\n[epoch {epoch + 1}/{args.num_epochs}] (interleaved)")
+
+            # Phase A: Audio training pass
+            print(f"  [phase:audio] training audio adapters...")
+            args_audio = argparse.Namespace(**vars(args))
+            args_audio.train_modality = "audio"
+            audio_loss, global_step = train_epoch(
+                model, train_loader, optimizer, scheduler, scaler, device, args_audio,
+                use_bf16_amp=use_bf16_amp,
+                wandb_run=wandb_run, global_step=global_step,
+            )
+            print(f"  [phase:audio] loss={audio_loss:.4f}")
+
+            # Phase B: Vision training pass
+            print(f"  [phase:vision] training vision adapters...")
+            args_vision = argparse.Namespace(**vars(args))
+            args_vision.train_modality = "image"
+            vision_loss, global_step = train_epoch(
+                model, train_loader, optimizer, scheduler, scaler, device, args_vision,
+                use_bf16_amp=use_bf16_amp,
+                wandb_run=wandb_run, global_step=global_step,
+            )
+            print(f"  [phase:vision] loss={vision_loss:.4f}")
+
+            # Phase C: 3-way evaluation
+            epoch_result = {
+                "epoch": epoch + 1,
+                "audio_train_loss": float(audio_loss),
+                "vision_train_loss": float(vision_loss),
+                "eval": {},
+            }
+            for modality in interleaved_eval_modalities:
+                metrics = evaluate(model, val_loader, tokenizer, device, modality, args)
+                epoch_result["eval"][modality] = metrics
+                print(
+                    f"  [eval:{modality}] raw_em={metrics['exact_match']:.2f} "
+                    f"extracted_em={metrics['extracted_match']:.2f} "
+                    f"cat_f1={metrics['categorical_f1']:.2f} "
+                    f"f1={metrics['token_f1']:.2f} n={metrics['num_samples']}"
+                )
+
+            # Composition summary line
+            text_em_now = epoch_result["eval"]["text"]["extracted_match"]
+            audio_em = epoch_result["eval"]["audio"]["extracted_match"]
+            image_em = epoch_result["eval"]["image"]["extracted_match"]
+            both_em = epoch_result["eval"]["both"]["extracted_match"]
+            composition_gain = both_em - max(audio_em, image_em)
+            gain_over_text = both_em - text_em_now
+            print(
+                f"  [composition] text={text_em_now:.2f} audio={audio_em:.2f} "
+                f"vision={image_em:.2f} both={both_em:.2f} "
+                f"gain_vs_best_single={composition_gain:+.2f} "
+                f"gain_vs_text={gain_over_text:+.2f}"
+            )
+
+            history.append(epoch_result)
+            if wandb_run is not None:
+                log_payload = {
+                    "epoch": epoch + 1,
+                    "train/audio_loss": float(audio_loss),
+                    "train/vision_loss": float(vision_loss),
+                    "train/lr": optimizer.param_groups[0]["lr"],
+                    "composition/gain_vs_best_single": composition_gain,
+                    "composition/gain_vs_text": gain_over_text,
+                }
+                for modality, metrics in epoch_result["eval"].items():
+                    log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
+                    log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
+                    log_payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
+                    log_payload[f"val/{modality}/categorical_f1"] = metrics["categorical_f1"]
+                wandb_run.log(log_payload, step=epoch + 1)
+
+            # Save per-epoch checkpoint (for post-hoc composition analysis)
+            epoch_ckpt_path = args.output_dir / f"epoch_{epoch + 1}.pt"
+            torch.save(model.state_dict(), epoch_ckpt_path)
+            print(f"  [save] epoch checkpoint -> {epoch_ckpt_path}")
+
+            # Track best composed score
+            if both_em > best_composed_score:
+                best_composed_score = both_em
+                best_score = both_em
+                best_ckpt_path = args.output_dir / "best_model.pt"
+                torch.save(model.state_dict(), best_ckpt_path)
+                print(f"  [save] best composition checkpoint -> {best_ckpt_path}")
+
+            with (args.output_dir / "history.json").open("w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2)
+
+        final_path = args.output_dir / "final_model.pt"
+        torch.save(model.state_dict(), final_path)
     else:
         global_step = 0
         for epoch in range(args.num_epochs):
