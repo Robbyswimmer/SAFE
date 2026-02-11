@@ -626,6 +626,7 @@ def evaluate(
     by_type: Dict[str, Dict[str, float]] = defaultdict(
         lambda: {"exact": 0.0, "extracted": 0.0, "f1": 0.0, "categorical_f1": 0.0, "n": 0.0}
     )
+    debug_print_budget = max(0, int(getattr(args, "eval_debug_samples", 0)))
 
     eval_batches = len(dataloader)
     eval_log_every = max(1, eval_batches // 5)  # Log ~5 times per eval
@@ -657,21 +658,24 @@ def evaluate(
         )
 
         prompt_mask = inputs.get("attention_mask")
+        prompt_width = int(inputs["input_ids"].size(1))
         for i in range(output_ids.size(0)):
-            prompt_len = int(prompt_mask[i].sum().item()) if prompt_mask is not None else inputs["input_ids"].size(1)
             seq = output_ids[i]
             # Some model paths return full sequence (prompt + generation),
             # while others return only newly generated tokens.
             # InternVL vision path can differ from audio-only path here.
-            if seq.size(0) > prompt_len:
-                gen = seq[prompt_len:]
+            # IMPORTANT: with left-padding, prompt length for slicing full-sequence
+            # outputs should use the padded input width, not attention sum.
+            if seq.size(0) > prompt_width:
+                gen = seq[prompt_width:]
             else:
                 # Fallback: treat returned tokens as generated tokens directly.
                 gen = seq
                 if eval_step == 0 and i == 0:
+                    attn_prompt = int(prompt_mask[i].sum().item()) if prompt_mask is not None else prompt_width
                     print(
                         f"  [eval:{modality}] decode fallback active "
-                        f"(seq_len={int(seq.size(0))} prompt_len={int(prompt_len)})",
+                        f"(seq_len={int(seq.size(0))} prompt_width={prompt_width} attn_prompt={attn_prompt})",
                         flush=True,
                     )
             pred = tokenizer.decode(gen, skip_special_tokens=True).strip()
@@ -698,6 +702,14 @@ def evaluate(
             by_type[qtype]["f1"] += f1
             by_type[qtype]["categorical_f1"] += cat_f1
             by_type[qtype]["n"] += 1.0
+
+            if debug_print_budget > 0:
+                print(
+                    f"  [eval:{modality}:sample] q={batch['questions'][i]!r} "
+                    f"pred={pred!r} extracted={extracted_pred!r} ref={ref!r}",
+                    flush=True,
+                )
+                debug_print_budget -= 1
 
         if (eval_step + 1) % eval_log_every == 0:
             running_em = 100.0 * exact_total / max(1, count)
@@ -789,6 +801,8 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--max-samples", type=int, default=0,
                    help="Limit train/val to N samples for quick sanity runs (0=unlimited)")
+    p.add_argument("--eval-debug-samples", type=int, default=0,
+                   help="Print first N eval predictions per run for decode/debug checks")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", type=str, default="SAFE-AVQA-Composition")
     p.add_argument("--wandb-run-name", type=str, default=None)

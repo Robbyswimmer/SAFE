@@ -40,6 +40,7 @@ WANDB_PROJECT=${WANDB_PROJECT:-SAFE-Composition}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-composition_interleaved_${SLURM_JOB_ID:-local}}
 WANDB_TAGS=${WANDB_TAGS:-composition,interleaved}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
+EVAL_DEBUG_SAMPLES=${EVAL_DEBUG_SAMPLES:-0}
 
 # Qwen-specific env vars
 export SAFE_QWEN_QUANT=none
@@ -60,6 +61,11 @@ if [[ "$MAX_SAMPLES" != "0" ]]; then
   MAX_SAMPLES_ARGS+=(--max-samples "$MAX_SAMPLES")
 fi
 
+EVAL_DEBUG_ARGS=()
+if [[ "$EVAL_DEBUG_SAMPLES" != "0" ]]; then
+  EVAL_DEBUG_ARGS+=(--eval-debug-samples "$EVAL_DEBUG_SAMPLES")
+fi
+
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --model-config "$MODEL_CONFIG" \
@@ -75,4 +81,5 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --eval-modalities "$EVAL_MODALITIES" \
   --freeze-audio-encoder \
   "${MAX_SAMPLES_ARGS[@]}" \
+  "${EVAL_DEBUG_ARGS[@]}" \
   "${WANDB_ARGS[@]}"
