@@ -598,6 +598,128 @@ COMPOSITION_CONFIG = {
     "gradient_accumulation_steps": 16,
 }
 
+# InternVL 3.5-14B: Qwen3-14B backbone (40 layers, hidden=5120)
+INTERNVL_14B_CONFIG = {
+    "name": "internvl_14b",
+    "description": "InternVL 3.5-14B VLM with SAFE audio adapters",
+    "eval_prompt": "Describe what you hear in one short sentence.",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/OpenGVLab_InternVL3_5-14B"),
+    "vision_model_name": "built-in",
+
+    # InternVL vision pipeline defaults
+    "image_token_id": 151667,
+    "image_seq_length": 256,
+    "downsample_ratio": 0.5,
+    "image_size": [448, 448],
+
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0,
+    },
+
+    # Model dimensions - Qwen3-14B backbone (40 layers)
+    "llm_hidden_size": 5120,
+    "audio_embed_dim": 512,
+    "num_audio_tokens": 8,
+
+    "projector_type": "standard",
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    # Fusion: 6 layers spread across 40-layer decoder, mid-heavy per gradient attribution
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [5, 11, 17, 23, 29, 35],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "num_attention_heads": 40,
+        "dropout": 0.1,
+        "modalities": {
+            "audio": {
+                "layer_indices": [5, 11, 17, 23, 29, 35],
+                "num_tokens": 8,
+            }
+        },
+    },
+
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+
+    "expected_vram_gb": 55,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+}
+
+# InternVL 3.5-38B: Qwen3-32B backbone (64 layers, hidden=5120)
+INTERNVL_38B_CONFIG = {
+    "name": "internvl_38b",
+    "description": "InternVL 3.5-38B VLM with SAFE audio adapters",
+    "eval_prompt": "Describe what you hear in one short sentence.",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/OpenGVLab_InternVL3_5-38B"),
+    "vision_model_name": "built-in",
+
+    # InternVL vision pipeline defaults
+    "image_token_id": 151667,
+    "image_seq_length": 256,
+    "downsample_ratio": 0.5,
+    "image_size": [448, 448],
+
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0,
+    },
+
+    # Model dimensions - Qwen3-32B backbone (64 layers)
+    "llm_hidden_size": 5120,
+    "audio_embed_dim": 512,
+    "num_audio_tokens": 8,
+
+    "projector_type": "standard",
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    # Fusion: 6 layers spread across 64-layer decoder, mid-heavy per gradient attribution
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [8, 18, 28, 38, 48, 56],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "num_attention_heads": 64,
+        "dropout": 0.1,
+        "modalities": {
+            "audio": {
+                "layer_indices": [8, 18, 28, 38, 48, 56],
+                "num_tokens": 8,
+            }
+        },
+    },
+
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+
+    "expected_vram_gb": 90,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+}
+
 # Available configurations
 CONFIGS = {
     "demo": DEMO_CONFIG,
@@ -611,6 +733,10 @@ CONFIGS = {
     "internvl": INTERNVL_CONFIG,
     "internvl3.5": INTERNVL_CONFIG,
     "internvl_8b": INTERNVL_CONFIG,
+    "internvl_14b": INTERNVL_14B_CONFIG,
+    "internvl3.5-14b": INTERNVL_14B_CONFIG,
+    "internvl_38b": INTERNVL_38B_CONFIG,
+    "internvl3.5-38b": INTERNVL_38B_CONFIG,
     "composition": COMPOSITION_CONFIG,
 }
 
