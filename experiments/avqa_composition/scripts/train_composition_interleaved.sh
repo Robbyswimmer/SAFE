@@ -41,6 +41,7 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-composition_interleaved_${SLURM_JOB_ID:-local}}
 WANDB_TAGS=${WANDB_TAGS:-composition,interleaved}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
 EVAL_DEBUG_SAMPLES=${EVAL_DEBUG_SAMPLES:-0}
+MAX_ANSWER_TOKENS=${MAX_ANSWER_TOKENS:-16}
 
 # Qwen-specific env vars
 export SAFE_QWEN_QUANT=none
@@ -79,6 +80,7 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --num-audio-tokens "$NUM_AUDIO_TOKENS" \
   --train-modality "$TRAIN_MODALITY" \
   --eval-modalities "$EVAL_MODALITIES" \
+  --max-answer-tokens "$MAX_ANSWER_TOKENS" \
   --freeze-audio-encoder \
   "${MAX_SAMPLES_ARGS[@]}" \
   "${EVAL_DEBUG_ARGS[@]}" \

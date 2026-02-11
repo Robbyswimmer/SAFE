@@ -1079,15 +1079,24 @@ class SAFEModel(nn.Module):
                     if has_chat_template:
                         try:
                             message = [{"role": "user", "content": user_text}]
-                            prompt = self.base_vl.tokenizer.apply_chat_template(
-                                message,
-                                tokenize=False,
-                                add_generation_prompt=True,
-                            )
+                            # Qwen3 may default to reasoning mode; force no-think when supported.
+                            try:
+                                prompt = self.base_vl.tokenizer.apply_chat_template(
+                                    message,
+                                    tokenize=False,
+                                    add_generation_prompt=True,
+                                    enable_thinking=False,
+                                )
+                            except TypeError:
+                                prompt = self.base_vl.tokenizer.apply_chat_template(
+                                    message,
+                                    tokenize=False,
+                                    add_generation_prompt=True,
+                                )
                         except Exception:
-                            prompt = f"USER: {user_text}\nASSISTANT:"
+                            prompt = f"USER: /no_think\n{user_text}\nASSISTANT:"
                     else:
-                        prompt = f"USER: {user_text}\nASSISTANT:"
+                        prompt = f"USER: /no_think\n{user_text}\nASSISTANT:"
                     prompts.append(prompt)
                 text_with_modalities = prompts
             else:
@@ -1572,11 +1581,20 @@ class SAFEModel(nn.Module):
             if has_chat_template:
                 try:
                     message = [{"role": "user", "content": user_text}]
-                    prompt_ids = tokenizer.apply_chat_template(
-                        message,
-                        tokenize=True,
-                        add_generation_prompt=True,
-                    )
+                    # Qwen3 chat templates can emit <think> by default; disable if supported.
+                    try:
+                        prompt_ids = tokenizer.apply_chat_template(
+                            message,
+                            tokenize=True,
+                            add_generation_prompt=True,
+                            enable_thinking=False,
+                        )
+                    except TypeError:
+                        prompt_ids = tokenizer.apply_chat_template(
+                            message,
+                            tokenize=True,
+                            add_generation_prompt=True,
+                        )
                     if torch.is_tensor(prompt_ids):
                         prompt_ids = prompt_ids.tolist()
                     if prompt_ids and isinstance(prompt_ids[0], list):
@@ -1587,7 +1605,7 @@ class SAFEModel(nn.Module):
                     pass
             # Fallback keeps prompt aligned with LLaVA path.
             return tokenizer.encode(
-                f"USER: {user_text} ASSISTANT:",
+                f"USER: /no_think\n{user_text} ASSISTANT:",
                 add_special_tokens=True,
             )
 
