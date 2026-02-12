@@ -163,7 +163,30 @@ if [[ "$USE_SRUN" == "1" ]] && command -v srun >/dev/null 2>&1 && [[ -n "${SLURM
 fi
 if [[ "$REQUIRE_CUDA" == "1" ]]; then
     nvidia-smi -L || true
-    "${LAUNCHER[@]}" python3 -c "import torch,sys,os; print(f'[cuda_check] torch={torch.__version__} built_cuda={torch.version.cuda} built={torch.backends.cuda.is_built()} available={torch.cuda.is_available()} count={torch.cuda.device_count()} visible={os.environ.get(\"CUDA_VISIBLE_DEVICES\")}'); ok=torch.cuda.is_available() and torch.cuda.device_count()>0; sys.exit(0 if ok else 2)" || { echo "FATAL: No CUDA GPUs available (GPU_COUNT=$GPU_COUNT, USE_SRUN=$USE_SRUN). Aborting."; exit 2; }
+    "${LAUNCHER[@]}" python3 - <<'PY' || { echo "FATAL: No CUDA GPUs available (GPU_COUNT=$GPU_COUNT, USE_SRUN=$USE_SRUN). Aborting."; exit 2; }
+import os
+import sys
+import torch
+
+err = None
+runtime_ok = False
+try:
+    if torch.cuda.device_count() > 0:
+        torch.cuda.init()
+        x = torch.tensor([1.0], device="cuda:0")
+        runtime_ok = bool(x.is_cuda)
+except Exception as e:
+    err = repr(e)
+
+print(
+    f"[cuda_check] torch={torch.__version__} built_cuda={torch.version.cuda} "
+    f"built={torch.backends.cuda.is_built()} available={torch.cuda.is_available()} "
+    f"count={torch.cuda.device_count()} visible={os.environ.get('CUDA_VISIBLE_DEVICES')} "
+    f"runtime_ok={runtime_ok} err={err}",
+    flush=True,
+)
+sys.exit(0 if runtime_ok else 2)
+PY
 fi
 
 # Build optional flags
