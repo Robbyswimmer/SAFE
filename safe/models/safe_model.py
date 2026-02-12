@@ -1998,6 +1998,8 @@ class SAFEModel(nn.Module):
                         )
                     )
                     clip_features = clip_out.last_hidden_state  # (B, 257, 1024)
+                proj_device = next(self.vision_projector.parameters()).device
+                clip_features = clip_features.to(device=proj_device)
                 vision_tokens = self.vision_projector(clip_features, out_dtype=base_dtype)
                 # Composition mode uses projected vision tokens; Qwen does not
                 # consume pixel_values directly.
@@ -2806,6 +2808,8 @@ class SAFEModel(nn.Module):
                         )
                     )
                     clip_features = clip_out.last_hidden_state
+                proj_device = next(self.vision_projector.parameters()).device
+                clip_features = clip_features.to(device=proj_device)
                 vision_tokens = self.vision_projector(clip_features, out_dtype=base_dtype)
                 pixel_values = None  # Composition path uses vision tokens, not raw pixel inputs
 
