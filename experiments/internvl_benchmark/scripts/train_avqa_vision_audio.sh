@@ -110,6 +110,29 @@ mkdir -p "$OUTPUT_DIR"
 mkdir -p logs
 mkdir -p "$SAFE_OFFLOAD_FOLDER"
 
+# Optional: fail fast on known bad nodes (does not replace scheduler-level --exclude)
+BAD_NODES=${BAD_NODES:-}
+if [[ -n "${BAD_NODES}" && -n "${SLURMD_NODENAME:-}" ]]; then
+    IFS=',' read -r -a _bad_nodes_arr <<< "${BAD_NODES}"
+    for _bad in "${_bad_nodes_arr[@]}"; do
+        if [[ "${SLURMD_NODENAME}" == "${_bad}" ]]; then
+            echo "FATAL: landed on excluded node ${SLURMD_NODENAME} (BAD_NODES=${BAD_NODES})."
+            echo "Resubmit with: sbatch --exclude=${BAD_NODES} ..."
+            exit 3
+        fi
+    done
+fi
+
+# Build optional flags
+REQUIRE_CUDA=${REQUIRE_CUDA:-1}
+LAUNCHER=()
+if command -v srun >/dev/null 2>&1 && [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    LAUNCHER=(srun --ntasks=1)
+fi
+if [[ "$REQUIRE_CUDA" == "1" ]]; then
+    "${LAUNCHER[@]}" python3 -c "import torch,sys,os; print(f'[cuda_check] available={torch.cuda.is_available()} count={torch.cuda.device_count()} visible={os.environ.get(\"CUDA_VISIBLE_DEVICES\")}'); ok=torch.cuda.is_available() and torch.cuda.device_count()>0; sys.exit(0 if ok else 2)" || { echo "FATAL: No CUDA GPUs available. Aborting."; exit 2; }
+fi
+
 # Build optional flags
 EXTRA_FLAGS=""
 if [ "$LEARNED_GATE" = "1" ]; then
@@ -125,7 +148,7 @@ if [ "$MAX_SAMPLES" != "0" ] && [ -n "$MAX_SAMPLES" ]; then
     echo "Max samples: $MAX_SAMPLES (sanity run)"
 fi
 
-python3 experiments/avqa_composition/train_avqa_composition.py \
+"${LAUNCHER[@]}" python3 experiments/avqa_composition/train_avqa_composition.py \
     --dataset music_avqa \
     --train-manifest "$TRAIN_MANIFEST" \
     --val-manifest "$VAL_MANIFEST" \

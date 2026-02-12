@@ -141,10 +141,27 @@ echo "========================================"
 cd "$SAFE_ROOT"
 mkdir -p "$OUTPUT_DIR" logs "$SAFE_OFFLOAD_FOLDER"
 
+# Optional: fail fast on known bad nodes (does not replace scheduler-level --exclude)
+BAD_NODES=${BAD_NODES:-}
+if [[ -n "${BAD_NODES}" && -n "${SLURMD_NODENAME:-}" ]]; then
+    IFS=',' read -r -a _bad_nodes_arr <<< "${BAD_NODES}"
+    for _bad in "${_bad_nodes_arr[@]}"; do
+        if [[ "${SLURMD_NODENAME}" == "${_bad}" ]]; then
+            echo "FATAL: landed on excluded node ${SLURMD_NODENAME} (BAD_NODES=${BAD_NODES})."
+            echo "Resubmit with: sbatch --exclude=${BAD_NODES} ..."
+            exit 3
+        fi
+    done
+fi
+
 # Fail fast if CUDA is not available
 REQUIRE_CUDA=${REQUIRE_CUDA:-1}
+LAUNCHER=()
+if command -v srun >/dev/null 2>&1 && [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    LAUNCHER=(srun --ntasks=1)
+fi
 if [[ "$REQUIRE_CUDA" == "1" ]]; then
-    python3 -c "import torch,sys; ok=torch.cuda.is_available() and torch.cuda.device_count()>0; print(f'[cuda_check] available={torch.cuda.is_available()} count={torch.cuda.device_count()}'); sys.exit(0 if ok else 2)" || { echo "FATAL: No CUDA GPUs available (GPU_COUNT=$GPU_COUNT). Aborting."; exit 2; }
+    "${LAUNCHER[@]}" python3 -c "import torch,sys; print(f'[cuda_check] available={torch.cuda.is_available()} count={torch.cuda.device_count()} visible={__import__(\"os\").environ.get(\"CUDA_VISIBLE_DEVICES\")}'); ok=torch.cuda.is_available() and torch.cuda.device_count()>0; sys.exit(0 if ok else 2)" || { echo "FATAL: No CUDA GPUs available (GPU_COUNT=$GPU_COUNT). Aborting."; exit 2; }
 fi
 
 # Build optional flags
@@ -164,7 +181,7 @@ if [ "$WANDB" = "1" ]; then
     WANDB_ARGS="--wandb --wandb-project $WANDB_PROJECT --wandb-run-name $WANDB_RUN_NAME --wandb-tags $WANDB_TAGS"
 fi
 
-python3 experiments/avqa_composition/train_avqa_composition.py \
+"${LAUNCHER[@]}" python3 experiments/avqa_composition/train_avqa_composition.py \
     --dataset music_avqa \
     --train-manifest "$TRAIN_MANIFEST" \
     --val-manifest "$VAL_MANIFEST" \
