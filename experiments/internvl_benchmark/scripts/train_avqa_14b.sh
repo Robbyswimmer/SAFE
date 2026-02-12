@@ -6,7 +6,7 @@
 #SBATCH --mem=96G
 #SBATCH --cpus-per-task=8
 #SBATCH -p gpu
-#SBATCH --gres=gpu:3
+#SBATCH --gres=gpu:2
 
 # InternVL 3.5-14B MUSIC-AVQA Training with SAFE
 #
