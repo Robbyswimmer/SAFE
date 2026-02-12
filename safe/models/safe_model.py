@@ -1569,7 +1569,7 @@ class SAFEModel(nn.Module):
             pil_images.append(None)
         pil_images = pil_images[:batch_size]
 
-        instruction = "Answer with a single word or number."
+        instruction = "Answer with exactly one short answer token (single word or number)."
         newline_ids = tokenizer.encode("\n", add_special_tokens=False)
 
         has_chat_template = bool(getattr(tokenizer, "chat_template", None)) and hasattr(
@@ -1577,7 +1577,8 @@ class SAFEModel(nn.Module):
         )
 
         def _build_text_ids(question: str) -> List[int]:
-            user_text = f"{instruction} {question}".strip()
+            # Keep InternVL prompts aligned with Qwen path and suppress reasoning traces.
+            user_text = f"/no_think\n{instruction}\nQuestion: {question}\nAnswer:"
             if has_chat_template:
                 try:
                     message = [{"role": "user", "content": user_text}]
@@ -1604,10 +1605,7 @@ class SAFEModel(nn.Module):
                 except Exception:
                     pass
             # Fallback keeps prompt aligned with LLaVA path.
-            return tokenizer.encode(
-                f"USER: /no_think\n{user_text} ASSISTANT:",
-                add_special_tokens=True,
-            )
+            return tokenizer.encode(f"USER: {user_text}\nASSISTANT:", add_special_tokens=True)
 
         # Build input_ids by directly inserting image placeholder token IDs.
         # Avoids string encode/decode roundtrip which loses special tokens.
@@ -2956,6 +2954,7 @@ class SAFEModel(nn.Module):
             if not hasattr(self, '_gen_fusion_logged'):
                 print(f"[GEN FUSION DEBUG] audio_tokens is not None: {audio_tokens is not None}", flush=True)
                 print(f"[GEN FUSION DEBUG] vision_tokens is not None: {vision_tokens is not None}", flush=True)
+                print(f"[GEN FUSION DEBUG] pixel_values is not None: {pixel_values is not None}", flush=True)
                 print(f"[GEN FUSION DEBUG] gate_scalar: {gate_scalar}", flush=True)
                 print(f"[GEN FUSION DEBUG] enable_midlayer_fusion: {self.enable_midlayer_fusion}", flush=True)
                 print(f"[GEN FUSION DEBUG] use_midlayer_hooks: {use_midlayer_hooks}", flush=True)
