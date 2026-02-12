@@ -2066,12 +2066,13 @@ class SAFEModel(nn.Module):
                 internvl_with_vision = (
                     self.base_vl.model_type == "internvl"
                     and pixel_values is not None
-                    and hasattr(self.base_vl.llm, "get_image_features")
+                    and (hasattr(self.base_vl.llm, "get_image_features")
+                         or hasattr(self.base_vl.llm, "extract_feature"))
                 )
 
                 if internvl_with_vision:
                     # Full InternVL VL passthrough: pass input_ids + pixel_values
-                    # InternVL handles vision internally (embed → get_image_features → masked_scatter)
+                    # InternVL handles vision internally (embed → get/extract_feature → masked_scatter)
                     base_inputs = {
                         "input_ids": input_ids,
                         "pixel_values": pixel_values,
@@ -2128,7 +2129,8 @@ class SAFEModel(nn.Module):
             internvl_with_vision = (
                 self.base_vl.model_type == "internvl"
                 and pixel_values is not None
-                and hasattr(self.base_vl.llm, "get_image_features")
+                and (hasattr(self.base_vl.llm, "get_image_features")
+                     or hasattr(self.base_vl.llm, "extract_feature"))
             )
 
             # FUSION PATH: Prepare inputs_embeds (skip for InternVL with vision)
