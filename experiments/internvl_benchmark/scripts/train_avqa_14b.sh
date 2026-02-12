@@ -42,7 +42,7 @@ export SAFE_QWEN_QUANT=none
 export SAFE_GRAD_CKPT=0
 export FP16=0
 export SAFE_DEVICE_MAP=${SAFE_DEVICE_MAP:-auto}
-export SAFE_MAX_MEMORY=${SAFE_MAX_MEMORY:-"0=46GiB,1=46GiB,2=46GiB,cpu=160GiB"}
+export SAFE_MAX_MEMORY=${SAFE_MAX_MEMORY:-"0=46GiB,1=46GiB,cpu=160GiB"}
 export SAFE_OFFLOAD_FOLDER=${SAFE_OFFLOAD_FOLDER:-$SAFE_ROOT/.hf_offload}
 
 # Fixed: model config and fusion layers for 14B (do NOT override via --export)
