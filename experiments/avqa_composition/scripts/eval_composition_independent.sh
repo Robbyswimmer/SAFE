@@ -85,6 +85,11 @@ export SAFE_OFFLOAD_FOLDER=${SAFE_OFFLOAD_FOLDER:-$SAFE_ROOT/.hf_offload}
 mkdir -p logs "$OUTPUT_DIR" "$SAFE_OFFLOAD_FOLDER"
 cd "$SAFE_ROOT"
 
+REQUIRE_CUDA=${REQUIRE_CUDA:-1}
+if [[ "$REQUIRE_CUDA" == "1" ]]; then
+  python3 -c "import torch,sys; ok=torch.cuda.is_available() and torch.cuda.device_count()>0; print(f'[cuda_check] available={torch.cuda.is_available()} count={torch.cuda.device_count()}'); sys.exit(0 if ok else 2)"
+fi
+
 WANDB_ARGS=()
 if [[ "$WANDB" == "1" ]]; then
   WANDB_ARGS+=(--wandb --wandb-project "$WANDB_PROJECT" --wandb-run-name "$WANDB_RUN_NAME" --wandb-tags "$WANDB_TAGS")
