@@ -43,8 +43,41 @@ MAX_SAMPLES=${MAX_SAMPLES:-0}
 export SAFE_QWEN_QUANT=none
 export SAFE_GRAD_CKPT=0
 export FP16=0
-export SAFE_DEVICE_MAP=${SAFE_DEVICE_MAP:-auto}
-export SAFE_MAX_MEMORY=${SAFE_MAX_MEMORY:-0=46GiB,1=46GiB,2=46GiB,cpu=160GiB}
+
+# Derive visible GPU count so sharding config matches the actual Slurm allocation.
+GPU_COUNT=0
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  IFS=',' read -r -a _gpu_arr <<< "${CUDA_VISIBLE_DEVICES}"
+  GPU_COUNT=${#_gpu_arr[@]}
+elif [[ -n "${SLURM_GPUS_ON_NODE:-}" ]]; then
+  if [[ "${SLURM_GPUS_ON_NODE}" =~ ^[0-9]+$ ]]; then
+    GPU_COUNT=${SLURM_GPUS_ON_NODE}
+  else
+    GPU_COUNT=$(echo "${SLURM_GPUS_ON_NODE}" | grep -o '[0-9]\+' | head -n1 || echo 0)
+  fi
+fi
+if [[ -z "${GPU_COUNT}" || "${GPU_COUNT}" -le 0 ]]; then
+  GPU_COUNT=1
+fi
+
+if [[ -z "${SAFE_DEVICE_MAP:-}" ]]; then
+  if [[ "${GPU_COUNT}" -le 1 ]]; then
+    export SAFE_DEVICE_MAP=none
+  else
+    export SAFE_DEVICE_MAP=auto
+  fi
+fi
+
+if [[ -z "${SAFE_MAX_MEMORY:-}" ]]; then
+  SAFE_PER_GPU_MEMORY=${SAFE_PER_GPU_MEMORY:-46GiB}
+  SAFE_CPU_MEMORY=${SAFE_CPU_MEMORY:-160GiB}
+  _mem_entries=()
+  for ((i=0; i<GPU_COUNT; i++)); do
+    _mem_entries+=("${i}=${SAFE_PER_GPU_MEMORY}")
+  done
+  export SAFE_MAX_MEMORY="$(IFS=,; echo "${_mem_entries[*]}"),cpu=${SAFE_CPU_MEMORY}"
+fi
+
 export SAFE_OFFLOAD_FOLDER=${SAFE_OFFLOAD_FOLDER:-$SAFE_ROOT/.hf_offload}
 
 mkdir -p logs "$OUTPUT_DIR"

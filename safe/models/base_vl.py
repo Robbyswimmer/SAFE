@@ -215,6 +215,10 @@ class BaseVLModel(nn.Module):
                 attempts.append((name, cfg, None, None))
             attempts.append((f"bf16+{attn_impl or 'noattn'}", None, qwen_dtype, attn_impl))
             attempts.append(("bf16", None, qwen_dtype, None))
+            # Fallback for environments where bf16 path fails (driver/accelerate/runtime).
+            if torch.cuda.is_available():
+                attempts.append((f"fp16+{attn_impl or 'noattn'}", None, torch.float16, attn_impl))
+                attempts.append(("fp16", None, torch.float16, None))
 
             for name, cfg, td, ai in attempts:
                 try:
@@ -520,6 +524,7 @@ class BaseVLModel(nn.Module):
         if not spec:
             return None
         out: Dict[Any, str] = {}
+        max_cuda_devices = torch.cuda.device_count() if torch.cuda.is_available() else 0
         for raw_item in spec.split(","):
             item = raw_item.strip()
             if not item:
@@ -541,6 +546,18 @@ class BaseVLModel(nn.Module):
                 parsed_key = lower
             else:
                 parsed_key = key
+            # Guard against invalid GPU ids in max_memory, which can happen
+            # when scripts assume 3 GPUs but Slurm allocated only 1.
+            if isinstance(parsed_key, int):
+                if parsed_key < 0:
+                    continue
+                if parsed_key >= max_cuda_devices:
+                    print(
+                        f"[BaseVL] Ignoring max_memory entry for unavailable cuda:{parsed_key} "
+                        f"(visible_gpus={max_cuda_devices})",
+                        flush=True,
+                    )
+                    continue
             out[parsed_key] = val
         return out or None
     
