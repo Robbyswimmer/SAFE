@@ -293,9 +293,12 @@ class BaseVLModel(nn.Module):
                 attn_impl = os.environ.get("SAFE_ATTN_IMPL", "flash_attention_2")
 
             def _try_load_internvl_builtin(quant_cfg, torch_dtype, attn_implementation):
-                """Load via built-in InternVLForConditionalGeneration (no trust_remote_code)."""
+                """Load via built-in InternVLForConditionalGeneration."""
                 kwargs = {
                     "low_cpu_mem_usage": True,
+                    # Required for local/Hub InternVL repos that ship custom code.
+                    # Avoids interactive prompt in non-interactive Slurm jobs.
+                    "trust_remote_code": True,
                 }
                 kwargs.update(load_device_kwargs)
                 if quant_cfg is not None:
