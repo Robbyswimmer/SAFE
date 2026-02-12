@@ -10,7 +10,13 @@
 
 set -euo pipefail
 
-SAFE_ROOT="${SAFE_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+if [[ -z "${SAFE_ROOT:-}" ]]; then
+  if [[ -n "${SLURM_SUBMIT_DIR:-}" && -d "${SLURM_SUBMIT_DIR}" ]]; then
+    SAFE_ROOT="${SLURM_SUBMIT_DIR}"
+  else
+    SAFE_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+  fi
+fi
 
 CONDA_ENV=${CONDA_ENV:-safe-env}
 if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
