@@ -141,6 +141,27 @@ echo "========================================"
 cd "$SAFE_ROOT"
 mkdir -p "$OUTPUT_DIR" logs "$SAFE_OFFLOAD_FOLDER"
 
+DIAG_LOGS=${DIAG_LOGS:-1}
+if [[ "$DIAG_LOGS" == "1" ]]; then
+    echo "[diag] timestamp=$(date -Iseconds)"
+    echo "[diag] hostname=$(hostname)"
+    echo "[diag] slurm_job_id=${SLURM_JOB_ID:-none}"
+    echo "[diag] slurm_node=${SLURMD_NODENAME:-unknown}"
+    echo "[diag] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
+    echo "[diag] python=$(which python3)"
+    echo "[diag] conda_env=${CONDA_DEFAULT_ENV:-unset}"
+    nvidia-smi -L || true
+    nvidia-smi --query-gpu=name,driver_version,memory.total,pci.bus_id --format=csv,noheader || true
+    python3 - <<'PY' || true
+import os, sys, platform
+import torch
+print(f"[diag] python_version={sys.version.split()[0]} platform={platform.platform()}")
+print(f"[diag] torch={torch.__version__} torch_cuda={torch.version.cuda} cuda_built={torch.backends.cuda.is_built()}")
+print(f"[diag] torch_is_available={torch.cuda.is_available()} torch_device_count={torch.cuda.device_count()}")
+print(f"[diag] env_CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
+PY
+fi
+
 # Optional: fail fast on known bad nodes (does not replace scheduler-level --exclude)
 BAD_NODES=${BAD_NODES:-}
 if [[ -n "${BAD_NODES}" && -n "${SLURMD_NODENAME:-}" ]]; then
@@ -185,6 +206,15 @@ print(
     f"runtime_ok={runtime_ok} err={err}",
     flush=True,
 )
+if runtime_ok:
+    try:
+        props = torch.cuda.get_device_properties(0)
+        print(
+            f"[cuda_check] device0 name={props.name} total_mem_gb={props.total_memory / (1024**3):.2f}",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"[cuda_check] warning: failed to query device properties: {e!r}", flush=True)
 sys.exit(0 if runtime_ok else 2)
 PY
 fi

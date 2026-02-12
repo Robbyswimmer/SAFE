@@ -17,6 +17,7 @@ import json
 import math
 import random
 import sys
+import time
 from collections import defaultdict
 from contextlib import nullcontext
 from pathlib import Path
@@ -619,6 +620,7 @@ def evaluate(
     silent: bool = False,
 ) -> Dict[str, Any]:
     model.eval()
+    eval_start = time.time()
 
     exact_total = 0.0
     extracted_total = 0.0
@@ -718,7 +720,15 @@ def evaluate(
         if (eval_step + 1) % eval_log_every == 0 and not silent:
             running_em = 100.0 * exact_total / max(1, count)
             running_ext = 100.0 * extracted_total / max(1, count)
-            print(f"  [eval:{modality}] step {eval_step + 1}/{eval_batches} raw_em={running_em:.2f}% extracted_em={running_ext:.2f}%", flush=True)
+            elapsed = max(1e-6, time.time() - eval_start)
+            avg_batch_sec = elapsed / float(eval_step + 1)
+            eta_sec = avg_batch_sec * float(eval_batches - (eval_step + 1))
+            print(
+                f"  [eval:{modality}] step {eval_step + 1}/{eval_batches} "
+                f"raw_em={running_em:.2f}% extracted_em={running_ext:.2f}% "
+                f"elapsed={elapsed/60.0:.1f}m eta={eta_sec/60.0:.1f}m",
+                flush=True,
+            )
 
     result = {
         "modality": modality,
@@ -738,6 +748,13 @@ def evaluate(
             "categorical_f1": 100.0 * v["categorical_f1"] / n,
             "num_samples": int(v["n"]),
         }
+    if not silent:
+        total_elapsed = time.time() - eval_start
+        print(
+            f"  [eval:{modality}] complete in {total_elapsed/60.0:.1f}m "
+            f"({total_elapsed/max(1, count):.3f}s/sample)",
+            flush=True,
+        )
     return result
 
 
@@ -765,6 +782,7 @@ def run_layer_additivity_probe(
     if not layers:
         return None
 
+    probe_start = time.time()
     probe_n = int(getattr(args, "layer_probe_samples", 0) or 0)
     if probe_n > 0 and probe_n < len(dataset):
         probe_dataset: Dataset = Subset(dataset, list(range(probe_n)))
@@ -786,7 +804,8 @@ def run_layer_additivity_probe(
     y0 = text_metrics["extracted_match"] / 100.0
 
     rows: List[Dict[str, Any]] = []
-    for layer in layers:
+    for layer_idx, layer in enumerate(layers):
+        layer_start = time.time()
         active = [int(layer)]
         audio_metrics = evaluate(
             model, probe_loader, tokenizer, device, "audio", args,
@@ -822,6 +841,12 @@ def run_layer_additivity_probe(
                 "gain_vs_best_single": float(gain_vs_best_single),
             }
         )
+        elapsed = time.time() - layer_start
+        print(
+            f"  [additivity_probe] layer {layer_idx + 1}/{len(layers)}={layer} "
+            f"done in {elapsed/60.0:.1f}m",
+            flush=True,
+        )
 
     # Lower epsilon is better additivity; use both score as tiebreaker.
     ranking = sorted(
@@ -843,6 +868,12 @@ def run_layer_additivity_probe(
             f"gain_vs_best_single={100.0 * r['gain_vs_best_single']:+.2f}",
             flush=True,
         )
+
+    total_probe_elapsed = time.time() - probe_start
+    print(
+        f"  [additivity_probe] complete in {total_probe_elapsed/60.0:.1f}m",
+        flush=True,
+    )
 
     return {
         "num_samples": len(probe_dataset),
