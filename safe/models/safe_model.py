@@ -1953,6 +1953,49 @@ class SAFEModel(nn.Module):
         # Last-resort fallback (LLaVA often uses 32000)
         return getattr(bv, "image_token_id", 32000)
 
+    def _build_internvl_image_flags(
+        self,
+        input_ids: Optional[torch.Tensor],
+        pixel_values: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        """
+        Build `image_flags` expected by some InternVL forward implementations.
+
+        Returns shape (batch, 1) with 1 for rows that contain image placeholder
+        tokens and 0 otherwise. Falls back to all-ones when placeholders cannot
+        be detected robustly.
+        """
+        if pixel_values is None or not torch.is_tensor(pixel_values):
+            return None
+
+        batch = int(pixel_values.size(0))
+        device = pixel_values.device
+        flags: Optional[torch.Tensor] = None
+
+        if (
+            input_ids is not None
+            and torch.is_tensor(input_ids)
+            and input_ids.dim() == 2
+            and int(input_ids.size(0)) == batch
+        ):
+            image_token_id = None
+            try:
+                image_token_id = getattr(self.base_vl.llm, "img_context_token_id", None)
+                if not isinstance(image_token_id, int) or image_token_id < 0:
+                    image_token_id = getattr(self.base_vl.llm.config, "image_token_id", None)
+            except Exception:
+                image_token_id = None
+
+            if isinstance(image_token_id, int) and image_token_id >= 0:
+                flags = (input_ids == image_token_id).any(dim=1).to(dtype=torch.long)
+
+        if flags is None:
+            flags = torch.ones((batch,), dtype=torch.long, device=device)
+        else:
+            flags = flags.to(device=device, dtype=torch.long)
+
+        return flags.unsqueeze(-1)
+
     # Rest of the methods remain the same as original...
     def forward(
         self,
@@ -2080,6 +2123,12 @@ class SAFEModel(nn.Module):
                         "labels": labels,
                         **filtered_kwargs,
                     }
+                    image_flags = self._build_internvl_image_flags(
+                        input_ids=input_ids,
+                        pixel_values=pixel_values,
+                    )
+                    if image_flags is not None:
+                        base_inputs["image_flags"] = image_flags
                     _passthrough_model = self.base_vl.llm  # Full InternVL model
                 else:
                     # Other models or InternVL audio-only: use inputs_embeds path
@@ -2250,6 +2299,12 @@ class SAFEModel(nn.Module):
                     "labels": labels,
                     **filtered_kwargs,
                 }
+                image_flags = self._build_internvl_image_flags(
+                    input_ids=input_ids,
+                    pixel_values=pixel_values,
+                )
+                if image_flags is not None:
+                    model_inputs["image_flags"] = image_flags
                 _forward_model = self.base_vl.llm  # Full InternVL model
             else:
                 model_inputs = {
@@ -2264,6 +2319,18 @@ class SAFEModel(nn.Module):
                 _forward_model = self.base_vl.llm
                 if self.base_vl.model_type == "internvl":
                     _forward_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
+
+            if (
+                self.base_vl.model_type == "internvl"
+                and "pixel_values" in model_inputs
+                and "image_flags" not in model_inputs
+            ):
+                image_flags = self._build_internvl_image_flags(
+                    input_ids=model_inputs.get("input_ids", input_ids),
+                    pixel_values=model_inputs.get("pixel_values"),
+                )
+                if image_flags is not None:
+                    model_inputs["image_flags"] = image_flags
 
             # Ensure hidden states are returned when requested by caller.
             if bool(filtered_kwargs.get("output_hidden_states", False)):
@@ -2840,6 +2907,13 @@ class SAFEModel(nn.Module):
                     # Cast to model dtype (InternViT expects bfloat16, not float32)
                     pv_dtype = next(self.base_vl.llm.parameters()).dtype
                     base_inputs["pixel_values"] = pixel_values.to(dtype=pv_dtype)
+                    if self.base_vl.model_type == "internvl":
+                        image_flags = self._build_internvl_image_flags(
+                            input_ids=input_ids,
+                            pixel_values=base_inputs["pixel_values"],
+                        )
+                        if image_flags is not None:
+                            base_inputs["image_flags"] = image_flags
 
                 # For InternVL without images, use language_model (Qwen3)
                 # to avoid issues with custom generate(). With images,
@@ -2878,6 +2952,12 @@ class SAFEModel(nn.Module):
                 if pixel_values is not None:
                     # Cast to model dtype (InternViT expects bfloat16, not float32)
                     base_inputs["pixel_values"] = pixel_values.to(dtype=base_dtype)
+                    image_flags = self._build_internvl_image_flags(
+                        input_ids=input_ids,
+                        pixel_values=base_inputs["pixel_values"],
+                    )
+                    if image_flags is not None:
+                        base_inputs["image_flags"] = image_flags
             else:
                 sanitized_ids = self.sanitize_input_ids_for_base(input_ids)
                 if sanitized_ids is not None:
@@ -2935,6 +3015,18 @@ class SAFEModel(nn.Module):
                     base_inputs["attention_mask"] = attention_mask
                 if pixel_values is not None:
                     base_inputs["pixel_values"] = pixel_values
+
+            if (
+                self.base_vl.model_type == "internvl"
+                and "pixel_values" in base_inputs
+                and "image_flags" not in base_inputs
+            ):
+                image_flags = self._build_internvl_image_flags(
+                    input_ids=base_inputs.get("input_ids", input_ids),
+                    pixel_values=base_inputs.get("pixel_values"),
+                )
+                if image_flags is not None:
+                    base_inputs["image_flags"] = image_flags
 
             has_any_modality_gen = (audio_tokens is not None) or (vision_tokens is not None)
             use_midlayer_hooks = (

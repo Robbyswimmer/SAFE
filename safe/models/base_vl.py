@@ -832,6 +832,31 @@ class BaseVLModel(nn.Module):
                 pixel_values = torch.zeros((batch_size, 3, 224, 224), dtype=torch.float32, device=device)
             if pixel_values is not None:
                 llm_kwargs["pixel_values"] = pixel_values
+                if self.model_type == "internvl" and "image_flags" not in llm_kwargs:
+                    flags = None
+                    try:
+                        image_token_id = getattr(self.llm, "img_context_token_id", None)
+                        if not isinstance(image_token_id, int) or image_token_id < 0:
+                            image_token_id = getattr(self.llm.config, "image_token_id", None)
+                        if (
+                            isinstance(image_token_id, int)
+                            and image_token_id >= 0
+                            and input_ids is not None
+                            and input_ids.dim() == 2
+                            and input_ids.size(0) == pixel_values.size(0)
+                        ):
+                            flags = (input_ids == image_token_id).any(dim=1).to(dtype=torch.long)
+                    except Exception:
+                        flags = None
+                    if flags is None:
+                        flags = torch.ones(
+                            (pixel_values.size(0),),
+                            dtype=torch.long,
+                            device=pixel_values.device,
+                        )
+                    else:
+                        flags = flags.to(device=pixel_values.device, dtype=torch.long)
+                    llm_kwargs["image_flags"] = flags.unsqueeze(-1)
 
             if input_ids is not None:
                 outputs = self.llm(input_ids=input_ids, **llm_kwargs)
