@@ -17,11 +17,18 @@ SAFE hooks into the Qwen3 layers via `LayerHookManager`, injecting audio fusion 
 
 ```bash
 bash experiments/internvl_benchmark/scripts/download_internvl.sh
+# Small backbones for scaling studies:
+bash experiments/internvl_benchmark/scripts/download_internvl_1b.sh
+bash experiments/internvl_benchmark/scripts/download_internvl_3b.sh
 ```
 
 Or directly:
 ```bash
 python scripts/download_internvl.py --model internvl3.5-8b --output-dir models
+# 1B
+python scripts/download_internvl.py --model internvl3.5-1b --output-dir models
+# "3B" alias (maps to 4B; InternVL 3.5 has no official 3B release)
+python scripts/download_internvl.py --model internvl3.5-3b --output-dir models
 ```
 
 ### 2. Verify Download

@@ -26,6 +26,7 @@ from pathlib import Path
 
 INTERNVL_MODELS = {
     # InternVL 3.5 (latest)
+    "internvl3.5-1b": "OpenGVLab/InternVL3_5-1B",
     "internvl3.5-2b": "OpenGVLab/InternVL3_5-2B",
     "internvl3.5-4b": "OpenGVLab/InternVL3_5-4B",
     "internvl3.5-8b": "OpenGVLab/InternVL3_5-8B",
@@ -35,6 +36,12 @@ INTERNVL_MODELS = {
     "internvl2.5-8b": "OpenGVLab/InternVL2_5-8B",
     "internvl2.5-26b": "OpenGVLab/InternVL2_5-26B",
     "internvl2.5-38b": "OpenGVLab/InternVL2_5-38B",
+}
+
+# Helpful aliases for common shorthand names.
+# Note: InternVL 3.5 does not publish a native 3B checkpoint.
+INTERNVL_MODEL_ALIASES = {
+    "internvl3.5-3b": "internvl3.5-4b",
 }
 
 
@@ -51,8 +58,18 @@ def download_model(
         sys.exit(1)
 
     # Resolve model name
-    if model_name.lower() in INTERNVL_MODELS:
-        repo_id = INTERNVL_MODELS[model_name.lower()]
+    normalized = model_name.lower()
+    if normalized in INTERNVL_MODEL_ALIASES:
+        alias = INTERNVL_MODEL_ALIASES[normalized]
+        print(
+            f"Warning: '{model_name}' is an alias. "
+            f"Using '{alias}' ({INTERNVL_MODELS[alias]}).",
+            flush=True,
+        )
+        normalized = alias
+
+    if normalized in INTERNVL_MODELS:
+        repo_id = INTERNVL_MODELS[normalized]
     else:
         repo_id = model_name  # Assume full HF repo name
 
@@ -170,8 +187,10 @@ Examples:
   python scripts/download_internvl.py --use-auth-token
 
 Available model shortcuts:
+  internvl3.5-1b   -> OpenGVLab/InternVL3_5-1B   (~2-3GB)
   internvl3.5-2b   -> OpenGVLab/InternVL3_5-2B   (~4GB)
   internvl3.5-4b   -> OpenGVLab/InternVL3_5-4B   (~8GB)
+  internvl3.5-3b   -> alias to internvl3.5-4b (no official 3B release)
   internvl3.5-8b   -> OpenGVLab/InternVL3_5-8B   (~17GB, default)
   internvl3.5-14b  -> OpenGVLab/InternVL3_5-14B  (~30GB)
   internvl3.5-38b  -> OpenGVLab/InternVL3_5-38B  (~76GB)
@@ -211,9 +230,12 @@ Available model shortcuts:
     print("InternVL Model Download")
     print("=" * 60)
 
-    # Resolve model name for display
-    if args.model.lower() in INTERNVL_MODELS:
-        display_name = INTERNVL_MODELS[args.model.lower()]
+    # Resolve model name for display (including aliases)
+    display_key = args.model.lower()
+    if display_key in INTERNVL_MODEL_ALIASES:
+        display_key = INTERNVL_MODEL_ALIASES[display_key]
+    if display_key in INTERNVL_MODELS:
+        display_name = INTERNVL_MODELS[display_key]
     else:
         display_name = args.model
 
