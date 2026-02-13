@@ -179,6 +179,7 @@ fi
 
 # Build optional flags
 REQUIRE_CUDA=${REQUIRE_CUDA:-1}
+echo "[launcher] mode=direct-python (nested srun disabled)"
 if [[ "$REQUIRE_CUDA" == "1" ]]; then
     nvidia-smi -L || true
     python3 - <<'PY' || { echo "FATAL: No CUDA GPUs available (GPU_COUNT=$GPU_COUNT). Aborting."; exit 2; }

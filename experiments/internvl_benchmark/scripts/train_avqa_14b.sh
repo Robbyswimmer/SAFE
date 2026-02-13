@@ -177,14 +177,10 @@ fi
 
 # Fail fast if CUDA is not available
 REQUIRE_CUDA=${REQUIRE_CUDA:-1}
-LAUNCHER=()
-USE_SRUN=${USE_SRUN:-0}
-if [[ "$USE_SRUN" == "1" ]] && command -v srun >/dev/null 2>&1 && [[ -n "${SLURM_JOB_ID:-}" ]]; then
-    LAUNCHER=(srun --ntasks=1)
-fi
+echo "[launcher] mode=direct-python (nested srun disabled)"
 if [[ "$REQUIRE_CUDA" == "1" ]]; then
     nvidia-smi -L || true
-    "${LAUNCHER[@]}" python3 - <<'PY' || { echo "FATAL: No CUDA GPUs available (GPU_COUNT=$GPU_COUNT, USE_SRUN=$USE_SRUN). Aborting."; exit 2; }
+    python3 - <<'PY' || { echo "FATAL: No CUDA GPUs available (GPU_COUNT=$GPU_COUNT). Aborting."; exit 2; }
 import os
 import sys
 import torch
@@ -236,7 +232,7 @@ if [ "$WANDB" = "1" ]; then
     WANDB_ARGS="--wandb --wandb-project $WANDB_PROJECT --wandb-run-name $WANDB_RUN_NAME --wandb-tags $WANDB_TAGS"
 fi
 
-"${LAUNCHER[@]}" python3 experiments/avqa_composition/train_avqa_composition.py \
+python3 experiments/avqa_composition/train_avqa_composition.py \
     --dataset music_avqa \
     --train-manifest "$TRAIN_MANIFEST" \
     --val-manifest "$VAL_MANIFEST" \
