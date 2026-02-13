@@ -2907,13 +2907,6 @@ class SAFEModel(nn.Module):
                     # Cast to model dtype (InternViT expects bfloat16, not float32)
                     pv_dtype = next(self.base_vl.llm.parameters()).dtype
                     base_inputs["pixel_values"] = pixel_values.to(dtype=pv_dtype)
-                    if self.base_vl.model_type == "internvl":
-                        image_flags = self._build_internvl_image_flags(
-                            input_ids=input_ids,
-                            pixel_values=base_inputs["pixel_values"],
-                        )
-                        if image_flags is not None:
-                            base_inputs["image_flags"] = image_flags
 
                 # For InternVL without images, use language_model (Qwen3)
                 # to avoid issues with custom generate(). With images,
@@ -2922,6 +2915,10 @@ class SAFEModel(nn.Module):
                     gen_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
                 else:
                     gen_model = self.base_vl.llm
+                if self.base_vl.model_type == "internvl":
+                    # InternVL 3.5 generate() implementations route kwargs into the
+                    # language model generate path, which rejects image_flags.
+                    base_inputs.pop("image_flags", None)
                 return gen_model.generate(**base_inputs)
 
             # AUDIO PATH: Use custom embeddings and fusion (existing logic)
@@ -2952,12 +2949,6 @@ class SAFEModel(nn.Module):
                 if pixel_values is not None:
                     # Cast to model dtype (InternViT expects bfloat16, not float32)
                     base_inputs["pixel_values"] = pixel_values.to(dtype=base_dtype)
-                    image_flags = self._build_internvl_image_flags(
-                        input_ids=input_ids,
-                        pixel_values=base_inputs["pixel_values"],
-                    )
-                    if image_flags is not None:
-                        base_inputs["image_flags"] = image_flags
             else:
                 sanitized_ids = self.sanitize_input_ids_for_base(input_ids)
                 if sanitized_ids is not None:
@@ -3016,17 +3007,9 @@ class SAFEModel(nn.Module):
                 if pixel_values is not None:
                     base_inputs["pixel_values"] = pixel_values
 
-            if (
-                self.base_vl.model_type == "internvl"
-                and "pixel_values" in base_inputs
-                and "image_flags" not in base_inputs
-            ):
-                image_flags = self._build_internvl_image_flags(
-                    input_ids=base_inputs.get("input_ids", input_ids),
-                    pixel_values=base_inputs.get("pixel_values"),
-                )
-                if image_flags is not None:
-                    base_inputs["image_flags"] = image_flags
+            if self.base_vl.model_type == "internvl":
+                # Defensive: callers may inject image_flags through generation_kwargs.
+                base_inputs.pop("image_flags", None)
 
             has_any_modality_gen = (audio_tokens is not None) or (vision_tokens is not None)
             use_midlayer_hooks = (
