@@ -315,7 +315,10 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
     fusion_cfg["fusion_mode"] = "residual"
     fusion_cfg["injection_point"] = "pre_ffn"
     fusion_cfg.setdefault("use_bottleneck", True)
-    fusion_cfg.setdefault("bottleneck_dim", 256)
+    if getattr(args, "bottleneck_dim", None) is not None:
+        fusion_cfg["bottleneck_dim"] = args.bottleneck_dim
+    else:
+        fusion_cfg.setdefault("bottleneck_dim", 256)
     # Per-layer learned gating
     if getattr(args, "learned_gate", False):
         fusion_cfg["use_learned_gate"] = True
@@ -901,6 +904,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fusion-gate", type=float, default=0.2)
     p.add_argument("--gate-warmup-steps", type=int, default=0,
                    help="Linearly warm fusion gate from 0 to --fusion-gate over N optimizer steps")
+    p.add_argument("--bottleneck-dim", type=int, default=None,
+                   help="Override fusion bottleneck dimension (default: 256, try 410 for 8B to match 4B's 10%% ratio)")
 
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--num-epochs", type=int, default=10)
