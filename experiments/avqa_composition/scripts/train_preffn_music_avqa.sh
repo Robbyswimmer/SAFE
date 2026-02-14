@@ -39,6 +39,7 @@ WANDB_PROJECT=${WANDB_PROJECT:-SAFE-AVQA-Composition}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-music_avqa_preffn_${SLURM_JOB_ID:-local}}
 WANDB_TAGS=${WANDB_TAGS:-music_avqa,preffn}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
+BOTTLENECK_DIM=${BOTTLENECK_DIM:-}
 
 mkdir -p logs "$OUTPUT_DIR"
 
@@ -64,6 +65,11 @@ if [[ "$MAX_SAMPLES" != "0" ]]; then
   MAX_SAMPLES_ARGS+=(--max-samples "$MAX_SAMPLES")
 fi
 
+BOTTLENECK_ARGS=()
+if [[ -n "$BOTTLENECK_DIM" ]]; then
+  BOTTLENECK_ARGS+=(--bottleneck-dim "$BOTTLENECK_DIM")
+fi
+
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --model-config "$MODEL_CONFIG" \
@@ -85,4 +91,5 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   "${FP16_ARGS[@]}" \
   "${FUSION_ARGS[@]}" \
   "${MAX_SAMPLES_ARGS[@]}" \
+  "${BOTTLENECK_ARGS[@]}" \
   "${WANDB_ARGS[@]}"
