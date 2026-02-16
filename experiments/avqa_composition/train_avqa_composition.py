@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
@@ -478,6 +479,28 @@ def log_gradient_attribution(
     return grad_norms
 
 
+def _recover_loss_from_logits(outputs: Any, labels: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """
+    Recover CE loss when model-provided loss is detached but logits still carry grad.
+    """
+    if labels is None:
+        return None
+
+    logits = outputs.get("logits") if isinstance(outputs, dict) else getattr(outputs, "logits", None)
+    if logits is None or not torch.is_tensor(logits) or not logits.requires_grad:
+        return None
+
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+    flat_labels = shift_labels.view(-1)
+    valid = flat_labels != -100
+    if not valid.any():
+        return None
+
+    return F.cross_entropy(flat_logits[valid], flat_labels[valid])
+
+
 def train_epoch(
     model: SAFEModel,
     dataloader: DataLoader,
@@ -559,9 +582,28 @@ def train_epoch(
 
             # Skip batch if loss has no gradient (e.g., all audio failed to load)
             if loss is None or not loss.requires_grad:
-                if step == 0:
-                    print("  [warn] first batch loss has no grad — check audio/image loading", flush=True)
-                continue
+                recovered_loss = _recover_loss_from_logits(outputs, inputs.get("labels"))
+                if recovered_loss is not None and recovered_loss.requires_grad:
+                    if step == 0:
+                        print(
+                            "  [warn] first batch model loss detached; using CE(logits, labels) fallback",
+                            flush=True,
+                        )
+                    loss = recovered_loss
+                else:
+                    if step == 0:
+                        logits = outputs.get("logits") if isinstance(outputs, dict) else getattr(outputs, "logits", None)
+                        logits_req = bool(torch.is_tensor(logits) and logits.requires_grad)
+                        n_valid = -1
+                        lbl = inputs.get("labels")
+                        if torch.is_tensor(lbl):
+                            n_valid = int((lbl != -100).sum().item())
+                        print(
+                            f"  [warn] first batch loss has no grad — "
+                            f"logits_requires_grad={logits_req} valid_label_tokens={n_valid}",
+                            flush=True,
+                        )
+                    continue
 
             loss = loss / args.gradient_accumulation_steps
 

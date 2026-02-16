@@ -50,6 +50,7 @@ class BaseVLModel(nn.Module):
         self.vision_hidden_size = vision_hidden_size
         self.llm_hidden_size = llm_hidden_size
         self.num_vision_tokens = num_vision_tokens
+        self._input_require_grads_hook = None
 
         # Optional multi-GPU sharding controls (HF accelerate device_map path).
         # Env examples:
@@ -254,6 +255,7 @@ class BaseVLModel(nn.Module):
                         self.llm.config.use_cache = False
                     except Exception:
                         pass
+                    self._enable_input_require_grads("Qwen")
                     print(f"[BaseVL] Qwen gradient checkpointing enabled", flush=True)
                 except Exception as e:
                     print(f"[BaseVL] Warning: could not enable gradient checkpointing: {e}", flush=True)
@@ -394,6 +396,7 @@ class BaseVLModel(nn.Module):
                         self.llm.config.use_cache = False
                     except Exception:
                         pass
+                    self._enable_input_require_grads("InternVL")
                     print(f"[BaseVL] InternVL gradient checkpointing enabled", flush=True)
                 except Exception as e:
                     print(f"[BaseVL] Warning: could not enable gradient checkpointing: {e}", flush=True)
@@ -521,6 +524,45 @@ class BaseVLModel(nn.Module):
         except Exception:
             pass
         return s
+
+    def _enable_input_require_grads(self, model_label: str) -> None:
+        """
+        Ensure at least one forward input requires grad when gradient checkpointing is on.
+
+        This is required for frozen-backbone adapter training, especially when models are
+        called with input_ids (no inputs_embeds path), as in InternVL vision+text forward.
+        """
+        try:
+            if hasattr(self.llm, "enable_input_require_grads"):
+                self.llm.enable_input_require_grads()
+                print(f"[BaseVL] {model_label} input-require-grads enabled", flush=True)
+                return
+        except Exception as e:
+            print(
+                f"[BaseVL] Warning: {model_label} enable_input_require_grads() failed: {e}",
+                flush=True,
+            )
+
+        try:
+            emb = self.llm.get_input_embeddings()
+            if emb is None:
+                return
+
+            if self._input_require_grads_hook is None:
+                def _make_output_require_grad(_module, _inputs, output):
+                    if torch.is_tensor(output) and not output.requires_grad:
+                        output.requires_grad_(True)
+
+                self._input_require_grads_hook = emb.register_forward_hook(_make_output_require_grad)
+                print(
+                    f"[BaseVL] {model_label} input-require-grads hook registered",
+                    flush=True,
+                )
+        except Exception as e:
+            print(
+                f"[BaseVL] Warning: could not register {model_label} input-require-grads hook: {e}",
+                flush=True,
+            )
 
     @staticmethod
     def _parse_max_memory_spec(spec: str) -> Optional[Dict[Any, str]]:
