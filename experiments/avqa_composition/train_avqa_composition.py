@@ -507,6 +507,305 @@ def _recover_loss_from_logits(outputs: Any, labels: Optional[torch.Tensor]) -> O
     return F.cross_entropy(flat_logits[valid], flat_labels[valid])
 
 
+def _parse_layer_list(layer_csv: str) -> List[int]:
+    if not layer_csv:
+        return []
+    out: List[int] = []
+    for raw in layer_csv.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        out.append(int(raw))
+    return sorted(set(out))
+
+
+def _get_modality_fusion_layers(model: SAFEModel, modality: str) -> List[int]:
+    adapter = getattr(model, "fusion_adapter", None)
+    if adapter is None:
+        return []
+
+    layers: List[int] = []
+    mapping = getattr(adapter, "fusion_layers", None)
+    if isinstance(mapping, dict):
+        vals = mapping.get(modality, [])
+        if isinstance(vals, (list, tuple)):
+            layers = [int(v) for v in vals]
+
+    if not layers:
+        fallback = getattr(adapter, "fusion_layer_indices", None)
+        if isinstance(fallback, (list, tuple)):
+            layers = [int(v) for v in fallback]
+
+    return sorted(set(layers))
+
+
+def _pool_token_states(
+    hidden_states: torch.Tensor,
+    labels: Optional[torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
+) -> torch.Tensor:
+    # Prefer supervised target positions; fall back to attention mask.
+    if labels is not None and torch.is_tensor(labels):
+        token_mask = labels != -100
+    elif attention_mask is not None and torch.is_tensor(attention_mask):
+        token_mask = attention_mask > 0
+    else:
+        token_mask = torch.ones(
+            hidden_states.shape[:2], device=hidden_states.device, dtype=torch.bool
+        )
+
+    mask = token_mask.to(device=hidden_states.device, dtype=hidden_states.dtype)
+    denom = mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+    return (hidden_states * mask.unsqueeze(-1)).sum(dim=1) / denom
+
+
+def _extract_pooled_layer_states(
+    all_hidden_states: Any,
+    layer_indices: Sequence[int],
+    labels: Optional[torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
+) -> Dict[int, torch.Tensor]:
+    if not isinstance(all_hidden_states, (list, tuple)) or len(all_hidden_states) == 0:
+        return {}
+
+    pooled: Dict[int, torch.Tensor] = {}
+    n_states = len(all_hidden_states)
+    for layer_idx in layer_indices:
+        # HuggingFace convention: hidden_states[0] is embedding output,
+        # hidden_states[l+1] is output of decoder layer l.
+        candidates = [layer_idx + 1, layer_idx]
+        state = None
+        for idx in candidates:
+            if 0 <= idx < n_states and torch.is_tensor(all_hidden_states[idx]):
+                state = all_hidden_states[idx]
+                break
+        if state is None:
+            continue
+        pooled[layer_idx] = _pool_token_states(state, labels=labels, attention_mask=attention_mask)
+    return pooled
+
+
+def _fit_shift_basis(samples: torch.Tensor, rank: int) -> Optional[torch.Tensor]:
+    if samples.ndim != 2 or samples.size(0) < 2:
+        return None
+    centered = samples - samples.mean(dim=0, keepdim=True)
+    max_rank = min(int(rank), int(centered.size(0) - 1), int(centered.size(1)))
+    if max_rank <= 0:
+        return None
+
+    try:
+        # V: (d, q) principal directions in feature space
+        _, _, v = torch.pca_lowrank(centered, q=max_rank, center=False, niter=2)
+        basis = v[:, :max_rank].contiguous()
+    except Exception:
+        _, _, vh = torch.linalg.svd(centered, full_matrices=False)
+        basis = vh[:max_rank].transpose(0, 1).contiguous()
+
+    return F.normalize(basis, dim=0)
+
+
+@torch.no_grad()
+def collect_audio_shift_subspaces(
+    model: SAFEModel,
+    dataloader: DataLoader,
+    device: torch.device,
+    args: argparse.Namespace,
+    layer_indices: Sequence[int],
+    use_bf16_amp: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """
+    Collect Δh_{a->l} = pooled_hidden(audio_on) - pooled_hidden(audio_off)
+    at target layers and fit low-rank PCA bases per layer.
+    """
+    if not layer_indices:
+        return None
+
+    max_samples = int(getattr(args, "compat_reg_audio_samples", 0))
+    min_samples = int(getattr(args, "compat_reg_min_samples", 0))
+    rank = int(getattr(args, "compat_reg_rank", 0))
+    if max_samples <= 0 or rank <= 0:
+        return None
+
+    def _amp_context():
+        if args.fp16 and torch.cuda.is_available():
+            return autocast(enabled=True, dtype=torch.float16)
+        if use_bf16_amp and torch.cuda.is_available():
+            return autocast(enabled=True, dtype=torch.bfloat16)
+        return nullcontext()
+
+    was_training = model.training
+    model.eval()
+
+    started = time.time()
+    delta_rows: Dict[int, List[torch.Tensor]] = {int(l): [] for l in layer_indices}
+    collected = 0
+
+    for batch in dataloader:
+        mm = resolve_modality_batch(batch, "audio")
+        inputs = model.prepare_multimodal_inputs(
+            text=batch["questions"],
+            images=mm["images"],
+            audio=mm["audio"],
+            answers=batch["answers"],
+            device=str(device),
+            training_mode=True,
+        )
+        audio_tokens = inputs.pop("audio_tokens", None)
+        audio_mask = inputs.pop("audio_attention_mask", None)
+        if audio_tokens is None:
+            continue
+
+        labels = inputs.get("labels")
+        attn = inputs.get("attention_mask")
+
+        with _amp_context():
+            off_outputs = model(
+                input_ids=inputs["input_ids"],
+                attention_mask=attn,
+                labels=labels,
+                pixel_values=inputs.get("pixel_values"),
+                audio_tokens=audio_tokens,
+                audio_attention_mask=audio_mask,
+                gate=0.0,
+                output_hidden_states=True,
+            )
+            on_outputs = model(
+                input_ids=inputs["input_ids"],
+                attention_mask=attn,
+                labels=labels,
+                pixel_values=inputs.get("pixel_values"),
+                audio_tokens=audio_tokens,
+                audio_attention_mask=audio_mask,
+                gate=args.fusion_gate,
+                output_hidden_states=True,
+            )
+
+        off_hs = off_outputs.get("all_hidden_states") if isinstance(off_outputs, dict) else None
+        on_hs = on_outputs.get("all_hidden_states") if isinstance(on_outputs, dict) else None
+        if off_hs is None or on_hs is None:
+            continue
+
+        off_pooled = _extract_pooled_layer_states(off_hs, layer_indices, labels=labels, attention_mask=attn)
+        on_pooled = _extract_pooled_layer_states(on_hs, layer_indices, labels=labels, attention_mask=attn)
+        if not off_pooled or not on_pooled:
+            continue
+
+        for layer in layer_indices:
+            if layer not in off_pooled or layer not in on_pooled:
+                continue
+            delta = (on_pooled[layer] - off_pooled[layer]).detach().float().cpu()
+            if delta.numel() == 0:
+                continue
+            delta_rows[layer].append(delta)
+
+        collected += int(inputs["input_ids"].size(0))
+        if collected >= max_samples:
+            break
+
+    if was_training:
+        model.train()
+
+    basis_by_layer: Dict[int, torch.Tensor] = {}
+    stats_by_layer: Dict[int, Dict[str, float]] = {}
+
+    for layer in layer_indices:
+        rows = delta_rows.get(layer, [])
+        if not rows:
+            continue
+        mat = torch.cat(rows, dim=0)
+        if mat.size(0) > max_samples:
+            mat = mat[:max_samples]
+        if mat.size(0) < max(2, min_samples):
+            continue
+
+        basis = _fit_shift_basis(mat, rank=rank)
+        if basis is None:
+            continue
+
+        basis_by_layer[int(layer)] = basis
+        stats_by_layer[int(layer)] = {
+            "num_samples": float(mat.size(0)),
+            "rank": float(basis.size(1)),
+            "mean_shift_norm": float(mat.norm(dim=1).mean().item()),
+            "std_shift_norm": float(mat.norm(dim=1).std(unbiased=False).item()),
+        }
+
+    elapsed = time.time() - started
+    if not basis_by_layer:
+        print(
+            f"[compat] Failed to build audio shift bases (layers={list(layer_indices)}; "
+            f"collected={collected}; elapsed={elapsed/60.0:.1f}m)",
+            flush=True,
+        )
+        return None
+
+    print(
+        f"[compat] Collected audio shift subspaces on {len(basis_by_layer)}/{len(layer_indices)} layers "
+        f"(samples={collected}, elapsed={elapsed/60.0:.1f}m)",
+        flush=True,
+    )
+    for layer in sorted(basis_by_layer.keys()):
+        st = stats_by_layer[layer]
+        print(
+            f"[compat] layer={layer} rank={int(st['rank'])} n={int(st['num_samples'])} "
+            f"mean_shift_norm={st['mean_shift_norm']:.4f}",
+            flush=True,
+        )
+
+    return {
+        "layers": [int(l) for l in sorted(basis_by_layer.keys())],
+        "basis_by_layer": basis_by_layer,
+        "stats_by_layer": stats_by_layer,
+        "num_samples_collected": int(collected),
+    }
+
+
+def compute_vision_subspace_regularizer(
+    all_hidden_states: Any,
+    baseline_pooled: Dict[int, torch.Tensor],
+    labels: Optional[torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
+    basis_by_layer: Dict[int, torch.Tensor],
+    layers: Sequence[int],
+) -> tuple[Optional[torch.Tensor], Dict[int, float]]:
+    if not basis_by_layer:
+        return None, {}
+
+    current_pooled = _extract_pooled_layer_states(
+        all_hidden_states,
+        layer_indices=layers,
+        labels=labels,
+        attention_mask=attention_mask,
+    )
+    if not current_pooled:
+        return None, {}
+
+    reg_loss: Optional[torch.Tensor] = None
+    per_layer: Dict[int, float] = {}
+    for layer in layers:
+        if layer not in basis_by_layer:
+            continue
+        if layer not in current_pooled or layer not in baseline_pooled:
+            continue
+
+        cur = current_pooled[layer]
+        base = baseline_pooled[layer]
+        if base.device != cur.device:
+            base = base.to(cur.device)
+        delta = cur - base
+
+        basis = basis_by_layer[layer]
+        if basis.device != cur.device:
+            basis = basis.to(cur.device)
+
+        proj = delta.float().matmul(basis.float())  # (B, rank)
+        layer_loss = (proj.pow(2).sum(dim=1)).mean()
+        per_layer[int(layer)] = float(layer_loss.detach().item())
+        reg_loss = layer_loss if reg_loss is None else (reg_loss + layer_loss)
+
+    return reg_loss, per_layer
+
+
 def train_epoch(
     model: SAFEModel,
     dataloader: DataLoader,
@@ -518,14 +817,33 @@ def train_epoch(
     use_bf16_amp: bool = False,
     wandb_run: Any = None,
     global_step: int = 0,
+    compatibility_state: Optional[Dict[str, Any]] = None,
 ) -> tuple:
     model.train()
     total_loss = 0.0
+    total_compat_reg = 0.0
+    compat_reg_batches = 0
     total_batches = 0
     num_batches = len(dataloader)
     log_every = max(1, min(100, num_batches // 20))  # Log at least every 100 steps
     optimizer.zero_grad()
     trainable_for_clip = [p for p in model.parameters() if p.requires_grad]
+
+    compat_enabled = (
+        args.train_modality == "image"
+        and compatibility_state is not None
+        and bool(compatibility_state.get("basis_by_layer"))
+    )
+    compat_layers = compatibility_state.get("layers", []) if compat_enabled else []
+    compat_basis = compatibility_state.get("basis_by_layer", {}) if compat_enabled else {}
+    compat_warned_hidden = False
+
+    def _amp_context():
+        if args.fp16 and torch.cuda.is_available():
+            return autocast(enabled=True, dtype=torch.float16)
+        if use_bf16_amp and torch.cuda.is_available():
+            return autocast(enabled=True, dtype=torch.bfloat16)
+        return nullcontext()
 
     pending_accum_steps = 0
     for step, batch in enumerate(dataloader):
@@ -567,14 +885,29 @@ def train_epoch(
             progress = min(1.0, float(global_step + 1) / float(max(1, args.gate_warmup_steps)))
             gate_value = args.fusion_gate * progress
 
-        if args.fp16 and torch.cuda.is_available():
-            amp_ctx = autocast(enabled=True, dtype=torch.float16)
-        elif use_bf16_amp and torch.cuda.is_available():
-            amp_ctx = autocast(enabled=True, dtype=torch.bfloat16)
-        else:
-            amp_ctx = nullcontext()
+        baseline_pooled: Dict[int, torch.Tensor] = {}
+        if compat_enabled:
+            with torch.no_grad():
+                with _amp_context():
+                    baseline_outputs = model(
+                        input_ids=inputs["input_ids"],
+                        attention_mask=inputs.get("attention_mask"),
+                        labels=inputs.get("labels"),
+                        pixel_values=inputs.get("pixel_values"),
+                        audio_tokens=audio_tokens,
+                        audio_attention_mask=audio_mask,
+                        gate=0.0,
+                        output_hidden_states=True,
+                    )
+            baseline_hs = baseline_outputs.get("all_hidden_states") if isinstance(baseline_outputs, dict) else None
+            baseline_pooled = _extract_pooled_layer_states(
+                baseline_hs,
+                layer_indices=compat_layers,
+                labels=inputs.get("labels"),
+                attention_mask=inputs.get("attention_mask"),
+            )
 
-        with amp_ctx:
+        with _amp_context():
             outputs = model(
                 input_ids=inputs["input_ids"],
                 attention_mask=inputs.get("attention_mask"),
@@ -583,6 +916,7 @@ def train_epoch(
                 audio_tokens=audio_tokens,
                 audio_attention_mask=audio_mask,
                 gate=gate_value,
+                output_hidden_states=bool(compat_enabled),
             )
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
 
@@ -610,6 +944,28 @@ def train_epoch(
                             flush=True,
                         )
                     continue
+
+            if compat_enabled:
+                all_hs = outputs.get("all_hidden_states") if isinstance(outputs, dict) else None
+                compat_reg, _ = compute_vision_subspace_regularizer(
+                    all_hidden_states=all_hs,
+                    baseline_pooled=baseline_pooled,
+                    labels=inputs.get("labels"),
+                    attention_mask=inputs.get("attention_mask"),
+                    basis_by_layer=compat_basis,
+                    layers=compat_layers,
+                )
+                if compat_reg is not None:
+                    total_compat_reg += float(compat_reg.detach().item())
+                    compat_reg_batches += 1
+                    loss = loss + float(args.compat_reg_lambda) * compat_reg
+                elif step == 0 and not compat_warned_hidden:
+                    print(
+                        "  [compat] warning: hidden-state regularizer inactive on first batch "
+                        "(missing all_hidden_states at requested layers)",
+                        flush=True,
+                    )
+                    compat_warned_hidden = True
 
             loss = loss / args.gradient_accumulation_steps
 
@@ -639,9 +995,13 @@ def train_epoch(
         if (step + 1) % log_every == 0 or step == 0:
             avg_loss = total_loss / max(total_batches, 1)
             current_lr = optimizer.param_groups[0]["lr"]
+            compat_suffix = ""
+            if compat_reg_batches > 0:
+                compat_avg = total_compat_reg / float(max(1, compat_reg_batches))
+                compat_suffix = f" compat_reg={compat_avg:.4f}"
             print(
                 f"  [train] step {step + 1}/{num_batches} "
-                f"loss={avg_loss:.4f} lr={current_lr:.2e} gate={gate_value:.3f}",
+                f"loss={avg_loss:.4f} lr={current_lr:.2e} gate={gate_value:.3f}{compat_suffix}",
                 flush=True,
             )
 
@@ -1000,6 +1360,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--compose-vision-ckpt", type=Path, default=None,
                    help="Path to vision-only adapter checkpoint for composition eval")
 
+    # Sequential composition objective (Audio -> Vision, no joint AV pairs)
+    p.add_argument("--compat-reg-enable", action="store_true",
+                   help="Enable vision subspace compatibility regularizer using audio-induced shift bases")
+    p.add_argument("--compat-reg-lambda", type=float, default=0.05,
+                   help="Weight for compatibility regularizer added during vision phase")
+    p.add_argument("--compat-reg-rank", type=int, default=8,
+                   help="PCA rank for per-layer audio shift subspaces")
+    p.add_argument("--compat-reg-audio-samples", type=int, default=256,
+                   help="Number of audio-text samples used to fit shift subspaces per refresh")
+    p.add_argument("--compat-reg-min-samples", type=int, default=64,
+                   help="Minimum samples required to fit a layer subspace")
+    p.add_argument("--compat-reg-refresh-every", type=int, default=1,
+                   help="Recompute audio shift subspaces every N epochs")
+    p.add_argument("--compat-reg-layers", type=str, default="",
+                   help="Optional comma-separated layer indices for compatibility regularizer "
+                        "(default: vision fusion layers)")
+
     p.add_argument("--max-samples", type=int, default=0,
                    help="Limit train/val to N samples for quick sanity runs (0=unlimited)")
     p.add_argument("--eval-debug-samples", type=int, default=0,
@@ -1070,6 +1447,13 @@ def main() -> None:
                     "layer_additivity_probe": args.layer_additivity_probe,
                     "layer_probe_samples": args.layer_probe_samples,
                     "layer_probe_every": args.layer_probe_every,
+                    "compat_reg_enable": args.compat_reg_enable,
+                    "compat_reg_lambda": args.compat_reg_lambda,
+                    "compat_reg_rank": args.compat_reg_rank,
+                    "compat_reg_audio_samples": args.compat_reg_audio_samples,
+                    "compat_reg_min_samples": args.compat_reg_min_samples,
+                    "compat_reg_refresh_every": args.compat_reg_refresh_every,
+                    "compat_reg_layers": args.compat_reg_layers,
                 },
             )
 
@@ -1192,6 +1576,23 @@ def main() -> None:
         interleaved_eval_modalities = ["text", "audio", "image", "both"]
         global_step = 0
         best_composed_score = -1.0
+        compat_layers: List[int] = []
+        compatibility_state: Optional[Dict[str, Any]] = None
+
+        if args.compat_reg_enable:
+            compat_layers = _parse_layer_list(args.compat_reg_layers)
+            if not compat_layers:
+                compat_layers = _get_modality_fusion_layers(model, "vision")
+            if not compat_layers:
+                print("[compat] No vision fusion layers found; disabling compatibility regularizer.", flush=True)
+                args.compat_reg_enable = False
+            else:
+                print(
+                    f"[compat] enabled lambda={args.compat_reg_lambda} rank={args.compat_reg_rank} "
+                    f"audio_samples={args.compat_reg_audio_samples} refresh_every={args.compat_reg_refresh_every} "
+                    f"layers={compat_layers}",
+                    flush=True,
+                )
 
         # Epoch 0: text-only baseline before any adapter training
         print("\n[epoch 0/{}] (text-only baseline)".format(args.num_epochs))
@@ -1243,6 +1644,21 @@ def main() -> None:
             )
             print(f"  [phase:audio] loss={audio_loss:.4f}")
 
+            if args.compat_reg_enable:
+                refresh_every = max(1, int(args.compat_reg_refresh_every))
+                refresh_now = compatibility_state is None or (epoch % refresh_every == 0)
+                if refresh_now:
+                    compatibility_state = collect_audio_shift_subspaces(
+                        model=model,
+                        dataloader=train_loader,
+                        device=device,
+                        args=args,
+                        layer_indices=compat_layers,
+                        use_bf16_amp=use_bf16_amp,
+                    )
+                if compatibility_state is None:
+                    print("[compat] Warning: subspace stats unavailable; vision phase will run without compatibility regularizer.", flush=True)
+
             # Phase B: Vision training pass
             print(f"  [phase:vision] training vision adapters...")
             args_vision = argparse.Namespace(**vars(args))
@@ -1251,6 +1667,7 @@ def main() -> None:
                 model, train_loader, optimizer, scheduler, scaler, device, args_vision,
                 use_bf16_amp=use_bf16_amp,
                 wandb_run=wandb_run, global_step=global_step,
+                compatibility_state=compatibility_state,
             )
             print(f"  [phase:vision] loss={vision_loss:.4f}")
 
@@ -1261,6 +1678,13 @@ def main() -> None:
                 "vision_train_loss": float(vision_loss),
                 "eval": {},
             }
+            if args.compat_reg_enable and compatibility_state is not None:
+                epoch_result["compat_reg"] = {
+                    "lambda": float(args.compat_reg_lambda),
+                    "layers": list(compatibility_state.get("layers", [])),
+                    "stats_by_layer": compatibility_state.get("stats_by_layer", {}),
+                    "num_samples_collected": int(compatibility_state.get("num_samples_collected", 0)),
+                }
             for modality in interleaved_eval_modalities:
                 metrics = evaluate(model, val_loader, tokenizer, device, modality, args)
                 epoch_result["eval"][modality] = metrics
@@ -1300,6 +1724,12 @@ def main() -> None:
                     "composition/gain_vs_best_single": composition_gain,
                     "composition/gain_vs_text": gain_over_text,
                 }
+                if args.compat_reg_enable and compatibility_state is not None:
+                    log_payload["compat/lambda"] = float(args.compat_reg_lambda)
+                    log_payload["compat/num_layers"] = float(len(compatibility_state.get("layers", [])))
+                    log_payload["compat/num_samples_collected"] = float(
+                        compatibility_state.get("num_samples_collected", 0)
+                    )
                 for modality, metrics in epoch_result["eval"].items():
                     log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
                     log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]

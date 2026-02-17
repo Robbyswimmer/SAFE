@@ -41,6 +41,8 @@ LR=${LR:-5e-5}
 NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-8}
 TRAIN_MODALITY=interleaved
 EVAL_MODALITIES=${EVAL_MODALITIES:-text,audio,image,both}
+FUSION_GATE=${FUSION_GATE:-0.2}
+SEED=${SEED:-42}
 WANDB=${WANDB:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-SAFE-Composition}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-composition_interleaved_${SLURM_JOB_ID:-local}}
@@ -51,6 +53,15 @@ MAX_ANSWER_TOKENS=${MAX_ANSWER_TOKENS:-16}
 LAYER_ADDITIVITY_PROBE=${LAYER_ADDITIVITY_PROBE:-1}
 LAYER_PROBE_SAMPLES=${LAYER_PROBE_SAMPLES:-256}
 LAYER_PROBE_EVERY=${LAYER_PROBE_EVERY:-1}
+
+# Optional sequential composition objective (audio->vision compatibility regularizer)
+COMPAT_REG_ENABLE=${COMPAT_REG_ENABLE:-0}
+COMPAT_REG_LAMBDA=${COMPAT_REG_LAMBDA:-0.05}
+COMPAT_REG_RANK=${COMPAT_REG_RANK:-8}
+COMPAT_REG_AUDIO_SAMPLES=${COMPAT_REG_AUDIO_SAMPLES:-256}
+COMPAT_REG_MIN_SAMPLES=${COMPAT_REG_MIN_SAMPLES:-64}
+COMPAT_REG_REFRESH_EVERY=${COMPAT_REG_REFRESH_EVERY:-1}
+COMPAT_REG_LAYERS=${COMPAT_REG_LAYERS:-}
 
 # Qwen-specific env vars
 export SAFE_QWEN_QUANT=none
@@ -123,6 +134,21 @@ if [[ "$LAYER_ADDITIVITY_PROBE" == "1" ]]; then
   LAYER_PROBE_ARGS+=(--layer-additivity-probe --layer-probe-samples "$LAYER_PROBE_SAMPLES" --layer-probe-every "$LAYER_PROBE_EVERY")
 fi
 
+COMPAT_REG_ARGS=()
+if [[ "$COMPAT_REG_ENABLE" == "1" ]]; then
+  COMPAT_REG_ARGS+=(
+    --compat-reg-enable
+    --compat-reg-lambda "$COMPAT_REG_LAMBDA"
+    --compat-reg-rank "$COMPAT_REG_RANK"
+    --compat-reg-audio-samples "$COMPAT_REG_AUDIO_SAMPLES"
+    --compat-reg-min-samples "$COMPAT_REG_MIN_SAMPLES"
+    --compat-reg-refresh-every "$COMPAT_REG_REFRESH_EVERY"
+  )
+  if [[ -n "$COMPAT_REG_LAYERS" ]]; then
+    COMPAT_REG_ARGS+=(--compat-reg-layers "$COMPAT_REG_LAYERS")
+  fi
+fi
+
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --model-config "$MODEL_CONFIG" \
@@ -134,6 +160,8 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --num-epochs "$EPOCHS" \
   --learning-rate "$LR" \
   --num-audio-tokens "$NUM_AUDIO_TOKENS" \
+  --fusion-gate "$FUSION_GATE" \
+  --seed "$SEED" \
   --train-modality "$TRAIN_MODALITY" \
   --eval-modalities "$EVAL_MODALITIES" \
   --max-answer-tokens "$MAX_ANSWER_TOKENS" \
@@ -141,4 +169,5 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   "${MAX_SAMPLES_ARGS[@]}" \
   "${EVAL_DEBUG_ARGS[@]}" \
   "${LAYER_PROBE_ARGS[@]}" \
+  "${COMPAT_REG_ARGS[@]}" \
   "${WANDB_ARGS[@]}"
