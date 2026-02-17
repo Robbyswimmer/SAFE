@@ -62,6 +62,15 @@ COMPAT_REG_AUDIO_SAMPLES=${COMPAT_REG_AUDIO_SAMPLES:-256}
 COMPAT_REG_MIN_SAMPLES=${COMPAT_REG_MIN_SAMPLES:-64}
 COMPAT_REG_REFRESH_EVERY=${COMPAT_REG_REFRESH_EVERY:-1}
 COMPAT_REG_LAYERS=${COMPAT_REG_LAYERS:-}
+COMPAT_REG_WEIGHT_BY_SHIFT_NORM=${COMPAT_REG_WEIGHT_BY_SHIFT_NORM:-1}
+
+# Optional additivity-positive objective (unpaired AV regularizer)
+COMPAT_ADD_REG_ENABLE=${COMPAT_ADD_REG_ENABLE:-0}
+COMPAT_ADD_REG_LAMBDA=${COMPAT_ADD_REG_LAMBDA:-0.01}
+COMPAT_ADD_REG_EVERY=${COMPAT_ADD_REG_EVERY:-200}
+COMPAT_ADD_REG_LAYERS=${COMPAT_ADD_REG_LAYERS:-}
+COMPAT_ADD_REG_NORMALIZE=${COMPAT_ADD_REG_NORMALIZE:-1}
+COMPAT_ADD_BANK_SIZE=${COMPAT_ADD_BANK_SIZE:-64}
 
 # Qwen-specific env vars
 export SAFE_QWEN_QUANT=none
@@ -144,8 +153,31 @@ if [[ "$COMPAT_REG_ENABLE" == "1" ]]; then
     --compat-reg-min-samples "$COMPAT_REG_MIN_SAMPLES"
     --compat-reg-refresh-every "$COMPAT_REG_REFRESH_EVERY"
   )
+  if [[ "$COMPAT_REG_WEIGHT_BY_SHIFT_NORM" == "1" ]]; then
+    COMPAT_REG_ARGS+=(--compat-reg-weight-by-shift-norm)
+  else
+    COMPAT_REG_ARGS+=(--no-compat-reg-weight-by-shift-norm)
+  fi
   if [[ -n "$COMPAT_REG_LAYERS" ]]; then
     COMPAT_REG_ARGS+=(--compat-reg-layers "$COMPAT_REG_LAYERS")
+  fi
+fi
+
+COMPAT_ADD_ARGS=()
+if [[ "$COMPAT_ADD_REG_ENABLE" == "1" ]]; then
+  COMPAT_ADD_ARGS+=(
+    --compat-add-reg-enable
+    --compat-add-reg-lambda "$COMPAT_ADD_REG_LAMBDA"
+    --compat-add-reg-every "$COMPAT_ADD_REG_EVERY"
+    --compat-add-bank-size "$COMPAT_ADD_BANK_SIZE"
+  )
+  if [[ "$COMPAT_ADD_REG_NORMALIZE" == "1" ]]; then
+    COMPAT_ADD_ARGS+=(--compat-add-reg-normalize)
+  else
+    COMPAT_ADD_ARGS+=(--no-compat-add-reg-normalize)
+  fi
+  if [[ -n "$COMPAT_ADD_REG_LAYERS" ]]; then
+    COMPAT_ADD_ARGS+=(--compat-add-reg-layers "$COMPAT_ADD_REG_LAYERS")
   fi
 fi
 
@@ -170,4 +202,5 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   "${EVAL_DEBUG_ARGS[@]}" \
   "${LAYER_PROBE_ARGS[@]}" \
   "${COMPAT_REG_ARGS[@]}" \
+  "${COMPAT_ADD_ARGS[@]}" \
   "${WANDB_ARGS[@]}"

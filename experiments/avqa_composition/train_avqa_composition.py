@@ -604,6 +604,31 @@ def _fit_shift_basis(samples: torch.Tensor, rank: int) -> Optional[torch.Tensor]
     return F.normalize(basis, dim=0)
 
 
+def _compute_layer_weights_from_stats(
+    stats_by_layer: Dict[int, Dict[str, float]],
+    normalize: bool = True,
+    eps: float = 1e-6,
+) -> Dict[int, float]:
+    """
+    Inverse-energy weighting so large-shift late layers do not dominate the regularizer.
+    """
+    weights: Dict[int, float] = {}
+    for layer, st in stats_by_layer.items():
+        mean_norm = float(st.get("mean_shift_norm", 0.0))
+        weights[int(layer)] = 1.0 / (mean_norm * mean_norm + eps)
+
+    if not weights:
+        return weights
+
+    if normalize:
+        avg = sum(weights.values()) / float(max(1, len(weights)))
+        if avg > 0:
+            for layer in list(weights.keys()):
+                weights[layer] = weights[layer] / avg
+
+    return weights
+
+
 @torch.no_grad()
 def collect_audio_shift_subspaces(
     model: SAFEModel,
@@ -638,6 +663,10 @@ def collect_audio_shift_subspaces(
 
     started = time.time()
     delta_rows: Dict[int, List[torch.Tensor]] = {int(l): [] for l in layer_indices}
+    token_bank: List[torch.Tensor] = []
+    mask_bank: List[Optional[torch.Tensor]] = []
+    bank_size = int(getattr(args, "compat_add_bank_size", 64))
+    add_bank_enabled = bool(getattr(args, "compat_add_reg_enable", False)) and bank_size > 0
     collected = 0
 
     for batch in dataloader:
@@ -654,6 +683,18 @@ def collect_audio_shift_subspaces(
         audio_mask = inputs.pop("audio_attention_mask", None)
         if audio_tokens is None:
             continue
+
+        if add_bank_enabled and len(token_bank) < bank_size:
+            tok_cpu = audio_tokens.detach().to(device="cpu")
+            mask_cpu = audio_mask.detach().to(device="cpu") if torch.is_tensor(audio_mask) else None
+            for i in range(tok_cpu.size(0)):
+                token_bank.append(tok_cpu[i:i + 1].clone())
+                if mask_cpu is not None:
+                    mask_bank.append(mask_cpu[i:i + 1].clone())
+                else:
+                    mask_bank.append(None)
+                if len(token_bank) >= bank_size:
+                    break
 
         labels = inputs.get("labels")
         attn = inputs.get("attention_mask")
@@ -739,6 +780,11 @@ def collect_audio_shift_subspaces(
         )
         return None
 
+    layer_weights = _compute_layer_weights_from_stats(
+        stats_by_layer,
+        normalize=bool(getattr(args, "compat_reg_weight_by_shift_norm", True)),
+    )
+
     print(
         f"[compat] Collected audio shift subspaces on {len(basis_by_layer)}/{len(layer_indices)} layers "
         f"(samples={collected}, elapsed={elapsed/60.0:.1f}m)",
@@ -748,14 +794,20 @@ def collect_audio_shift_subspaces(
         st = stats_by_layer[layer]
         print(
             f"[compat] layer={layer} rank={int(st['rank'])} n={int(st['num_samples'])} "
-            f"mean_shift_norm={st['mean_shift_norm']:.4f}",
+            f"mean_shift_norm={st['mean_shift_norm']:.4f} "
+            f"weight={layer_weights.get(layer, 1.0):.4f}",
             flush=True,
         )
+    if add_bank_enabled:
+        print(f"[compat] additivity audio token bank size={len(token_bank)}", flush=True)
 
     return {
         "layers": [int(l) for l in sorted(basis_by_layer.keys())],
         "basis_by_layer": basis_by_layer,
         "stats_by_layer": stats_by_layer,
+        "layer_weights": layer_weights,
+        "audio_token_bank": token_bank,
+        "audio_mask_bank": mask_bank,
         "num_samples_collected": int(collected),
     }
 
@@ -767,6 +819,7 @@ def compute_vision_subspace_regularizer(
     attention_mask: Optional[torch.Tensor],
     basis_by_layer: Dict[int, torch.Tensor],
     layers: Sequence[int],
+    layer_weights: Optional[Dict[int, float]] = None,
 ) -> tuple[Optional[torch.Tensor], Dict[int, float]]:
     if not basis_by_layer:
         return None, {}
@@ -800,8 +853,141 @@ def compute_vision_subspace_regularizer(
 
         proj = delta.float().matmul(basis.float())  # (B, rank)
         layer_loss = (proj.pow(2).sum(dim=1)).mean()
-        per_layer[int(layer)] = float(layer_loss.detach().item())
-        reg_loss = layer_loss if reg_loss is None else (reg_loss + layer_loss)
+        weight = 1.0
+        if layer_weights is not None:
+            weight = float(layer_weights.get(int(layer), 1.0))
+        weighted = layer_loss * weight
+        per_layer[int(layer)] = float(weighted.detach().item())
+        reg_loss = weighted if reg_loss is None else (reg_loss + weighted)
+
+    return reg_loss, per_layer
+
+
+def _sample_audio_bank_entry(
+    compatibility_state: Dict[str, Any],
+) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    token_bank = compatibility_state.get("audio_token_bank", [])
+    mask_bank = compatibility_state.get("audio_mask_bank", [])
+    if not token_bank:
+        return None, None
+    idx = random.randrange(len(token_bank))
+    tok = token_bank[idx]
+    msk = mask_bank[idx] if idx < len(mask_bank) else None
+    return tok, msk
+
+
+def compute_unpaired_additivity_regularizer(
+    model: SAFEModel,
+    inputs: Dict[str, Any],
+    compatibility_state: Dict[str, Any],
+    gate_value: float,
+    add_layers: Sequence[int],
+    layer_weights: Optional[Dict[int, float]] = None,
+    normalize: bool = True,
+) -> tuple[Optional[torch.Tensor], Dict[int, float]]:
+    """
+    Unpaired additivity loss (no joint AV supervision):
+      ||Δ_av - Δ_a - Δ_v||^2 at selected layers.
+    Audio is sampled from the compatibility token bank.
+    """
+    if not add_layers:
+        return None, {}
+    pixel_values = inputs.get("pixel_values")
+    if pixel_values is None:
+        return None, {}
+
+    sampled_audio, sampled_mask = _sample_audio_bank_entry(compatibility_state)
+    if sampled_audio is None:
+        return None, {}
+
+    input_ids = inputs["input_ids"]
+    attention_mask = inputs.get("attention_mask")
+    labels = inputs.get("labels")
+
+    # Text-only and audio-only terms are constants for this regularizer.
+    with torch.no_grad():
+        out_text = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            pixel_values=None,
+            audio_tokens=None,
+            audio_attention_mask=None,
+            gate=0.0,
+            output_hidden_states=True,
+        )
+        out_audio = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            pixel_values=None,
+            audio_tokens=sampled_audio.to(device=input_ids.device),
+            audio_attention_mask=(
+                sampled_mask.to(device=input_ids.device) if torch.is_tensor(sampled_mask) else None
+            ),
+            gate=gate_value,
+            output_hidden_states=True,
+        )
+
+    # Vision-only and both carry gradients to vision adapters.
+    out_vision = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        labels=labels,
+        pixel_values=pixel_values,
+        audio_tokens=None,
+        audio_attention_mask=None,
+        gate=gate_value,
+        output_hidden_states=True,
+    )
+    out_both = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        labels=labels,
+        pixel_values=pixel_values,
+        audio_tokens=sampled_audio.to(device=input_ids.device),
+        audio_attention_mask=(
+            sampled_mask.to(device=input_ids.device) if torch.is_tensor(sampled_mask) else None
+        ),
+        gate=gate_value,
+        output_hidden_states=True,
+    )
+
+    hs_text = out_text.get("all_hidden_states") if isinstance(out_text, dict) else None
+    hs_audio = out_audio.get("all_hidden_states") if isinstance(out_audio, dict) else None
+    hs_vision = out_vision.get("all_hidden_states") if isinstance(out_vision, dict) else None
+    hs_both = out_both.get("all_hidden_states") if isinstance(out_both, dict) else None
+    if any(x is None for x in (hs_text, hs_audio, hs_vision, hs_both)):
+        return None, {}
+
+    pooled_t = _extract_pooled_layer_states(hs_text, add_layers, labels=labels, attention_mask=attention_mask)
+    pooled_a = _extract_pooled_layer_states(hs_audio, add_layers, labels=labels, attention_mask=attention_mask)
+    pooled_v = _extract_pooled_layer_states(hs_vision, add_layers, labels=labels, attention_mask=attention_mask)
+    pooled_av = _extract_pooled_layer_states(hs_both, add_layers, labels=labels, attention_mask=attention_mask)
+
+    reg_loss: Optional[torch.Tensor] = None
+    per_layer: Dict[int, float] = {}
+    for layer in add_layers:
+        if layer not in pooled_t or layer not in pooled_a or layer not in pooled_v or layer not in pooled_av:
+            continue
+
+        dt = pooled_t[layer]
+        da = (pooled_a[layer] - dt).detach()
+        dv = pooled_v[layer] - dt
+        dav = pooled_av[layer] - dt
+        residual = dav - da - dv
+
+        layer_loss = residual.pow(2).mean()
+        if normalize:
+            denom = da.pow(2).mean().detach() + dv.pow(2).mean().detach() + 1e-6
+            layer_loss = layer_loss / denom
+
+        weight = 1.0
+        if layer_weights is not None:
+            weight = float(layer_weights.get(int(layer), 1.0))
+        weighted = layer_loss * weight
+        per_layer[int(layer)] = float(weighted.detach().item())
+        reg_loss = weighted if reg_loss is None else (reg_loss + weighted)
 
     return reg_loss, per_layer
 
@@ -823,6 +1009,8 @@ def train_epoch(
     total_loss = 0.0
     total_compat_reg = 0.0
     compat_reg_batches = 0
+    total_add_reg = 0.0
+    add_reg_batches = 0
     total_batches = 0
     num_batches = len(dataloader)
     log_every = max(1, min(100, num_batches // 20))  # Log at least every 100 steps
@@ -836,7 +1024,20 @@ def train_epoch(
     )
     compat_layers = compatibility_state.get("layers", []) if compat_enabled else []
     compat_basis = compatibility_state.get("basis_by_layer", {}) if compat_enabled else {}
+    compat_layer_weights = compatibility_state.get("layer_weights", {}) if compat_enabled else {}
     compat_warned_hidden = False
+    add_reg_enabled = bool(
+        compat_enabled
+        and getattr(args, "compat_add_reg_enable", False)
+        and compatibility_state.get("audio_token_bank")
+    )
+    add_layers = _parse_layer_list(getattr(args, "compat_add_reg_layers", "")) if add_reg_enabled else []
+    if add_reg_enabled and not add_layers:
+        add_layers = list(compat_layers)
+    add_every = max(1, int(getattr(args, "compat_add_reg_every", 200)))
+    add_lambda = float(getattr(args, "compat_add_reg_lambda", 0.0))
+    add_norm = bool(getattr(args, "compat_add_reg_normalize", True))
+    add_warned = False
 
     def _amp_context():
         if args.fp16 and torch.cuda.is_available():
@@ -954,6 +1155,7 @@ def train_epoch(
                     attention_mask=inputs.get("attention_mask"),
                     basis_by_layer=compat_basis,
                     layers=compat_layers,
+                    layer_weights=compat_layer_weights,
                 )
                 if compat_reg is not None:
                     total_compat_reg += float(compat_reg.detach().item())
@@ -966,6 +1168,29 @@ def train_epoch(
                         flush=True,
                     )
                     compat_warned_hidden = True
+
+                # Optional additivity-positive objective on sparse steps
+                if add_reg_enabled and add_lambda > 0.0 and (step % add_every == 0):
+                    add_reg, _ = compute_unpaired_additivity_regularizer(
+                        model=model,
+                        inputs=inputs,
+                        compatibility_state=compatibility_state,
+                        gate_value=gate_value,
+                        add_layers=add_layers,
+                        layer_weights=compat_layer_weights,
+                        normalize=add_norm,
+                    )
+                    if add_reg is not None:
+                        total_add_reg += float(add_reg.detach().item())
+                        add_reg_batches += 1
+                        loss = loss + add_lambda * add_reg
+                    elif not add_warned:
+                        print(
+                            "  [compat] warning: additivity regularizer inactive "
+                            "(missing hidden states or audio token bank)",
+                            flush=True,
+                        )
+                        add_warned = True
 
             loss = loss / args.gradient_accumulation_steps
 
@@ -999,6 +1224,9 @@ def train_epoch(
             if compat_reg_batches > 0:
                 compat_avg = total_compat_reg / float(max(1, compat_reg_batches))
                 compat_suffix = f" compat_reg={compat_avg:.4f}"
+            if add_reg_batches > 0:
+                add_avg = total_add_reg / float(max(1, add_reg_batches))
+                compat_suffix += f" add_reg={add_avg:.4f}"
             print(
                 f"  [train] step {step + 1}/{num_batches} "
                 f"loss={avg_loss:.4f} lr={current_lr:.2e} gate={gate_value:.3f}{compat_suffix}",
@@ -1376,6 +1604,33 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--compat-reg-layers", type=str, default="",
                    help="Optional comma-separated layer indices for compatibility regularizer "
                         "(default: vision fusion layers)")
+    p.add_argument("--compat-reg-weight-by-shift-norm", action="store_true",
+                   help="Use inverse shift-energy layer weighting for compat/additivity losses")
+    p.add_argument("--no-compat-reg-weight-by-shift-norm", dest="compat_reg_weight_by_shift_norm",
+                   action="store_false",
+                   help="Disable inverse shift-energy weighting")
+
+    # Additivity-positive objective (unpaired AV; no joint labels required)
+    p.add_argument("--compat-add-reg-enable", action="store_true",
+                   help="Enable unpaired additivity regularizer ||Δ_av - Δ_a - Δ_v||^2 on sparse steps")
+    p.add_argument("--compat-add-reg-lambda", type=float, default=0.01,
+                   help="Weight for unpaired additivity regularizer")
+    p.add_argument("--compat-add-reg-every", type=int, default=200,
+                   help="Compute additivity regularizer every N vision steps")
+    p.add_argument("--compat-add-reg-layers", type=str, default="",
+                   help="Optional comma-separated layers for additivity regularizer "
+                        "(default: compatibility layers)")
+    p.add_argument("--compat-add-reg-normalize", action="store_true",
+                   help="Normalize additivity residual loss by shift energy")
+    p.add_argument("--no-compat-add-reg-normalize", dest="compat_add_reg_normalize",
+                   action="store_false",
+                   help="Disable additivity loss normalization")
+    p.add_argument("--compat-add-bank-size", type=int, default=64,
+                   help="Max number of audio token samples to cache for unpaired additivity regularizer")
+    p.set_defaults(
+        compat_reg_weight_by_shift_norm=True,
+        compat_add_reg_normalize=True,
+    )
 
     p.add_argument("--max-samples", type=int, default=0,
                    help="Limit train/val to N samples for quick sanity runs (0=unlimited)")
@@ -1454,6 +1709,13 @@ def main() -> None:
                     "compat_reg_min_samples": args.compat_reg_min_samples,
                     "compat_reg_refresh_every": args.compat_reg_refresh_every,
                     "compat_reg_layers": args.compat_reg_layers,
+                    "compat_reg_weight_by_shift_norm": args.compat_reg_weight_by_shift_norm,
+                    "compat_add_reg_enable": args.compat_add_reg_enable,
+                    "compat_add_reg_lambda": args.compat_add_reg_lambda,
+                    "compat_add_reg_every": args.compat_add_reg_every,
+                    "compat_add_reg_layers": args.compat_add_reg_layers,
+                    "compat_add_reg_normalize": args.compat_add_reg_normalize,
+                    "compat_add_bank_size": args.compat_add_bank_size,
                 },
             )
 
@@ -1590,9 +1852,16 @@ def main() -> None:
                 print(
                     f"[compat] enabled lambda={args.compat_reg_lambda} rank={args.compat_reg_rank} "
                     f"audio_samples={args.compat_reg_audio_samples} refresh_every={args.compat_reg_refresh_every} "
-                    f"layers={compat_layers}",
+                    f"layers={compat_layers} weight_by_shift_norm={args.compat_reg_weight_by_shift_norm}",
                     flush=True,
                 )
+                if args.compat_add_reg_enable:
+                    print(
+                        f"[compat] additivity objective enabled lambda={args.compat_add_reg_lambda} "
+                        f"every={args.compat_add_reg_every} layers={args.compat_add_reg_layers or compat_layers} "
+                        f"normalize={args.compat_add_reg_normalize}",
+                        flush=True,
+                    )
 
         # Epoch 0: text-only baseline before any adapter training
         print("\n[epoch 0/{}] (text-only baseline)".format(args.num_epochs))
@@ -1683,7 +1952,16 @@ def main() -> None:
                     "lambda": float(args.compat_reg_lambda),
                     "layers": list(compatibility_state.get("layers", [])),
                     "stats_by_layer": compatibility_state.get("stats_by_layer", {}),
+                    "layer_weights": compatibility_state.get("layer_weights", {}),
                     "num_samples_collected": int(compatibility_state.get("num_samples_collected", 0)),
+                    "additivity": {
+                        "enabled": bool(args.compat_add_reg_enable),
+                        "lambda": float(args.compat_add_reg_lambda),
+                        "every": int(args.compat_add_reg_every),
+                        "layers": _parse_layer_list(args.compat_add_reg_layers)
+                        if args.compat_add_reg_layers
+                        else list(compatibility_state.get("layers", [])),
+                    },
                 }
             for modality in interleaved_eval_modalities:
                 metrics = evaluate(model, val_loader, tokenizer, device, modality, args)
@@ -1730,6 +2008,10 @@ def main() -> None:
                     log_payload["compat/num_samples_collected"] = float(
                         compatibility_state.get("num_samples_collected", 0)
                     )
+                    log_payload["compat/add_enabled"] = float(bool(args.compat_add_reg_enable))
+                    if args.compat_add_reg_enable:
+                        log_payload["compat/add_lambda"] = float(args.compat_add_reg_lambda)
+                        log_payload["compat/add_every"] = float(args.compat_add_reg_every)
                 for modality, metrics in epoch_result["eval"].items():
                     log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
                     log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
