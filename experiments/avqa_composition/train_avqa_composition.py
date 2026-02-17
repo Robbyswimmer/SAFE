@@ -905,14 +905,20 @@ def compute_unpaired_additivity_regularizer(
     labels = inputs.get("labels")
 
     # Text-only and audio-only terms are constants for this regularizer.
+    # IMPORTANT: avoid the pure passthrough branch (no modalities), because some
+    # model paths only return `hidden_states` there and omit `all_hidden_states`.
+    # We keep audio tokens present and set gate=0.0 to force hook-capable path
+    # while remaining semantically text-only.
     with torch.no_grad():
         out_text = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
             pixel_values=None,
-            audio_tokens=None,
-            audio_attention_mask=None,
+            audio_tokens=sampled_audio.to(device=input_ids.device),
+            audio_attention_mask=(
+                sampled_mask.to(device=input_ids.device) if torch.is_tensor(sampled_mask) else None
+            ),
             gate=0.0,
             output_hidden_states=True,
         )
