@@ -307,20 +307,24 @@ class LayerHookManager:
             return None
 
         # Seed with typical top-level containers.
+        # IMPORTANT: prioritize language-model paths before generic `.model` to
+        # avoid accidentally hooking a vision tower in multi-backbone wrappers.
+        model_attr = getattr(model, "model", None)
         seeds: List[Any] = [
-            model,
-            getattr(model, "model", None),
             getattr(model, "language_model", None),
+            getattr(model_attr, "language_model", None),
             getattr(model, "decoder", None),
             getattr(model, "transformer", None),
+            model_attr,
+            model,
         ]
 
         seen: set = set()
         queue: List[Any] = [s for s in seeds if s is not None]
         max_visits = 50  # bounded to avoid pathological graphs
 
-        # Walk down common wrapper attributes.
-        expand_attrs = ("model", "language_model", "decoder", "transformer")
+        # Walk down common wrapper attributes (language_model first for InternVL/Qwen wrappers).
+        expand_attrs = ("language_model", "model", "decoder", "transformer")
 
         visits = 0
         while queue and visits < max_visits:
@@ -333,6 +337,19 @@ class LayerHookManager:
 
             extracted = _try_extract(candidate)
             if extracted is not None:
+                try:
+                    first_layer = extracted.get(0)
+                    first_layer_name = type(first_layer).__name__ if first_layer is not None else "None"
+                    owner_name = type(candidate).__name__
+                    if not getattr(self, "_printed_layer_source", False):
+                        print(
+                            f"[LayerHookManager] Using layers from {owner_name}; "
+                            f"layer0={first_layer_name}; n_layers={len(extracted)}",
+                            flush=True,
+                        )
+                        self._printed_layer_source = True
+                except Exception:
+                    pass
                 return extracted
 
             for attr in expand_attrs:

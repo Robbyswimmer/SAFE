@@ -456,7 +456,7 @@ def log_gradient_attribution(
         parts = []
         for key in sorted(grad_norms.keys()):
             g = grad_norms[key]
-            entry = f"{key}={g:.4f}"
+            entry = f"{key}={g:.3e}"
             if key in gate_values:
                 entry += f"(gate={gate_values[key]:.3f})"
             parts.append(entry)
