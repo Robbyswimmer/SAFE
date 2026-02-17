@@ -72,6 +72,20 @@ COMPAT_ADD_REG_LAYERS=${COMPAT_ADD_REG_LAYERS:-}
 COMPAT_ADD_REG_NORMALIZE=${COMPAT_ADD_REG_NORMALIZE:-1}
 COMPAT_ADD_BANK_SIZE=${COMPAT_ADD_BANK_SIZE:-64}
 
+# Optional no-harm / calibrated fusion / confidence routing objectives
+COMPAT_NOHARM_ENABLE=${COMPAT_NOHARM_ENABLE:-0}
+COMPAT_NOHARM_LAMBDA=${COMPAT_NOHARM_LAMBDA:-0.02}
+COMPAT_NOHARM_MARGIN=${COMPAT_NOHARM_MARGIN:-0.0}
+COMPAT_NOHARM_USE_BEST_SINGLE=${COMPAT_NOHARM_USE_BEST_SINGLE:-1}
+
+COMPAT_LOGIT_FUSION_ENABLE=${COMPAT_LOGIT_FUSION_ENABLE:-0}
+COMPAT_LOGIT_FUSION_LAMBDA=${COMPAT_LOGIT_FUSION_LAMBDA:-0.02}
+COMPAT_LOGIT_FUSION_CONF_TEMP=${COMPAT_LOGIT_FUSION_CONF_TEMP:-0.5}
+
+COMPAT_ROUTING_ENABLE=${COMPAT_ROUTING_ENABLE:-0}
+COMPAT_ROUTING_MIN_SCALE=${COMPAT_ROUTING_MIN_SCALE:-0.25}
+COMPAT_ROUTING_MAX_SCALE=${COMPAT_ROUTING_MAX_SCALE:-1.0}
+
 # Qwen-specific env vars
 export SAFE_QWEN_QUANT=none
 export SAFE_GRAD_CKPT=0
@@ -181,6 +195,34 @@ if [[ "$COMPAT_ADD_REG_ENABLE" == "1" ]]; then
   fi
 fi
 
+COMPAT_EXTRA_ARGS=()
+if [[ "$COMPAT_NOHARM_ENABLE" == "1" ]]; then
+  COMPAT_EXTRA_ARGS+=(
+    --compat-noharm-enable
+    --compat-noharm-lambda "$COMPAT_NOHARM_LAMBDA"
+    --compat-noharm-margin "$COMPAT_NOHARM_MARGIN"
+  )
+  if [[ "$COMPAT_NOHARM_USE_BEST_SINGLE" == "1" ]]; then
+    COMPAT_EXTRA_ARGS+=(--compat-noharm-use-best-single)
+  fi
+fi
+
+if [[ "$COMPAT_LOGIT_FUSION_ENABLE" == "1" ]]; then
+  COMPAT_EXTRA_ARGS+=(
+    --compat-logit-fusion-enable
+    --compat-logit-fusion-lambda "$COMPAT_LOGIT_FUSION_LAMBDA"
+    --compat-logit-fusion-conf-temp "$COMPAT_LOGIT_FUSION_CONF_TEMP"
+  )
+fi
+
+if [[ "$COMPAT_ROUTING_ENABLE" == "1" ]]; then
+  COMPAT_EXTRA_ARGS+=(
+    --compat-routing-enable
+    --compat-routing-min-scale "$COMPAT_ROUTING_MIN_SCALE"
+    --compat-routing-max-scale "$COMPAT_ROUTING_MAX_SCALE"
+  )
+fi
+
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --model-config "$MODEL_CONFIG" \
@@ -203,4 +245,5 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   "${LAYER_PROBE_ARGS[@]}" \
   "${COMPAT_REG_ARGS[@]}" \
   "${COMPAT_ADD_ARGS[@]}" \
+  "${COMPAT_EXTRA_ARGS[@]}" \
   "${WANDB_ARGS[@]}"

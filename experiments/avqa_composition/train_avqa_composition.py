@@ -507,6 +507,60 @@ def _recover_loss_from_logits(outputs: Any, labels: Optional[torch.Tensor]) -> O
     return F.cross_entropy(flat_logits[valid], flat_labels[valid])
 
 
+def _sequence_nll_from_output(
+    outputs: Any,
+    labels: Optional[torch.Tensor],
+    require_grad: bool = False,
+) -> Optional[torch.Tensor]:
+    """
+    Return token-level CE/NLL scalar from model outputs.
+    Falls back to CE(logits, labels) when model loss is detached.
+    """
+    raw_loss = outputs.get("loss") if isinstance(outputs, dict) else getattr(outputs, "loss", None)
+    if torch.is_tensor(raw_loss):
+        if (not require_grad) or raw_loss.requires_grad:
+            return raw_loss
+
+    recovered = _recover_loss_from_logits(outputs, labels)
+    if recovered is not None:
+        if (not require_grad) or recovered.requires_grad:
+            return recovered
+    return None
+
+
+def _confidence_from_logits(
+    logits: Optional[torch.Tensor],
+    labels: Optional[torch.Tensor],
+) -> float:
+    """
+    Confidence proxy in [0,1] using mean top-1 probability on supervised tokens.
+    This avoids full entropy computation while still tracking certainty.
+    """
+    if logits is None or labels is None or not torch.is_tensor(logits) or not torch.is_tensor(labels):
+        return 0.5
+
+    if logits.size(1) < 2:
+        return 0.5
+
+    shift_logits = logits[..., :-1, :].contiguous()  # (B, T-1, V)
+    shift_labels = labels[..., 1:].contiguous()      # (B, T-1)
+    flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+    flat_labels = shift_labels.view(-1)
+    valid = flat_labels != -100
+    if not valid.any():
+        return 0.5
+
+    with torch.no_grad():
+        valid_logits = flat_logits[valid].float()
+        top1 = valid_logits.max(dim=-1).values
+        lse = torch.logsumexp(valid_logits, dim=-1)
+        top1_prob = torch.exp(top1 - lse)
+        conf = float(top1_prob.mean().item())
+    if not math.isfinite(conf):
+        return 0.5
+    return float(max(0.0, min(1.0, conf)))
+
+
 def _parse_layer_list(layer_csv: str) -> List[int]:
     if not layer_csv:
         return []
@@ -666,7 +720,14 @@ def collect_audio_shift_subspaces(
     token_bank: List[torch.Tensor] = []
     mask_bank: List[Optional[torch.Tensor]] = []
     bank_size = int(getattr(args, "compat_add_bank_size", 64))
-    add_bank_enabled = bool(getattr(args, "compat_add_reg_enable", False)) and bank_size > 0
+    add_bank_enabled = bool(
+        (
+            getattr(args, "compat_add_reg_enable", False)
+            or getattr(args, "compat_noharm_enable", False)
+            or getattr(args, "compat_logit_fusion_enable", False)
+        )
+        and bank_size > 0
+    )
     collected = 0
 
     for batch in dataloader:
@@ -773,6 +834,22 @@ def collect_audio_shift_subspaces(
 
     elapsed = time.time() - started
     if not basis_by_layer:
+        if add_bank_enabled and token_bank:
+            print(
+                f"[compat] No shift basis fit (layers={list(layer_indices)}; "
+                f"collected={collected}); returning token-bank-only state "
+                f"(bank={len(token_bank)}; elapsed={elapsed/60.0:.1f}m)",
+                flush=True,
+            )
+            return {
+                "layers": [int(l) for l in sorted(set(int(x) for x in layer_indices))],
+                "basis_by_layer": {},
+                "stats_by_layer": {},
+                "layer_weights": {},
+                "audio_token_bank": token_bank,
+                "audio_mask_bank": mask_bank,
+                "num_samples_collected": int(collected),
+            }
         print(
             f"[compat] Failed to build audio shift bases (layers={list(layer_indices)}; "
             f"collected={collected}; elapsed={elapsed/60.0:.1f}m)",
@@ -884,25 +961,54 @@ def compute_unpaired_additivity_regularizer(
     add_layers: Sequence[int],
     layer_weights: Optional[Dict[int, float]] = None,
     normalize: bool = True,
-) -> tuple[Optional[torch.Tensor], Dict[int, float]]:
+    no_harm_enable: bool = False,
+    no_harm_margin: float = 0.0,
+    no_harm_use_best_single: bool = False,
+    logit_fusion_enable: bool = False,
+    logit_fusion_conf_temp: float = 0.5,
+    routing_enable: bool = False,
+    routing_min: float = 0.25,
+    routing_max: float = 1.0,
+) -> tuple[Optional[torch.Tensor], Dict[int, float], Dict[str, Optional[torch.Tensor]], Dict[str, float]]:
     """
     Unpaired additivity loss (no joint AV supervision):
       ||Δ_av - Δ_a - Δ_v||^2 at selected layers.
     Audio is sampled from the compatibility token bank.
     """
-    if not add_layers:
-        return None, {}
+    aux_losses: Dict[str, Optional[torch.Tensor]] = {
+        "no_harm": None,
+        "logit_fusion": None,
+    }
+    aux_stats: Dict[str, float] = {}
+
+    need_hidden_states = bool(add_layers)
+    if not need_hidden_states and not (no_harm_enable or logit_fusion_enable):
+        return None, {}, aux_losses, aux_stats
+
     pixel_values = inputs.get("pixel_values")
     if pixel_values is None:
-        return None, {}
+        return None, {}, aux_losses, aux_stats
 
     sampled_audio, sampled_mask = _sample_audio_bank_entry(compatibility_state)
     if sampled_audio is None:
-        return None, {}
+        return None, {}, aux_losses, aux_stats
 
     input_ids = inputs["input_ids"]
     attention_mask = inputs.get("attention_mask")
     labels = inputs.get("labels")
+    sampled_audio = sampled_audio.to(device=input_ids.device)
+    sampled_mask = sampled_mask.to(device=input_ids.device) if torch.is_tensor(sampled_mask) else None
+
+    no_harm_enable = bool(no_harm_enable)
+    no_harm_margin = float(no_harm_margin)
+    no_harm_use_best_single = bool(no_harm_use_best_single)
+    logit_fusion_enable = bool(logit_fusion_enable)
+    logit_fusion_conf_temp = float(logit_fusion_conf_temp)
+    routing_enable = bool(routing_enable)
+    routing_min = float(routing_min)
+    routing_max = float(routing_max)
+    routing_max = max(routing_min, routing_max)
+    routed_gate = float(gate_value)
 
     # Text-only and audio-only terms are constants for this regularizer.
     # IMPORTANT: avoid the pure passthrough branch (no modalities), because some
@@ -915,25 +1021,34 @@ def compute_unpaired_additivity_regularizer(
             attention_mask=attention_mask,
             labels=labels,
             pixel_values=None,
-            audio_tokens=sampled_audio.to(device=input_ids.device),
-            audio_attention_mask=(
-                sampled_mask.to(device=input_ids.device) if torch.is_tensor(sampled_mask) else None
-            ),
+            audio_tokens=sampled_audio,
+            audio_attention_mask=sampled_mask,
             gate=0.0,
-            output_hidden_states=True,
+            output_hidden_states=need_hidden_states,
         )
         out_audio = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
             pixel_values=None,
-            audio_tokens=sampled_audio.to(device=input_ids.device),
-            audio_attention_mask=(
-                sampled_mask.to(device=input_ids.device) if torch.is_tensor(sampled_mask) else None
-            ),
+            audio_tokens=sampled_audio,
+            audio_attention_mask=sampled_mask,
             gate=gate_value,
-            output_hidden_states=True,
+            output_hidden_states=need_hidden_states,
         )
+
+    conf_audio = _confidence_from_logits(
+        out_audio.get("logits") if isinstance(out_audio, dict) else getattr(out_audio, "logits", None),
+        labels=labels,
+    )
+    aux_stats["conf_audio"] = float(conf_audio)
+    if routing_enable:
+        route_scale = routing_min + (routing_max - routing_min) * conf_audio
+        route_scale = float(max(routing_min, min(routing_max, route_scale)))
+        routed_gate = float(gate_value) * route_scale
+        aux_stats["route_audio_scale"] = route_scale
+    else:
+        aux_stats["route_audio_scale"] = 1.0
 
     # Vision-only and both carry gradients to vision adapters.
     out_vision = model(
@@ -944,58 +1059,95 @@ def compute_unpaired_additivity_regularizer(
         audio_tokens=None,
         audio_attention_mask=None,
         gate=gate_value,
-        output_hidden_states=True,
+        output_hidden_states=need_hidden_states,
     )
     out_both = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
         labels=labels,
         pixel_values=pixel_values,
-        audio_tokens=sampled_audio.to(device=input_ids.device),
-        audio_attention_mask=(
-            sampled_mask.to(device=input_ids.device) if torch.is_tensor(sampled_mask) else None
-        ),
-        gate=gate_value,
-        output_hidden_states=True,
+        audio_tokens=sampled_audio,
+        audio_attention_mask=sampled_mask,
+        gate=routed_gate,
+        output_hidden_states=need_hidden_states,
     )
 
-    hs_text = out_text.get("all_hidden_states") if isinstance(out_text, dict) else None
-    hs_audio = out_audio.get("all_hidden_states") if isinstance(out_audio, dict) else None
-    hs_vision = out_vision.get("all_hidden_states") if isinstance(out_vision, dict) else None
-    hs_both = out_both.get("all_hidden_states") if isinstance(out_both, dict) else None
-    if any(x is None for x in (hs_text, hs_audio, hs_vision, hs_both)):
-        return None, {}
-
-    pooled_t = _extract_pooled_layer_states(hs_text, add_layers, labels=labels, attention_mask=attention_mask)
-    pooled_a = _extract_pooled_layer_states(hs_audio, add_layers, labels=labels, attention_mask=attention_mask)
-    pooled_v = _extract_pooled_layer_states(hs_vision, add_layers, labels=labels, attention_mask=attention_mask)
-    pooled_av = _extract_pooled_layer_states(hs_both, add_layers, labels=labels, attention_mask=attention_mask)
+    conf_vision = _confidence_from_logits(
+        out_vision.get("logits") if isinstance(out_vision, dict) else getattr(out_vision, "logits", None),
+        labels=labels,
+    )
+    aux_stats["conf_vision"] = float(conf_vision)
+    aux_stats["routed_gate"] = float(routed_gate)
 
     reg_loss: Optional[torch.Tensor] = None
     per_layer: Dict[int, float] = {}
-    for layer in add_layers:
-        if layer not in pooled_t or layer not in pooled_a or layer not in pooled_v or layer not in pooled_av:
-            continue
+    if need_hidden_states:
+        hs_text = out_text.get("all_hidden_states") if isinstance(out_text, dict) else None
+        hs_audio = out_audio.get("all_hidden_states") if isinstance(out_audio, dict) else None
+        hs_vision = out_vision.get("all_hidden_states") if isinstance(out_vision, dict) else None
+        hs_both = out_both.get("all_hidden_states") if isinstance(out_both, dict) else None
+        if any(x is None for x in (hs_text, hs_audio, hs_vision, hs_both)):
+            return None, {}, aux_losses, aux_stats
 
-        dt = pooled_t[layer]
-        da = (pooled_a[layer] - dt).detach()
-        dv = pooled_v[layer] - dt
-        dav = pooled_av[layer] - dt
-        residual = dav - da - dv
+        pooled_t = _extract_pooled_layer_states(hs_text, add_layers, labels=labels, attention_mask=attention_mask)
+        pooled_a = _extract_pooled_layer_states(hs_audio, add_layers, labels=labels, attention_mask=attention_mask)
+        pooled_v = _extract_pooled_layer_states(hs_vision, add_layers, labels=labels, attention_mask=attention_mask)
+        pooled_av = _extract_pooled_layer_states(hs_both, add_layers, labels=labels, attention_mask=attention_mask)
 
-        layer_loss = residual.pow(2).mean()
-        if normalize:
-            denom = da.pow(2).mean().detach() + dv.pow(2).mean().detach() + 1e-6
-            layer_loss = layer_loss / denom
+        for layer in add_layers:
+            if layer not in pooled_t or layer not in pooled_a or layer not in pooled_v or layer not in pooled_av:
+                continue
 
-        weight = 1.0
-        if layer_weights is not None:
-            weight = float(layer_weights.get(int(layer), 1.0))
-        weighted = layer_loss * weight
-        per_layer[int(layer)] = float(weighted.detach().item())
-        reg_loss = weighted if reg_loss is None else (reg_loss + weighted)
+            dt = pooled_t[layer]
+            da = (pooled_a[layer] - dt).detach()
+            dv = pooled_v[layer] - dt
+            dav = pooled_av[layer] - dt
+            residual = dav - da - dv
 
-    return reg_loss, per_layer
+            layer_loss = residual.pow(2).mean()
+            if normalize:
+                denom = da.pow(2).mean().detach() + dv.pow(2).mean().detach() + 1e-6
+                layer_loss = layer_loss / denom
+
+            weight = 1.0
+            if layer_weights is not None:
+                weight = float(layer_weights.get(int(layer), 1.0))
+            weighted = layer_loss * weight
+            per_layer[int(layer)] = float(weighted.detach().item())
+            reg_loss = weighted if reg_loss is None else (reg_loss + weighted)
+
+    nll_text = _sequence_nll_from_output(out_text, labels=labels, require_grad=False)
+    nll_audio = _sequence_nll_from_output(out_audio, labels=labels, require_grad=False)
+    nll_vision = _sequence_nll_from_output(out_vision, labels=labels, require_grad=False)
+    nll_both = _sequence_nll_from_output(out_both, labels=labels, require_grad=True)
+
+    if no_harm_enable and nll_both is not None and nll_vision is not None:
+        ref = nll_vision.detach()
+        if no_harm_use_best_single and nll_audio is not None:
+            ref = torch.minimum(ref, nll_audio.detach())
+        aux_losses["no_harm"] = F.relu(nll_both - ref + no_harm_margin)
+        aux_stats["nll_ref"] = float(ref.item())
+        aux_stats["nll_both"] = float(nll_both.detach().item())
+        aux_stats["nll_gap_both_minus_ref"] = float((nll_both.detach() - ref).item())
+
+    if logit_fusion_enable and nll_both is not None and nll_audio is not None and nll_vision is not None:
+        # Confidence-calibrated single-modality mixture in NLL space.
+        # Lower confidence => lower contribution in fusion target.
+        temp = max(1e-3, logit_fusion_conf_temp)
+        wa = math.exp(conf_audio / temp)
+        wv = math.exp(conf_vision / temp)
+        wsum = max(1e-6, wa + wv)
+        wa /= wsum
+        wv /= wsum
+
+        nll_t = nll_text.detach() if nll_text is not None else nll_vision.detach()
+        nll_target = nll_t + wa * (nll_audio.detach() - nll_t) + wv * (nll_vision.detach() - nll_t)
+        aux_losses["logit_fusion"] = (nll_both - nll_target).pow(2)
+        aux_stats["fusion_w_audio"] = float(wa)
+        aux_stats["fusion_w_vision"] = float(wv)
+        aux_stats["nll_fusion_target"] = float(nll_target.item())
+
+    return reg_loss, per_layer, aux_losses, aux_stats
 
 
 def train_epoch(
@@ -1017,32 +1169,58 @@ def train_epoch(
     compat_reg_batches = 0
     total_add_reg = 0.0
     add_reg_batches = 0
+    total_noharm_reg = 0.0
+    noharm_reg_batches = 0
+    total_logit_reg = 0.0
+    logit_reg_batches = 0
+    total_route_scale = 0.0
+    route_scale_batches = 0
     total_batches = 0
     num_batches = len(dataloader)
     log_every = max(1, min(100, num_batches // 20))  # Log at least every 100 steps
     optimizer.zero_grad()
     trainable_for_clip = [p for p in model.parameters() if p.requires_grad]
 
-    compat_enabled = (
+    compat_state_available = bool(
         args.train_modality == "image"
         and compatibility_state is not None
-        and bool(compatibility_state.get("basis_by_layer"))
     )
-    compat_layers = compatibility_state.get("layers", []) if compat_enabled else []
-    compat_basis = compatibility_state.get("basis_by_layer", {}) if compat_enabled else {}
-    compat_layer_weights = compatibility_state.get("layer_weights", {}) if compat_enabled else {}
+    compat_layers = compatibility_state.get("layers", []) if compat_state_available else []
+    compat_basis = compatibility_state.get("basis_by_layer", {}) if compat_state_available else {}
+    compat_layer_weights = compatibility_state.get("layer_weights", {}) if compat_state_available else {}
+    compat_reg_active = bool(
+        compat_state_available
+        and getattr(args, "compat_reg_enable", False)
+        and bool(compat_basis)
+    )
     compat_warned_hidden = False
-    add_reg_enabled = bool(
-        compat_enabled
-        and getattr(args, "compat_add_reg_enable", False)
+    unpaired_aux_enabled = bool(
+        compat_state_available
+        and (
+            getattr(args, "compat_add_reg_enable", False)
+            or getattr(args, "compat_noharm_enable", False)
+            or getattr(args, "compat_logit_fusion_enable", False)
+        )
         and compatibility_state.get("audio_token_bank")
     )
+    add_reg_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_add_reg_enable", False))
+    noharm_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_noharm_enable", False))
+    logit_fusion_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_logit_fusion_enable", False))
+
     add_layers = _parse_layer_list(getattr(args, "compat_add_reg_layers", "")) if add_reg_enabled else []
     if add_reg_enabled and not add_layers:
         add_layers = list(compat_layers)
     add_every = max(1, int(getattr(args, "compat_add_reg_every", 200)))
     add_lambda = float(getattr(args, "compat_add_reg_lambda", 0.0))
     add_norm = bool(getattr(args, "compat_add_reg_normalize", True))
+    noharm_lambda = float(getattr(args, "compat_noharm_lambda", 0.0))
+    noharm_margin = float(getattr(args, "compat_noharm_margin", 0.0))
+    noharm_use_best_single = bool(getattr(args, "compat_noharm_use_best_single", False))
+    logit_fusion_lambda = float(getattr(args, "compat_logit_fusion_lambda", 0.0))
+    logit_fusion_conf_temp = float(getattr(args, "compat_logit_fusion_conf_temp", 0.5))
+    routing_enabled = bool(getattr(args, "compat_routing_enable", False))
+    routing_min_scale = float(getattr(args, "compat_routing_min_scale", 0.25))
+    routing_max_scale = float(getattr(args, "compat_routing_max_scale", 1.0))
     add_warned = False
 
     def _amp_context():
@@ -1093,7 +1271,7 @@ def train_epoch(
             gate_value = args.fusion_gate * progress
 
         baseline_pooled: Dict[int, torch.Tensor] = {}
-        if compat_enabled:
+        if compat_reg_active:
             with torch.no_grad():
                 with _amp_context():
                     baseline_outputs = model(
@@ -1123,7 +1301,7 @@ def train_epoch(
                 audio_tokens=audio_tokens,
                 audio_attention_mask=audio_mask,
                 gate=gate_value,
-                output_hidden_states=bool(compat_enabled),
+                output_hidden_states=bool(compat_reg_active),
             )
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
 
@@ -1152,7 +1330,7 @@ def train_epoch(
                         )
                     continue
 
-            if compat_enabled:
+            if compat_reg_active:
                 all_hs = outputs.get("all_hidden_states") if isinstance(outputs, dict) else None
                 compat_reg, _ = compute_vision_subspace_regularizer(
                     all_hidden_states=all_hs,
@@ -1175,9 +1353,18 @@ def train_epoch(
                     )
                     compat_warned_hidden = True
 
-                # Optional additivity-positive objective on sparse steps
-                if add_reg_enabled and add_lambda > 0.0 and (step % add_every == 0):
-                    add_reg, _ = compute_unpaired_additivity_regularizer(
+                # Optional unpaired composition objectives on sparse steps
+                run_unpaired_aux = (
+                    unpaired_aux_enabled
+                    and (
+                        (add_reg_enabled and add_lambda > 0.0)
+                        or (noharm_enabled and noharm_lambda > 0.0)
+                        or (logit_fusion_enabled and logit_fusion_lambda > 0.0)
+                    )
+                    and (step % add_every == 0)
+                )
+                if run_unpaired_aux:
+                    add_reg, _, aux_losses, aux_stats = compute_unpaired_additivity_regularizer(
                         model=model,
                         inputs=inputs,
                         compatibility_state=compatibility_state,
@@ -1185,14 +1372,45 @@ def train_epoch(
                         add_layers=add_layers,
                         layer_weights=compat_layer_weights,
                         normalize=add_norm,
+                        no_harm_enable=noharm_enabled,
+                        no_harm_margin=noharm_margin,
+                        no_harm_use_best_single=noharm_use_best_single,
+                        logit_fusion_enable=logit_fusion_enabled,
+                        logit_fusion_conf_temp=logit_fusion_conf_temp,
+                        routing_enable=routing_enabled,
+                        routing_min=routing_min_scale,
+                        routing_max=routing_max_scale,
                     )
-                    if add_reg is not None:
+
+                    if add_reg_enabled and add_reg is not None and add_lambda > 0.0:
                         total_add_reg += float(add_reg.detach().item())
                         add_reg_batches += 1
                         loss = loss + add_lambda * add_reg
-                    elif not add_warned:
+
+                    noharm_loss = aux_losses.get("no_harm")
+                    if noharm_enabled and noharm_loss is not None and noharm_lambda > 0.0:
+                        total_noharm_reg += float(noharm_loss.detach().item())
+                        noharm_reg_batches += 1
+                        loss = loss + noharm_lambda * noharm_loss
+
+                    logit_loss = aux_losses.get("logit_fusion")
+                    if logit_fusion_enabled and logit_loss is not None and logit_fusion_lambda > 0.0:
+                        total_logit_reg += float(logit_loss.detach().item())
+                        logit_reg_batches += 1
+                        loss = loss + logit_fusion_lambda * logit_loss
+
+                    if "route_audio_scale" in aux_stats:
+                        total_route_scale += float(aux_stats["route_audio_scale"])
+                        route_scale_batches += 1
+
+                    if (
+                        add_reg is None
+                        and noharm_loss is None
+                        and logit_loss is None
+                        and not add_warned
+                    ):
                         print(
-                            "  [compat] warning: additivity regularizer inactive "
+                            "  [compat] warning: unpaired composition objective inactive "
                             "(missing hidden states or audio token bank)",
                             flush=True,
                         )
@@ -1233,6 +1451,15 @@ def train_epoch(
             if add_reg_batches > 0:
                 add_avg = total_add_reg / float(max(1, add_reg_batches))
                 compat_suffix += f" add_reg={add_avg:.4f}"
+            if noharm_reg_batches > 0:
+                noharm_avg = total_noharm_reg / float(max(1, noharm_reg_batches))
+                compat_suffix += f" noharm_reg={noharm_avg:.4f}"
+            if logit_reg_batches > 0:
+                logit_avg = total_logit_reg / float(max(1, logit_reg_batches))
+                compat_suffix += f" logit_reg={logit_avg:.4f}"
+            if route_scale_batches > 0:
+                route_avg = total_route_scale / float(max(1, route_scale_batches))
+                compat_suffix += f" route_scale={route_avg:.3f}"
             print(
                 f"  [train] step {step + 1}/{num_batches} "
                 f"loss={avg_loss:.4f} lr={current_lr:.2e} gate={gate_value:.3f}{compat_suffix}",
@@ -1633,6 +1860,33 @@ def parse_args() -> argparse.Namespace:
                    help="Disable additivity loss normalization")
     p.add_argument("--compat-add-bank-size", type=int, default=64,
                    help="Max number of audio token samples to cache for unpaired additivity regularizer")
+
+    # Do-no-harm objective: prevent composed loss from exceeding best/single modality loss
+    p.add_argument("--compat-noharm-enable", action="store_true",
+                   help="Enable unpaired do-no-harm penalty: ReLU(NLL_both - NLL_ref + margin)")
+    p.add_argument("--compat-noharm-lambda", type=float, default=0.02,
+                   help="Weight for do-no-harm penalty")
+    p.add_argument("--compat-noharm-margin", type=float, default=0.0,
+                   help="Slack margin for do-no-harm penalty")
+    p.add_argument("--compat-noharm-use-best-single", action="store_true",
+                   help="Use min(NLL_audio, NLL_vision) as no-harm reference (else vision-only)")
+
+    # Confidence-calibrated score fusion objective (NLL-space)
+    p.add_argument("--compat-logit-fusion-enable", action="store_true",
+                   help="Enable confidence-calibrated NLL fusion consistency loss")
+    p.add_argument("--compat-logit-fusion-lambda", type=float, default=0.02,
+                   help="Weight for NLL fusion consistency penalty")
+    p.add_argument("--compat-logit-fusion-conf-temp", type=float, default=0.5,
+                   help="Temperature for confidence -> fusion weights softmax")
+
+    # Confidence-routed gate for unpaired auxiliary composition passes
+    p.add_argument("--compat-routing-enable", action="store_true",
+                   help="Scale audio gate in unpaired composition passes using audio confidence")
+    p.add_argument("--compat-routing-min-scale", type=float, default=0.25,
+                   help="Minimum routing gate scale")
+    p.add_argument("--compat-routing-max-scale", type=float, default=1.0,
+                   help="Maximum routing gate scale")
+
     p.set_defaults(
         compat_reg_weight_by_shift_norm=True,
         compat_add_reg_normalize=True,
@@ -1722,6 +1976,16 @@ def main() -> None:
                     "compat_add_reg_layers": args.compat_add_reg_layers,
                     "compat_add_reg_normalize": args.compat_add_reg_normalize,
                     "compat_add_bank_size": args.compat_add_bank_size,
+                    "compat_noharm_enable": args.compat_noharm_enable,
+                    "compat_noharm_lambda": args.compat_noharm_lambda,
+                    "compat_noharm_margin": args.compat_noharm_margin,
+                    "compat_noharm_use_best_single": args.compat_noharm_use_best_single,
+                    "compat_logit_fusion_enable": args.compat_logit_fusion_enable,
+                    "compat_logit_fusion_lambda": args.compat_logit_fusion_lambda,
+                    "compat_logit_fusion_conf_temp": args.compat_logit_fusion_conf_temp,
+                    "compat_routing_enable": args.compat_routing_enable,
+                    "compat_routing_min_scale": args.compat_routing_min_scale,
+                    "compat_routing_max_scale": args.compat_routing_max_scale,
                 },
             )
 
@@ -1846,14 +2110,25 @@ def main() -> None:
         best_composed_score = -1.0
         compat_layers: List[int] = []
         compatibility_state: Optional[Dict[str, Any]] = None
+        compat_objective_enabled = bool(
+            args.compat_reg_enable
+            or args.compat_add_reg_enable
+            or args.compat_noharm_enable
+            or args.compat_logit_fusion_enable
+        )
 
-        if args.compat_reg_enable:
+        if compat_objective_enabled:
             compat_layers = _parse_layer_list(args.compat_reg_layers)
             if not compat_layers:
                 compat_layers = _get_modality_fusion_layers(model, "vision")
             if not compat_layers:
-                print("[compat] No vision fusion layers found; disabling compatibility regularizer.", flush=True)
+                print("[compat] No vision fusion layers found; disabling compatibility objectives.", flush=True)
                 args.compat_reg_enable = False
+                args.compat_add_reg_enable = False
+                args.compat_noharm_enable = False
+                args.compat_logit_fusion_enable = False
+                args.compat_routing_enable = False
+                compat_objective_enabled = False
             else:
                 print(
                     f"[compat] enabled lambda={args.compat_reg_lambda} rank={args.compat_reg_rank} "
@@ -1866,6 +2141,25 @@ def main() -> None:
                         f"[compat] additivity objective enabled lambda={args.compat_add_reg_lambda} "
                         f"every={args.compat_add_reg_every} layers={args.compat_add_reg_layers or compat_layers} "
                         f"normalize={args.compat_add_reg_normalize}",
+                        flush=True,
+                    )
+                if args.compat_noharm_enable:
+                    print(
+                        f"[compat] no-harm objective enabled lambda={args.compat_noharm_lambda} "
+                        f"margin={args.compat_noharm_margin} "
+                        f"use_best_single={args.compat_noharm_use_best_single}",
+                        flush=True,
+                    )
+                if args.compat_logit_fusion_enable:
+                    print(
+                        f"[compat] logit-fusion objective enabled lambda={args.compat_logit_fusion_lambda} "
+                        f"conf_temp={args.compat_logit_fusion_conf_temp}",
+                        flush=True,
+                    )
+                if args.compat_routing_enable:
+                    print(
+                        f"[compat] confidence routing enabled min_scale={args.compat_routing_min_scale} "
+                        f"max_scale={args.compat_routing_max_scale}",
                         flush=True,
                     )
 
@@ -1919,7 +2213,7 @@ def main() -> None:
             )
             print(f"  [phase:audio] loss={audio_loss:.4f}")
 
-            if args.compat_reg_enable:
+            if compat_objective_enabled:
                 refresh_every = max(1, int(args.compat_reg_refresh_every))
                 refresh_now = compatibility_state is None or (epoch % refresh_every == 0)
                 if refresh_now:
@@ -1932,7 +2226,7 @@ def main() -> None:
                         use_bf16_amp=use_bf16_amp,
                     )
                 if compatibility_state is None:
-                    print("[compat] Warning: subspace stats unavailable; vision phase will run without compatibility regularizer.", flush=True)
+                    print("[compat] Warning: compatibility state unavailable; vision phase will run without unpaired composition objectives.", flush=True)
 
             # Phase B: Vision training pass
             print(f"  [phase:vision] training vision adapters...")
@@ -1953,7 +2247,7 @@ def main() -> None:
                 "vision_train_loss": float(vision_loss),
                 "eval": {},
             }
-            if args.compat_reg_enable and compatibility_state is not None:
+            if compat_objective_enabled and compatibility_state is not None:
                 epoch_result["compat_reg"] = {
                     "lambda": float(args.compat_reg_lambda),
                     "layers": list(compatibility_state.get("layers", [])),
@@ -1967,6 +2261,22 @@ def main() -> None:
                         "layers": _parse_layer_list(args.compat_add_reg_layers)
                         if args.compat_add_reg_layers
                         else list(compatibility_state.get("layers", [])),
+                    },
+                    "noharm": {
+                        "enabled": bool(args.compat_noharm_enable),
+                        "lambda": float(args.compat_noharm_lambda),
+                        "margin": float(args.compat_noharm_margin),
+                        "use_best_single": bool(args.compat_noharm_use_best_single),
+                    },
+                    "logit_fusion": {
+                        "enabled": bool(args.compat_logit_fusion_enable),
+                        "lambda": float(args.compat_logit_fusion_lambda),
+                        "conf_temp": float(args.compat_logit_fusion_conf_temp),
+                    },
+                    "routing": {
+                        "enabled": bool(args.compat_routing_enable),
+                        "min_scale": float(args.compat_routing_min_scale),
+                        "max_scale": float(args.compat_routing_max_scale),
                     },
                 }
             for modality in interleaved_eval_modalities:
@@ -2008,7 +2318,7 @@ def main() -> None:
                     "composition/gain_vs_best_single": composition_gain,
                     "composition/gain_vs_text": gain_over_text,
                 }
-                if args.compat_reg_enable and compatibility_state is not None:
+                if compat_objective_enabled and compatibility_state is not None:
                     log_payload["compat/lambda"] = float(args.compat_reg_lambda)
                     log_payload["compat/num_layers"] = float(len(compatibility_state.get("layers", [])))
                     log_payload["compat/num_samples_collected"] = float(
@@ -2018,6 +2328,19 @@ def main() -> None:
                     if args.compat_add_reg_enable:
                         log_payload["compat/add_lambda"] = float(args.compat_add_reg_lambda)
                         log_payload["compat/add_every"] = float(args.compat_add_reg_every)
+                    log_payload["compat/noharm_enabled"] = float(bool(args.compat_noharm_enable))
+                    if args.compat_noharm_enable:
+                        log_payload["compat/noharm_lambda"] = float(args.compat_noharm_lambda)
+                        log_payload["compat/noharm_margin"] = float(args.compat_noharm_margin)
+                        log_payload["compat/noharm_use_best_single"] = float(bool(args.compat_noharm_use_best_single))
+                    log_payload["compat/logit_fusion_enabled"] = float(bool(args.compat_logit_fusion_enable))
+                    if args.compat_logit_fusion_enable:
+                        log_payload["compat/logit_fusion_lambda"] = float(args.compat_logit_fusion_lambda)
+                        log_payload["compat/logit_fusion_conf_temp"] = float(args.compat_logit_fusion_conf_temp)
+                    log_payload["compat/routing_enabled"] = float(bool(args.compat_routing_enable))
+                    if args.compat_routing_enable:
+                        log_payload["compat/routing_min_scale"] = float(args.compat_routing_min_scale)
+                        log_payload["compat/routing_max_scale"] = float(args.compat_routing_max_scale)
                 for modality, metrics in epoch_result["eval"].items():
                     log_payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
                     log_payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
