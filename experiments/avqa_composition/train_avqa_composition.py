@@ -324,11 +324,14 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
     if getattr(args, "learned_gate", False):
         fusion_cfg["use_learned_gate"] = True
         fusion_cfg["learned_gate_init"] = getattr(args, "learned_gate_init", 0.0)
-    # Slim projector: output at bottleneck_dim instead of llm_hidden_size
-    if getattr(args, "slim_projector", False):
+    # Slim projector (default ON): output at bottleneck_dim instead of llm_hidden_size
+    # Saves ~80% of trainable params. Disable with --no-slim-projector.
+    if getattr(args, "slim_projector", True):
         slim_dim = fusion_cfg.get("bottleneck_dim", 256)
         cfg.setdefault("projector_config", {})["output_dim"] = slim_dim
         print(f"[SlimProjector] Projector output_dim set to {slim_dim} (bottleneck_dim)", flush=True)
+    else:
+        print(f"[SlimProjector] Disabled — projector outputs at full llm_hidden_size", flush=True)
 
     cfg["fusion_config"] = fusion_cfg
     # Only pass keys that SAFEModel.__init__ accepts
@@ -1775,9 +1778,9 @@ def parse_args() -> argparse.Namespace:
                    help="Linearly warm fusion gate from 0 to --fusion-gate over N optimizer steps")
     p.add_argument("--bottleneck-dim", type=int, default=None,
                    help="Override fusion bottleneck dimension (default: 256, try 410 for 8B to match 4B's 10%% ratio)")
-    p.add_argument("--slim-projector", action="store_true",
-                   help="Output projector at bottleneck_dim instead of llm_hidden_size, "
-                        "saving ~80%% of trainable params by eliminating expand-then-compress path")
+    p.add_argument("--no-slim-projector", dest="slim_projector", action="store_false",
+                   help="Disable slim projector (output at full llm_hidden_size instead of bottleneck_dim)")
+    p.set_defaults(slim_projector=True)
 
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--num-epochs", type=int, default=10)

@@ -111,6 +111,7 @@ LEARNED_GATE_INIT=${LEARNED_GATE_INIT:-1.5}
 GRAD_ATTRIBUTION=${GRAD_ATTRIBUTION:-1}
 GRAD_LOG_EVERY=${GRAD_LOG_EVERY:-200}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
+SLIM_PROJECTOR=${SLIM_PROJECTOR:-1}       # 0 to disable slim projector (default ON, ~80% fewer params)
 
 # W&B
 WANDB=${WANDB:-1}
@@ -225,6 +226,12 @@ if [ "$GRAD_ATTRIBUTION" = "1" ]; then
 fi
 if [ "$MAX_SAMPLES" != "0" ] && [ -n "$MAX_SAMPLES" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --max-samples $MAX_SAMPLES"
+fi
+if [ "$SLIM_PROJECTOR" = "0" ]; then
+    EXTRA_FLAGS="$EXTRA_FLAGS --no-slim-projector"
+    echo "Slim projector: OFF (projector outputs at full llm_hidden_size)"
+else
+    echo "Slim projector: ON (default, projector outputs at bottleneck_dim)"
 fi
 
 WANDB_ARGS=""

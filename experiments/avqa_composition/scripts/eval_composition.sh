@@ -46,6 +46,7 @@ WANDB_PROJECT=${WANDB_PROJECT:-SAFE-Composition}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-composition_eval_${SLURM_JOB_ID:-local}}
 WANDB_TAGS=${WANDB_TAGS:-composition,eval,zero_shot}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
+SLIM_PROJECTOR=${SLIM_PROJECTOR:-1}       # 0 to disable slim projector (default ON)
 
 # Qwen-specific env vars
 export SAFE_QWEN_QUANT=none
@@ -108,6 +109,11 @@ if [[ "$MAX_SAMPLES" != "0" ]]; then
   MAX_SAMPLES_ARGS+=(--max-samples "$MAX_SAMPLES")
 fi
 
+SLIM_ARGS=()
+if [ "$SLIM_PROJECTOR" = "0" ]; then
+  SLIM_ARGS+=(--no-slim-projector)
+fi
+
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --model-config "$MODEL_CONFIG" \
@@ -123,5 +129,6 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --freeze-audio-encoder \
   --compose-audio-ckpt "$COMPOSE_AUDIO_CKPT" \
   --compose-vision-ckpt "$COMPOSE_VISION_CKPT" \
+  "${SLIM_ARGS[@]}" \
   "${MAX_SAMPLES_ARGS[@]}" \
   "${WANDB_ARGS[@]}"
