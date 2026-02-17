@@ -2414,6 +2414,17 @@ class SAFEModel(nn.Module):
                     active_layers=active_fusion_layers,
                     supervised_mask=supervised_mask,
                 )
+                if self.training and not hasattr(self, "_hook_registration_logged"):
+                    try:
+                        print(
+                            f"[LayerHookManager] registered_hooks={hook_manager.num_hooks} "
+                            f"injection_point={self.fusion_injection_point} "
+                            f"fusion_layers={fusion_layers}",
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
+                    self._hook_registration_logged = True
                 try:
                     return _forward_model(**run_inputs)
                 finally:

@@ -194,6 +194,7 @@ class PreFFNFusionHook:
 
 class LayerHookManager:
     """Manages registration and cleanup of decoder layer fusion hooks."""
+    _global_layer_source_logged: bool = False
 
     def __init__(
         self,
@@ -341,13 +342,13 @@ class LayerHookManager:
                     first_layer = extracted.get(0)
                     first_layer_name = type(first_layer).__name__ if first_layer is not None else "None"
                     owner_name = type(candidate).__name__
-                    if not getattr(self, "_printed_layer_source", False):
+                    if not LayerHookManager._global_layer_source_logged:
                         print(
                             f"[LayerHookManager] Using layers from {owner_name}; "
                             f"layer0={first_layer_name}; n_layers={len(extracted)}",
                             flush=True,
                         )
-                        self._printed_layer_source = True
+                        LayerHookManager._global_layer_source_logged = True
                 except Exception:
                     pass
                 return extracted
