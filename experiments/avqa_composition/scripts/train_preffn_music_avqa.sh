@@ -41,9 +41,22 @@ WANDB_TAGS=${WANDB_TAGS:-music_avqa,preffn}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
 BOTTLENECK_DIM=${BOTTLENECK_DIM:-}
 
+# InternVL defaults: gradient checkpointing currently breaks hook-based adapter grads.
+# Keep override-friendly behavior (user can still set these explicitly via --export).
+if [[ "${MODEL_CONFIG}" == internvl* ]]; then
+  export SAFE_QWEN_QUANT=${SAFE_QWEN_QUANT:-none}
+  export SAFE_GRAD_CKPT=${SAFE_GRAD_CKPT:-0}
+  if [[ "${USE_FP16}" == "1" && -z "${FORCE_FP16:-}" ]]; then
+    USE_FP16=0
+    echo "[launcher] InternVL detected: USE_FP16->0 (bf16 path). Set FORCE_FP16=1 to keep fp16."
+  fi
+fi
+
 mkdir -p logs "$OUTPUT_DIR"
 
 cd "$SAFE_ROOT"
+
+echo "[launcher] model_config=${MODEL_CONFIG} SAFE_GRAD_CKPT=${SAFE_GRAD_CKPT:-unset} SAFE_QWEN_QUANT=${SAFE_QWEN_QUANT:-unset} USE_FP16=${USE_FP16}"
 
 WANDB_ARGS=()
 if [[ "$WANDB" == "1" ]]; then

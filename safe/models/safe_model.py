@@ -214,6 +214,10 @@ class SAFEModel(nn.Module):
                     target_modules=fusion_config.get("target_modules", None),
                 )
             elif fusion_type == "multilayer":
+                # If projector outputs at a different dim than LLM hidden size
+                # (e.g. slim projector mode), tell fusion adapter so K/V projections
+                # accept the smaller audio token dimension directly.
+                _kv_input_dim = actual_output_dim if actual_output_dim != llm_hidden_size else None
                 self.fusion_adapter = MultiLayerFusionAdapter(
                     hidden_size=llm_hidden_size,
                     fusion_layer_indices=fusion_layer_indices,
@@ -236,6 +240,8 @@ class SAFEModel(nn.Module):
                     # Per-layer learned gating (Flamingo-style)
                     use_learned_gate=fusion_config.get("use_learned_gate", False),
                     learned_gate_init=fusion_config.get("learned_gate_init", 0.0),
+                    # Slim projector: K/V accept audio tokens at projector output dim
+                    kv_input_dim=_kv_input_dim,
                 )
             elif fusion_type == "gated":
                 self.fusion_adapter = GatedFusionAdapter(

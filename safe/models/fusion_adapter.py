@@ -281,11 +281,13 @@ class BottleneckCrossAttentionBlock(nn.Module):
         use_ffn: bool = True,
         ffn_expansion: float = 2.0,
         use_pre_norm: bool = False,
+        kv_input_dim: Optional[int] = None,
     ):
         super().__init__()
 
         self.hidden_size = hidden_size
         self.bottleneck_dim = bottleneck_dim
+        self.kv_input_dim = kv_input_dim if kv_input_dim is not None else hidden_size
         self.num_attention_heads = max(num_attention_heads, 1)
         self.use_ffn = use_ffn
         self.use_pre_norm = use_pre_norm
@@ -309,15 +311,15 @@ class BottleneckCrossAttentionBlock(nn.Module):
         # Pre-norm is more stable for training (used in GPT-2+, LLaMA, etc.)
         if use_pre_norm:
             self.pre_norm_q = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
-            self.pre_norm_kv = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+            self.pre_norm_kv = nn.LayerNorm(self.kv_input_dim, eps=layer_norm_eps)
 
         # Bottleneck projections - small dimensions
         # Q: hidden_size → bottleneck_dim
         self.query = nn.Linear(hidden_size, bottleneck_dim)
-        # K: hidden_size → bottleneck_dim
-        self.key = nn.Linear(hidden_size, bottleneck_dim)
-        # V: hidden_size → bottleneck_dim
-        self.value = nn.Linear(hidden_size, bottleneck_dim)
+        # K: kv_input_dim → bottleneck_dim (kv_input_dim == hidden_size unless slim projector)
+        self.key = nn.Linear(self.kv_input_dim, bottleneck_dim)
+        # V: kv_input_dim → bottleneck_dim
+        self.value = nn.Linear(self.kv_input_dim, bottleneck_dim)
         # O: bottleneck_dim → hidden_size
         self.output_dense = nn.Linear(bottleneck_dim, hidden_size)
 
@@ -488,6 +490,7 @@ class SimpleFusionAdapter(nn.Module):
         use_ffn: bool = True,
         ffn_expansion: float = 2.0,
         use_pre_norm: bool = False,
+        kv_input_dim: Optional[int] = None,
     ):
         super().__init__()
 
@@ -510,6 +513,7 @@ class SimpleFusionAdapter(nn.Module):
             use_ffn=use_ffn,
             ffn_expansion=ffn_expansion,
             use_pre_norm=use_pre_norm,
+            kv_input_dim=kv_input_dim,
         )
 
         # Optional token-wise gating
@@ -845,6 +849,7 @@ class MultiLayerFusionAdapter(nn.Module):
         use_pre_norm: bool = False,
         use_learned_gate: bool = False,
         learned_gate_init: float = 0.0,
+        kv_input_dim: Optional[int] = None,
         **unused_kwargs,
     ):
         super().__init__()
@@ -854,6 +859,7 @@ class MultiLayerFusionAdapter(nn.Module):
         self.use_tokenwise_gate = bool(use_tokenwise_gate)
         self.use_bottleneck = bool(use_bottleneck)
         self.bottleneck_dim = bottleneck_dim
+        self.kv_input_dim = kv_input_dim
         self.fusion_mode = str(fusion_mode)
         self.film_alpha_scale = float(film_alpha_scale)
         self.film_beta_scale = float(film_beta_scale)
@@ -892,6 +898,7 @@ class MultiLayerFusionAdapter(nn.Module):
                         use_ffn=use_ffn,
                         ffn_expansion=ffn_expansion,
                         use_pre_norm=use_pre_norm,
+                        kv_input_dim=kv_input_dim,
                     )
                 else:
                     # Use LoRA-based fusion adapter (original behavior)
