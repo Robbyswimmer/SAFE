@@ -564,6 +564,28 @@ def _confidence_from_logits(
     return float(max(0.0, min(1.0, conf)))
 
 
+def _flatten_valid_logits(
+    logits: Optional[torch.Tensor],
+    labels: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """
+    Return flattened logits over supervised next-token positions: (N_valid, V).
+    """
+    if logits is None or labels is None or not torch.is_tensor(logits) or not torch.is_tensor(labels):
+        return None
+    if logits.size(1) < 2:
+        return None
+
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+    flat_labels = shift_labels.view(-1)
+    valid = flat_labels != -100
+    if not valid.any():
+        return None
+    return flat_logits[valid]
+
+
 def _parse_layer_list(layer_csv: str) -> List[int]:
     if not layer_csv:
         return []
@@ -728,6 +750,7 @@ def collect_audio_shift_subspaces(
             getattr(args, "compat_add_reg_enable", False)
             or getattr(args, "compat_noharm_enable", False)
             or getattr(args, "compat_logit_fusion_enable", False)
+            or getattr(args, "compat_poe_enable", False)
         )
         and bank_size > 0
     )
@@ -969,6 +992,10 @@ def compute_unpaired_additivity_regularizer(
     no_harm_use_best_single: bool = False,
     logit_fusion_enable: bool = False,
     logit_fusion_conf_temp: float = 0.5,
+    poe_enable: bool = False,
+    poe_weight_temp: float = 0.5,
+    poe_loss_type: str = "kl",
+    poe_logit_temp: float = 1.0,
     routing_enable: bool = False,
     routing_min: float = 0.25,
     routing_max: float = 1.0,
@@ -981,11 +1008,12 @@ def compute_unpaired_additivity_regularizer(
     aux_losses: Dict[str, Optional[torch.Tensor]] = {
         "no_harm": None,
         "logit_fusion": None,
+        "poe_consistency": None,
     }
     aux_stats: Dict[str, float] = {}
 
     need_hidden_states = bool(add_layers)
-    if not need_hidden_states and not (no_harm_enable or logit_fusion_enable):
+    if not need_hidden_states and not (no_harm_enable or logit_fusion_enable or poe_enable):
         return None, {}, aux_losses, aux_stats
 
     pixel_values = inputs.get("pixel_values")
@@ -1007,6 +1035,10 @@ def compute_unpaired_additivity_regularizer(
     no_harm_use_best_single = bool(no_harm_use_best_single)
     logit_fusion_enable = bool(logit_fusion_enable)
     logit_fusion_conf_temp = float(logit_fusion_conf_temp)
+    poe_enable = bool(poe_enable)
+    poe_weight_temp = float(poe_weight_temp)
+    poe_loss_type = str(poe_loss_type).lower().strip()
+    poe_logit_temp = float(poe_logit_temp)
     routing_enable = bool(routing_enable)
     routing_min = float(routing_min)
     routing_max = float(routing_max)
@@ -1150,6 +1182,47 @@ def compute_unpaired_additivity_regularizer(
         aux_stats["fusion_w_vision"] = float(wv)
         aux_stats["nll_fusion_target"] = float(nll_target.item())
 
+    if poe_enable:
+        logits_text = out_text.get("logits") if isinstance(out_text, dict) else getattr(out_text, "logits", None)
+        logits_audio = out_audio.get("logits") if isinstance(out_audio, dict) else getattr(out_audio, "logits", None)
+        logits_vision = out_vision.get("logits") if isinstance(out_vision, dict) else getattr(out_vision, "logits", None)
+        logits_both = out_both.get("logits") if isinstance(out_both, dict) else getattr(out_both, "logits", None)
+
+        flat_t = _flatten_valid_logits(logits_text, labels=labels)
+        flat_a = _flatten_valid_logits(logits_audio, labels=labels)
+        flat_v = _flatten_valid_logits(logits_vision, labels=labels)
+        flat_av = _flatten_valid_logits(logits_both, labels=labels)
+
+        if all(torch.is_tensor(x) for x in (flat_t, flat_a, flat_v, flat_av)):
+            # Confidence-weighted residual PoE:
+            # z_poe = z0 + alpha*(za-z0) + beta*(zv-z0)
+            # alpha,beta from confidence softmax.
+            wtemp = max(1e-3, poe_weight_temp)
+            alpha = math.exp(conf_audio / wtemp)
+            beta = math.exp(conf_vision / wtemp)
+            wsum = max(1e-6, alpha + beta)
+            alpha /= wsum
+            beta /= wsum
+
+            z0 = flat_t.detach().float()
+            za = flat_a.detach().float()
+            zv = flat_v.detach().float()
+            zav = flat_av.float()
+            z_poe = z0 + alpha * (za - z0) + beta * (zv - z0)
+
+            if poe_loss_type == "mse":
+                poe_loss = (zav - z_poe).pow(2).mean()
+            else:
+                # KL( p_poe || p_av ): composed logits should match PoE target.
+                t = max(1e-3, poe_logit_temp)
+                tgt = F.softmax(z_poe / t, dim=-1)
+                pred_log = F.log_softmax(zav / t, dim=-1)
+                poe_loss = F.kl_div(pred_log, tgt, reduction="batchmean")
+
+            aux_losses["poe_consistency"] = poe_loss
+            aux_stats["poe_alpha"] = float(alpha)
+            aux_stats["poe_beta"] = float(beta)
+
     return reg_loss, per_layer, aux_losses, aux_stats
 
 
@@ -1176,6 +1249,8 @@ def train_epoch(
     noharm_reg_batches = 0
     total_logit_reg = 0.0
     logit_reg_batches = 0
+    total_poe_reg = 0.0
+    poe_reg_batches = 0
     total_route_scale = 0.0
     route_scale_batches = 0
     total_batches = 0
@@ -1203,6 +1278,7 @@ def train_epoch(
             getattr(args, "compat_add_reg_enable", False)
             or getattr(args, "compat_noharm_enable", False)
             or getattr(args, "compat_logit_fusion_enable", False)
+            or getattr(args, "compat_poe_enable", False)
         )
         and compatibility_state.get("audio_token_bank")
     )
@@ -1221,6 +1297,11 @@ def train_epoch(
     noharm_use_best_single = bool(getattr(args, "compat_noharm_use_best_single", False))
     logit_fusion_lambda = float(getattr(args, "compat_logit_fusion_lambda", 0.0))
     logit_fusion_conf_temp = float(getattr(args, "compat_logit_fusion_conf_temp", 0.5))
+    poe_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_poe_enable", False))
+    poe_lambda = float(getattr(args, "compat_poe_lambda", 0.0))
+    poe_weight_temp = float(getattr(args, "compat_poe_weight_temp", 0.5))
+    poe_loss_type = str(getattr(args, "compat_poe_loss_type", "kl"))
+    poe_logit_temp = float(getattr(args, "compat_poe_logit_temp", 1.0))
     routing_enabled = bool(getattr(args, "compat_routing_enable", False))
     routing_min_scale = float(getattr(args, "compat_routing_min_scale", 0.25))
     routing_max_scale = float(getattr(args, "compat_routing_max_scale", 1.0))
@@ -1356,68 +1437,80 @@ def train_epoch(
                     )
                     compat_warned_hidden = True
 
-                # Optional unpaired composition objectives on sparse steps
-                run_unpaired_aux = (
-                    unpaired_aux_enabled
-                    and (
-                        (add_reg_enabled and add_lambda > 0.0)
-                        or (noharm_enabled and noharm_lambda > 0.0)
-                        or (logit_fusion_enabled and logit_fusion_lambda > 0.0)
-                    )
-                    and (step % add_every == 0)
+            # Optional unpaired composition objectives on sparse steps
+            run_unpaired_aux = (
+                unpaired_aux_enabled
+                and (
+                    (add_reg_enabled and add_lambda > 0.0)
+                    or (noharm_enabled and noharm_lambda > 0.0)
+                    or (logit_fusion_enabled and logit_fusion_lambda > 0.0)
+                    or (poe_enabled and poe_lambda > 0.0)
                 )
-                if run_unpaired_aux:
-                    add_reg, _, aux_losses, aux_stats = compute_unpaired_additivity_regularizer(
-                        model=model,
-                        inputs=inputs,
-                        compatibility_state=compatibility_state,
-                        gate_value=gate_value,
-                        add_layers=add_layers,
-                        layer_weights=compat_layer_weights,
-                        normalize=add_norm,
-                        no_harm_enable=noharm_enabled,
-                        no_harm_margin=noharm_margin,
-                        no_harm_use_best_single=noharm_use_best_single,
-                        logit_fusion_enable=logit_fusion_enabled,
-                        logit_fusion_conf_temp=logit_fusion_conf_temp,
-                        routing_enable=routing_enabled,
-                        routing_min=routing_min_scale,
-                        routing_max=routing_max_scale,
+                and (step % add_every == 0)
+            )
+            if run_unpaired_aux:
+                add_reg, _, aux_losses, aux_stats = compute_unpaired_additivity_regularizer(
+                    model=model,
+                    inputs=inputs,
+                    compatibility_state=compatibility_state,
+                    gate_value=gate_value,
+                    add_layers=add_layers,
+                    layer_weights=compat_layer_weights,
+                    normalize=add_norm,
+                    no_harm_enable=noharm_enabled,
+                    no_harm_margin=noharm_margin,
+                    no_harm_use_best_single=noharm_use_best_single,
+                    logit_fusion_enable=logit_fusion_enabled,
+                    logit_fusion_conf_temp=logit_fusion_conf_temp,
+                    poe_enable=poe_enabled,
+                    poe_weight_temp=poe_weight_temp,
+                    poe_loss_type=poe_loss_type,
+                    poe_logit_temp=poe_logit_temp,
+                    routing_enable=routing_enabled,
+                    routing_min=routing_min_scale,
+                    routing_max=routing_max_scale,
+                )
+
+                if add_reg_enabled and add_reg is not None and add_lambda > 0.0:
+                    total_add_reg += float(add_reg.detach().item())
+                    add_reg_batches += 1
+                    loss = loss + add_lambda * add_reg
+
+                noharm_loss = aux_losses.get("no_harm")
+                if noharm_enabled and noharm_loss is not None and noharm_lambda > 0.0:
+                    total_noharm_reg += float(noharm_loss.detach().item())
+                    noharm_reg_batches += 1
+                    loss = loss + noharm_lambda * noharm_loss
+
+                logit_loss = aux_losses.get("logit_fusion")
+                if logit_fusion_enabled and logit_loss is not None and logit_fusion_lambda > 0.0:
+                    total_logit_reg += float(logit_loss.detach().item())
+                    logit_reg_batches += 1
+                    loss = loss + logit_fusion_lambda * logit_loss
+
+                poe_loss = aux_losses.get("poe_consistency")
+                if poe_enabled and poe_loss is not None and poe_lambda > 0.0:
+                    total_poe_reg += float(poe_loss.detach().item())
+                    poe_reg_batches += 1
+                    loss = loss + poe_lambda * poe_loss
+
+                if "route_audio_scale" in aux_stats:
+                    total_route_scale += float(aux_stats["route_audio_scale"])
+                    route_scale_batches += 1
+
+                if (
+                    add_reg is None
+                    and noharm_loss is None
+                    and logit_loss is None
+                    and poe_loss is None
+                    and not add_warned
+                ):
+                    print(
+                        "  [compat] warning: unpaired composition objective inactive "
+                        "(missing hidden states or audio token bank)",
+                        flush=True,
                     )
-
-                    if add_reg_enabled and add_reg is not None and add_lambda > 0.0:
-                        total_add_reg += float(add_reg.detach().item())
-                        add_reg_batches += 1
-                        loss = loss + add_lambda * add_reg
-
-                    noharm_loss = aux_losses.get("no_harm")
-                    if noharm_enabled and noharm_loss is not None and noharm_lambda > 0.0:
-                        total_noharm_reg += float(noharm_loss.detach().item())
-                        noharm_reg_batches += 1
-                        loss = loss + noharm_lambda * noharm_loss
-
-                    logit_loss = aux_losses.get("logit_fusion")
-                    if logit_fusion_enabled and logit_loss is not None and logit_fusion_lambda > 0.0:
-                        total_logit_reg += float(logit_loss.detach().item())
-                        logit_reg_batches += 1
-                        loss = loss + logit_fusion_lambda * logit_loss
-
-                    if "route_audio_scale" in aux_stats:
-                        total_route_scale += float(aux_stats["route_audio_scale"])
-                        route_scale_batches += 1
-
-                    if (
-                        add_reg is None
-                        and noharm_loss is None
-                        and logit_loss is None
-                        and not add_warned
-                    ):
-                        print(
-                            "  [compat] warning: unpaired composition objective inactive "
-                            "(missing hidden states or audio token bank)",
-                            flush=True,
-                        )
-                        add_warned = True
+                    add_warned = True
 
             loss = loss / args.gradient_accumulation_steps
 
@@ -1463,6 +1556,9 @@ def train_epoch(
             if route_scale_batches > 0:
                 route_avg = total_route_scale / float(max(1, route_scale_batches))
                 compat_suffix += f" route_scale={route_avg:.3f}"
+            if poe_reg_batches > 0:
+                poe_avg = total_poe_reg / float(max(1, poe_reg_batches))
+                compat_suffix += f" poe_reg={poe_avg:.4f}"
             print(
                 f"  [train] step {step + 1}/{num_batches} "
                 f"loss={avg_loss:.4f} lr={current_lr:.2e} gate={gate_value:.3f}{compat_suffix}",
@@ -1882,6 +1978,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--compat-logit-fusion-conf-temp", type=float, default=0.5,
                    help="Temperature for confidence -> fusion weights softmax")
 
+    # Residual-PoE consistency objective (logit space)
+    p.add_argument("--compat-poe-enable", action="store_true",
+                   help="Enable residual-PoE logit consistency: z_av ~ z0 + a*(za-z0) + b*(zv-z0)")
+    p.add_argument("--compat-poe-lambda", type=float, default=0.02,
+                   help="Weight for residual-PoE consistency loss")
+    p.add_argument("--compat-poe-weight-temp", type=float, default=0.5,
+                   help="Temperature for confidence->(alpha,beta) PoE weights")
+    p.add_argument("--compat-poe-loss-type", type=str, default="kl", choices=["kl", "mse"],
+                   help="Residual-PoE loss form")
+    p.add_argument("--compat-poe-logit-temp", type=float, default=1.0,
+                   help="Logit temperature for KL-based residual-PoE loss")
+
     # Confidence-routed gate for unpaired auxiliary composition passes
     p.add_argument("--compat-routing-enable", action="store_true",
                    help="Scale audio gate in unpaired composition passes using audio confidence")
@@ -1986,6 +2094,11 @@ def main() -> None:
                     "compat_logit_fusion_enable": args.compat_logit_fusion_enable,
                     "compat_logit_fusion_lambda": args.compat_logit_fusion_lambda,
                     "compat_logit_fusion_conf_temp": args.compat_logit_fusion_conf_temp,
+                    "compat_poe_enable": args.compat_poe_enable,
+                    "compat_poe_lambda": args.compat_poe_lambda,
+                    "compat_poe_weight_temp": args.compat_poe_weight_temp,
+                    "compat_poe_loss_type": args.compat_poe_loss_type,
+                    "compat_poe_logit_temp": args.compat_poe_logit_temp,
                     "compat_routing_enable": args.compat_routing_enable,
                     "compat_routing_min_scale": args.compat_routing_min_scale,
                     "compat_routing_max_scale": args.compat_routing_max_scale,
@@ -2118,6 +2231,7 @@ def main() -> None:
             or args.compat_add_reg_enable
             or args.compat_noharm_enable
             or args.compat_logit_fusion_enable
+            or args.compat_poe_enable
         )
 
         if compat_objective_enabled:
@@ -2130,6 +2244,7 @@ def main() -> None:
                 args.compat_add_reg_enable = False
                 args.compat_noharm_enable = False
                 args.compat_logit_fusion_enable = False
+                args.compat_poe_enable = False
                 args.compat_routing_enable = False
                 compat_objective_enabled = False
             else:
@@ -2157,6 +2272,13 @@ def main() -> None:
                     print(
                         f"[compat] logit-fusion objective enabled lambda={args.compat_logit_fusion_lambda} "
                         f"conf_temp={args.compat_logit_fusion_conf_temp}",
+                        flush=True,
+                    )
+                if args.compat_poe_enable:
+                    print(
+                        f"[compat] residual-PoE objective enabled lambda={args.compat_poe_lambda} "
+                        f"weight_temp={args.compat_poe_weight_temp} "
+                        f"loss={args.compat_poe_loss_type} logit_temp={args.compat_poe_logit_temp}",
                         flush=True,
                     )
                 if args.compat_routing_enable:
@@ -2276,6 +2398,13 @@ def main() -> None:
                         "lambda": float(args.compat_logit_fusion_lambda),
                         "conf_temp": float(args.compat_logit_fusion_conf_temp),
                     },
+                    "residual_poe": {
+                        "enabled": bool(args.compat_poe_enable),
+                        "lambda": float(args.compat_poe_lambda),
+                        "weight_temp": float(args.compat_poe_weight_temp),
+                        "loss_type": str(args.compat_poe_loss_type),
+                        "logit_temp": float(args.compat_poe_logit_temp),
+                    },
                     "routing": {
                         "enabled": bool(args.compat_routing_enable),
                         "min_scale": float(args.compat_routing_min_scale),
@@ -2340,6 +2469,12 @@ def main() -> None:
                     if args.compat_logit_fusion_enable:
                         log_payload["compat/logit_fusion_lambda"] = float(args.compat_logit_fusion_lambda)
                         log_payload["compat/logit_fusion_conf_temp"] = float(args.compat_logit_fusion_conf_temp)
+                    log_payload["compat/poe_enabled"] = float(bool(args.compat_poe_enable))
+                    if args.compat_poe_enable:
+                        log_payload["compat/poe_lambda"] = float(args.compat_poe_lambda)
+                        log_payload["compat/poe_weight_temp"] = float(args.compat_poe_weight_temp)
+                        log_payload["compat/poe_loss_type_is_kl"] = float(str(args.compat_poe_loss_type).lower() == "kl")
+                        log_payload["compat/poe_logit_temp"] = float(args.compat_poe_logit_temp)
                     log_payload["compat/routing_enabled"] = float(bool(args.compat_routing_enable))
                     if args.compat_routing_enable:
                         log_payload["compat/routing_min_scale"] = float(args.compat_routing_min_scale)
