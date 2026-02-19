@@ -179,17 +179,21 @@ class SAFEModel(nn.Module):
             _num_vt = (fusion_config or {}).get("modalities", {}).get("vision", {}).get("num_tokens", num_vision_tokens)
             _vp_cfg = dict(vision_projector_config) if vision_projector_config else {}
             from .projectors import TokenSetProjector
+            # Use slim output_dim when audio projector is in slim mode,
+            # so vision tokens match the same kv_input_dim expected by the
+            # shared cross-attention adapters.
+            _vision_output_dim = actual_output_dim
             self.vision_projector = TokenSetProjector(
                 input_dim=_clip_hidden,
                 num_tokens=_num_vt,
-                output_dim=llm_hidden_size,
+                output_dim=_vision_output_dim,
                 dropout=_vp_cfg.get("dropout", 0.1),
                 bottleneck_dim=_vp_cfg.get("bottleneck_dim", 1024),
                 use_positional_embedding=_vp_cfg.get("use_positional_embedding", True),
             )
             self.num_vision_tokens = _num_vt
             print(
-                f"[SAFE] ✓ Vision projector initialized (CLIP {_clip_hidden}→{_num_vt} tokens×{llm_hidden_size})",
+                f"[SAFE] ✓ Vision projector initialized (CLIP {_clip_hidden}→{_num_vt} tokens×{_vision_output_dim})",
                 flush=True,
             )
             sys.stdout.flush()

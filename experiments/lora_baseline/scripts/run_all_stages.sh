@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-SAFE_ROOT="${SAFE_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+SAFE_ROOT="${SAFE_ROOT:-/data/SalmanAsif/RobbyMoseley/SAFE/SAFE}"
 SEED="${SEED:-42}"
 LR="${LR:-5e-5}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
