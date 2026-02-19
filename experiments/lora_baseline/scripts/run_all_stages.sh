@@ -20,7 +20,11 @@
 set -euo pipefail
 
 # ---- Cluster paths ----
-SAFE_ROOT="/data/SalmanAsif/RobbyMoseley/SAFE/SAFE"
+SAFE_ROOT="${SAFE_ROOT:-/data/SalmanAsif/RobbyMoseley/SAFE/SAFE}"
+if [[ ! -d "$SAFE_ROOT" ]]; then
+  echo "ERROR: SAFE_ROOT does not exist: $SAFE_ROOT" >&2
+  exit 1
+fi
 
 # ---- Conda activation ----
 CONDA_ENV=${CONDA_ENV:-safe-env}
@@ -104,6 +108,14 @@ python3 -c "import torch,sys; ok=torch.cuda.is_available() and torch.cuda.device
 # ---- Script paths ----
 TRAIN_SCRIPT="${SAFE_ROOT}/experiments/lora_baseline/train_lora_baseline.py"
 MERGE_SCRIPT="${SAFE_ROOT}/experiments/lora_baseline/merge_and_continue.py"
+if [[ ! -f "$TRAIN_SCRIPT" ]]; then
+  echo "ERROR: training script not found: $TRAIN_SCRIPT" >&2
+  exit 1
+fi
+if [[ ! -f "$MERGE_SCRIPT" ]]; then
+  echo "ERROR: merge script not found: $MERGE_SCRIPT" >&2
+  exit 1
+fi
 
 COMMON_ARGS=(
     --train-manifest "${TRAIN_MANIFEST}"

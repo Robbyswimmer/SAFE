@@ -20,7 +20,11 @@
 set -euo pipefail
 
 # ---- Cluster paths ----
-SAFE_ROOT="/data/SalmanAsif/RobbyMoseley/SAFE/SAFE"
+SAFE_ROOT="${SAFE_ROOT:-/data/SalmanAsif/RobbyMoseley/SAFE/SAFE}"
+if [[ ! -d "$SAFE_ROOT" ]]; then
+  echo "ERROR: SAFE_ROOT does not exist: $SAFE_ROOT" >&2
+  exit 1
+fi
 
 # ---- Conda activation ----
 CONDA_ENV=${CONDA_ENV:-safe-env}
@@ -93,6 +97,15 @@ export SAFE_OFFLOAD_FOLDER=${SAFE_OFFLOAD_FOLDER:-$SAFE_ROOT/.hf_offload}
 mkdir -p logs "${OUTPUT_BASE}"
 mkdir -p "$SAFE_OFFLOAD_FOLDER"
 cd "$SAFE_ROOT"
+
+if [[ ! -f "$SAFE_ROOT/experiments/lora_baseline/train_lora_baseline.py" ]]; then
+  echo "ERROR: training script missing at $SAFE_ROOT/experiments/lora_baseline/train_lora_baseline.py" >&2
+  exit 1
+fi
+if [[ ! -f "$SAFE_ROOT/experiments/lora_baseline/merge_and_continue.py" ]]; then
+  echo "ERROR: merge script missing at $SAFE_ROOT/experiments/lora_baseline/merge_and_continue.py" >&2
+  exit 1
+fi
 
 # ---- CUDA check ----
 python3 -c "import torch,sys; ok=torch.cuda.is_available() and torch.cuda.device_count()>0; print(f'[cuda_check] available={torch.cuda.is_available()} count={torch.cuda.device_count()}'); sys.exit(0 if ok else 2)"
