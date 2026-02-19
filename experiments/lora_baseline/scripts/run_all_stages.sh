@@ -2,6 +2,7 @@
 #SBATCH --job-name=lora-baseline-all
 #SBATCH --time=72:00:00
 #SBATCH --mem=96G
+#SBATCH --gres=gpu:1
 #SBATCH -p gpu
 #
 # Run all LoRA baseline stages sequentially in a single job:

@@ -2,6 +2,7 @@
 #SBATCH --job-name=lora-baseline
 #SBATCH --time=48:00:00
 #SBATCH --mem=96G
+#SBATCH --gres=gpu:1
 #SBATCH -p gpu
 #
 # LoRA baseline experiment: sequential modality addition
