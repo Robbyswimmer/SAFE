@@ -1,0 +1,156 @@
+#!/bin/bash
+#SBATCH --job-name=lora-baseline
+#SBATCH --time=48:00:00
+#SBATCH --mem=96G
+#SBATCH -p gpu
+#
+# LoRA baseline experiment: sequential modality addition
+#
+# Usage:
+#   Stage 0 (text-only eval):
+#     STAGE=0 bash run_lora_baseline.sh
+#
+#   Stage 1 (audio LoRA):
+#     STAGE=1 bash run_lora_baseline.sh
+#
+#   Merge audio LoRA:
+#     bash run_lora_baseline.sh merge
+#
+#   Stage 2 (vision LoRA on merged model):
+#     STAGE=2 MERGED_MODEL_PATH=checkpoints/lora_stage1_merged \
+#       AUDIO_PROJECTOR_PATH=checkpoints/lora_stage1/best_audio_projector.pt \
+#       bash run_lora_baseline.sh
+
+set -euo pipefail
+
+# ---- Configuration ----
+SAFE_ROOT="${SAFE_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+STAGE="${STAGE:-1}"
+SEED="${SEED:-42}"
+LR="${LR:-5e-5}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
+GRAD_ACCUM="${GRAD_ACCUM:-16}"
+NUM_EPOCHS="${NUM_EPOCHS:-10}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
+
+# LoRA hyperparameters
+LORA_RANK="${LORA_RANK:-8}"
+LORA_ALPHA="${LORA_ALPHA:-16}"
+LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-q_proj,v_proj}"
+LORA_DROPOUT="${LORA_DROPOUT:-0.05}"
+
+# Data paths
+DATA_ROOT="${DATA_ROOT:-${SAFE_ROOT}/data/music_avqa}"
+TRAIN_MANIFEST="${TRAIN_MANIFEST:-${DATA_ROOT}/manifests/train.jsonl}"
+VAL_MANIFEST="${VAL_MANIFEST:-${DATA_ROOT}/manifests/validation.jsonl}"
+MEDIA_ROOT="${MEDIA_ROOT:-${DATA_ROOT}}"
+
+# Model paths
+LLM_MODEL="${LLM_MODEL:-models/Qwen_Qwen3-8B}"
+MERGED_MODEL_PATH="${MERGED_MODEL_PATH:-}"
+AUDIO_PROJECTOR_PATH="${AUDIO_PROJECTOR_PATH:-}"
+
+# Output
+OUTPUT_BASE="${OUTPUT_BASE:-${SAFE_ROOT}/checkpoints/lora_baseline}"
+
+# Qwen-specific environment
+export SAFE_QWEN_QUANT=none
+export SAFE_GRAD_CKPT=0
+export FP16=0
+
+echo "============================================"
+echo " LoRA Baseline Experiment"
+echo " SAFE_ROOT:  ${SAFE_ROOT}"
+echo " STAGE:      ${STAGE}"
+echo " SEED:       ${SEED}"
+echo " LR:         ${LR}"
+echo " BATCH_SIZE: ${BATCH_SIZE}"
+echo " GRAD_ACCUM: ${GRAD_ACCUM}"
+echo " NUM_EPOCHS: ${NUM_EPOCHS}"
+echo " LORA_RANK:  ${LORA_RANK}"
+echo " LORA_ALPHA: ${LORA_ALPHA}"
+echo " DATA_ROOT:  ${DATA_ROOT}"
+echo "============================================"
+
+# ---- Handle merge command ----
+if [ "${1:-}" = "merge" ]; then
+    LORA_CKPT="${LORA_CKPT:-${OUTPUT_BASE}/stage1/best_lora}"
+    MERGE_OUTPUT="${MERGE_OUTPUT:-${OUTPUT_BASE}/stage1_merged}"
+
+    echo "[Merge] Merging audio LoRA into base model..."
+    echo "  Base model:    ${LLM_MODEL}"
+    echo "  LoRA ckpt:     ${LORA_CKPT}"
+    echo "  Output:        ${MERGE_OUTPUT}"
+
+    python3 "${SAFE_ROOT}/experiments/lora_baseline/merge_and_continue.py" \
+        --base-model "${LLM_MODEL}" \
+        --lora-checkpoint "${LORA_CKPT}" \
+        --output-dir "${MERGE_OUTPUT}" \
+        --verify
+
+    echo "[Merge] Done. Merged model at: ${MERGE_OUTPUT}"
+    exit 0
+fi
+
+# ---- Run training/eval ----
+OUTPUT_DIR="${OUTPUT_BASE}/stage${STAGE}"
+mkdir -p "${OUTPUT_DIR}"
+
+EXTRA_ARGS=""
+
+case "${STAGE}" in
+    0)
+        echo "[Stage 0] Text-only baseline evaluation"
+        EXTRA_ARGS="--eval-modalities text"
+        TRAIN_MODALITY="audio"  # Unused for stage 0
+        ;;
+    1)
+        echo "[Stage 1] Audio LoRA training"
+        TRAIN_MODALITY="audio"
+        EXTRA_ARGS="--eval-modalities text,audio"
+        ;;
+    2)
+        echo "[Stage 2] Vision LoRA training (on merged model)"
+        TRAIN_MODALITY="image"
+        EXTRA_ARGS="--eval-modalities text,audio,image,both"
+
+        if [ -z "${MERGED_MODEL_PATH}" ]; then
+            echo "ERROR: MERGED_MODEL_PATH is required for stage 2"
+            exit 1
+        fi
+        EXTRA_ARGS="${EXTRA_ARGS} --merged-model-path ${MERGED_MODEL_PATH}"
+
+        if [ -n "${AUDIO_PROJECTOR_PATH}" ]; then
+            EXTRA_ARGS="${EXTRA_ARGS} --audio-projector-path ${AUDIO_PROJECTOR_PATH}"
+        fi
+        ;;
+    *)
+        echo "ERROR: Unknown stage ${STAGE}"
+        exit 1
+        ;;
+esac
+
+python3 "${SAFE_ROOT}/experiments/lora_baseline/train_lora_baseline.py" \
+    --stage "${STAGE}" \
+    --train-manifest "${TRAIN_MANIFEST}" \
+    --val-manifest "${VAL_MANIFEST}" \
+    --media-root "${MEDIA_ROOT}" \
+    --output-dir "${OUTPUT_DIR}" \
+    --llm-model "${LLM_MODEL}" \
+    --train-modality "${TRAIN_MODALITY}" \
+    --batch-size "${BATCH_SIZE}" \
+    --num-epochs "${NUM_EPOCHS}" \
+    --learning-rate "${LR}" \
+    --gradient-accumulation-steps "${GRAD_ACCUM}" \
+    --lora-rank "${LORA_RANK}" \
+    --lora-alpha "${LORA_ALPHA}" \
+    --lora-target-modules "${LORA_TARGET_MODULES}" \
+    --lora-dropout "${LORA_DROPOUT}" \
+    --seed "${SEED}" \
+    --num-workers "${NUM_WORKERS}" \
+    --bf16 \
+    --wandb \
+    --wandb-project "SAFE-LoRA-Baseline" \
+    ${EXTRA_ARGS}
+
+echo "[Done] Stage ${STAGE} complete. Results in ${OUTPUT_DIR}"

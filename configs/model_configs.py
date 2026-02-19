@@ -939,6 +939,45 @@ INTERNVL_38B_CONFIG = {
     "gradient_accumulation_steps": 16,
 }
 
+# LoRA Baseline Configuration
+# Demonstrates degradation when adding modalities via LoRA weight modification
+# (Table 1 comparison): prepend tokens + LoRA on Qwen3-8B self-attention
+LORA_BASELINE_CONFIG = {
+    "name": "lora_baseline",
+    "description": "LoRA baseline: prepend tokens + LoRA on Qwen3-8B attention",
+    "eval_prompt": "Answer with exactly one short answer token (single word or number).",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/Qwen_Qwen3-8B"),
+    "vision_model_name": "openai/clip-vit-large-patch14",
+
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0,
+    },
+
+    "llm_hidden_size": 4096,
+    "audio_embed_dim": 512,
+    "vision_embed_dim": 1024,
+    "num_audio_tokens": 8,
+    "num_vision_tokens": 8,
+
+    # LoRA hyperparameters (rank 8 on q_proj, v_proj = ~4.2M params)
+    "lora_rank": 8,
+    "lora_alpha": 16,
+    "lora_target_modules": ["q_proj", "v_proj"],
+    "lora_dropout": 0.05,
+
+    "freeze_audio_encoder": True,
+    "freeze_vision_encoder": True,
+    "label_smoothing": 0.1,
+
+    "expected_vram_gb": 38,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+}
+
 # Available configurations
 CONFIGS = {
     "demo": DEMO_CONFIG,
@@ -961,6 +1000,7 @@ CONFIGS = {
     "composition_independent": COMPOSITION_INDEPENDENT_CONFIG,
     "composition_staggered": COMPOSITION_INDEPENDENT_CONFIG,
     "composition_disjoint": COMPOSITION_DISJOINT_CONFIG,
+    "lora_baseline": LORA_BASELINE_CONFIG,
 }
 
 def get_config(config_name: str):
