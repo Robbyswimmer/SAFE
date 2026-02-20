@@ -978,6 +978,79 @@ LORA_BASELINE_CONFIG = {
     "gradient_accumulation_steps": 16,
 }
 
+# InternVL 3.5-8B Modality Binding Configuration
+# Audio-only training on InternVL (which has built-in InternViT vision).
+# At eval, pass vision inputs to test whether InternVL's native vision
+# composes with the trained audio adapter through the frozen backbone
+# ("modality binding" hypothesis).
+# Uses bottleneck_dim=756 projector (756/4096 = 18.5% ratio).
+INTERNVL_BINDING_CONFIG = {
+    "name": "internvl_binding",
+    "description": "InternVL 8B modality binding: audio-only training, test vision composition at eval",
+    "eval_prompt": "Answer with a single word or number.",
+
+    # Base VL Model - InternVL 3.5-8B (has built-in InternViT-300M vision encoder)
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/OpenGVLab_InternVL3_5-8B"),
+    "vision_model_name": "built-in",  # InternVL has built-in InternViT-300M
+
+    # InternVL vision pipeline defaults (frozen, used at eval only)
+    "image_token_id": 151667,
+    "image_seq_length": 256,
+    "downsample_ratio": 0.5,
+    "image_size": [448, 448],
+
+    # Audio configuration
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0,
+    },
+
+    # Model dimensions - Qwen3-8B backbone inside InternVL
+    "llm_hidden_size": 4096,
+    "audio_embed_dim": 512,
+    "num_audio_tokens": 8,
+
+    # Projector configuration - bottleneck_dim=756 (18.5% ratio)
+    "projector_type": "standard",
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 756,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    # Fusion configuration - audio adapters only
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [1, 5, 9, 13, 17, 21],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "use_bottleneck": True,
+        "bottleneck_dim": 256,
+        "num_attention_heads": 32,
+        "dropout": 0.1,
+        "modalities": {
+            "audio": {
+                "layer_indices": [1, 5, 9, 13, 17, 21],
+                "num_tokens": 8,
+            },
+        },
+    },
+
+    # Training configuration
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+
+    # Memory and compute
+    "expected_vram_gb": 35,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+}
+
 # Available configurations
 CONFIGS = {
     "demo": DEMO_CONFIG,
@@ -1001,6 +1074,7 @@ CONFIGS = {
     "composition_staggered": COMPOSITION_INDEPENDENT_CONFIG,
     "composition_disjoint": COMPOSITION_DISJOINT_CONFIG,
     "lora_baseline": LORA_BASELINE_CONFIG,
+    "internvl_binding": INTERNVL_BINDING_CONFIG,
 }
 
 def get_config(config_name: str):
