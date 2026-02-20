@@ -91,6 +91,50 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _load_state_dict_maybe_nested(path: Path) -> Dict[str, torch.Tensor]:
+    raw = torch.load(str(path), map_location="cpu")
+    if isinstance(raw, dict):
+        # Handle common wrapped formats just in case.
+        for key in ("state_dict", "model_state_dict", "model"):
+            if key in raw and isinstance(raw[key], dict):
+                maybe = raw[key]
+                if maybe and all(torch.is_tensor(v) for v in maybe.values()):
+                    return maybe
+        if raw and all(torch.is_tensor(v) for v in raw.values()):
+            return raw  # direct state_dict
+    raise RuntimeError(f"Unsupported checkpoint format: {path}")
+
+
+def _infer_requires_full_projector(path: Path) -> Optional[bool]:
+    """
+    Infer whether checkpoint expects full projector width (llm_hidden_size) instead of slim bottleneck width.
+
+    Returns:
+      True  -> likely full projector (SLIM_PROJECTOR=0 / --no-slim-projector)
+      False -> likely slim projector
+      None  -> could not infer
+    """
+    try:
+        state = _load_state_dict_maybe_nested(path)
+    except Exception:
+        return None
+
+    for k, v in state.items():
+        if (
+            "fusion_adapter.fusion_adapters.audio:" in k
+            and k.endswith(".cross_attention.key.weight")
+            and torch.is_tensor(v)
+            and v.ndim == 2
+        ):
+            bottleneck = int(v.shape[0])
+            kv_dim = int(v.shape[1])
+            if kv_dim > bottleneck:
+                return True
+            if kv_dim == bottleneck:
+                return False
+    return None
+
+
 @torch.no_grad()
 def _run_forward(
     model: SAFEModel,
@@ -384,6 +428,15 @@ def main() -> None:
         collate_fn=collate_avqa,
         pin_memory=torch.cuda.is_available(),
     )
+
+    inferred_full = _infer_requires_full_projector(args.compose_audio_ckpt)
+    if inferred_full is True and args.slim_projector:
+        print(
+            "[diag] checkpoint appears to require full projector width; "
+            "auto-disabling slim projector for compatibility.",
+            flush=True,
+        )
+        args.slim_projector = False
 
     cfg_args = SimpleNamespace(
         model_config=args.model_config,

@@ -44,6 +44,7 @@ FUSION_GATE=${FUSION_GATE:-0.2}
 MAX_ANSWER_TOKENS=${MAX_ANSWER_TOKENS:-16}
 SEED=${SEED:-42}
 SKIP_LAYER_PROBE=${SKIP_LAYER_PROBE:-0}
+SLIM_PROJECTOR=${SLIM_PROJECTOR:-1}   # 0 => --no-slim-projector
 
 export SAFE_QWEN_QUANT=${SAFE_QWEN_QUANT:-none}
 export SAFE_GRAD_CKPT=${SAFE_GRAD_CKPT:-0}
@@ -174,6 +175,9 @@ if [[ -n "${OUTPUT_JSON}" ]]; then
 fi
 if [[ "${SKIP_LAYER_PROBE}" == "1" ]]; then
   PY_ARGS+=(--skip-layer-probe)
+fi
+if [[ "${SLIM_PROJECTOR}" == "0" ]]; then
+  PY_ARGS+=(--no-slim-projector)
 fi
 
 python3 "$SAFE_ROOT/experiments/avqa_composition/analyze_composability.py" "${PY_ARGS[@]}"
