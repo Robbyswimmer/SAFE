@@ -31,8 +31,8 @@ MEDIA_ROOT=${MEDIA_ROOT:-$SAFE_ROOT}
 OUTPUT_DIR=${OUTPUT_DIR:-checkpoints/composability_diagnostics}
 OUTPUT_JSON=${OUTPUT_JSON:-}
 
-COMPOSE_AUDIO_CKPT=${COMPOSE_AUDIO_CKPT:-checkpoints/composition_audio_study/best_model.pt}
-COMPOSE_VISION_CKPT=${COMPOSE_VISION_CKPT:-checkpoints/composition_vision_study/best_model.pt}
+COMPOSE_AUDIO_CKPT=${COMPOSE_AUDIO_CKPT:-}
+COMPOSE_VISION_CKPT=${COMPOSE_VISION_CKPT:-}
 
 MAX_SAMPLES=${MAX_SAMPLES:-1000}
 PROBE_SAMPLES=${PROBE_SAMPLES:-512}
@@ -85,6 +85,45 @@ fi
 export SAFE_OFFLOAD_FOLDER=${SAFE_OFFLOAD_FOLDER:-$SAFE_ROOT/.hf_offload}
 mkdir -p logs "$OUTPUT_DIR" "$SAFE_OFFLOAD_FOLDER"
 cd "$SAFE_ROOT"
+
+resolve_ckpt() {
+  for candidate in "$@"; do
+    if [[ -n "$candidate" && -f "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ -z "$COMPOSE_AUDIO_CKPT" ]]; then
+  COMPOSE_AUDIO_CKPT=$(resolve_ckpt \
+    checkpoints/composition_audio_study/best_model.pt \
+    checkpoints/composition_audio/best_model.pt \
+    checkpoints/avqa_composition/composition_audio_study/best_model.pt \
+    checkpoints/avqa_composition/composition_audio/best_model.pt \
+    ) || true
+fi
+
+if [[ -z "$COMPOSE_VISION_CKPT" ]]; then
+  COMPOSE_VISION_CKPT=$(resolve_ckpt \
+    checkpoints/composition_vision_study/best_model.pt \
+    checkpoints/composition_vision/best_model.pt \
+    checkpoints/avqa_composition/composition_vision_study/best_model.pt \
+    checkpoints/avqa_composition/composition_vision/best_model.pt \
+    ) || true
+fi
+
+if [[ -z "$COMPOSE_AUDIO_CKPT" || ! -f "$COMPOSE_AUDIO_CKPT" ]]; then
+  echo "FATAL: audio checkpoint not found. Set COMPOSE_AUDIO_CKPT explicitly." >&2
+  echo "Hint: find checkpoints -type f -name '*.pt' | rg -i 'audio|composition'" >&2
+  exit 2
+fi
+if [[ -z "$COMPOSE_VISION_CKPT" || ! -f "$COMPOSE_VISION_CKPT" ]]; then
+  echo "FATAL: vision checkpoint not found. Set COMPOSE_VISION_CKPT explicitly." >&2
+  echo "Hint: find checkpoints -type f -name '*.pt' | rg -i 'vision|composition'" >&2
+  exit 2
+fi
 
 REQUIRE_CUDA=${REQUIRE_CUDA:-1}
 if [[ "$REQUIRE_CUDA" == "1" ]]; then

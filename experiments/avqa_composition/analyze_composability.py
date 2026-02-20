@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,10 @@ from typing import Any, Dict, List, Optional, Sequence
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from experiments.avqa_composition.train_avqa_composition import (
     ManifestAVQADataset,
