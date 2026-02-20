@@ -109,6 +109,8 @@ class LoRABaselineModel(nn.Module):
         )
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        # Match Qwen composition scripts (causal generation with batched prompts).
+        self.tokenizer.padding_side = "left"
 
         self.llm = AutoModelForCausalLM.from_pretrained(
             llm_path,
@@ -388,11 +390,14 @@ class LoRABaselineModel(nn.Module):
             num_beams=1,
         )
 
-        # Decode only new tokens
+        # Decode generated tokens robustly across HF paths:
+        # some return full sequence (prompt + generation), others new tokens only.
+        prompt_width = int(attention_mask.size(1))
         preds = []
         for i in range(output_ids.size(0)):
-            # generate() returns input + new tokens when using inputs_embeds
-            pred_text = self.tokenizer.decode(output_ids[i], skip_special_tokens=True)
+            seq = output_ids[i]
+            gen = seq[prompt_width:] if seq.size(0) > prompt_width else seq
+            pred_text = self.tokenizer.decode(gen, skip_special_tokens=True)
             preds.append(pred_text)
         return preds
 
@@ -780,6 +785,7 @@ def main() -> None:
         tokenizer = AutoTokenizer.from_pretrained(llm_path, trust_remote_code=True)
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "left"
         base_llm = AutoModelForCausalLM.from_pretrained(
             llm_path, torch_dtype=torch.bfloat16, trust_remote_code=True,
         )
@@ -800,16 +806,32 @@ def main() -> None:
         stage0_start = time.time()
         total_batches = max(1, len(val_loader))
         log_every = max(1, min(200, total_batches // 5))
+        instruction = "Answer with exactly one short answer token (single word or number)."
+        has_chat_template = bool(getattr(tokenizer, "chat_template", None)) and hasattr(tokenizer, "apply_chat_template")
 
         for step, batch in enumerate(val_loader, start=1):
-            prompts = [
-                "<|im_start|>user\n"
-                "Answer with exactly one short answer token (single word or number).\n"
-                f"Question: {q}\n"
-                "Answer:<|im_end|>\n"
-                "<|im_start|>assistant\n"
-                for q in batch["questions"]
-            ]
+            prompts = []
+            for q in batch["questions"]:
+                user_text = f"{instruction}\nQuestion: {q}\nAnswer:"
+                if has_chat_template:
+                    try:
+                        prompt = tokenizer.apply_chat_template(
+                            [{"role": "user", "content": user_text}],
+                            tokenize=False,
+                            add_generation_prompt=True,
+                            enable_thinking=False,
+                        )
+                    except TypeError:
+                        prompt = tokenizer.apply_chat_template(
+                            [{"role": "user", "content": user_text}],
+                            tokenize=False,
+                            add_generation_prompt=True,
+                        )
+                    except Exception:
+                        prompt = f"USER: /no_think\n{user_text}\nASSISTANT:"
+                else:
+                    prompt = f"USER: /no_think\n{user_text}\nASSISTANT:"
+                prompts.append(prompt)
             enc = tokenizer(
                 prompts, return_tensors="pt", padding=True, truncation=True, max_length=512,
             )
@@ -821,8 +843,11 @@ def main() -> None:
                     do_sample=False, num_beams=1,
                 )
 
+            prompt_width = int(enc["input_ids"].size(1))
             for i in range(out_ids.size(0)):
-                pred = tokenizer.decode(out_ids[i], skip_special_tokens=True)
+                seq = out_ids[i]
+                gen = seq[prompt_width:] if seq.size(0) > prompt_width else seq
+                pred = tokenizer.decode(gen, skip_special_tokens=True)
                 ref = batch["answers"][i]
                 exact_total += float(normalize_answer(pred) == normalize_answer(ref))
                 extracted_total += float(extract_answer(pred) == extract_answer(ref))
