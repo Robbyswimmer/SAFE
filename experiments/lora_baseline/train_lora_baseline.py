@@ -520,6 +520,7 @@ def evaluate(
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
     model.eval()
+    eval_start = time.time()
 
     exact_total = 0.0
     extracted_total = 0.0
@@ -527,8 +528,10 @@ def evaluate(
     cat_f1_total = 0.0
     count = 0
     by_type: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    total_batches = max(1, len(dataloader))
+    log_every = max(1, min(200, total_batches // 5))
 
-    for batch in dataloader:
+    for step, batch in enumerate(dataloader, start=1):
         # Resolve modality
         if modality == "text":
             audio, images = None, None
@@ -564,6 +567,17 @@ def evaluate(
             by_type[qtype]["f1"] += f1
             by_type[qtype]["cat_f1"] += cat_f1
             by_type[qtype]["count"] += 1
+
+        if step % log_every == 0 or step == total_batches:
+            elapsed = time.time() - eval_start
+            eta = (elapsed / step) * max(0, total_batches - step)
+            running_extracted = 100.0 * extracted_total / max(1, count)
+            print(
+                f"  [eval:{modality}] step {step}/{total_batches} "
+                f"extracted_em={running_extracted:.2f}% "
+                f"elapsed={elapsed/60.0:.1f}m eta={eta/60.0:.1f}m",
+                flush=True,
+            )
 
     n = max(1, count)
     results = {
@@ -783,8 +797,11 @@ def main() -> None:
         f1_total = 0.0
         cat_f1_total = 0.0
         count = 0
+        stage0_start = time.time()
+        total_batches = max(1, len(val_loader))
+        log_every = max(1, min(200, total_batches // 5))
 
-        for batch in val_loader:
+        for step, batch in enumerate(val_loader, start=1):
             prompts = [
                 "<|im_start|>user\n"
                 "Answer with exactly one short answer token (single word or number).\n"
@@ -812,6 +829,17 @@ def main() -> None:
                 f1_total += token_f1(pred, ref)
                 cat_f1_total += categorical_f1(pred, ref)
                 count += 1
+
+            if step % log_every == 0 or step == total_batches:
+                elapsed = time.time() - stage0_start
+                eta = (elapsed / step) * max(0, total_batches - step)
+                running_extracted = 100.0 * extracted_total / max(1, count)
+                print(
+                    f"  [Stage0:text] step {step}/{total_batches} "
+                    f"extracted_em={running_extracted:.2f}% "
+                    f"elapsed={elapsed/60.0:.1f}m eta={eta/60.0:.1f}m",
+                    flush=True,
+                )
 
         n = max(1, count)
         results = {
