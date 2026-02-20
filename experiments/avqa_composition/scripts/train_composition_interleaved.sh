@@ -93,6 +93,15 @@ COMPAT_ROUTING_ENABLE=${COMPAT_ROUTING_ENABLE:-0}
 COMPAT_ROUTING_MIN_SCALE=${COMPAT_ROUTING_MIN_SCALE:-0.25}
 COMPAT_ROUTING_MAX_SCALE=${COMPAT_ROUTING_MAX_SCALE:-1.0}
 
+# Optional initialization checkpoints (used for Level-1/2 continuation runs)
+INIT_AUDIO_CKPT=${INIT_AUDIO_CKPT:-}
+INIT_VISION_CKPT=${INIT_VISION_CKPT:-}
+
+# Optional learned per-layer gating (calibration-friendly)
+LEARNED_GATE=${LEARNED_GATE:-0}
+LEARNED_GATE_INIT=${LEARNED_GATE_INIT:-0.0}
+TRAIN_GATES_ONLY=${TRAIN_GATES_ONLY:-0}
+
 # Qwen-specific env vars
 export SAFE_QWEN_QUANT=none
 export SAFE_GRAD_CKPT=0
@@ -245,6 +254,22 @@ if [ "$SLIM_PROJECTOR" = "0" ]; then
   SLIM_ARGS+=(--no-slim-projector)
 fi
 
+INIT_ARGS=()
+if [[ -n "$INIT_AUDIO_CKPT" ]]; then
+  INIT_ARGS+=(--init-audio-ckpt "$INIT_AUDIO_CKPT")
+fi
+if [[ -n "$INIT_VISION_CKPT" ]]; then
+  INIT_ARGS+=(--init-vision-ckpt "$INIT_VISION_CKPT")
+fi
+
+GATE_ARGS=()
+if [[ "$LEARNED_GATE" == "1" ]]; then
+  GATE_ARGS+=(--learned-gate --learned-gate-init "$LEARNED_GATE_INIT")
+fi
+if [[ "$TRAIN_GATES_ONLY" == "1" ]]; then
+  GATE_ARGS+=(--train-gates-only)
+fi
+
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --model-config "$MODEL_CONFIG" \
@@ -263,6 +288,8 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --max-answer-tokens "$MAX_ANSWER_TOKENS" \
   --freeze-audio-encoder \
   "${SLIM_ARGS[@]}" \
+  "${INIT_ARGS[@]}" \
+  "${GATE_ARGS[@]}" \
   "${MAX_SAMPLES_ARGS[@]}" \
   "${EVAL_DEBUG_ARGS[@]}" \
   "${LAYER_PROBE_ARGS[@]}" \

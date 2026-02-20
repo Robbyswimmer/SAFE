@@ -1904,6 +1904,8 @@ def parse_args() -> argparse.Namespace:
                    help="Enable per-layer learned gating (Flamingo-style tanh gates)")
     p.add_argument("--learned-gate-init", type=float, default=0.0,
                    help="Initial value for learned gate params (tanh-squashed, 0.0=gate off)")
+    p.add_argument("--train-gates-only", action="store_true",
+                   help="Freeze all trainable adapter params except per-layer learned gates")
 
     # Gradient attribution study
     p.add_argument("--grad-attribution", dest="grad_attribution", action="store_true",
@@ -1919,6 +1921,10 @@ def parse_args() -> argparse.Namespace:
                    help="Path to audio-only adapter checkpoint for composition eval")
     p.add_argument("--compose-vision-ckpt", type=Path, default=None,
                    help="Path to vision-only adapter checkpoint for composition eval")
+    p.add_argument("--init-audio-ckpt", type=Path, default=None,
+                   help="Optional audio adapter checkpoint to initialize model before training")
+    p.add_argument("--init-vision-ckpt", type=Path, default=None,
+                   help="Optional vision adapter checkpoint to initialize model before training")
 
     # Sequential composition objective (Audio -> Vision, no joint AV pairs)
     p.add_argument("--compat-reg-enable", action="store_true",
@@ -2069,6 +2075,9 @@ def main() -> None:
                     "val_manifest": str(args.val_manifest),
                     "fusion_gate": args.fusion_gate,
                     "gate_warmup_steps": args.gate_warmup_steps,
+                    "learned_gate": args.learned_gate,
+                    "learned_gate_init": args.learned_gate_init,
+                    "train_gates_only": args.train_gates_only,
                     "label_smoothing": args.label_smoothing,
                     "layer_additivity_probe": args.layer_additivity_probe,
                     "layer_probe_samples": args.layer_probe_samples,
@@ -2102,6 +2111,10 @@ def main() -> None:
                     "compat_routing_enable": args.compat_routing_enable,
                     "compat_routing_min_scale": args.compat_routing_min_scale,
                     "compat_routing_max_scale": args.compat_routing_max_scale,
+                    "init_audio_ckpt": str(args.init_audio_ckpt) if args.init_audio_ckpt else None,
+                    "init_vision_ckpt": str(args.init_vision_ckpt) if args.init_vision_ckpt else None,
+                    "compose_audio_ckpt": str(args.compose_audio_ckpt) if args.compose_audio_ckpt else None,
+                    "compose_vision_ckpt": str(args.compose_vision_ckpt) if args.compose_vision_ckpt else None,
                 },
             )
 
@@ -2137,6 +2150,15 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Optional initialization from modality checkpoints before training.
+    # This does NOT force eval-only mode.
+    if args.init_audio_ckpt:
+        model.load_modality_adapters(str(args.init_audio_ckpt), "audio")
+        print(f"[init] loaded audio adapters from {args.init_audio_ckpt}", flush=True)
+    if args.init_vision_ckpt:
+        model.load_modality_adapters(str(args.init_vision_ckpt), "vision")
+        print(f"[init] loaded vision adapters from {args.init_vision_ckpt}", flush=True)
+
     # Composition experiment: load separate modality checkpoints for zero-shot eval
     composition_eval_only = False
     if args.compose_audio_ckpt and args.compose_vision_ckpt:
@@ -2144,6 +2166,25 @@ def main() -> None:
         model.load_modality_adapters(str(args.compose_vision_ckpt), "vision")
         composition_eval_only = True
         print("[composition] Loaded both modality checkpoints — running eval-only", flush=True)
+
+    if args.train_gates_only:
+        gate_param_count = 0
+        # Freeze all currently trainable params.
+        for _, param in model.named_parameters():
+            param.requires_grad = False
+        # Re-enable only learned per-layer gates.
+        fusion_adapter = getattr(model, "fusion_adapter", None)
+        layer_gates = getattr(fusion_adapter, "layer_gates", None) if fusion_adapter is not None else None
+        if layer_gates is not None:
+            for _, gate_param in layer_gates.items():
+                gate_param.requires_grad = True
+                gate_param_count += int(gate_param.numel())
+        if gate_param_count <= 0:
+            raise RuntimeError(
+                "--train-gates-only requested, but no learned gates found. "
+                "Enable --learned-gate (or config fusion_config.use_learned_gate=True)."
+            )
+        print(f"[calib] train_gates_only=True gate_params={gate_param_count}", flush=True)
 
     trainable_params = list(model.get_trainable_parameters())
     print(f"[info] trainable_parameters={sum(p.numel() for p in trainable_params if p.requires_grad):,}")
