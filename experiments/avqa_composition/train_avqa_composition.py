@@ -979,6 +979,157 @@ def _sample_audio_bank_entry(
     return tok, msk
 
 
+def _parse_modality_layers(
+    model: SAFEModel,
+) -> tuple[List[int], List[int]]:
+    fusion_adapter = getattr(model, "fusion_adapter", None)
+    if fusion_adapter is None:
+        return [], []
+
+    fusion_layers = getattr(fusion_adapter, "fusion_layers", None)
+    if isinstance(fusion_layers, dict):
+        audio_layers = sorted(int(x) for x in fusion_layers.get("audio", []))
+        vision_layers = sorted(int(x) for x in fusion_layers.get("vision", []))
+        return audio_layers, vision_layers
+
+    return [], []
+
+
+def _build_gate_pairs(
+    audio_layers: Sequence[int],
+    vision_layers: Sequence[int],
+    pairing: str = "zip",
+) -> List[tuple[str, str, int]]:
+    pairing = str(pairing).lower().strip()
+    a_sorted = sorted(int(x) for x in audio_layers)
+    v_sorted = sorted(int(x) for x in vision_layers)
+    pairs: List[tuple[str, str, int]] = []
+
+    shared = sorted(set(a_sorted).intersection(v_sorted))
+    if pairing == "shared" and shared:
+        for layer in shared:
+            pairs.append((f"audio:{layer}", f"vision:{layer}", int(layer)))
+        return pairs
+
+    if pairing == "all":
+        for a in a_sorted:
+            for v in v_sorted:
+                pairs.append((f"audio:{a}", f"vision:{v}", int(v)))
+        return pairs
+
+    # Default: zip by depth order (audio_i -> vision_i). If shared exists, use it first.
+    if shared:
+        for layer in shared:
+            pairs.append((f"audio:{layer}", f"vision:{layer}", int(layer)))
+        return pairs
+
+    for a, v in zip(a_sorted, v_sorted):
+        pairs.append((f"audio:{a}", f"vision:{v}", int(v)))
+    return pairs
+
+
+def compute_gate_additivity_objective(
+    model: SAFEModel,
+    gate_value: float,
+    rho_proxy_by_layer: Optional[Dict[int, float]] = None,
+    fallback_layer_weights: Optional[Dict[int, float]] = None,
+    pairing: str = "zip",
+    target_mode: str = "inverse_rho",
+    target_product: float = -1.0,
+    rho_beta: float = 2.0,
+    min_effective: float = 0.0,
+    floor_lambda: float = 0.0,
+) -> tuple[Optional[torch.Tensor], Dict[str, float]]:
+    """
+    Additivity-first gate objective:
+      sum_{pairs} rho_l * (g_a * g_v - p*_l)^2
+    where p*_l is fixed or inverse-rho target.
+    """
+    stats: Dict[str, float] = {}
+    fusion_adapter = getattr(model, "fusion_adapter", None)
+    if fusion_adapter is None:
+        return None, stats
+
+    layer_gates = getattr(fusion_adapter, "layer_gates", None)
+    if layer_gates is None or len(layer_gates) == 0:
+        return None, stats
+
+    audio_layers, vision_layers = _parse_modality_layers(model)
+    pairs = _build_gate_pairs(audio_layers, vision_layers, pairing=pairing)
+    if not pairs:
+        return None, stats
+
+    # Effective modality gate magnitudes (include global scalar gate).
+    gate_mag: Dict[str, torch.Tensor] = {}
+    for key, param in layer_gates.items():
+        g = torch.abs(torch.tanh(param)) * float(gate_value)
+        gate_mag[str(key)] = g
+
+    base_target = float(target_product)
+    if base_target < 0.0:
+        base_target = float(gate_value) * float(gate_value)
+
+    rho_source = rho_proxy_by_layer or {}
+    if not rho_source and fallback_layer_weights:
+        # Fallback proxy when online residual unavailable.
+        rho_source = {int(k): float(v) for k, v in fallback_layer_weights.items()}
+    rho_default = float(sum(rho_source.values()) / max(1, len(rho_source))) if rho_source else 1.0
+    rho_beta = max(0.0, float(rho_beta))
+    min_effective = max(0.0, float(min_effective))
+    floor_lambda = max(0.0, float(floor_lambda))
+
+    pair_terms: List[torch.Tensor] = []
+    prod_vals: List[float] = []
+    target_vals: List[float] = []
+    rho_vals: List[float] = []
+    used_gate_keys: List[str] = []
+
+    mode = str(target_mode).lower().strip()
+    for a_key, v_key, ref_layer in pairs:
+        if a_key not in gate_mag or v_key not in gate_mag:
+            continue
+        ga = gate_mag[a_key]
+        gv = gate_mag[v_key]
+        prod = ga * gv
+        rho_l = float(rho_source.get(int(ref_layer), rho_default))
+        rho_l = max(0.0, rho_l)
+        if mode == "inverse_rho":
+            tgt = base_target / (1.0 + rho_beta * rho_l)
+        else:
+            tgt = base_target
+        rho_t = torch.tensor(rho_l, device=prod.device, dtype=prod.dtype)
+        tgt_t = torch.tensor(float(tgt), device=prod.device, dtype=prod.dtype)
+        pair_terms.append(rho_t * (prod - tgt_t).pow(2))
+        prod_vals.append(float(prod.detach().item()))
+        target_vals.append(float(tgt))
+        rho_vals.append(float(rho_l))
+        used_gate_keys.extend([a_key, v_key])
+
+    if not pair_terms:
+        return None, stats
+
+    loss = torch.stack(pair_terms).mean()
+
+    if floor_lambda > 0.0 and min_effective > 0.0:
+        floor_terms: List[torch.Tensor] = []
+        gmin_t = None
+        for key in set(used_gate_keys):
+            g = gate_mag[key]
+            if gmin_t is None:
+                gmin_t = torch.tensor(min_effective, device=g.device, dtype=g.dtype)
+            floor_terms.append(F.relu(gmin_t - g).pow(2))
+        if floor_terms:
+            floor_loss = torch.stack(floor_terms).mean()
+            loss = loss + floor_lambda * floor_loss
+            stats["gate_floor_loss"] = float(floor_loss.detach().item())
+
+    stats["gate_pair_count"] = float(len(pair_terms))
+    stats["gate_avg_product"] = float(sum(prod_vals) / max(1, len(prod_vals)))
+    stats["gate_avg_target"] = float(sum(target_vals) / max(1, len(target_vals)))
+    stats["gate_avg_rho"] = float(sum(rho_vals) / max(1, len(rho_vals)))
+    return loss, stats
+
+
 def compute_unpaired_additivity_regularizer(
     model: SAFEModel,
     inputs: Dict[str, Any],
@@ -999,7 +1150,7 @@ def compute_unpaired_additivity_regularizer(
     routing_enable: bool = False,
     routing_min: float = 0.25,
     routing_max: float = 1.0,
-) -> tuple[Optional[torch.Tensor], Dict[int, float], Dict[str, Optional[torch.Tensor]], Dict[str, float]]:
+) -> tuple[Optional[torch.Tensor], Dict[int, float], Dict[int, float], Dict[str, Optional[torch.Tensor]], Dict[str, float]]:
     """
     Unpaired additivity loss (no joint AV supervision):
       ||Δ_av - Δ_a - Δ_v||^2 at selected layers.
@@ -1014,15 +1165,15 @@ def compute_unpaired_additivity_regularizer(
 
     need_hidden_states = bool(add_layers)
     if not need_hidden_states and not (no_harm_enable or logit_fusion_enable or poe_enable):
-        return None, {}, aux_losses, aux_stats
+        return None, {}, {}, aux_losses, aux_stats
 
     pixel_values = inputs.get("pixel_values")
     if pixel_values is None:
-        return None, {}, aux_losses, aux_stats
+        return None, {}, {}, aux_losses, aux_stats
 
     sampled_audio, sampled_mask = _sample_audio_bank_entry(compatibility_state)
     if sampled_audio is None:
-        return None, {}, aux_losses, aux_stats
+        return None, {}, {}, aux_losses, aux_stats
 
     input_ids = inputs["input_ids"]
     attention_mask = inputs.get("attention_mask")
@@ -1116,13 +1267,14 @@ def compute_unpaired_additivity_regularizer(
 
     reg_loss: Optional[torch.Tensor] = None
     per_layer: Dict[int, float] = {}
+    rho_proxy_by_layer: Dict[int, float] = {}
     if need_hidden_states:
         hs_text = out_text.get("all_hidden_states") if isinstance(out_text, dict) else None
         hs_audio = out_audio.get("all_hidden_states") if isinstance(out_audio, dict) else None
         hs_vision = out_vision.get("all_hidden_states") if isinstance(out_vision, dict) else None
         hs_both = out_both.get("all_hidden_states") if isinstance(out_both, dict) else None
         if any(x is None for x in (hs_text, hs_audio, hs_vision, hs_both)):
-            return None, {}, aux_losses, aux_stats
+            return None, {}, {}, aux_losses, aux_stats
 
         pooled_t = _extract_pooled_layer_states(hs_text, add_layers, labels=labels, attention_mask=attention_mask)
         pooled_a = _extract_pooled_layer_states(hs_audio, add_layers, labels=labels, attention_mask=attention_mask)
@@ -1143,6 +1295,7 @@ def compute_unpaired_additivity_regularizer(
             if normalize:
                 denom = da.pow(2).mean().detach() + dv.pow(2).mean().detach() + 1e-6
                 layer_loss = layer_loss / denom
+            rho_proxy_by_layer[int(layer)] = float(layer_loss.detach().item())
 
             weight = 1.0
             if layer_weights is not None:
@@ -1223,7 +1376,7 @@ def compute_unpaired_additivity_regularizer(
             aux_stats["poe_alpha"] = float(alpha)
             aux_stats["poe_beta"] = float(beta)
 
-    return reg_loss, per_layer, aux_losses, aux_stats
+    return reg_loss, per_layer, rho_proxy_by_layer, aux_losses, aux_stats
 
 
 def train_epoch(
@@ -1251,6 +1404,10 @@ def train_epoch(
     logit_reg_batches = 0
     total_poe_reg = 0.0
     poe_reg_batches = 0
+    total_gateadd_reg = 0.0
+    gateadd_reg_batches = 0
+    total_gateadd_prod = 0.0
+    gateadd_prod_batches = 0
     total_route_scale = 0.0
     route_scale_batches = 0
     total_batches = 0
@@ -1279,15 +1436,17 @@ def train_epoch(
             or getattr(args, "compat_noharm_enable", False)
             or getattr(args, "compat_logit_fusion_enable", False)
             or getattr(args, "compat_poe_enable", False)
+            or getattr(args, "compat_gate_add_enable", False)
         )
         and compatibility_state.get("audio_token_bank")
     )
     add_reg_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_add_reg_enable", False))
     noharm_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_noharm_enable", False))
     logit_fusion_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_logit_fusion_enable", False))
+    gateadd_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_gate_add_enable", False))
 
-    add_layers = _parse_layer_list(getattr(args, "compat_add_reg_layers", "")) if add_reg_enabled else []
-    if add_reg_enabled and not add_layers:
+    add_layers = _parse_layer_list(getattr(args, "compat_add_reg_layers", "")) if (add_reg_enabled or gateadd_enabled) else []
+    if (add_reg_enabled or gateadd_enabled) and not add_layers:
         add_layers = list(compat_layers)
     add_every = max(1, int(getattr(args, "compat_add_reg_every", 200)))
     add_lambda = float(getattr(args, "compat_add_reg_lambda", 0.0))
@@ -1305,6 +1464,13 @@ def train_epoch(
     routing_enabled = bool(getattr(args, "compat_routing_enable", False))
     routing_min_scale = float(getattr(args, "compat_routing_min_scale", 0.25))
     routing_max_scale = float(getattr(args, "compat_routing_max_scale", 1.0))
+    gateadd_lambda = float(getattr(args, "compat_gate_add_lambda", 0.0))
+    gateadd_pairing = str(getattr(args, "compat_gate_pairing", "zip"))
+    gateadd_target_mode = str(getattr(args, "compat_gate_target_mode", "inverse_rho"))
+    gateadd_target_product = float(getattr(args, "compat_gate_product_target", -1.0))
+    gateadd_rho_beta = float(getattr(args, "compat_gate_rho_beta", 2.0))
+    gateadd_min_effective = float(getattr(args, "compat_gate_min_effective", 0.0))
+    gateadd_floor_lambda = float(getattr(args, "compat_gate_floor_lambda", 0.0))
     add_warned = False
 
     def _amp_context():
@@ -1445,11 +1611,12 @@ def train_epoch(
                     or (noharm_enabled and noharm_lambda > 0.0)
                     or (logit_fusion_enabled and logit_fusion_lambda > 0.0)
                     or (poe_enabled and poe_lambda > 0.0)
+                    or (gateadd_enabled and gateadd_lambda > 0.0)
                 )
                 and (step % add_every == 0)
             )
             if run_unpaired_aux:
-                add_reg, _, aux_losses, aux_stats = compute_unpaired_additivity_regularizer(
+                add_reg, _, add_rho_proxy, aux_losses, aux_stats = compute_unpaired_additivity_regularizer(
                     model=model,
                     inputs=inputs,
                     compatibility_state=compatibility_state,
@@ -1494,6 +1661,29 @@ def train_epoch(
                     poe_reg_batches += 1
                     loss = loss + poe_lambda * poe_loss
 
+                gateadd_loss = None
+                gateadd_stats: Dict[str, float] = {}
+                if gateadd_enabled and gateadd_lambda > 0.0:
+                    gateadd_loss, gateadd_stats = compute_gate_additivity_objective(
+                        model=model,
+                        gate_value=gate_value,
+                        rho_proxy_by_layer=add_rho_proxy,
+                        fallback_layer_weights=compat_layer_weights,
+                        pairing=gateadd_pairing,
+                        target_mode=gateadd_target_mode,
+                        target_product=gateadd_target_product,
+                        rho_beta=gateadd_rho_beta,
+                        min_effective=gateadd_min_effective,
+                        floor_lambda=gateadd_floor_lambda,
+                    )
+                    if gateadd_loss is not None:
+                        total_gateadd_reg += float(gateadd_loss.detach().item())
+                        gateadd_reg_batches += 1
+                        loss = loss + gateadd_lambda * gateadd_loss
+                        if "gate_avg_product" in gateadd_stats:
+                            total_gateadd_prod += float(gateadd_stats["gate_avg_product"])
+                            gateadd_prod_batches += 1
+
                 if "route_audio_scale" in aux_stats:
                     total_route_scale += float(aux_stats["route_audio_scale"])
                     route_scale_batches += 1
@@ -1503,6 +1693,7 @@ def train_epoch(
                     and noharm_loss is None
                     and logit_loss is None
                     and poe_loss is None
+                    and gateadd_loss is None
                     and not add_warned
                 ):
                     print(
@@ -1559,6 +1750,12 @@ def train_epoch(
             if poe_reg_batches > 0:
                 poe_avg = total_poe_reg / float(max(1, poe_reg_batches))
                 compat_suffix += f" poe_reg={poe_avg:.4f}"
+            if gateadd_reg_batches > 0:
+                gateadd_avg = total_gateadd_reg / float(max(1, gateadd_reg_batches))
+                compat_suffix += f" gateadd_reg={gateadd_avg:.4f}"
+            if gateadd_prod_batches > 0:
+                gateprod_avg = total_gateadd_prod / float(max(1, gateadd_prod_batches))
+                compat_suffix += f" gate_prod={gateprod_avg:.4f}"
             print(
                 f"  [train] step {step + 1}/{num_batches} "
                 f"loss={avg_loss:.4f} lr={current_lr:.2e} gate={gate_value:.3f}{compat_suffix}",
@@ -2004,6 +2201,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--compat-routing-max-scale", type=float, default=1.0,
                    help="Maximum routing gate scale")
 
+    # Additivity-first gate-product objective (trainable learned gates).
+    p.add_argument("--compat-gate-add-enable", action="store_true",
+                   help="Enable gate-product additivity objective weighted by measured non-additivity")
+    p.add_argument("--compat-gate-add-lambda", type=float, default=0.02,
+                   help="Weight for gate-product additivity objective")
+    p.add_argument("--compat-gate-pairing", type=str, default="zip", choices=["zip", "shared", "all"],
+                   help="How to pair audio and vision layers for gate-product objective")
+    p.add_argument("--compat-gate-target-mode", type=str, default="inverse_rho", choices=["fixed", "inverse_rho"],
+                   help="Gate-product target schedule mode")
+    p.add_argument("--compat-gate-product-target", type=float, default=-1.0,
+                   help="Target effective gate product; <0 uses gate^2 as automatic base target")
+    p.add_argument("--compat-gate-rho-beta", type=float, default=2.0,
+                   help="Inverse-rho target sharpness: target = base/(1+beta*rho)")
+    p.add_argument("--compat-gate-min-effective", type=float, default=0.0,
+                   help="Optional minimum effective gate magnitude for floor penalty")
+    p.add_argument("--compat-gate-floor-lambda", type=float, default=0.0,
+                   help="Weight for gate floor penalty")
+
     p.set_defaults(
         compat_reg_weight_by_shift_norm=True,
         compat_add_reg_normalize=True,
@@ -2111,6 +2326,14 @@ def main() -> None:
                     "compat_routing_enable": args.compat_routing_enable,
                     "compat_routing_min_scale": args.compat_routing_min_scale,
                     "compat_routing_max_scale": args.compat_routing_max_scale,
+                    "compat_gate_add_enable": args.compat_gate_add_enable,
+                    "compat_gate_add_lambda": args.compat_gate_add_lambda,
+                    "compat_gate_pairing": args.compat_gate_pairing,
+                    "compat_gate_target_mode": args.compat_gate_target_mode,
+                    "compat_gate_product_target": args.compat_gate_product_target,
+                    "compat_gate_rho_beta": args.compat_gate_rho_beta,
+                    "compat_gate_min_effective": args.compat_gate_min_effective,
+                    "compat_gate_floor_lambda": args.compat_gate_floor_lambda,
                     "init_audio_ckpt": str(args.init_audio_ckpt) if args.init_audio_ckpt else None,
                     "init_vision_ckpt": str(args.init_vision_ckpt) if args.init_vision_ckpt else None,
                     "compose_audio_ckpt": str(args.compose_audio_ckpt) if args.compose_audio_ckpt else None,
@@ -2273,6 +2496,7 @@ def main() -> None:
             or args.compat_noharm_enable
             or args.compat_logit_fusion_enable
             or args.compat_poe_enable
+            or args.compat_gate_add_enable
         )
 
         if compat_objective_enabled:
@@ -2326,6 +2550,14 @@ def main() -> None:
                     print(
                         f"[compat] confidence routing enabled min_scale={args.compat_routing_min_scale} "
                         f"max_scale={args.compat_routing_max_scale}",
+                        flush=True,
+                    )
+                if args.compat_gate_add_enable:
+                    print(
+                        f"[compat] gate-add objective enabled lambda={args.compat_gate_add_lambda} "
+                        f"pairing={args.compat_gate_pairing} target_mode={args.compat_gate_target_mode} "
+                        f"target={args.compat_gate_product_target} rho_beta={args.compat_gate_rho_beta} "
+                        f"gmin={args.compat_gate_min_effective} floor_lambda={args.compat_gate_floor_lambda}",
                         flush=True,
                     )
 

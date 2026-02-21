@@ -73,6 +73,16 @@ COMPAT_ADD_REG_LAYERS=${COMPAT_ADD_REG_LAYERS:-}
 COMPAT_ADD_REG_NORMALIZE=${COMPAT_ADD_REG_NORMALIZE:-1}
 COMPAT_ADD_BANK_SIZE=${COMPAT_ADD_BANK_SIZE:-64}
 
+# Optional gate-product additivity objective (diagnostic-guided)
+COMPAT_GATE_ADD_ENABLE=${COMPAT_GATE_ADD_ENABLE:-0}
+COMPAT_GATE_ADD_LAMBDA=${COMPAT_GATE_ADD_LAMBDA:-0.02}
+COMPAT_GATE_PAIRING=${COMPAT_GATE_PAIRING:-zip}
+COMPAT_GATE_TARGET_MODE=${COMPAT_GATE_TARGET_MODE:-inverse_rho}
+COMPAT_GATE_PRODUCT_TARGET=${COMPAT_GATE_PRODUCT_TARGET:--1}
+COMPAT_GATE_RHO_BETA=${COMPAT_GATE_RHO_BETA:-2.0}
+COMPAT_GATE_MIN_EFFECTIVE=${COMPAT_GATE_MIN_EFFECTIVE:-0.0}
+COMPAT_GATE_FLOOR_LAMBDA=${COMPAT_GATE_FLOOR_LAMBDA:-0.0}
+
 # Optional no-harm / calibrated fusion / confidence routing objectives
 COMPAT_NOHARM_ENABLE=${COMPAT_NOHARM_ENABLE:-0}
 COMPAT_NOHARM_LAMBDA=${COMPAT_NOHARM_LAMBDA:-0.02}
@@ -211,6 +221,20 @@ if [[ "$COMPAT_ADD_REG_ENABLE" == "1" ]]; then
   fi
 fi
 
+COMPAT_GATE_ARGS=()
+if [[ "$COMPAT_GATE_ADD_ENABLE" == "1" ]]; then
+  COMPAT_GATE_ARGS+=(
+    --compat-gate-add-enable
+    --compat-gate-add-lambda "$COMPAT_GATE_ADD_LAMBDA"
+    --compat-gate-pairing "$COMPAT_GATE_PAIRING"
+    --compat-gate-target-mode "$COMPAT_GATE_TARGET_MODE"
+    --compat-gate-product-target "$COMPAT_GATE_PRODUCT_TARGET"
+    --compat-gate-rho-beta "$COMPAT_GATE_RHO_BETA"
+    --compat-gate-min-effective "$COMPAT_GATE_MIN_EFFECTIVE"
+    --compat-gate-floor-lambda "$COMPAT_GATE_FLOOR_LAMBDA"
+  )
+fi
+
 COMPAT_EXTRA_ARGS=()
 if [[ "$COMPAT_NOHARM_ENABLE" == "1" ]]; then
   COMPAT_EXTRA_ARGS+=(
@@ -295,5 +319,6 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   "${LAYER_PROBE_ARGS[@]}" \
   "${COMPAT_REG_ARGS[@]}" \
   "${COMPAT_ADD_ARGS[@]}" \
+  "${COMPAT_GATE_ARGS[@]}" \
   "${COMPAT_EXTRA_ARGS[@]}" \
   "${WANDB_ARGS[@]}"
