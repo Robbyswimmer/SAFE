@@ -1,7 +1,15 @@
 #!/bin/bash
+#SBATCH --job-name=hm-vfirst
+#SBATCH --output=logs/hailmary_vfirst_%j.out
+#SBATCH --error=logs/hailmary_vfirst_%j.err
+#SBATCH --time=72:00:00
+#SBATCH --mem=96G
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH -p gpu
+
 # Hail Mary Run 1: Vision-First Disjoint on Qwen3-4B
 # V={8,14,20} A={26,30,34} — structural transport elimination
-set -euo pipefail
 
 export MODEL_CONFIG=composition_4b_vfirst
 export AUDIO_FUSION_LAYERS="26,30,34"
@@ -31,4 +39,4 @@ export WANDB_RUN_NAME=comp_4b_vfirst_disjoint_s42
 export WANDB_TAGS="composition,4b,vfirst,disjoint,from_scratch,hailmary"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec bash "$SCRIPT_DIR/submit_level2_full_config.sh"
+source "$SCRIPT_DIR/train_composition_interleaved.sh"

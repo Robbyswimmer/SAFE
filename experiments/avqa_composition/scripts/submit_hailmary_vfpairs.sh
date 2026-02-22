@@ -1,7 +1,15 @@
 #!/bin/bash
+#SBATCH --job-name=hm-vfpairs
+#SBATCH --output=logs/hailmary_vfpairs_%j.out
+#SBATCH --error=logs/hailmary_vfpairs_%j.err
+#SBATCH --time=72:00:00
+#SBATCH --mem=96G
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH -p gpu
+
 # Hail Mary Run 3: Vision-First Pairs on Qwen3-4B
 # V={8,16,24,32} A={10,18,26,34} — structural fix + all soft objectives
-set -euo pipefail
 
 export MODEL_CONFIG=composition_4b_vfpairs
 export AUDIO_FUSION_LAYERS="10,18,26,34"
@@ -39,4 +47,4 @@ export WANDB_RUN_NAME=comp_4b_vfpairs_kitchen_s42
 export WANDB_TAGS="composition,4b,vfpairs,kitchen_sink,from_scratch,hailmary"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec bash "$SCRIPT_DIR/submit_level2_full_config.sh"
+source "$SCRIPT_DIR/train_composition_interleaved.sh"
