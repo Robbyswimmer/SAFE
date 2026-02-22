@@ -244,6 +244,12 @@ class SAFEModel(nn.Module):
                     # Per-layer learned gating (Flamingo-style)
                     use_learned_gate=fusion_config.get("use_learned_gate", False),
                     learned_gate_init=fusion_config.get("learned_gate_init", 0.0),
+                    # Cross-layer transport mitigation controls
+                    delta_norm_cap_ratio=fusion_config.get("delta_norm_cap_ratio", 0.0),
+                    delta_norm_cap_eps=fusion_config.get("delta_norm_cap_eps", 1e-6),
+                    gate_depth_decay=fusion_config.get("gate_depth_decay", 1.0),
+                    audio_gate_depth_decay=fusion_config.get("audio_gate_depth_decay", 1.0),
+                    vision_gate_depth_decay=fusion_config.get("vision_gate_depth_decay", 1.0),
                     # Slim projector: K/V accept audio tokens at projector output dim
                     kv_input_dim=_kv_input_dim,
                 )

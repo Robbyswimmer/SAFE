@@ -8,6 +8,27 @@ import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model, LoraModel
 
 
+def _apply_delta_norm_cap(
+    hidden_states: torch.Tensor,
+    delta: torch.Tensor,
+    cap_ratio: float,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Cap per-token residual magnitude relative to hidden-state norm:
+      ||delta_t|| <= cap_ratio * ||h_t||
+    """
+    if cap_ratio <= 0.0:
+        return delta
+    hs_f = hidden_states.float()
+    d_f = delta.float()
+    hs_norm = torch.linalg.vector_norm(hs_f, dim=-1, keepdim=True).clamp_min(float(eps))
+    d_norm = torch.linalg.vector_norm(d_f, dim=-1, keepdim=True).clamp_min(float(eps))
+    max_norm = hs_norm * float(cap_ratio)
+    scale = torch.clamp(max_norm / d_norm, max=1.0)
+    return (d_f * scale).to(delta.dtype)
+
+
 class CrossAttentionBlock(nn.Module):
     """
     Single cross-attention block for fusing audio tokens with LLM hidden states.
@@ -282,6 +303,8 @@ class BottleneckCrossAttentionBlock(nn.Module):
         ffn_expansion: float = 2.0,
         use_pre_norm: bool = False,
         kv_input_dim: Optional[int] = None,
+        delta_norm_cap_ratio: float = 0.0,
+        delta_norm_cap_eps: float = 1e-6,
     ):
         super().__init__()
 
@@ -291,6 +314,8 @@ class BottleneckCrossAttentionBlock(nn.Module):
         self.num_attention_heads = max(num_attention_heads, 1)
         self.use_ffn = use_ffn
         self.use_pre_norm = use_pre_norm
+        self.delta_norm_cap_ratio = float(max(0.0, delta_norm_cap_ratio))
+        self.delta_norm_cap_eps = float(max(1e-12, delta_norm_cap_eps))
 
         # Ensure bottleneck_dim is divisible by num_heads
         if bottleneck_dim % self.num_attention_heads != 0:
@@ -491,6 +516,8 @@ class SimpleFusionAdapter(nn.Module):
         ffn_expansion: float = 2.0,
         use_pre_norm: bool = False,
         kv_input_dim: Optional[int] = None,
+        delta_norm_cap_ratio: float = 0.0,
+        delta_norm_cap_eps: float = 1e-6,
     ):
         super().__init__()
 
@@ -501,6 +528,8 @@ class SimpleFusionAdapter(nn.Module):
         self.fusion_mode = str(fusion_mode)
         self.film_alpha_scale = float(film_alpha_scale)
         self.film_beta_scale = float(film_beta_scale)
+        self.delta_norm_cap_ratio = float(max(0.0, delta_norm_cap_ratio))
+        self.delta_norm_cap_eps = float(max(1e-12, delta_norm_cap_eps))
         if self.fusion_mode not in {"residual", "film"}:
             raise ValueError(f"Unsupported fusion_mode: {self.fusion_mode}")
 
@@ -514,6 +543,8 @@ class SimpleFusionAdapter(nn.Module):
             ffn_expansion=ffn_expansion,
             use_pre_norm=use_pre_norm,
             kv_input_dim=kv_input_dim,
+            delta_norm_cap_ratio=self.delta_norm_cap_ratio,
+            delta_norm_cap_eps=self.delta_norm_cap_eps,
         )
 
         # Optional token-wise gating
@@ -607,6 +638,12 @@ class SimpleFusionAdapter(nn.Module):
             attention_mask=attention_mask,
             supervised_mask=supervised_mask,
         )
+        delta = _apply_delta_norm_cap(
+            hidden_states=hidden_states,
+            delta=delta,
+            cap_ratio=self.delta_norm_cap_ratio,
+            eps=self.delta_norm_cap_eps,
+        )
 
         # Debug: log delta (limited)
         if self.debug_logging and not hasattr(self, '_fusion_delta_logged'):
@@ -634,6 +671,8 @@ class LoRAFusionAdapter(nn.Module):
         target_modules: Optional[List[str]] = None,
         train_base_cross_attention: bool = False,
         use_tokenwise_gate: bool = False,
+        delta_norm_cap_ratio: float = 0.0,
+        delta_norm_cap_eps: float = 1e-6,
     ):
         super().__init__()
         
@@ -645,6 +684,8 @@ class LoRAFusionAdapter(nn.Module):
         self._attention_log_limit = 5
         self._attention_logs_emitted = 0
         self.use_tokenwise_gate = bool(use_tokenwise_gate)
+        self.delta_norm_cap_ratio = float(max(0.0, delta_norm_cap_ratio))
+        self.delta_norm_cap_eps = float(max(1e-12, delta_norm_cap_eps))
         
         # Base cross-attention block
         self.cross_attention = CrossAttentionBlock(
@@ -752,6 +793,12 @@ class LoRAFusionAdapter(nn.Module):
             attention_mask=attention_mask,
             supervised_mask=supervised_mask,
         )
+        delta_states = _apply_delta_norm_cap(
+            hidden_states=hidden_states,
+            delta=delta_states,
+            cap_ratio=self.delta_norm_cap_ratio,
+            eps=self.delta_norm_cap_eps,
+        )
 
         base_model = getattr(self.cross_attention, "base_model", None)
         if base_model is not None:
@@ -850,6 +897,11 @@ class MultiLayerFusionAdapter(nn.Module):
         use_learned_gate: bool = False,
         learned_gate_init: float = 0.0,
         kv_input_dim: Optional[int] = None,
+        delta_norm_cap_ratio: float = 0.0,
+        delta_norm_cap_eps: float = 1e-6,
+        gate_depth_decay: float = 1.0,
+        audio_gate_depth_decay: float = 1.0,
+        vision_gate_depth_decay: float = 1.0,
         **unused_kwargs,
     ):
         super().__init__()
@@ -867,6 +919,11 @@ class MultiLayerFusionAdapter(nn.Module):
         self.ffn_expansion = ffn_expansion
         self.use_pre_norm = use_pre_norm
         self.use_learned_gate = bool(use_learned_gate)
+        self.delta_norm_cap_ratio = float(max(0.0, delta_norm_cap_ratio))
+        self.delta_norm_cap_eps = float(max(1e-12, delta_norm_cap_eps))
+        self.gate_depth_decay = float(max(0.0, gate_depth_decay))
+        self.audio_gate_depth_decay = float(max(0.0, audio_gate_depth_decay))
+        self.vision_gate_depth_decay = float(max(0.0, vision_gate_depth_decay))
         # Last recorded attention summary from any inner fusion adapter
         self.last_attention_summary: Optional[dict] = None
         self.extra_config = dict(unused_kwargs)
@@ -899,6 +956,8 @@ class MultiLayerFusionAdapter(nn.Module):
                         ffn_expansion=ffn_expansion,
                         use_pre_norm=use_pre_norm,
                         kv_input_dim=kv_input_dim,
+                        delta_norm_cap_ratio=self.delta_norm_cap_ratio,
+                        delta_norm_cap_eps=self.delta_norm_cap_eps,
                     )
                 else:
                     # Use LoRA-based fusion adapter (original behavior)
@@ -912,6 +971,8 @@ class MultiLayerFusionAdapter(nn.Module):
                         target_modules=target_modules,
                         train_base_cross_attention=train_base_cross_attention,
                         use_tokenwise_gate=self.use_tokenwise_gate,
+                        delta_norm_cap_ratio=self.delta_norm_cap_ratio,
+                        delta_norm_cap_eps=self.delta_norm_cap_eps,
                     )
 
         # Per-layer learned gating (Flamingo-style tanh gating)
@@ -1031,6 +1092,15 @@ class MultiLayerFusionAdapter(nn.Module):
                 else:
                     modality_gate = float(modality_gate) * learned_gate
 
+            # Optional depth-decayed gate: suppress early layers to reduce
+            # long-range transport amplification.
+            depth_scale = self._depth_decay_scale(modality=modality, layer_idx=int(layer_idx))
+            if depth_scale != 1.0:
+                if isinstance(modality_gate, torch.Tensor):
+                    modality_gate = modality_gate * float(depth_scale)
+                else:
+                    modality_gate = float(modality_gate) * float(depth_scale)
+
             output = adapter(
                 hidden_states=output,
                 audio_tokens=tokens,
@@ -1044,6 +1114,24 @@ class MultiLayerFusionAdapter(nn.Module):
                 self.last_attention_summary = adapter.last_attention_summary
 
         return output
+
+    def _depth_decay_scale(self, modality: str, layer_idx: int) -> float:
+        indices = sorted(int(x) for x in self.fusion_layers.get(modality, []))
+        if len(indices) <= 1:
+            return 1.0
+        if modality == "audio":
+            decay = self.audio_gate_depth_decay
+        elif modality == "vision":
+            decay = self.vision_gate_depth_decay
+        else:
+            decay = self.gate_depth_decay
+        if decay <= 0.0 or abs(decay - 1.0) < 1e-8:
+            return 1.0
+        max_idx = max(indices)
+        distance_to_top = max(0, int(max_idx) - int(layer_idx))
+        if distance_to_top <= 0:
+            return 1.0
+        return float(decay) ** float(distance_to_top)
 
     def _align_batch(self, tensor: torch.Tensor, target_batch: int):
         if tensor is None or not torch.is_tensor(tensor):

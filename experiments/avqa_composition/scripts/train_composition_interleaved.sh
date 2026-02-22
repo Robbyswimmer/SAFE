@@ -42,6 +42,9 @@ NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-8}
 TRAIN_MODALITY=interleaved
 EVAL_MODALITIES=${EVAL_MODALITIES:-text,audio,image,both}
 FUSION_GATE=${FUSION_GATE:-0.2}
+FUSION_LAYERS=${FUSION_LAYERS:-}
+AUDIO_FUSION_LAYERS=${AUDIO_FUSION_LAYERS:-}
+VISION_FUSION_LAYERS=${VISION_FUSION_LAYERS:-}
 SEED=${SEED:-42}
 WANDB=${WANDB:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-SAFE-Composition}
@@ -54,6 +57,11 @@ MAX_ANSWER_TOKENS=${MAX_ANSWER_TOKENS:-16}
 LAYER_ADDITIVITY_PROBE=${LAYER_ADDITIVITY_PROBE:-1}
 LAYER_PROBE_SAMPLES=${LAYER_PROBE_SAMPLES:-256}
 LAYER_PROBE_EVERY=${LAYER_PROBE_EVERY:-1}
+DELTA_NORM_CAP_RATIO=${DELTA_NORM_CAP_RATIO:-0.0}
+DELTA_NORM_CAP_EPS=${DELTA_NORM_CAP_EPS:-1e-6}
+GATE_DEPTH_DECAY=${GATE_DEPTH_DECAY:-1.0}
+AUDIO_GATE_DEPTH_DECAY=${AUDIO_GATE_DEPTH_DECAY:-1.0}
+VISION_GATE_DEPTH_DECAY=${VISION_GATE_DEPTH_DECAY:-1.0}
 
 # Optional sequential composition objective (audio->vision compatibility regularizer)
 COMPAT_REG_ENABLE=${COMPAT_REG_ENABLE:-0}
@@ -72,6 +80,13 @@ COMPAT_ADD_REG_EVERY=${COMPAT_ADD_REG_EVERY:-200}
 COMPAT_ADD_REG_LAYERS=${COMPAT_ADD_REG_LAYERS:-}
 COMPAT_ADD_REG_NORMALIZE=${COMPAT_ADD_REG_NORMALIZE:-1}
 COMPAT_ADD_BANK_SIZE=${COMPAT_ADD_BANK_SIZE:-64}
+
+# Optional transport objective (cross-layer hidden shift suppression)
+COMPAT_TRANSPORT_ENABLE=${COMPAT_TRANSPORT_ENABLE:-0}
+COMPAT_TRANSPORT_LAMBDA=${COMPAT_TRANSPORT_LAMBDA:-0.02}
+COMPAT_TRANSPORT_CAP=${COMPAT_TRANSPORT_CAP:-0.0}
+COMPAT_TRANSPORT_NORMALIZE=${COMPAT_TRANSPORT_NORMALIZE:-1}
+COMPAT_TRANSPORT_LAYERS=${COMPAT_TRANSPORT_LAYERS:-}
 
 # Optional gate-product additivity objective (diagnostic-guided)
 COMPAT_GATE_ADD_ENABLE=${COMPAT_GATE_ADD_ENABLE:-0}
@@ -183,6 +198,31 @@ if [[ "$LAYER_ADDITIVITY_PROBE" == "1" ]]; then
   LAYER_PROBE_ARGS+=(--layer-additivity-probe --layer-probe-samples "$LAYER_PROBE_SAMPLES" --layer-probe-every "$LAYER_PROBE_EVERY")
 fi
 
+FUSION_LAYER_ARGS=()
+if [[ -n "$FUSION_LAYERS" ]]; then
+  FUSION_LAYER_ARGS+=(--fusion-layers "$FUSION_LAYERS")
+fi
+if [[ -n "$AUDIO_FUSION_LAYERS" ]]; then
+  FUSION_LAYER_ARGS+=(--audio-fusion-layers "$AUDIO_FUSION_LAYERS")
+fi
+if [[ -n "$VISION_FUSION_LAYERS" ]]; then
+  FUSION_LAYER_ARGS+=(--vision-fusion-layers "$VISION_FUSION_LAYERS")
+fi
+
+TRANSPORT_ARCH_ARGS=()
+if [[ "$DELTA_NORM_CAP_RATIO" != "0" && "$DELTA_NORM_CAP_RATIO" != "0.0" ]]; then
+  TRANSPORT_ARCH_ARGS+=(--delta-norm-cap-ratio "$DELTA_NORM_CAP_RATIO" --delta-norm-cap-eps "$DELTA_NORM_CAP_EPS")
+fi
+if [[ "$GATE_DEPTH_DECAY" != "1" && "$GATE_DEPTH_DECAY" != "1.0" ]]; then
+  TRANSPORT_ARCH_ARGS+=(--gate-depth-decay "$GATE_DEPTH_DECAY")
+fi
+if [[ "$AUDIO_GATE_DEPTH_DECAY" != "1" && "$AUDIO_GATE_DEPTH_DECAY" != "1.0" ]]; then
+  TRANSPORT_ARCH_ARGS+=(--audio-gate-depth-decay "$AUDIO_GATE_DEPTH_DECAY")
+fi
+if [[ "$VISION_GATE_DEPTH_DECAY" != "1" && "$VISION_GATE_DEPTH_DECAY" != "1.0" ]]; then
+  TRANSPORT_ARCH_ARGS+=(--vision-gate-depth-decay "$VISION_GATE_DEPTH_DECAY")
+fi
+
 COMPAT_REG_ARGS=()
 if [[ "$COMPAT_REG_ENABLE" == "1" ]]; then
   COMPAT_REG_ARGS+=(
@@ -218,6 +258,23 @@ if [[ "$COMPAT_ADD_REG_ENABLE" == "1" ]]; then
   fi
   if [[ -n "$COMPAT_ADD_REG_LAYERS" ]]; then
     COMPAT_ADD_ARGS+=(--compat-add-reg-layers "$COMPAT_ADD_REG_LAYERS")
+  fi
+fi
+
+COMPAT_TRANSPORT_ARGS=()
+if [[ "$COMPAT_TRANSPORT_ENABLE" == "1" ]]; then
+  COMPAT_TRANSPORT_ARGS+=(
+    --compat-transport-enable
+    --compat-transport-lambda "$COMPAT_TRANSPORT_LAMBDA"
+    --compat-transport-cap "$COMPAT_TRANSPORT_CAP"
+  )
+  if [[ "$COMPAT_TRANSPORT_NORMALIZE" == "1" ]]; then
+    COMPAT_TRANSPORT_ARGS+=(--compat-transport-normalize)
+  else
+    COMPAT_TRANSPORT_ARGS+=(--no-compat-transport-normalize)
+  fi
+  if [[ -n "$COMPAT_TRANSPORT_LAYERS" ]]; then
+    COMPAT_TRANSPORT_ARGS+=(--compat-transport-layers "$COMPAT_TRANSPORT_LAYERS")
   fi
 fi
 
@@ -317,8 +374,11 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   "${MAX_SAMPLES_ARGS[@]}" \
   "${EVAL_DEBUG_ARGS[@]}" \
   "${LAYER_PROBE_ARGS[@]}" \
+  "${FUSION_LAYER_ARGS[@]}" \
+  "${TRANSPORT_ARCH_ARGS[@]}" \
   "${COMPAT_REG_ARGS[@]}" \
   "${COMPAT_ADD_ARGS[@]}" \
+  "${COMPAT_TRANSPORT_ARGS[@]}" \
   "${COMPAT_GATE_ARGS[@]}" \
   "${COMPAT_EXTRA_ARGS[@]}" \
   "${WANDB_ARGS[@]}"

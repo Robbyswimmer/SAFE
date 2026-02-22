@@ -308,6 +308,23 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
                     mcfg["layer_indices"] = list(layer_indices)
                 elif isinstance(mcfg, (list, tuple)):
                     modalities[modality] = {"layer_indices": list(layer_indices)}
+    # Optional modality-specific fusion layer overrides (for layer pruning).
+    # These take precedence over --fusion-layers when provided.
+    modalities = fusion_cfg.get("modalities")
+    if (getattr(args, "audio_fusion_layers", None) or getattr(args, "vision_fusion_layers", None)) and not isinstance(modalities, dict):
+        modalities = {}
+        fusion_cfg["modalities"] = modalities
+    if isinstance(modalities, dict):
+        if getattr(args, "audio_fusion_layers", None):
+            audio_layers = [int(x) for x in args.audio_fusion_layers.split(",") if x.strip()]
+            if "audio" not in modalities or not isinstance(modalities.get("audio"), dict):
+                modalities["audio"] = {}
+            modalities["audio"]["layer_indices"] = list(audio_layers)
+        if getattr(args, "vision_fusion_layers", None):
+            vision_layers = [int(x) for x in args.vision_fusion_layers.split(",") if x.strip()]
+            if "vision" not in modalities or not isinstance(modalities.get("vision"), dict):
+                modalities["vision"] = {}
+            modalities["vision"]["layer_indices"] = list(vision_layers)
     cfg["freeze_base_vl"] = True
     cfg["freeze_audio_encoder"] = args.freeze_audio_encoder
     if args.label_smoothing is not None:
@@ -324,6 +341,12 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
     if getattr(args, "learned_gate", False):
         fusion_cfg["use_learned_gate"] = True
         fusion_cfg["learned_gate_init"] = getattr(args, "learned_gate_init", 0.0)
+    # Cross-layer transport mitigation controls.
+    fusion_cfg["delta_norm_cap_ratio"] = float(getattr(args, "delta_norm_cap_ratio", 0.0))
+    fusion_cfg["delta_norm_cap_eps"] = float(getattr(args, "delta_norm_cap_eps", 1e-6))
+    fusion_cfg["gate_depth_decay"] = float(getattr(args, "gate_depth_decay", 1.0))
+    fusion_cfg["audio_gate_depth_decay"] = float(getattr(args, "audio_gate_depth_decay", 1.0))
+    fusion_cfg["vision_gate_depth_decay"] = float(getattr(args, "vision_gate_depth_decay", 1.0))
     # Slim projector (default ON): output at bottleneck_dim instead of llm_hidden_size
     # Saves ~80% of trainable params. Disable with --no-slim-projector.
     if getattr(args, "slim_projector", True):
@@ -1136,6 +1159,7 @@ def compute_unpaired_additivity_regularizer(
     compatibility_state: Dict[str, Any],
     gate_value: float,
     add_layers: Sequence[int],
+    transport_layers: Optional[Sequence[int]] = None,
     layer_weights: Optional[Dict[int, float]] = None,
     normalize: bool = True,
     no_harm_enable: bool = False,
@@ -1143,6 +1167,9 @@ def compute_unpaired_additivity_regularizer(
     no_harm_use_best_single: bool = False,
     logit_fusion_enable: bool = False,
     logit_fusion_conf_temp: float = 0.5,
+    transport_enable: bool = False,
+    transport_cap: float = 0.0,
+    transport_normalize: bool = True,
     poe_enable: bool = False,
     poe_weight_temp: float = 0.5,
     poe_loss_type: str = "kl",
@@ -1159,12 +1186,18 @@ def compute_unpaired_additivity_regularizer(
     aux_losses: Dict[str, Optional[torch.Tensor]] = {
         "no_harm": None,
         "logit_fusion": None,
+        "transport": None,
         "poe_consistency": None,
     }
     aux_stats: Dict[str, float] = {}
 
-    need_hidden_states = bool(add_layers)
-    if not need_hidden_states and not (no_harm_enable or logit_fusion_enable or poe_enable):
+    add_layers = [int(layer) for layer in add_layers]
+    if transport_layers is None:
+        transport_layers = list(add_layers)
+    transport_layers = [int(layer) for layer in transport_layers]
+
+    need_hidden_states = bool(add_layers or transport_layers)
+    if not need_hidden_states and not (no_harm_enable or logit_fusion_enable or transport_enable or poe_enable):
         return None, {}, {}, aux_losses, aux_stats
 
     pixel_values = inputs.get("pixel_values")
@@ -1186,6 +1219,9 @@ def compute_unpaired_additivity_regularizer(
     no_harm_use_best_single = bool(no_harm_use_best_single)
     logit_fusion_enable = bool(logit_fusion_enable)
     logit_fusion_conf_temp = float(logit_fusion_conf_temp)
+    transport_enable = bool(transport_enable)
+    transport_cap = float(transport_cap)
+    transport_normalize = bool(transport_normalize)
     poe_enable = bool(poe_enable)
     poe_weight_temp = float(poe_weight_temp)
     poe_loss_type = str(poe_loss_type).lower().strip()
@@ -1276,10 +1312,11 @@ def compute_unpaired_additivity_regularizer(
         if any(x is None for x in (hs_text, hs_audio, hs_vision, hs_both)):
             return None, {}, {}, aux_losses, aux_stats
 
-        pooled_t = _extract_pooled_layer_states(hs_text, add_layers, labels=labels, attention_mask=attention_mask)
-        pooled_a = _extract_pooled_layer_states(hs_audio, add_layers, labels=labels, attention_mask=attention_mask)
-        pooled_v = _extract_pooled_layer_states(hs_vision, add_layers, labels=labels, attention_mask=attention_mask)
-        pooled_av = _extract_pooled_layer_states(hs_both, add_layers, labels=labels, attention_mask=attention_mask)
+        pooled_layers = sorted(set(add_layers) | set(transport_layers))
+        pooled_t = _extract_pooled_layer_states(hs_text, pooled_layers, labels=labels, attention_mask=attention_mask)
+        pooled_a = _extract_pooled_layer_states(hs_audio, pooled_layers, labels=labels, attention_mask=attention_mask)
+        pooled_v = _extract_pooled_layer_states(hs_vision, pooled_layers, labels=labels, attention_mask=attention_mask)
+        pooled_av = _extract_pooled_layer_states(hs_both, pooled_layers, labels=labels, attention_mask=attention_mask)
 
         for layer in add_layers:
             if layer not in pooled_t or layer not in pooled_a or layer not in pooled_v or layer not in pooled_av:
@@ -1303,6 +1340,31 @@ def compute_unpaired_additivity_regularizer(
             weighted = layer_loss * weight
             per_layer[int(layer)] = float(weighted.detach().item())
             reg_loss = weighted if reg_loss is None else (reg_loss + weighted)
+
+        if transport_enable:
+            transport_loss: Optional[torch.Tensor] = None
+            transport_vals: List[float] = []
+            for layer in transport_layers:
+                if layer not in pooled_v or layer not in pooled_av:
+                    continue
+                # Transported shift at destination layer:
+                # how much enabling audio perturbs vision hidden states.
+                shift = pooled_av[layer] - pooled_v[layer]
+                layer_t = shift.pow(2).mean()
+                if transport_normalize:
+                    denom_t = pooled_v[layer].pow(2).mean().detach() + 1e-6
+                    layer_t = layer_t / denom_t
+                if transport_cap > 0.0:
+                    layer_t = F.relu(layer_t - float(transport_cap)).pow(2)
+                weight = 1.0
+                if layer_weights is not None:
+                    weight = float(layer_weights.get(int(layer), 1.0))
+                layer_t = layer_t * weight
+                transport_vals.append(float(layer_t.detach().item()))
+                transport_loss = layer_t if transport_loss is None else (transport_loss + layer_t)
+            if transport_loss is not None:
+                aux_losses["transport"] = transport_loss
+                aux_stats["transport_layer_mean"] = float(sum(transport_vals) / max(1, len(transport_vals)))
 
     nll_text = _sequence_nll_from_output(out_text, labels=labels, require_grad=False)
     nll_audio = _sequence_nll_from_output(out_audio, labels=labels, require_grad=False)
@@ -1402,6 +1464,8 @@ def train_epoch(
     noharm_reg_batches = 0
     total_logit_reg = 0.0
     logit_reg_batches = 0
+    total_transport_reg = 0.0
+    transport_reg_batches = 0
     total_poe_reg = 0.0
     poe_reg_batches = 0
     total_gateadd_reg = 0.0
@@ -1435,6 +1499,7 @@ def train_epoch(
             getattr(args, "compat_add_reg_enable", False)
             or getattr(args, "compat_noharm_enable", False)
             or getattr(args, "compat_logit_fusion_enable", False)
+            or getattr(args, "compat_transport_enable", False)
             or getattr(args, "compat_poe_enable", False)
             or getattr(args, "compat_gate_add_enable", False)
         )
@@ -1443,11 +1508,17 @@ def train_epoch(
     add_reg_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_add_reg_enable", False))
     noharm_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_noharm_enable", False))
     logit_fusion_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_logit_fusion_enable", False))
+    transport_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_transport_enable", False))
     gateadd_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_gate_add_enable", False))
 
-    add_layers = _parse_layer_list(getattr(args, "compat_add_reg_layers", "")) if (add_reg_enabled or gateadd_enabled) else []
+    add_layers_hint = str(getattr(args, "compat_add_reg_layers", ""))
+    add_layers = _parse_layer_list(add_layers_hint) if (add_reg_enabled or gateadd_enabled) else []
     if (add_reg_enabled or gateadd_enabled) and not add_layers:
         add_layers = list(compat_layers)
+    transport_layers_hint = str(getattr(args, "compat_transport_layers", ""))
+    transport_layers = _parse_layer_list(transport_layers_hint) if transport_enabled else []
+    if transport_enabled and not transport_layers:
+        transport_layers = list(add_layers) if add_layers else list(compat_layers)
     add_every = max(1, int(getattr(args, "compat_add_reg_every", 200)))
     add_lambda = float(getattr(args, "compat_add_reg_lambda", 0.0))
     add_norm = bool(getattr(args, "compat_add_reg_normalize", True))
@@ -1456,6 +1527,9 @@ def train_epoch(
     noharm_use_best_single = bool(getattr(args, "compat_noharm_use_best_single", False))
     logit_fusion_lambda = float(getattr(args, "compat_logit_fusion_lambda", 0.0))
     logit_fusion_conf_temp = float(getattr(args, "compat_logit_fusion_conf_temp", 0.5))
+    transport_lambda = float(getattr(args, "compat_transport_lambda", 0.0))
+    transport_cap = float(getattr(args, "compat_transport_cap", 0.0))
+    transport_norm = bool(getattr(args, "compat_transport_normalize", True))
     poe_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_poe_enable", False))
     poe_lambda = float(getattr(args, "compat_poe_lambda", 0.0))
     poe_weight_temp = float(getattr(args, "compat_poe_weight_temp", 0.5))
@@ -1610,6 +1684,7 @@ def train_epoch(
                     (add_reg_enabled and add_lambda > 0.0)
                     or (noharm_enabled and noharm_lambda > 0.0)
                     or (logit_fusion_enabled and logit_fusion_lambda > 0.0)
+                    or (transport_enabled and transport_lambda > 0.0)
                     or (poe_enabled and poe_lambda > 0.0)
                     or (gateadd_enabled and gateadd_lambda > 0.0)
                 )
@@ -1622,6 +1697,7 @@ def train_epoch(
                     compatibility_state=compatibility_state,
                     gate_value=gate_value,
                     add_layers=add_layers,
+                    transport_layers=transport_layers,
                     layer_weights=compat_layer_weights,
                     normalize=add_norm,
                     no_harm_enable=noharm_enabled,
@@ -1629,6 +1705,9 @@ def train_epoch(
                     no_harm_use_best_single=noharm_use_best_single,
                     logit_fusion_enable=logit_fusion_enabled,
                     logit_fusion_conf_temp=logit_fusion_conf_temp,
+                    transport_enable=transport_enabled,
+                    transport_cap=transport_cap,
+                    transport_normalize=transport_norm,
                     poe_enable=poe_enabled,
                     poe_weight_temp=poe_weight_temp,
                     poe_loss_type=poe_loss_type,
@@ -1654,6 +1733,12 @@ def train_epoch(
                     total_logit_reg += float(logit_loss.detach().item())
                     logit_reg_batches += 1
                     loss = loss + logit_fusion_lambda * logit_loss
+
+                transport_loss = aux_losses.get("transport")
+                if transport_enabled and transport_loss is not None and transport_lambda > 0.0:
+                    total_transport_reg += float(transport_loss.detach().item())
+                    transport_reg_batches += 1
+                    loss = loss + transport_lambda * transport_loss
 
                 poe_loss = aux_losses.get("poe_consistency")
                 if poe_enabled and poe_loss is not None and poe_lambda > 0.0:
@@ -1692,6 +1777,7 @@ def train_epoch(
                     add_reg is None
                     and noharm_loss is None
                     and logit_loss is None
+                    and transport_loss is None
                     and poe_loss is None
                     and gateadd_loss is None
                     and not add_warned
@@ -1744,6 +1830,9 @@ def train_epoch(
             if logit_reg_batches > 0:
                 logit_avg = total_logit_reg / float(max(1, logit_reg_batches))
                 compat_suffix += f" logit_reg={logit_avg:.4f}"
+            if transport_reg_batches > 0:
+                transport_avg = total_transport_reg / float(max(1, transport_reg_batches))
+                compat_suffix += f" transport_reg={transport_avg:.4f}"
             if route_scale_batches > 0:
                 route_avg = total_route_scale / float(max(1, route_scale_batches))
                 compat_suffix += f" route_scale={route_avg:.3f}"
@@ -2062,6 +2151,10 @@ def parse_args() -> argparse.Namespace:
                    help="Base model config name (e.g. phase1, internvl, qwen)")
     p.add_argument("--llm-model", type=str, default=None)
     p.add_argument("--fusion-layers", type=str, default=None)
+    p.add_argument("--audio-fusion-layers", type=str, default=None,
+                   help="Optional comma-separated audio fusion layers (overrides config/modalities)")
+    p.add_argument("--vision-fusion-layers", type=str, default=None,
+                   help="Optional comma-separated vision fusion layers (overrides config/modalities)")
     p.add_argument("--num-audio-tokens", type=int, default=8)
 
     p.add_argument("--train-modality", type=str, default="both", choices=["audio", "image", "both", "interleaved"])
@@ -2103,6 +2196,16 @@ def parse_args() -> argparse.Namespace:
                    help="Initial value for learned gate params (tanh-squashed, 0.0=gate off)")
     p.add_argument("--train-gates-only", action="store_true",
                    help="Freeze all trainable adapter params except per-layer learned gates")
+    p.add_argument("--delta-norm-cap-ratio", type=float, default=0.0,
+                   help="Cap per-token fusion residual norm: ||delta|| <= ratio * ||hidden|| (0=disabled)")
+    p.add_argument("--delta-norm-cap-eps", type=float, default=1e-6,
+                   help="Numerical epsilon for delta norm capping")
+    p.add_argument("--gate-depth-decay", type=float, default=1.0,
+                   help="Global depth decay for per-layer gates (<1 suppresses early layers, 1=off)")
+    p.add_argument("--audio-gate-depth-decay", type=float, default=1.0,
+                   help="Audio-specific depth decay for per-layer gates (<1 suppresses early audio layers)")
+    p.add_argument("--vision-gate-depth-decay", type=float, default=1.0,
+                   help="Vision-specific depth decay for per-layer gates (<1 suppresses early vision layers)")
 
     # Gradient attribution study
     p.add_argument("--grad-attribution", dest="grad_attribution", action="store_true",
@@ -2162,6 +2265,19 @@ def parse_args() -> argparse.Namespace:
                    help="Disable additivity loss normalization")
     p.add_argument("--compat-add-bank-size", type=int, default=64,
                    help="Max number of audio token samples to cache for unpaired additivity regularizer")
+    p.add_argument("--compat-transport-enable", action="store_true",
+                   help="Enable cross-layer transport penalty ||h_both - h_vision||^2 at vision layers")
+    p.add_argument("--compat-transport-lambda", type=float, default=0.02,
+                   help="Weight for transport penalty")
+    p.add_argument("--compat-transport-cap", type=float, default=0.0,
+                   help="Optional hinge cap on normalized transport energy (0=quadratic without cap)")
+    p.add_argument("--compat-transport-normalize", action="store_true",
+                   help="Normalize transport penalty by vision hidden energy")
+    p.add_argument("--no-compat-transport-normalize", dest="compat_transport_normalize",
+                   action="store_false",
+                   help="Disable transport loss normalization")
+    p.add_argument("--compat-transport-layers", type=str, default="",
+                   help="Optional comma-separated layers for transport penalty (default: compatibility layers)")
 
     # Do-no-harm objective: prevent composed loss from exceeding best/single modality loss
     p.add_argument("--compat-noharm-enable", action="store_true",
@@ -2222,6 +2338,7 @@ def parse_args() -> argparse.Namespace:
     p.set_defaults(
         compat_reg_weight_by_shift_norm=True,
         compat_add_reg_normalize=True,
+        compat_transport_normalize=True,
     )
 
     p.add_argument("--max-samples", type=int, default=0,
@@ -2275,6 +2392,8 @@ def main() -> None:
                     "train_modality": args.train_modality,
                     "eval_modalities": args.eval_modalities,
                     "fusion_layers": args.fusion_layers,
+                    "audio_fusion_layers": args.audio_fusion_layers,
+                    "vision_fusion_layers": args.vision_fusion_layers,
                     "num_audio_tokens": args.num_audio_tokens,
                     "batch_size": args.batch_size,
                     "num_epochs": args.num_epochs,
@@ -2293,6 +2412,10 @@ def main() -> None:
                     "learned_gate": args.learned_gate,
                     "learned_gate_init": args.learned_gate_init,
                     "train_gates_only": args.train_gates_only,
+                    "delta_norm_cap_ratio": args.delta_norm_cap_ratio,
+                    "gate_depth_decay": args.gate_depth_decay,
+                    "audio_gate_depth_decay": args.audio_gate_depth_decay,
+                    "vision_gate_depth_decay": args.vision_gate_depth_decay,
                     "label_smoothing": args.label_smoothing,
                     "layer_additivity_probe": args.layer_additivity_probe,
                     "layer_probe_samples": args.layer_probe_samples,
@@ -2311,6 +2434,11 @@ def main() -> None:
                     "compat_add_reg_layers": args.compat_add_reg_layers,
                     "compat_add_reg_normalize": args.compat_add_reg_normalize,
                     "compat_add_bank_size": args.compat_add_bank_size,
+                    "compat_transport_enable": args.compat_transport_enable,
+                    "compat_transport_lambda": args.compat_transport_lambda,
+                    "compat_transport_cap": args.compat_transport_cap,
+                    "compat_transport_normalize": args.compat_transport_normalize,
+                    "compat_transport_layers": args.compat_transport_layers,
                     "compat_noharm_enable": args.compat_noharm_enable,
                     "compat_noharm_lambda": args.compat_noharm_lambda,
                     "compat_noharm_margin": args.compat_noharm_margin,
@@ -2369,6 +2497,22 @@ def main() -> None:
         layers = getattr(model.fusion_adapter, "fusion_layer_indices", None)
         if layers is not None:
             print(f"[info] effective_fusion_layers={list(layers)}", flush=True)
+    if args.delta_norm_cap_ratio > 0.0:
+        print(
+            f"[transport] delta_norm_cap enabled ratio={args.delta_norm_cap_ratio} "
+            f"eps={args.delta_norm_cap_eps}",
+            flush=True,
+        )
+    if (
+        abs(args.gate_depth_decay - 1.0) > 1e-8
+        or abs(args.audio_gate_depth_decay - 1.0) > 1e-8
+        or abs(args.vision_gate_depth_decay - 1.0) > 1e-8
+    ):
+        print(
+            f"[transport] depth-decay gates global={args.gate_depth_decay} "
+            f"audio={args.audio_gate_depth_decay} vision={args.vision_gate_depth_decay}",
+            flush=True,
+        )
     tokenizer = model.base_vl.tokenizer
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -2493,6 +2637,7 @@ def main() -> None:
         compat_objective_enabled = bool(
             args.compat_reg_enable
             or args.compat_add_reg_enable
+            or args.compat_transport_enable
             or args.compat_noharm_enable
             or args.compat_logit_fusion_enable
             or args.compat_poe_enable
@@ -2507,6 +2652,7 @@ def main() -> None:
                 print("[compat] No vision fusion layers found; disabling compatibility objectives.", flush=True)
                 args.compat_reg_enable = False
                 args.compat_add_reg_enable = False
+                args.compat_transport_enable = False
                 args.compat_noharm_enable = False
                 args.compat_logit_fusion_enable = False
                 args.compat_poe_enable = False
@@ -2524,6 +2670,14 @@ def main() -> None:
                         f"[compat] additivity objective enabled lambda={args.compat_add_reg_lambda} "
                         f"every={args.compat_add_reg_every} layers={args.compat_add_reg_layers or compat_layers} "
                         f"normalize={args.compat_add_reg_normalize}",
+                        flush=True,
+                    )
+                if args.compat_transport_enable:
+                    transport_layers = args.compat_transport_layers or args.compat_add_reg_layers or compat_layers
+                    print(
+                        f"[compat] transport objective enabled lambda={args.compat_transport_lambda} "
+                        f"cap={args.compat_transport_cap} layers={transport_layers} "
+                        f"normalize={args.compat_transport_normalize}",
                         flush=True,
                     )
                 if args.compat_noharm_enable:
