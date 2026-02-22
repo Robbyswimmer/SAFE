@@ -1051,6 +1051,216 @@ INTERNVL_BINDING_CONFIG = {
     "gradient_accumulation_steps": 8,
 }
 
+# Qwen3-4B Composition: Vision-First Disjoint
+# All vision layers BEFORE all audio layers → audio→vision transport = 0 by construction.
+COMPOSITION_4B_VFIRST_CONFIG = {
+    "name": "composition_4b_vfirst",
+    "description": "Qwen3-4B vision-first disjoint: V={8,14,20} A={26,30,34}, structural transport elimination",
+    "eval_prompt": "Answer with a single word or number.",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/Qwen_Qwen3-4B"),
+    "vision_model_name": "openai/clip-vit-large-patch14",
+
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0,
+    },
+
+    "llm_hidden_size": 2560,
+    "audio_embed_dim": 512,
+    "vision_embed_dim": 1024,
+
+    "projector_type": "standard",
+    "num_audio_tokens": 8,
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 256,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    "num_vision_tokens": 8,
+    "vision_projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 256,
+        "use_positional_embedding": True,
+    },
+
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [8, 14, 20, 26, 30, 34],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "use_bottleneck": True,
+        "bottleneck_dim": 256,
+        "num_attention_heads": 32,
+        "dropout": 0.1,
+        "use_tokenwise_gate": False,
+        "use_learned_gate": False,
+        "modalities": {
+            "audio": {
+                "layer_indices": [26, 30, 34],
+                "num_tokens": 8,
+            },
+            "vision": {
+                "layer_indices": [8, 14, 20],
+                "num_tokens": 8,
+            },
+        },
+    },
+
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+
+    "expected_vram_gb": 25,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+}
+
+# Qwen3-4B Composition: Tightened Staggered
+# Interleaved staggered layout adapted for 36 layers + transport reg + from scratch.
+COMPOSITION_4B_STAGGERED_CONFIG = {
+    "name": "composition_4b_staggered",
+    "description": "Qwen3-4B staggered: V={9,15,21,27} A={11,17,23,29}, transport reg + from scratch",
+    "eval_prompt": "Answer with a single word or number.",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/Qwen_Qwen3-4B"),
+    "vision_model_name": "openai/clip-vit-large-patch14",
+
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0,
+    },
+
+    "llm_hidden_size": 2560,
+    "audio_embed_dim": 512,
+    "vision_embed_dim": 1024,
+
+    "projector_type": "standard",
+    "num_audio_tokens": 8,
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 256,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    "num_vision_tokens": 8,
+    "vision_projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 256,
+        "use_positional_embedding": True,
+    },
+
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [9, 11, 15, 17, 21, 23, 27, 29],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "use_bottleneck": True,
+        "bottleneck_dim": 256,
+        "num_attention_heads": 32,
+        "dropout": 0.1,
+        "use_tokenwise_gate": False,
+        "use_learned_gate": False,
+        "modalities": {
+            "audio": {
+                "layer_indices": [11, 17, 23, 29],
+                "num_tokens": 8,
+            },
+            "vision": {
+                "layer_indices": [9, 15, 21, 27],
+                "num_tokens": 8,
+            },
+        },
+    },
+
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+
+    "expected_vram_gb": 25,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+}
+
+# Qwen3-4B Composition: Vision-First Pairs
+# Vision-first ordering within each pair + all soft objectives (kitchen sink).
+COMPOSITION_4B_VFPAIRS_CONFIG = {
+    "name": "composition_4b_vfpairs",
+    "description": "Qwen3-4B vision-first pairs: V={8,16,24,32} A={10,18,26,34}, all soft objectives",
+    "eval_prompt": "Answer with a single word or number.",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/Qwen_Qwen3-4B"),
+    "vision_model_name": "openai/clip-vit-large-patch14",
+
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0,
+    },
+
+    "llm_hidden_size": 2560,
+    "audio_embed_dim": 512,
+    "vision_embed_dim": 1024,
+
+    "projector_type": "standard",
+    "num_audio_tokens": 8,
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 256,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    "num_vision_tokens": 8,
+    "vision_projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 256,
+        "use_positional_embedding": True,
+    },
+
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [8, 10, 16, 18, 24, 26, 32, 34],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "use_bottleneck": True,
+        "bottleneck_dim": 256,
+        "num_attention_heads": 32,
+        "dropout": 0.1,
+        "use_tokenwise_gate": False,
+        "use_learned_gate": False,
+        "modalities": {
+            "audio": {
+                "layer_indices": [10, 18, 26, 34],
+                "num_tokens": 8,
+            },
+            "vision": {
+                "layer_indices": [8, 16, 24, 32],
+                "num_tokens": 8,
+            },
+        },
+    },
+
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+
+    "expected_vram_gb": 25,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+}
+
 # Available configurations
 CONFIGS = {
     "demo": DEMO_CONFIG,
@@ -1075,6 +1285,9 @@ CONFIGS = {
     "composition_disjoint": COMPOSITION_DISJOINT_CONFIG,
     "lora_baseline": LORA_BASELINE_CONFIG,
     "internvl_binding": INTERNVL_BINDING_CONFIG,
+    "composition_4b_vfirst": COMPOSITION_4B_VFIRST_CONFIG,
+    "composition_4b_staggered": COMPOSITION_4B_STAGGERED_CONFIG,
+    "composition_4b_vfpairs": COMPOSITION_4B_VFPAIRS_CONFIG,
 }
 
 def get_config(config_name: str):

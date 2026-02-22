@@ -27,6 +27,7 @@ QWEN_MODELS = {
     # Qwen3 (latest)
     "qwen3-14b": "Qwen/Qwen3-14B",
     "qwen3-8b": "Qwen/Qwen3-8B",
+    "qwen3-4b": "Qwen/Qwen3-4B",
     "qwen3-32b": "Qwen/Qwen3-32B",
     # Qwen2.5 (fallback)
     "qwen2.5-14b": "Qwen/Qwen2.5-14B",
