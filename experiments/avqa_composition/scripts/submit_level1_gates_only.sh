@@ -1,56 +1,65 @@
 #!/bin/bash
-#SBATCH --job-name=L1-gates
-#SBATCH --output=logs/level1_gates_%j.out
-#SBATCH --error=logs/level1_gates_%j.err
-#SBATCH --time=2:00:00
-#SBATCH --mem=96G
-#SBATCH --cpus-per-task=8
-#SBATCH -p gpu
-#SBATCH --gres=gpu:1
+# Submit Level-1 gates-only training (clean, derivation-only).
+# Task loss + learned gates — no auxiliary objectives.
+set -euo pipefail
 
-# Level 1: Gates-only calibration (~100 paired samples, 2 epochs)
-# Freezes all adapter params, learns only per-layer gate scalars
-# Uses pre-trained adapters from comp_indep_additive_v1
-# ~30 min on 1 GPU
+if [[ -z "${SAFE_ROOT:-}" ]]; then
+  if [[ -n "${SLURM_SUBMIT_DIR:-}" && -d "${SLURM_SUBMIT_DIR}" ]]; then
+    SAFE_ROOT="${SLURM_SUBMIT_DIR}"
+  else
+    SAFE_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+  fi
+fi
+cd "$SAFE_ROOT"
 
-export MODEL_CONFIG=${MODEL_CONFIG:-composition_independent}
-export INIT_AUDIO_CKPT=${INIT_AUDIO_CKPT:-checkpoints/comp_indep_additive_v1/best_model.pt}
-export INIT_VISION_CKPT=${INIT_VISION_CKPT:-checkpoints/comp_indep_additive_v1/best_model.pt}
-export OUTPUT_DIR=${OUTPUT_DIR:-checkpoints/level1_gates_only}
+BASE_CKPT=${BASE_CKPT:-checkpoints/comp_indep_additive_v1/best_model.pt}
+MODEL_CONFIG=${MODEL_CONFIG:-composition_independent}
+SEED=${SEED:-42}
+FUSION_GATE=${FUSION_GATE:-0.2}
+MAX_SAMPLES=${MAX_SAMPLES:-1000}
+OUTPUT_DIR=${OUTPUT_DIR:-checkpoints/level1_gates_only}
 
-# Gate settings
-export LEARNED_GATE=1
-export LEARNED_GATE_INIT=2.0
-export TRAIN_GATES_ONLY=1
+if [[ ! -f "$BASE_CKPT" ]]; then
+  echo "FATAL: BASE_CKPT not found: $BASE_CKPT" >&2
+  exit 2
+fi
 
-# Training settings — small and fast
-export EPOCHS=2
-export LR=1e-3
-export MAX_SAMPLES=${MAX_SAMPLES:-100}
-export BATCH_SIZE=${BATCH_SIZE:-1}
+echo "[level1] SAFE_ROOT=$SAFE_ROOT"
+echo "[level1] BASE_CKPT=$BASE_CKPT"
+echo "[level1] MODEL_CONFIG=$MODEL_CONFIG"
+echo "[level1] OUTPUT_DIR=$OUTPUT_DIR"
 
-# Eval all 4 conditions
-export EVAL_MODALITIES="text,audio,image,both"
-export LAYER_ADDITIVITY_PROBE=1
-export LAYER_PROBE_SAMPLES=256
+J1=$(sbatch --parsable --gres=gpu:1 \
+  --export=ALL,\
+SAFE_ROOT="$SAFE_ROOT",\
+MODEL_CONFIG="$MODEL_CONFIG",\
+OUTPUT_DIR="$OUTPUT_DIR",\
+SEED="$SEED",\
+FUSION_GATE="$FUSION_GATE",\
+SLIM_PROJECTOR=0,\
+INIT_AUDIO_CKPT="$BASE_CKPT",\
+INIT_VISION_CKPT="$BASE_CKPT",\
+EPOCHS=2,\
+LR=1e-3,\
+MAX_SAMPLES="$MAX_SAMPLES",\
+LEARNED_GATE=1,\
+LEARNED_GATE_INIT=2.0,\
+TRAIN_GATES_ONLY=1,\
+COMPAT_REG_ENABLE=0,\
+COMPAT_ADD_REG_ENABLE=0,\
+COMPAT_TRANSPORT_ENABLE=0,\
+COMPAT_GATE_ADD_ENABLE=0,\
+COMPAT_NOHARM_ENABLE=0,\
+COMPAT_POE_ENABLE=0,\
+COMPAT_ROUTING_ENABLE=0,\
+COMPAT_LOGIT_FUSION_ENABLE=0,\
+COMPAT_ICM_CANCEL_ENABLE=0,\
+EVAL_MODALITIES=text,audio,image,both,\
+LAYER_ADDITIVITY_PROBE=1,\
+LAYER_PROBE_SAMPLES=256,\
+WANDB_RUN_NAME=level1_gates_only_${SEED},\
+WANDB_TAGS=composition,level1,clean,gates_only,derivation \
+  experiments/avqa_composition/scripts/train_composition_interleaved.sh)
 
-# No heavy regularizers — just gate learning
-export COMPAT_REG_ENABLE=0
-export COMPAT_ADD_REG_ENABLE=0
-export COMPAT_TRANSPORT_ENABLE=0
-export COMPAT_GATE_ADD_ENABLE=0
-export COMPAT_NOHARM_ENABLE=0
-export COMPAT_POE_ENABLE=0
-export COMPAT_ROUTING_ENABLE=0
-export COMPAT_LOGIT_FUSION_ENABLE=0
-
-# Projector
-export SLIM_PROJECTOR=${SLIM_PROJECTOR:-0}
-
-# Wandb
-export WANDB=${WANDB:-1}
-export WANDB_PROJECT=${WANDB_PROJECT:-SAFE-Composition}
-export WANDB_RUN_NAME=${WANDB_RUN_NAME:-level1_gates_only_${SLURM_JOB_ID:-local}}
-export WANDB_TAGS=${WANDB_TAGS:-composition,level1,gates_only,calibration}
-
-source "$(dirname "$0")/train_composition_interleaved.sh"
+echo "[level1] submitted job: $J1"
+echo "[level1] monitor: squeue -j $J1"
