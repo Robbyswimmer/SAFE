@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from collections import Counter
 from typing import Any, Optional, Dict, List, Sequence, Union, Tuple
 from .base_vl import BaseVLModel
 from .audio_encoders import CLAPAudioEncoder, WhisperAudioEncoder, MultiModalAudioEncoder
 from .projectors import AudioProjector, AdaptiveAudioProjector
 from .fusion_adapter import LoRAFusionAdapter, MultiLayerFusionAdapter, GatedFusionAdapter
+from .interaction_mixer import InteractionCorrectionMixer
 from .layer_hooks import LayerHookManager
 from .kv_augmentation import (
     KVAugmentationAdapter,
@@ -273,6 +275,33 @@ class SAFEModel(nn.Module):
         # Fusion injection point: "post_layer" (layer output, default) or
         # "pre_ffn" (before FFN within each decoder layer).
         self.fusion_injection_point = fusion_config.get("injection_point", "post_layer")
+
+        # Interaction Correction Mixer (ICM): optional permutation-invariant
+        # sidecar that predicts a small hidden-space correction from active
+        # modality summaries. This leaves the base LLM frozen and keeps
+        # unimodal paths intact via min-modalities gating.
+        self.interaction_mixer = None
+        self.icm_enabled = bool(fusion_config.get("interaction_mixer_enable", False))
+        self.icm_util_target_entropy = float(fusion_config.get("interaction_mixer_util_target", 0.7))
+        if self.icm_enabled:
+            self.interaction_mixer = InteractionCorrectionMixer(
+                hidden_size=llm_hidden_size,
+                mixer_dim=int(fusion_config.get("interaction_mixer_dim", 512)),
+                num_heads=int(fusion_config.get("interaction_mixer_heads", 8)),
+                num_layers=int(fusion_config.get("interaction_mixer_layers", 1)),
+                dropout=float(fusion_config.get("interaction_mixer_dropout", 0.1)),
+                gate_init=float(fusion_config.get("interaction_mixer_gate_init", -2.0)),
+                min_modalities_to_apply=int(fusion_config.get("interaction_mixer_min_modalities", 2)),
+                util_target_entropy=self.icm_util_target_entropy,
+            )
+            print(
+                f"[SAFE] ✓ Interaction mixer initialized "
+                f"(dim={fusion_config.get('interaction_mixer_dim', 512)} "
+                f"layers={fusion_config.get('interaction_mixer_layers', 1)} "
+                f"heads={fusion_config.get('interaction_mixer_heads', 8)})",
+                flush=True,
+            )
+            sys.stdout.flush()
 
         # KV Augmentation: inject audio as additional K,V in self-attention
         # This makes audio "un-ignorable" by the frozen LLM
@@ -688,6 +717,11 @@ class SAFEModel(nn.Module):
             for param in self.fusion_adapter.parameters():
                 yield param
 
+        # Interaction mixer parameters
+        if self.interaction_mixer is not None:
+            for param in self.interaction_mixer.parameters():
+                yield param
+
         # KV augmentation adapters
         if self.kv_adapters is not None:
             for param in self.kv_adapters.parameters():
@@ -707,6 +741,8 @@ class SAFEModel(nn.Module):
             self.vision_projector.train()
         if self.fusion_adapter is not None:
             self.fusion_adapter.train()
+        if self.interaction_mixer is not None:
+            self.interaction_mixer.train()
         # KV augmentation adapters
         if self.kv_adapters is not None:
             self.kv_adapters.train()
@@ -2365,6 +2401,8 @@ class SAFEModel(nn.Module):
             fusion_layers = None
             modality_tokens = None
             modality_masks = None
+            modality_summaries = None
+            modality_active_mask = None
 
             # Determine target device/dtype for audio token casting.
             # When InternVL with vision, inputs_embeds is None so use input_ids device + base_dtype.
@@ -2409,6 +2447,18 @@ class SAFEModel(nn.Module):
                     )
                 if audio_attention_mask is not None:
                     audio_attention_mask = audio_attention_mask.to(_cast_device)
+                if vision_tokens is not None:
+                    vision_tokens = vision_tokens.to(
+                        device=_cast_device,
+                        dtype=_cast_dtype,
+                    )
+
+            # Build optional ICM set inputs from active modality summaries.
+            modality_summaries, modality_active_mask = self._build_interaction_mixer_inputs(
+                audio_tokens=audio_tokens,
+                audio_attention_mask=audio_attention_mask,
+                vision_tokens=vision_tokens,
+            )
 
             # Build per-modality gate dict (all present modalities use same gate)
             _modality_gate = {}
@@ -2605,6 +2655,18 @@ class SAFEModel(nn.Module):
                     raise
             logits = outputs.logits
             loss = outputs.loss if labels is not None else None
+            icm_aux: Dict[str, torch.Tensor] = {}
+
+            # Optional interaction mixer correction in logit space.
+            if self.interaction_mixer is not None and modality_summaries is not None:
+                logits, icm_aux = self._apply_interaction_mixer_logits(
+                    logits=logits,
+                    modality_summaries=modality_summaries,
+                    modality_active_mask=modality_active_mask,
+                )
+                # Recompute supervised loss on corrected logits.
+                if labels is not None:
+                    loss = self._compute_causal_loss_from_logits(logits, labels)
 
             # Add attention regularization loss if computed
             if attn_reg_loss is not None and loss is not None:
@@ -2670,6 +2732,13 @@ class SAFEModel(nn.Module):
                 "hidden_states": hidden_state_out,
                 "all_hidden_states": all_hidden_states,
                 "attn_reg_loss": attn_reg_loss,
+                "icm_identity_loss": icm_aux.get("icm_identity_loss"),
+                "icm_small_loss": icm_aux.get("icm_small_loss"),
+                "icm_util_loss": icm_aux.get("icm_util_loss"),
+                "icm_entropy": icm_aux.get("icm_entropy"),
+                "icm_gate_mean": icm_aux.get("icm_gate_mean"),
+                "icm_active_modalities_mean": icm_aux.get("icm_active_modalities_mean"),
+                "icm_correction_norm": icm_aux.get("icm_correction_norm"),
             }
         
         resolved_input_ids = input_ids if input_ids is not None else kwargs.pop("input_ids", None)
@@ -2865,6 +2934,148 @@ class SAFEModel(nn.Module):
             return {"audio": list(indices)}
 
         return {"audio": []}
+
+    @staticmethod
+    def _masked_mean_tokens(tokens: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute per-sample token mean with optional mask.
+        Returns:
+          summary: (B, H)
+          active: (B,) bool
+        """
+        if mask is None:
+            return tokens.float().mean(dim=1), torch.ones(tokens.size(0), device=tokens.device, dtype=torch.bool)
+        if mask.dim() != 2:
+            return tokens.float().mean(dim=1), torch.ones(tokens.size(0), device=tokens.device, dtype=torch.bool)
+        w = mask.to(device=tokens.device, dtype=tokens.dtype).unsqueeze(-1)
+        denom = w.sum(dim=1).clamp_min(1.0)
+        summary = (tokens * w).sum(dim=1) / denom
+        active = (mask.sum(dim=1) > 0).to(device=tokens.device)
+        return summary.float(), active.bool()
+
+    def _build_interaction_mixer_inputs(
+        self,
+        audio_tokens: Optional[torch.Tensor],
+        audio_attention_mask: Optional[torch.Tensor],
+        vision_tokens: Optional[torch.Tensor],
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Build set-style modality summary tokens for ICM.
+        Returns:
+          modality_summaries: (B, M, H) or None
+          active_mask: (B, M) bool or None
+        """
+        if self.interaction_mixer is None:
+            return None, None
+
+        summaries: List[torch.Tensor] = []
+        actives: List[torch.Tensor] = []
+
+        # Fixed order for reproducibility; mixer is permutation-invariant.
+        if audio_tokens is not None:
+            s_a, a_active = self._masked_mean_tokens(audio_tokens.float(), audio_attention_mask)
+            summaries.append(s_a)
+            actives.append(a_active)
+        if vision_tokens is not None:
+            s_v, v_active = self._masked_mean_tokens(vision_tokens.float(), None)
+            summaries.append(s_v)
+            actives.append(v_active)
+
+        if not summaries:
+            return None, None
+
+        # Ensure consistent batch size across modalities.
+        batch = summaries[0].size(0)
+        summaries = [s[:batch] for s in summaries]
+        actives = [a[:batch] for a in actives]
+        modality_summaries = torch.stack(summaries, dim=1)  # (B, M, H)
+        active_mask = torch.stack(actives, dim=1)  # (B, M)
+        return modality_summaries, active_mask
+
+    @staticmethod
+    def _compute_causal_loss_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        vocab = shift_logits.size(-1)
+        return F.cross_entropy(
+            shift_logits.view(-1, vocab),
+            shift_labels.view(-1),
+            ignore_index=-100,
+        )
+
+    def _apply_interaction_mixer_logits(
+        self,
+        logits: torch.Tensor,
+        modality_summaries: Optional[torch.Tensor],
+        modality_active_mask: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Apply ICM correction in hidden/logit space:
+          logits' = logits + W * delta_mix
+        where W is the frozen LM head projection (implicitly through existing logits space).
+        """
+        aux: Dict[str, torch.Tensor] = {}
+        if self.interaction_mixer is None or modality_summaries is None or modality_active_mask is None:
+            return logits, aux
+
+        icm_out = self.interaction_mixer(modality_summaries, active_mask=modality_active_mask)
+        correction = icm_out["correction"].to(device=logits.device, dtype=logits.dtype)  # (B, H)
+
+        # Map hidden correction into logit correction via frozen LM head weights.
+        lm_head = getattr(self.base_vl.llm, "lm_head", None)
+        if lm_head is None:
+            # Some wrappers place lm_head under language_model.
+            language_model = getattr(self.base_vl.llm, "language_model", None)
+            lm_head = getattr(language_model, "lm_head", None) if language_model is not None else None
+        if lm_head is None or not hasattr(lm_head, "weight"):
+            return logits, aux
+
+        corr_in = correction.to(
+            device=lm_head.weight.device,
+            dtype=lm_head.weight.dtype,
+        )
+        corr_logits = F.linear(corr_in, lm_head.weight, None)
+        if corr_logits.device != logits.device:
+            corr_logits = corr_logits.to(logits.device)
+        corr_logits = corr_logits.to(dtype=logits.dtype)
+        logits = logits + corr_logits.unsqueeze(1)
+
+        active_count = icm_out["active_count"]  # (B,)
+        raw_correction = icm_out["raw_correction"]  # (B,H)
+        entropy_norm = icm_out["entropy_norm"]  # (B,)
+
+        # Identity penalty: when <=1 modality is active, mixer should output ~0.
+        single_mask = (active_count <= 1.0)
+        if single_mask.any():
+            id_loss = raw_correction[single_mask].pow(2).mean()
+        else:
+            id_loss = raw_correction.new_zeros(())
+
+        # Magnitude regularizer on applied correction.
+        small_loss = correction.pow(2).mean()
+
+        # Utilization entropy floor only for samples with >=2 active modalities.
+        multi_mask = (active_count >= 2.0)
+        if multi_mask.any():
+            util_entropy = entropy_norm[multi_mask].mean()
+            util_target = torch.tensor(
+                float(self.icm_util_target_entropy),
+                device=util_entropy.device,
+                dtype=util_entropy.dtype,
+            )
+            util_loss = F.relu(util_target - util_entropy)
+        else:
+            util_entropy = entropy_norm.new_tensor(1.0)
+            util_loss = entropy_norm.new_zeros(())
+
+        aux["icm_identity_loss"] = id_loss
+        aux["icm_small_loss"] = small_loss
+        aux["icm_util_loss"] = util_loss
+        aux["icm_entropy"] = util_entropy
+        aux["icm_gate_mean"] = icm_out["gate"].mean()
+        aux["icm_active_modalities_mean"] = active_count.mean()
+        aux["icm_correction_norm"] = correction.norm(dim=-1).mean()
+        return logits, aux
     
     def generate(
         self,
@@ -3383,6 +3594,9 @@ class SAFEModel(nn.Module):
                 self._place_fusion_adapters_for_sharded_llm(runtime_device)
             else:
                 self.fusion_adapter = self.fusion_adapter.to(device=runtime_device)
+
+        if hasattr(self, "interaction_mixer") and self.interaction_mixer is not None:
+            self.interaction_mixer = self.interaction_mixer.to(device=runtime_device)
 
         # KV augmentation adapters
         if hasattr(self, "kv_adapters") and self.kv_adapters is not None:

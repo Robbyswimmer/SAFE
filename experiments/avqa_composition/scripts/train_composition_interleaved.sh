@@ -88,6 +88,18 @@ COMPAT_TRANSPORT_CAP=${COMPAT_TRANSPORT_CAP:-0.0}
 COMPAT_TRANSPORT_NORMALIZE=${COMPAT_TRANSPORT_NORMALIZE:-1}
 COMPAT_TRANSPORT_LAYERS=${COMPAT_TRANSPORT_LAYERS:-}
 
+# Optional interaction-mixer objectives (unpaired, synthetic pairing)
+COMPAT_ICM_CANCEL_ENABLE=${COMPAT_ICM_CANCEL_ENABLE:-0}
+COMPAT_ICM_CANCEL_LAMBDA=${COMPAT_ICM_CANCEL_LAMBDA:-0.02}
+COMPAT_ICM_CANCEL_LOSS_TYPE=${COMPAT_ICM_CANCEL_LOSS_TYPE:-mse}
+COMPAT_ICM_CANCEL_LOGIT_TEMP=${COMPAT_ICM_CANCEL_LOGIT_TEMP:-1.0}
+COMPAT_ICM_CANCEL_START_STEP=${COMPAT_ICM_CANCEL_START_STEP:-0}
+COMPAT_ICM_NOHARM_START_STEP=${COMPAT_ICM_NOHARM_START_STEP:-0}
+COMPAT_ICM_UTIL_LAMBDA=${COMPAT_ICM_UTIL_LAMBDA:-0.0}
+COMPAT_ICM_UTIL_START_STEP=${COMPAT_ICM_UTIL_START_STEP:-0}
+COMPAT_ICM_IDENTITY_LAMBDA=${COMPAT_ICM_IDENTITY_LAMBDA:-0.01}
+COMPAT_ICM_SMALL_LAMBDA=${COMPAT_ICM_SMALL_LAMBDA:-0.001}
+
 # Optional gate-product additivity objective (diagnostic-guided)
 COMPAT_GATE_ADD_ENABLE=${COMPAT_GATE_ADD_ENABLE:-0}
 COMPAT_GATE_ADD_LAMBDA=${COMPAT_GATE_ADD_LAMBDA:-0.02}
@@ -126,6 +138,14 @@ INIT_VISION_CKPT=${INIT_VISION_CKPT:-}
 LEARNED_GATE=${LEARNED_GATE:-0}
 LEARNED_GATE_INIT=${LEARNED_GATE_INIT:-0.0}
 TRAIN_GATES_ONLY=${TRAIN_GATES_ONLY:-0}
+ICM_ENABLE=${ICM_ENABLE:-0}
+ICM_DIM=${ICM_DIM:-512}
+ICM_HEADS=${ICM_HEADS:-8}
+ICM_LAYERS=${ICM_LAYERS:-1}
+ICM_DROPOUT=${ICM_DROPOUT:-0.1}
+ICM_GATE_INIT=${ICM_GATE_INIT:--2.0}
+ICM_MIN_MODALITIES=${ICM_MIN_MODALITIES:-2}
+ICM_UTIL_TARGET=${ICM_UTIL_TARGET:-0.7}
 
 # Qwen-specific env vars
 export SAFE_QWEN_QUANT=none
@@ -351,6 +371,37 @@ if [[ "$TRAIN_GATES_ONLY" == "1" ]]; then
   GATE_ARGS+=(--train-gates-only)
 fi
 
+ICM_ARGS=()
+if [[ "$ICM_ENABLE" == "1" ]]; then
+  ICM_ARGS+=(
+    --icm-enable
+    --icm-dim "$ICM_DIM"
+    --icm-heads "$ICM_HEADS"
+    --icm-layers "$ICM_LAYERS"
+    --icm-dropout "$ICM_DROPOUT"
+    --icm-gate-init "$ICM_GATE_INIT"
+    --icm-min-modalities "$ICM_MIN_MODALITIES"
+    --icm-util-target "$ICM_UTIL_TARGET"
+  )
+fi
+
+COMPAT_ICM_ARGS=(
+  --compat-icm-noharm-start-step "$COMPAT_ICM_NOHARM_START_STEP"
+  --compat-icm-util-lambda "$COMPAT_ICM_UTIL_LAMBDA"
+  --compat-icm-util-start-step "$COMPAT_ICM_UTIL_START_STEP"
+  --compat-icm-identity-lambda "$COMPAT_ICM_IDENTITY_LAMBDA"
+  --compat-icm-small-lambda "$COMPAT_ICM_SMALL_LAMBDA"
+)
+if [[ "$COMPAT_ICM_CANCEL_ENABLE" == "1" ]]; then
+  COMPAT_ICM_ARGS+=(
+    --compat-icm-cancel-enable
+    --compat-icm-cancel-lambda "$COMPAT_ICM_CANCEL_LAMBDA"
+    --compat-icm-cancel-loss-type "$COMPAT_ICM_CANCEL_LOSS_TYPE"
+    --compat-icm-cancel-logit-temp "$COMPAT_ICM_CANCEL_LOGIT_TEMP"
+    --compat-icm-cancel-start-step "$COMPAT_ICM_CANCEL_START_STEP"
+  )
+fi
+
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --model-config "$MODEL_CONFIG" \
@@ -371,6 +422,7 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   "${SLIM_ARGS[@]}" \
   "${INIT_ARGS[@]}" \
   "${GATE_ARGS[@]}" \
+  "${ICM_ARGS[@]}" \
   "${MAX_SAMPLES_ARGS[@]}" \
   "${EVAL_DEBUG_ARGS[@]}" \
   "${LAYER_PROBE_ARGS[@]}" \
@@ -379,6 +431,7 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   "${COMPAT_REG_ARGS[@]}" \
   "${COMPAT_ADD_ARGS[@]}" \
   "${COMPAT_TRANSPORT_ARGS[@]}" \
+  "${COMPAT_ICM_ARGS[@]}" \
   "${COMPAT_GATE_ARGS[@]}" \
   "${COMPAT_EXTRA_ARGS[@]}" \
   "${WANDB_ARGS[@]}"

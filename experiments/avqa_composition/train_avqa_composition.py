@@ -347,6 +347,14 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
     fusion_cfg["gate_depth_decay"] = float(getattr(args, "gate_depth_decay", 1.0))
     fusion_cfg["audio_gate_depth_decay"] = float(getattr(args, "audio_gate_depth_decay", 1.0))
     fusion_cfg["vision_gate_depth_decay"] = float(getattr(args, "vision_gate_depth_decay", 1.0))
+    fusion_cfg["interaction_mixer_enable"] = bool(getattr(args, "icm_enable", False))
+    fusion_cfg["interaction_mixer_dim"] = int(getattr(args, "icm_dim", 512))
+    fusion_cfg["interaction_mixer_heads"] = int(getattr(args, "icm_heads", 8))
+    fusion_cfg["interaction_mixer_layers"] = int(getattr(args, "icm_layers", 1))
+    fusion_cfg["interaction_mixer_dropout"] = float(getattr(args, "icm_dropout", 0.1))
+    fusion_cfg["interaction_mixer_gate_init"] = float(getattr(args, "icm_gate_init", -2.0))
+    fusion_cfg["interaction_mixer_min_modalities"] = int(getattr(args, "icm_min_modalities", 2))
+    fusion_cfg["interaction_mixer_util_target"] = float(getattr(args, "icm_util_target", 0.7))
     # Slim projector (default ON): output at bottleneck_dim instead of llm_hidden_size
     # Saves ~80% of trainable params. Disable with --no-slim-projector.
     if getattr(args, "slim_projector", True):
@@ -767,13 +775,19 @@ def collect_audio_shift_subspaces(
     delta_rows: Dict[int, List[torch.Tensor]] = {int(l): [] for l in layer_indices}
     token_bank: List[torch.Tensor] = []
     mask_bank: List[Optional[torch.Tensor]] = []
+    qtype_bank: List[str] = []
     bank_size = int(getattr(args, "compat_add_bank_size", 64))
     add_bank_enabled = bool(
         (
             getattr(args, "compat_add_reg_enable", False)
             or getattr(args, "compat_noharm_enable", False)
             or getattr(args, "compat_logit_fusion_enable", False)
+            or getattr(args, "compat_icm_cancel_enable", False)
             or getattr(args, "compat_poe_enable", False)
+            or getattr(args, "compat_gate_add_enable", False)
+            or float(getattr(args, "compat_icm_identity_lambda", 0.0)) > 0.0
+            or float(getattr(args, "compat_icm_small_lambda", 0.0)) > 0.0
+            or float(getattr(args, "compat_icm_util_lambda", 0.0)) > 0.0
         )
         and bank_size > 0
     )
@@ -797,12 +811,17 @@ def collect_audio_shift_subspaces(
         if add_bank_enabled and len(token_bank) < bank_size:
             tok_cpu = audio_tokens.detach().to(device="cpu")
             mask_cpu = audio_mask.detach().to(device="cpu") if torch.is_tensor(audio_mask) else None
+            qtypes = batch.get("question_types", None)
             for i in range(tok_cpu.size(0)):
                 token_bank.append(tok_cpu[i:i + 1].clone())
                 if mask_cpu is not None:
                     mask_bank.append(mask_cpu[i:i + 1].clone())
                 else:
                     mask_bank.append(None)
+                if isinstance(qtypes, (list, tuple)) and i < len(qtypes):
+                    qtype_bank.append(str(qtypes[i]))
+                else:
+                    qtype_bank.append("unknown")
                 if len(token_bank) >= bank_size:
                     break
 
@@ -897,6 +916,7 @@ def collect_audio_shift_subspaces(
                 "layer_weights": {},
                 "audio_token_bank": token_bank,
                 "audio_mask_bank": mask_bank,
+                "audio_qtype_bank": qtype_bank,
                 "num_samples_collected": int(collected),
             }
         print(
@@ -934,6 +954,7 @@ def collect_audio_shift_subspaces(
         "layer_weights": layer_weights,
         "audio_token_bank": token_bank,
         "audio_mask_bank": mask_bank,
+        "audio_qtype_bank": qtype_bank,
         "num_samples_collected": int(collected),
     }
 
@@ -991,12 +1012,28 @@ def compute_vision_subspace_regularizer(
 
 def _sample_audio_bank_entry(
     compatibility_state: Dict[str, Any],
+    preferred_types: Optional[Sequence[str]] = None,
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     token_bank = compatibility_state.get("audio_token_bank", [])
     mask_bank = compatibility_state.get("audio_mask_bank", [])
+    qtype_bank = compatibility_state.get("audio_qtype_bank", [])
     if not token_bank:
         return None, None
-    idx = random.randrange(len(token_bank))
+
+    idx: Optional[int] = None
+    if preferred_types and qtype_bank:
+        preferred = {str(x) for x in preferred_types if x is not None}
+        if preferred:
+            candidates = [
+                i for i, qt in enumerate(qtype_bank[: len(token_bank)])
+                if str(qt) in preferred
+            ]
+            if candidates:
+                idx = random.choice(candidates)
+
+    if idx is None:
+        idx = random.randrange(len(token_bank))
+
     tok = token_bank[idx]
     msk = mask_bank[idx] if idx < len(mask_bank) else None
     return tok, msk
@@ -1159,6 +1196,7 @@ def compute_unpaired_additivity_regularizer(
     compatibility_state: Dict[str, Any],
     gate_value: float,
     add_layers: Sequence[int],
+    current_question_types: Optional[Sequence[str]] = None,
     transport_layers: Optional[Sequence[int]] = None,
     layer_weights: Optional[Dict[int, float]] = None,
     normalize: bool = True,
@@ -1170,6 +1208,9 @@ def compute_unpaired_additivity_regularizer(
     transport_enable: bool = False,
     transport_cap: float = 0.0,
     transport_normalize: bool = True,
+    icm_cancel_enable: bool = False,
+    icm_cancel_loss_type: str = "mse",
+    icm_cancel_logit_temp: float = 1.0,
     poe_enable: bool = False,
     poe_weight_temp: float = 0.5,
     poe_loss_type: str = "kl",
@@ -1181,12 +1222,17 @@ def compute_unpaired_additivity_regularizer(
     """
     Unpaired additivity loss (no joint AV supervision):
       ||Δ_av - Δ_a - Δ_v||^2 at selected layers.
-    Audio is sampled from the compatibility token bank.
+    Audio is sampled from the compatibility token bank, preferring
+    matching question types when available (stratified synthetic pairs).
     """
     aux_losses: Dict[str, Optional[torch.Tensor]] = {
         "no_harm": None,
         "logit_fusion": None,
         "transport": None,
+        "icm_cancel": None,
+        "icm_identity": None,
+        "icm_small": None,
+        "icm_util": None,
         "poe_consistency": None,
     }
     aux_stats: Dict[str, float] = {}
@@ -1197,14 +1243,23 @@ def compute_unpaired_additivity_regularizer(
     transport_layers = [int(layer) for layer in transport_layers]
 
     need_hidden_states = bool(add_layers or transport_layers)
-    if not need_hidden_states and not (no_harm_enable or logit_fusion_enable or transport_enable or poe_enable):
+    if not need_hidden_states and not (
+        no_harm_enable
+        or logit_fusion_enable
+        or transport_enable
+        or icm_cancel_enable
+        or poe_enable
+    ):
         return None, {}, {}, aux_losses, aux_stats
 
     pixel_values = inputs.get("pixel_values")
     if pixel_values is None:
         return None, {}, {}, aux_losses, aux_stats
 
-    sampled_audio, sampled_mask = _sample_audio_bank_entry(compatibility_state)
+    sampled_audio, sampled_mask = _sample_audio_bank_entry(
+        compatibility_state,
+        preferred_types=current_question_types,
+    )
     if sampled_audio is None:
         return None, {}, {}, aux_losses, aux_stats
 
@@ -1222,6 +1277,9 @@ def compute_unpaired_additivity_regularizer(
     transport_enable = bool(transport_enable)
     transport_cap = float(transport_cap)
     transport_normalize = bool(transport_normalize)
+    icm_cancel_enable = bool(icm_cancel_enable)
+    icm_cancel_loss_type = str(icm_cancel_loss_type).lower().strip()
+    icm_cancel_logit_temp = float(icm_cancel_logit_temp)
     poe_enable = bool(poe_enable)
     poe_weight_temp = float(poe_weight_temp)
     poe_loss_type = str(poe_loss_type).lower().strip()
@@ -1300,6 +1358,40 @@ def compute_unpaired_additivity_regularizer(
     )
     aux_stats["conf_vision"] = float(conf_vision)
     aux_stats["routed_gate"] = float(routed_gate)
+
+    def _get_out_tensor(out_obj: Any, key: str) -> Optional[torch.Tensor]:
+        if isinstance(out_obj, dict):
+            t = out_obj.get(key)
+            if torch.is_tensor(t):
+                return t
+        return None
+
+    # ICM auxiliary terms emitted by SAFEModel forward.
+    id_terms: List[torch.Tensor] = []
+    for src in (out_audio, out_vision):
+        t = _get_out_tensor(src, "icm_identity_loss")
+        if t is not None:
+            id_terms.append(t)
+    if id_terms:
+        aux_losses["icm_identity"] = torch.stack([t.float() for t in id_terms]).mean()
+
+    t_small = _get_out_tensor(out_both, "icm_small_loss")
+    if t_small is not None:
+        aux_losses["icm_small"] = t_small.float()
+
+    t_util = _get_out_tensor(out_both, "icm_util_loss")
+    if t_util is not None:
+        aux_losses["icm_util"] = t_util.float()
+
+    t_entropy = _get_out_tensor(out_both, "icm_entropy")
+    if t_entropy is not None:
+        aux_stats["icm_entropy"] = float(t_entropy.detach().item())
+    t_gate = _get_out_tensor(out_both, "icm_gate_mean")
+    if t_gate is not None:
+        aux_stats["icm_gate_mean"] = float(t_gate.detach().item())
+    t_corr = _get_out_tensor(out_both, "icm_correction_norm")
+    if t_corr is not None:
+        aux_stats["icm_corr_norm"] = float(t_corr.detach().item())
 
     reg_loss: Optional[torch.Tensor] = None
     per_layer: Dict[int, float] = {}
@@ -1397,7 +1489,7 @@ def compute_unpaired_additivity_regularizer(
         aux_stats["fusion_w_vision"] = float(wv)
         aux_stats["nll_fusion_target"] = float(nll_target.item())
 
-    if poe_enable:
+    if icm_cancel_enable or poe_enable:
         logits_text = out_text.get("logits") if isinstance(out_text, dict) else getattr(out_text, "logits", None)
         logits_audio = out_audio.get("logits") if isinstance(out_audio, dict) else getattr(out_audio, "logits", None)
         logits_vision = out_vision.get("logits") if isinstance(out_vision, dict) else getattr(out_vision, "logits", None)
@@ -1409,34 +1501,51 @@ def compute_unpaired_additivity_regularizer(
         flat_av = _flatten_valid_logits(logits_both, labels=labels)
 
         if all(torch.is_tensor(x) for x in (flat_t, flat_a, flat_v, flat_av)):
-            # Confidence-weighted residual PoE:
-            # z_poe = z0 + alpha*(za-z0) + beta*(zv-z0)
-            # alpha,beta from confidence softmax.
-            wtemp = max(1e-3, poe_weight_temp)
-            alpha = math.exp(conf_audio / wtemp)
-            beta = math.exp(conf_vision / wtemp)
-            wsum = max(1e-6, alpha + beta)
-            alpha /= wsum
-            beta /= wsum
+            # ICM cancel objective: match corrected both logits to additive ideal.
+            # z* = z_a + z_v - z_0 (unpaired synthetic composition target).
+            if icm_cancel_enable:
+                z0 = flat_t.detach().float()
+                za = flat_a.detach().float()
+                zv = flat_v.detach().float()
+                zav = flat_av.float()
+                z_star = za + zv - z0
+                if icm_cancel_loss_type == "kl":
+                    t = max(1e-3, icm_cancel_logit_temp)
+                    target = F.softmax(z_star / t, dim=-1)
+                    pred_log = F.log_softmax(zav / t, dim=-1)
+                    aux_losses["icm_cancel"] = F.kl_div(pred_log, target, reduction="batchmean")
+                else:
+                    aux_losses["icm_cancel"] = (zav - z_star).pow(2).mean()
 
-            z0 = flat_t.detach().float()
-            za = flat_a.detach().float()
-            zv = flat_v.detach().float()
-            zav = flat_av.float()
-            z_poe = z0 + alpha * (za - z0) + beta * (zv - z0)
+            if poe_enable:
+                # Confidence-weighted residual PoE:
+                # z_poe = z0 + alpha*(za-z0) + beta*(zv-z0)
+                # alpha,beta from confidence softmax.
+                wtemp = max(1e-3, poe_weight_temp)
+                alpha = math.exp(conf_audio / wtemp)
+                beta = math.exp(conf_vision / wtemp)
+                wsum = max(1e-6, alpha + beta)
+                alpha /= wsum
+                beta /= wsum
 
-            if poe_loss_type == "mse":
-                poe_loss = (zav - z_poe).pow(2).mean()
-            else:
-                # KL( p_poe || p_av ): composed logits should match PoE target.
-                t = max(1e-3, poe_logit_temp)
-                tgt = F.softmax(z_poe / t, dim=-1)
-                pred_log = F.log_softmax(zav / t, dim=-1)
-                poe_loss = F.kl_div(pred_log, tgt, reduction="batchmean")
+                z0 = flat_t.detach().float()
+                za = flat_a.detach().float()
+                zv = flat_v.detach().float()
+                zav = flat_av.float()
+                z_poe = z0 + alpha * (za - z0) + beta * (zv - z0)
 
-            aux_losses["poe_consistency"] = poe_loss
-            aux_stats["poe_alpha"] = float(alpha)
-            aux_stats["poe_beta"] = float(beta)
+                if poe_loss_type == "mse":
+                    poe_loss = (zav - z_poe).pow(2).mean()
+                else:
+                    # KL( p_poe || p_av ): composed logits should match PoE target.
+                    t = max(1e-3, poe_logit_temp)
+                    tgt = F.softmax(z_poe / t, dim=-1)
+                    pred_log = F.log_softmax(zav / t, dim=-1)
+                    poe_loss = F.kl_div(pred_log, tgt, reduction="batchmean")
+
+                aux_losses["poe_consistency"] = poe_loss
+                aux_stats["poe_alpha"] = float(alpha)
+                aux_stats["poe_beta"] = float(beta)
 
     return reg_loss, per_layer, rho_proxy_by_layer, aux_losses, aux_stats
 
@@ -1468,6 +1577,16 @@ def train_epoch(
     transport_reg_batches = 0
     total_poe_reg = 0.0
     poe_reg_batches = 0
+    total_icm_cancel_reg = 0.0
+    icm_cancel_reg_batches = 0
+    total_icm_identity_reg = 0.0
+    icm_identity_reg_batches = 0
+    total_icm_small_reg = 0.0
+    icm_small_reg_batches = 0
+    total_icm_util_reg = 0.0
+    icm_util_reg_batches = 0
+    total_icm_entropy = 0.0
+    icm_entropy_batches = 0
     total_gateadd_reg = 0.0
     gateadd_reg_batches = 0
     total_gateadd_prod = 0.0
@@ -1500,8 +1619,12 @@ def train_epoch(
             or getattr(args, "compat_noharm_enable", False)
             or getattr(args, "compat_logit_fusion_enable", False)
             or getattr(args, "compat_transport_enable", False)
+            or getattr(args, "compat_icm_cancel_enable", False)
             or getattr(args, "compat_poe_enable", False)
             or getattr(args, "compat_gate_add_enable", False)
+            or float(getattr(args, "compat_icm_identity_lambda", 0.0)) > 0.0
+            or float(getattr(args, "compat_icm_small_lambda", 0.0)) > 0.0
+            or float(getattr(args, "compat_icm_util_lambda", 0.0)) > 0.0
         )
         and compatibility_state.get("audio_token_bank")
     )
@@ -1530,6 +1653,16 @@ def train_epoch(
     transport_lambda = float(getattr(args, "compat_transport_lambda", 0.0))
     transport_cap = float(getattr(args, "compat_transport_cap", 0.0))
     transport_norm = bool(getattr(args, "compat_transport_normalize", True))
+    icm_cancel_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_icm_cancel_enable", False))
+    icm_cancel_lambda = float(getattr(args, "compat_icm_cancel_lambda", 0.0))
+    icm_cancel_loss_type = str(getattr(args, "compat_icm_cancel_loss_type", "mse"))
+    icm_cancel_logit_temp = float(getattr(args, "compat_icm_cancel_logit_temp", 1.0))
+    icm_cancel_start_step = int(getattr(args, "compat_icm_cancel_start_step", 0))
+    icm_noharm_start_step = int(getattr(args, "compat_icm_noharm_start_step", 0))
+    icm_util_lambda = float(getattr(args, "compat_icm_util_lambda", 0.0))
+    icm_util_start_step = int(getattr(args, "compat_icm_util_start_step", 0))
+    icm_identity_lambda = float(getattr(args, "compat_icm_identity_lambda", 0.0))
+    icm_small_lambda = float(getattr(args, "compat_icm_small_lambda", 0.0))
     poe_enabled = bool(unpaired_aux_enabled and getattr(args, "compat_poe_enable", False))
     poe_lambda = float(getattr(args, "compat_poe_lambda", 0.0))
     poe_weight_temp = float(getattr(args, "compat_poe_weight_temp", 0.5))
@@ -1677,15 +1810,25 @@ def train_epoch(
                     )
                     compat_warned_hidden = True
 
+            # Optional curriculum scheduling for ICM-related auxiliary terms.
+            curr_step = int(global_step + step)
+            icm_cancel_lambda_eff = icm_cancel_lambda if curr_step >= icm_cancel_start_step else 0.0
+            icm_util_lambda_eff = icm_util_lambda if curr_step >= icm_util_start_step else 0.0
+            noharm_lambda_eff = noharm_lambda if curr_step >= icm_noharm_start_step else 0.0
+
             # Optional unpaired composition objectives on sparse steps
             run_unpaired_aux = (
                 unpaired_aux_enabled
                 and (
                     (add_reg_enabled and add_lambda > 0.0)
-                    or (noharm_enabled and noharm_lambda > 0.0)
+                    or (noharm_enabled and noharm_lambda_eff > 0.0)
                     or (logit_fusion_enabled and logit_fusion_lambda > 0.0)
                     or (transport_enabled and transport_lambda > 0.0)
+                    or (icm_cancel_enabled and icm_cancel_lambda_eff > 0.0)
                     or (poe_enabled and poe_lambda > 0.0)
+                    or (icm_identity_lambda > 0.0)
+                    or (icm_small_lambda > 0.0)
+                    or (icm_util_lambda_eff > 0.0)
                     or (gateadd_enabled and gateadd_lambda > 0.0)
                 )
                 and (step % add_every == 0)
@@ -1697,6 +1840,7 @@ def train_epoch(
                     compatibility_state=compatibility_state,
                     gate_value=gate_value,
                     add_layers=add_layers,
+                    current_question_types=batch.get("question_types"),
                     transport_layers=transport_layers,
                     layer_weights=compat_layer_weights,
                     normalize=add_norm,
@@ -1708,6 +1852,9 @@ def train_epoch(
                     transport_enable=transport_enabled,
                     transport_cap=transport_cap,
                     transport_normalize=transport_norm,
+                    icm_cancel_enable=icm_cancel_enabled,
+                    icm_cancel_loss_type=icm_cancel_loss_type,
+                    icm_cancel_logit_temp=icm_cancel_logit_temp,
                     poe_enable=poe_enabled,
                     poe_weight_temp=poe_weight_temp,
                     poe_loss_type=poe_loss_type,
@@ -1723,10 +1870,10 @@ def train_epoch(
                     loss = loss + add_lambda * add_reg
 
                 noharm_loss = aux_losses.get("no_harm")
-                if noharm_enabled and noharm_loss is not None and noharm_lambda > 0.0:
+                if noharm_enabled and noharm_loss is not None and noharm_lambda_eff > 0.0:
                     total_noharm_reg += float(noharm_loss.detach().item())
                     noharm_reg_batches += 1
-                    loss = loss + noharm_lambda * noharm_loss
+                    loss = loss + noharm_lambda_eff * noharm_loss
 
                 logit_loss = aux_losses.get("logit_fusion")
                 if logit_fusion_enabled and logit_loss is not None and logit_fusion_lambda > 0.0:
@@ -1739,6 +1886,34 @@ def train_epoch(
                     total_transport_reg += float(transport_loss.detach().item())
                     transport_reg_batches += 1
                     loss = loss + transport_lambda * transport_loss
+
+                icm_cancel_loss = aux_losses.get("icm_cancel")
+                if icm_cancel_enabled and icm_cancel_loss is not None and icm_cancel_lambda_eff > 0.0:
+                    total_icm_cancel_reg += float(icm_cancel_loss.detach().item())
+                    icm_cancel_reg_batches += 1
+                    loss = loss + icm_cancel_lambda_eff * icm_cancel_loss
+
+                icm_id_loss = aux_losses.get("icm_identity")
+                if icm_id_loss is not None and icm_identity_lambda > 0.0:
+                    total_icm_identity_reg += float(icm_id_loss.detach().item())
+                    icm_identity_reg_batches += 1
+                    loss = loss + icm_identity_lambda * icm_id_loss
+
+                icm_small_loss = aux_losses.get("icm_small")
+                if icm_small_loss is not None and icm_small_lambda > 0.0:
+                    total_icm_small_reg += float(icm_small_loss.detach().item())
+                    icm_small_reg_batches += 1
+                    loss = loss + icm_small_lambda * icm_small_loss
+
+                icm_util_loss = aux_losses.get("icm_util")
+                if icm_util_loss is not None and icm_util_lambda_eff > 0.0:
+                    total_icm_util_reg += float(icm_util_loss.detach().item())
+                    icm_util_reg_batches += 1
+                    loss = loss + icm_util_lambda_eff * icm_util_loss
+
+                if "icm_entropy" in aux_stats:
+                    total_icm_entropy += float(aux_stats["icm_entropy"])
+                    icm_entropy_batches += 1
 
                 poe_loss = aux_losses.get("poe_consistency")
                 if poe_enabled and poe_loss is not None and poe_lambda > 0.0:
@@ -1778,6 +1953,10 @@ def train_epoch(
                     and noharm_loss is None
                     and logit_loss is None
                     and transport_loss is None
+                    and icm_cancel_loss is None
+                    and icm_id_loss is None
+                    and icm_small_loss is None
+                    and icm_util_loss is None
                     and poe_loss is None
                     and gateadd_loss is None
                     and not add_warned
@@ -1833,6 +2012,21 @@ def train_epoch(
             if transport_reg_batches > 0:
                 transport_avg = total_transport_reg / float(max(1, transport_reg_batches))
                 compat_suffix += f" transport_reg={transport_avg:.4f}"
+            if icm_cancel_reg_batches > 0:
+                icm_cancel_avg = total_icm_cancel_reg / float(max(1, icm_cancel_reg_batches))
+                compat_suffix += f" icm_cancel={icm_cancel_avg:.4f}"
+            if icm_identity_reg_batches > 0:
+                icm_id_avg = total_icm_identity_reg / float(max(1, icm_identity_reg_batches))
+                compat_suffix += f" icm_id={icm_id_avg:.4f}"
+            if icm_small_reg_batches > 0:
+                icm_small_avg = total_icm_small_reg / float(max(1, icm_small_reg_batches))
+                compat_suffix += f" icm_small={icm_small_avg:.4f}"
+            if icm_util_reg_batches > 0:
+                icm_util_avg = total_icm_util_reg / float(max(1, icm_util_reg_batches))
+                compat_suffix += f" icm_util={icm_util_avg:.4f}"
+            if icm_entropy_batches > 0:
+                icm_entropy_avg = total_icm_entropy / float(max(1, icm_entropy_batches))
+                compat_suffix += f" icm_H={icm_entropy_avg:.3f}"
             if route_scale_batches > 0:
                 route_avg = total_route_scale / float(max(1, route_scale_batches))
                 compat_suffix += f" route_scale={route_avg:.3f}"
@@ -2196,6 +2390,22 @@ def parse_args() -> argparse.Namespace:
                    help="Initial value for learned gate params (tanh-squashed, 0.0=gate off)")
     p.add_argument("--train-gates-only", action="store_true",
                    help="Freeze all trainable adapter params except per-layer learned gates")
+    p.add_argument("--icm-enable", action="store_true",
+                   help="Enable Interaction Correction Mixer (set-style sidecar)")
+    p.add_argument("--icm-dim", type=int, default=512,
+                   help="Hidden width of interaction mixer")
+    p.add_argument("--icm-heads", type=int, default=8,
+                   help="Attention heads in interaction mixer")
+    p.add_argument("--icm-layers", type=int, default=1,
+                   help="Number of set-mixer blocks")
+    p.add_argument("--icm-dropout", type=float, default=0.1,
+                   help="Dropout used in interaction mixer")
+    p.add_argument("--icm-gate-init", type=float, default=-2.0,
+                   help="Initial gate bias for interaction mixer (negative keeps it near-off)")
+    p.add_argument("--icm-min-modalities", type=int, default=2,
+                   help="Minimum active modalities required before applying mixer correction")
+    p.add_argument("--icm-util-target", type=float, default=0.7,
+                   help="Target normalized entropy floor for modality utilization")
     p.add_argument("--delta-norm-cap-ratio", type=float, default=0.0,
                    help="Cap per-token fusion residual norm: ||delta|| <= ratio * ||hidden|| (0=disabled)")
     p.add_argument("--delta-norm-cap-eps", type=float, default=1e-6,
@@ -2278,6 +2488,26 @@ def parse_args() -> argparse.Namespace:
                    help="Disable transport loss normalization")
     p.add_argument("--compat-transport-layers", type=str, default="",
                    help="Optional comma-separated layers for transport penalty (default: compatibility layers)")
+    p.add_argument("--compat-icm-cancel-enable", action="store_true",
+                   help="Enable ICM cancel loss: match both logits to additive ideal (za + zv - z0)")
+    p.add_argument("--compat-icm-cancel-lambda", type=float, default=0.02,
+                   help="Weight for ICM cancel loss")
+    p.add_argument("--compat-icm-cancel-loss-type", type=str, default="mse", choices=["mse", "kl"],
+                   help="Loss type for ICM cancel objective")
+    p.add_argument("--compat-icm-cancel-logit-temp", type=float, default=1.0,
+                   help="Logit temperature for KL-based ICM cancel loss")
+    p.add_argument("--compat-icm-cancel-start-step", type=int, default=0,
+                   help="Start step for ICM cancel loss (curriculum)")
+    p.add_argument("--compat-icm-noharm-start-step", type=int, default=0,
+                   help="Start step for no-harm loss when used with ICM")
+    p.add_argument("--compat-icm-util-lambda", type=float, default=0.0,
+                   help="Weight for ICM utilization entropy floor loss")
+    p.add_argument("--compat-icm-util-start-step", type=int, default=0,
+                   help="Start step for ICM utilization loss (curriculum)")
+    p.add_argument("--compat-icm-identity-lambda", type=float, default=0.01,
+                   help="Weight for ICM identity loss (single-modality bypass)")
+    p.add_argument("--compat-icm-small-lambda", type=float, default=0.001,
+                   help="Weight for ICM correction magnitude loss")
 
     # Do-no-harm objective: prevent composed loss from exceeding best/single modality loss
     p.add_argument("--compat-noharm-enable", action="store_true",
@@ -2412,6 +2642,14 @@ def main() -> None:
                     "learned_gate": args.learned_gate,
                     "learned_gate_init": args.learned_gate_init,
                     "train_gates_only": args.train_gates_only,
+                    "icm_enable": args.icm_enable,
+                    "icm_dim": args.icm_dim,
+                    "icm_heads": args.icm_heads,
+                    "icm_layers": args.icm_layers,
+                    "icm_dropout": args.icm_dropout,
+                    "icm_gate_init": args.icm_gate_init,
+                    "icm_min_modalities": args.icm_min_modalities,
+                    "icm_util_target": args.icm_util_target,
                     "delta_norm_cap_ratio": args.delta_norm_cap_ratio,
                     "gate_depth_decay": args.gate_depth_decay,
                     "audio_gate_depth_decay": args.audio_gate_depth_decay,
@@ -2439,6 +2677,16 @@ def main() -> None:
                     "compat_transport_cap": args.compat_transport_cap,
                     "compat_transport_normalize": args.compat_transport_normalize,
                     "compat_transport_layers": args.compat_transport_layers,
+                    "compat_icm_cancel_enable": args.compat_icm_cancel_enable,
+                    "compat_icm_cancel_lambda": args.compat_icm_cancel_lambda,
+                    "compat_icm_cancel_loss_type": args.compat_icm_cancel_loss_type,
+                    "compat_icm_cancel_logit_temp": args.compat_icm_cancel_logit_temp,
+                    "compat_icm_cancel_start_step": args.compat_icm_cancel_start_step,
+                    "compat_icm_noharm_start_step": args.compat_icm_noharm_start_step,
+                    "compat_icm_util_lambda": args.compat_icm_util_lambda,
+                    "compat_icm_util_start_step": args.compat_icm_util_start_step,
+                    "compat_icm_identity_lambda": args.compat_icm_identity_lambda,
+                    "compat_icm_small_lambda": args.compat_icm_small_lambda,
                     "compat_noharm_enable": args.compat_noharm_enable,
                     "compat_noharm_lambda": args.compat_noharm_lambda,
                     "compat_noharm_margin": args.compat_noharm_margin,
@@ -2511,6 +2759,13 @@ def main() -> None:
         print(
             f"[transport] depth-decay gates global={args.gate_depth_decay} "
             f"audio={args.audio_gate_depth_decay} vision={args.vision_gate_depth_decay}",
+            flush=True,
+        )
+    if args.icm_enable:
+        print(
+            f"[icm] enabled dim={args.icm_dim} heads={args.icm_heads} "
+            f"layers={args.icm_layers} gate_init={args.icm_gate_init} "
+            f"min_modalities={args.icm_min_modalities} util_target={args.icm_util_target}",
             flush=True,
         )
     tokenizer = model.base_vl.tokenizer
@@ -2640,8 +2895,12 @@ def main() -> None:
             or args.compat_transport_enable
             or args.compat_noharm_enable
             or args.compat_logit_fusion_enable
+            or args.compat_icm_cancel_enable
             or args.compat_poe_enable
             or args.compat_gate_add_enable
+            or args.compat_icm_identity_lambda > 0.0
+            or args.compat_icm_small_lambda > 0.0
+            or args.compat_icm_util_lambda > 0.0
         )
 
         if compat_objective_enabled:
@@ -2655,6 +2914,7 @@ def main() -> None:
                 args.compat_transport_enable = False
                 args.compat_noharm_enable = False
                 args.compat_logit_fusion_enable = False
+                args.compat_icm_cancel_enable = False
                 args.compat_poe_enable = False
                 args.compat_routing_enable = False
                 compat_objective_enabled = False
@@ -2684,7 +2944,32 @@ def main() -> None:
                     print(
                         f"[compat] no-harm objective enabled lambda={args.compat_noharm_lambda} "
                         f"margin={args.compat_noharm_margin} "
-                        f"use_best_single={args.compat_noharm_use_best_single}",
+                        f"use_best_single={args.compat_noharm_use_best_single} "
+                        f"start_step={args.compat_icm_noharm_start_step}",
+                        flush=True,
+                    )
+                if args.compat_icm_cancel_enable:
+                    print(
+                        f"[compat] icm-cancel objective enabled lambda={args.compat_icm_cancel_lambda} "
+                        f"loss={args.compat_icm_cancel_loss_type} "
+                        f"logit_temp={args.compat_icm_cancel_logit_temp} "
+                        f"start_step={args.compat_icm_cancel_start_step}",
+                        flush=True,
+                    )
+                if args.compat_icm_identity_lambda > 0.0:
+                    print(
+                        f"[compat] icm-identity objective enabled lambda={args.compat_icm_identity_lambda}",
+                        flush=True,
+                    )
+                if args.compat_icm_small_lambda > 0.0:
+                    print(
+                        f"[compat] icm-small objective enabled lambda={args.compat_icm_small_lambda}",
+                        flush=True,
+                    )
+                if args.compat_icm_util_lambda > 0.0:
+                    print(
+                        f"[compat] icm-util objective enabled lambda={args.compat_icm_util_lambda} "
+                        f"start_step={args.compat_icm_util_start_step}",
                         flush=True,
                     )
                 if args.compat_logit_fusion_enable:
@@ -2814,6 +3099,34 @@ def main() -> None:
                         if args.compat_add_reg_layers
                         else list(compatibility_state.get("layers", [])),
                     },
+                    "transport": {
+                        "enabled": bool(args.compat_transport_enable),
+                        "lambda": float(args.compat_transport_lambda),
+                        "cap": float(args.compat_transport_cap),
+                        "normalize": bool(args.compat_transport_normalize),
+                        "layers": _parse_layer_list(args.compat_transport_layers)
+                        if args.compat_transport_layers
+                        else list(compatibility_state.get("layers", [])),
+                    },
+                    "icm": {
+                        "enabled": bool(args.icm_enable),
+                        "dim": int(args.icm_dim),
+                        "heads": int(args.icm_heads),
+                        "layers": int(args.icm_layers),
+                        "gate_init": float(args.icm_gate_init),
+                        "min_modalities": int(args.icm_min_modalities),
+                        "util_target": float(args.icm_util_target),
+                        "cancel_enabled": bool(args.compat_icm_cancel_enable),
+                        "cancel_lambda": float(args.compat_icm_cancel_lambda),
+                        "cancel_loss_type": str(args.compat_icm_cancel_loss_type),
+                        "cancel_logit_temp": float(args.compat_icm_cancel_logit_temp),
+                        "cancel_start_step": int(args.compat_icm_cancel_start_step),
+                        "identity_lambda": float(args.compat_icm_identity_lambda),
+                        "small_lambda": float(args.compat_icm_small_lambda),
+                        "util_lambda": float(args.compat_icm_util_lambda),
+                        "util_start_step": int(args.compat_icm_util_start_step),
+                        "noharm_start_step": int(args.compat_icm_noharm_start_step),
+                    },
                     "noharm": {
                         "enabled": bool(args.compat_noharm_enable),
                         "lambda": float(args.compat_noharm_lambda),
@@ -2887,6 +3200,30 @@ def main() -> None:
                     if args.compat_add_reg_enable:
                         log_payload["compat/add_lambda"] = float(args.compat_add_reg_lambda)
                         log_payload["compat/add_every"] = float(args.compat_add_reg_every)
+                    log_payload["compat/transport_enabled"] = float(bool(args.compat_transport_enable))
+                    if args.compat_transport_enable:
+                        log_payload["compat/transport_lambda"] = float(args.compat_transport_lambda)
+                        log_payload["compat/transport_cap"] = float(args.compat_transport_cap)
+                        log_payload["compat/transport_normalize"] = float(bool(args.compat_transport_normalize))
+                    log_payload["icm/enabled"] = float(bool(args.icm_enable))
+                    if args.icm_enable:
+                        log_payload["icm/dim"] = float(args.icm_dim)
+                        log_payload["icm/heads"] = float(args.icm_heads)
+                        log_payload["icm/layers"] = float(args.icm_layers)
+                        log_payload["icm/gate_init"] = float(args.icm_gate_init)
+                        log_payload["icm/min_modalities"] = float(args.icm_min_modalities)
+                        log_payload["icm/util_target"] = float(args.icm_util_target)
+                    log_payload["compat/icm_cancel_enabled"] = float(bool(args.compat_icm_cancel_enable))
+                    if args.compat_icm_cancel_enable:
+                        log_payload["compat/icm_cancel_lambda"] = float(args.compat_icm_cancel_lambda)
+                        log_payload["compat/icm_cancel_loss_is_kl"] = float(str(args.compat_icm_cancel_loss_type).lower() == "kl")
+                        log_payload["compat/icm_cancel_temp"] = float(args.compat_icm_cancel_logit_temp)
+                        log_payload["compat/icm_cancel_start_step"] = float(args.compat_icm_cancel_start_step)
+                    log_payload["compat/icm_identity_lambda"] = float(args.compat_icm_identity_lambda)
+                    log_payload["compat/icm_small_lambda"] = float(args.compat_icm_small_lambda)
+                    log_payload["compat/icm_util_lambda"] = float(args.compat_icm_util_lambda)
+                    log_payload["compat/icm_util_start_step"] = float(args.compat_icm_util_start_step)
+                    log_payload["compat/icm_noharm_start_step"] = float(args.compat_icm_noharm_start_step)
                     log_payload["compat/noharm_enabled"] = float(bool(args.compat_noharm_enable))
                     if args.compat_noharm_enable:
                         log_payload["compat/noharm_lambda"] = float(args.compat_noharm_lambda)
