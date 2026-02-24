@@ -959,6 +959,190 @@ def collect_audio_shift_subspaces(
     }
 
 
+@torch.no_grad()
+def collect_vision_shift_subspaces(
+    model: SAFEModel,
+    dataloader: DataLoader,
+    device: torch.device,
+    args: argparse.Namespace,
+    layer_indices: Sequence[int],
+    use_bf16_amp: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """
+    Collect Δh_{v->l} = pooled_hidden(vision_on) - pooled_hidden(vision_off)
+    at *audio* fusion layers and fit low-rank PCA bases per layer.
+
+    This is the **reverse** of collect_audio_shift_subspaces(): we measure
+    InternVL's built-in vision activation patterns so the audio adapter can
+    be penalized for projecting onto them.
+
+    Both passes use gate=0 (audio OFF) so only vision presence varies:
+      Pass 1: pixel_values=pv, gate=0  → vision ON,  audio OFF
+      Pass 2: pixel_values=None, gate=0 → vision OFF, audio OFF
+    """
+    if not layer_indices:
+        return None
+
+    max_samples = int(getattr(args, "compat_reg_audio_samples", 0))
+    min_samples = int(getattr(args, "compat_reg_min_samples", 0))
+    rank = int(getattr(args, "compat_reg_rank", 0))
+    if max_samples <= 0 or rank <= 0:
+        return None
+
+    def _amp_context():
+        if args.fp16 and torch.cuda.is_available():
+            return autocast(enabled=True, dtype=torch.float16)
+        if use_bf16_amp and torch.cuda.is_available():
+            return autocast(enabled=True, dtype=torch.bfloat16)
+        return nullcontext()
+
+    was_training = model.training
+    model.eval()
+
+    started = time.time()
+    delta_rows: Dict[int, List[torch.Tensor]] = {int(l): [] for l in layer_indices}
+    collected = 0
+
+    print(
+        f"[compat-reverse] Collecting vision shift subspaces at audio layers={list(layer_indices)}",
+        flush=True,
+    )
+
+    for batch in dataloader:
+        mm = resolve_modality_batch(batch, "both")
+        inputs = model.prepare_multimodal_inputs(
+            text=batch["questions"],
+            images=mm["images"],
+            audio=mm["audio"],
+            answers=batch["answers"],
+            device=str(device),
+            training_mode=True,
+        )
+        pixel_values = inputs.get("pixel_values")
+        if pixel_values is None:
+            continue
+
+        # Pop audio tokens — we don't inject audio in either pass
+        audio_tokens = inputs.pop("audio_tokens", None)
+        audio_mask = inputs.pop("audio_attention_mask", None)
+
+        labels = inputs.get("labels")
+        attn = inputs.get("attention_mask")
+
+        with _amp_context():
+            # Pass 1: vision ON, audio OFF (gate=0)
+            on_outputs = model(
+                input_ids=inputs["input_ids"],
+                attention_mask=attn,
+                labels=labels,
+                pixel_values=pixel_values,
+                audio_tokens=None,
+                audio_attention_mask=None,
+                gate=0.0,
+                output_hidden_states=True,
+            )
+            # Pass 2: vision OFF, audio OFF (gate=0)
+            off_outputs = model(
+                input_ids=inputs["input_ids"],
+                attention_mask=attn,
+                labels=labels,
+                pixel_values=None,
+                audio_tokens=None,
+                audio_attention_mask=None,
+                gate=0.0,
+                output_hidden_states=True,
+            )
+
+        on_hs = on_outputs.get("all_hidden_states") if isinstance(on_outputs, dict) else None
+        off_hs = off_outputs.get("all_hidden_states") if isinstance(off_outputs, dict) else None
+        if on_hs is None or off_hs is None:
+            continue
+
+        on_pooled = _extract_pooled_layer_states(on_hs, layer_indices, labels=labels, attention_mask=attn)
+        off_pooled = _extract_pooled_layer_states(off_hs, layer_indices, labels=labels, attention_mask=attn)
+        if not on_pooled or not off_pooled:
+            continue
+
+        for layer in layer_indices:
+            if layer not in on_pooled or layer not in off_pooled:
+                continue
+            delta = (on_pooled[layer] - off_pooled[layer]).detach().float().cpu()
+            if delta.numel() == 0:
+                continue
+            delta_rows[layer].append(delta)
+
+        collected += int(inputs["input_ids"].size(0))
+        if collected >= max_samples:
+            break
+
+    if was_training:
+        model.train()
+
+    basis_by_layer: Dict[int, torch.Tensor] = {}
+    stats_by_layer: Dict[int, Dict[str, float]] = {}
+
+    for layer in layer_indices:
+        rows = delta_rows.get(layer, [])
+        if not rows:
+            continue
+        mat = torch.cat(rows, dim=0)
+        if mat.size(0) > max_samples:
+            mat = mat[:max_samples]
+        if mat.size(0) < max(2, min_samples):
+            continue
+
+        basis = _fit_shift_basis(mat, rank=rank)
+        if basis is None:
+            continue
+
+        basis_by_layer[int(layer)] = basis
+        stats_by_layer[int(layer)] = {
+            "num_samples": float(mat.size(0)),
+            "rank": float(basis.size(1)),
+            "mean_shift_norm": float(mat.norm(dim=1).mean().item()),
+            "std_shift_norm": float(mat.norm(dim=1).std(unbiased=False).item()),
+        }
+
+    elapsed = time.time() - started
+    if not basis_by_layer:
+        print(
+            f"[compat-reverse] Failed to build vision shift bases (layers={list(layer_indices)}; "
+            f"collected={collected}; elapsed={elapsed/60.0:.1f}m)",
+            flush=True,
+        )
+        return None
+
+    layer_weights = _compute_layer_weights_from_stats(
+        stats_by_layer,
+        normalize=bool(getattr(args, "compat_reg_weight_by_shift_norm", True)),
+    )
+
+    print(
+        f"[compat-reverse] Collected vision shift subspaces on {len(basis_by_layer)}/{len(layer_indices)} layers "
+        f"(samples={collected}, elapsed={elapsed/60.0:.1f}m)",
+        flush=True,
+    )
+    for layer in sorted(basis_by_layer.keys()):
+        st = stats_by_layer[layer]
+        print(
+            f"[compat-reverse] layer={layer} rank={int(st['rank'])} n={int(st['num_samples'])} "
+            f"mean_shift_norm={st['mean_shift_norm']:.4f} "
+            f"weight={layer_weights.get(layer, 1.0):.4f}",
+            flush=True,
+        )
+
+    return {
+        "layers": [int(l) for l in sorted(basis_by_layer.keys())],
+        "basis_by_layer": basis_by_layer,
+        "stats_by_layer": stats_by_layer,
+        "layer_weights": layer_weights,
+        "audio_token_bank": [],
+        "audio_mask_bank": [],
+        "audio_qtype_bank": [],
+        "num_samples_collected": int(collected),
+    }
+
+
 def compute_vision_subspace_regularizer(
     all_hidden_states: Any,
     baseline_pooled: Dict[int, torch.Tensor],
@@ -1599,9 +1783,13 @@ def train_epoch(
     optimizer.zero_grad()
     trainable_for_clip = [p for p in model.parameters() if p.requires_grad]
 
+    compat_reg_reverse = bool(getattr(args, "compat_reg_reverse", False))
     compat_state_available = bool(
-        args.train_modality == "image"
-        and compatibility_state is not None
+        compatibility_state is not None
+        and (
+            (args.train_modality == "image" and not compat_reg_reverse)
+            or (args.train_modality == "audio" and compat_reg_reverse)
+        )
     )
     compat_layers = compatibility_state.get("layers", []) if compat_state_available else []
     compat_basis = compatibility_state.get("basis_by_layer", {}) if compat_state_available else {}
@@ -2457,6 +2645,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-compat-reg-weight-by-shift-norm", dest="compat_reg_weight_by_shift_norm",
                    action="store_false",
                    help="Disable inverse shift-energy weighting")
+    p.add_argument("--compat-reg-reverse", action="store_true",
+                   help="Reverse subspace avoidance: collect vision shifts, penalize audio.")
 
     # Additivity-positive objective (unpaired AV; no joint labels required)
     p.add_argument("--compat-add-reg-enable", action="store_true",
@@ -3276,12 +3466,35 @@ def main() -> None:
         torch.save(model.state_dict(), final_path)
     else:
         global_step = 0
+        reverse_compat_state = None
+        reverse_compat_enabled = bool(
+            getattr(args, "compat_reg_reverse", False)
+            and getattr(args, "compat_reg_enable", False)
+        )
+        if reverse_compat_enabled:
+            reverse_layers = _parse_layer_list(args.compat_reg_layers)
+            if not reverse_layers:
+                reverse_layers = _get_modality_fusion_layers(model, "audio")
+            if not reverse_layers:
+                print("[compat-reverse] No audio fusion layers found; disabling reverse compat.", flush=True)
+                reverse_compat_enabled = False
+
         for epoch in range(args.num_epochs):
+            if reverse_compat_enabled:
+                refresh_every = max(1, int(args.compat_reg_refresh_every))
+                if reverse_compat_state is None or (epoch % refresh_every == 0):
+                    reverse_compat_state = collect_vision_shift_subspaces(
+                        model=model, dataloader=train_loader, device=device,
+                        args=args, layer_indices=reverse_layers,
+                        use_bf16_amp=use_bf16_amp,
+                    )
+
             print(f"\n[epoch {epoch + 1}/{args.num_epochs}]")
             train_loss, global_step = train_epoch(
                 model, train_loader, optimizer, scheduler, scaler, device, args,
                 use_bf16_amp=use_bf16_amp,
                 wandb_run=wandb_run, global_step=global_step,
+                compatibility_state=reverse_compat_state,
             )
             epoch_result = {"epoch": epoch + 1, "train_loss": float(train_loss), "eval": {}}
 
