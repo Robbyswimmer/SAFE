@@ -201,10 +201,14 @@ class SAFEModel(nn.Module):
             sys.stdout.flush()
 
         # Initialize fusion adapter
+        self.enable_input_concat = (fusion_type == "concat")
 
         if is_kv_augment:
             # KV augmentation uses its own adapters, create a dummy fusion_adapter for compatibility
             print(f"[SAFE] Using KV Augmentation mode - skipping traditional fusion adapter", flush=True)
+            self.fusion_adapter = None
+        elif self.enable_input_concat:
+            print("[SAFE] Using input concatenation mode (RKCA) — no fusion adapter", flush=True)
             self.fusion_adapter = None
         else:
             print(f"[SAFE] Initializing fusion adapter ({fusion_type})...", flush=True)
@@ -2514,6 +2518,38 @@ class SAFEModel(nn.Module):
                     run_inputs = updated_inputs
                 return _forward_model(**run_inputs)
 
+            def run_with_input_concat(run_inputs: Dict[str, torch.Tensor]) -> Any:
+                """Prepend modality tokens to text embeddings (RKCA concat mode)."""
+                embeds = run_inputs["inputs_embeds"]
+                attn_mask = run_inputs.get("attention_mask")
+                lbl = run_inputs.get("labels")
+
+                prefix_parts = []
+                if audio_tokens is not None and gate_scalar > 0.0:
+                    prefix_parts.append(audio_tokens.to(device=embeds.device, dtype=embeds.dtype))
+                if vision_tokens is not None:
+                    prefix_parts.append(vision_tokens.to(device=embeds.device, dtype=embeds.dtype))
+
+                if not prefix_parts:
+                    return _forward_model(**run_inputs)
+
+                prefix = torch.cat(prefix_parts, dim=1)  # (B, N_prefix, hidden)
+                N = prefix.size(1)
+
+                updated = dict(run_inputs)
+                updated["inputs_embeds"] = torch.cat([prefix, embeds], dim=1)
+                if attn_mask is not None:
+                    updated["attention_mask"] = torch.cat([
+                        torch.ones((attn_mask.size(0), N), dtype=attn_mask.dtype, device=attn_mask.device),
+                        attn_mask
+                    ], dim=1)
+                if lbl is not None:
+                    updated["labels"] = torch.cat([
+                        torch.full((lbl.size(0), N), -100, dtype=lbl.dtype, device=lbl.device),
+                        lbl
+                    ], dim=1)
+                return _forward_model(**updated)
+
             def run_with_kv_augmentation(run_inputs: Dict[str, torch.Tensor]) -> Tuple[Any, Optional[torch.Tensor]]:
                 """
                 Run forward pass with KV augmentation.
@@ -2629,6 +2665,8 @@ class SAFEModel(nn.Module):
                 if use_kv_augmentation:
                     # KV Augmentation path: inject audio as additional K,V
                     outputs, attn_reg_loss = run_with_kv_augmentation(model_inputs)
+                elif self.enable_input_concat:
+                    outputs = run_with_input_concat(model_inputs)
                 elif use_midlayer_hooks:
                     outputs = run_with_hooks(model_inputs)
                 else:
@@ -2647,6 +2685,8 @@ class SAFEModel(nn.Module):
                     retry_inputs.pop("pixel_values", None)
                     if use_kv_augmentation:
                         outputs, attn_reg_loss = run_with_kv_augmentation(retry_inputs)
+                    elif self.enable_input_concat:
+                        outputs = run_with_input_concat(retry_inputs)
                     elif use_midlayer_hooks:
                         outputs = run_with_hooks(retry_inputs)
                     else:
@@ -3231,6 +3271,32 @@ class SAFEModel(nn.Module):
                     g[silent_mask] = 0.0
                     effective_gate = g
                     gate_scalar = float(g.max().item())
+
+            # RKCA concat path: prepend modality tokens to embeddings and generate
+            if self.enable_input_concat and embeds is not None:
+                prefix_parts = []
+                if audio_tokens is not None and gate_scalar > 0.0:
+                    prefix_parts.append(audio_tokens.to(device=embeds.device, dtype=embeds.dtype))
+                if vision_tokens is not None:
+                    prefix_parts.append(vision_tokens.to(device=embeds.device, dtype=embeds.dtype))
+                if prefix_parts:
+                    prefix = torch.cat(prefix_parts, dim=1)
+                    embeds = torch.cat([prefix, embeds], dim=1)
+                    if attention_mask is not None:
+                        attention_mask = torch.cat([
+                            torch.ones((attention_mask.size(0), prefix.size(1)),
+                                       dtype=attention_mask.dtype, device=attention_mask.device),
+                            attention_mask
+                        ], dim=1)
+
+                # Early return: concat mode doesn't need mid-layer hooks
+                concat_inputs = {**generation_kwargs}
+                concat_inputs["inputs_embeds"] = embeds
+                if attention_mask is not None:
+                    concat_inputs["attention_mask"] = attention_mask
+                gen_model = getattr(self.base_vl.llm, "language_model", self.base_vl.llm) \
+                            if self.base_vl.model_type == "internvl" else self.base_vl.llm
+                return gen_model.generate(**concat_inputs)
 
             if not internvl_with_vision_gen:
                 # Non-InternVL-vision path: populate base_inputs with embeds

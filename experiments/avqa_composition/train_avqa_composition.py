@@ -294,7 +294,8 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
     fusion_cfg = dict(cfg.get("fusion_config", {}))
 
     cfg["num_audio_tokens"] = args.num_audio_tokens
-    cfg["fusion_type"] = "multilayer"  # Required for mid-layer hook-based Pre-FFN fusion
+    if cfg.get("fusion_type") != "concat":
+        cfg["fusion_type"] = "multilayer"  # Required for mid-layer hook-based Pre-FFN fusion
     if args.fusion_layers is not None:
         layer_indices = [int(x) for x in args.fusion_layers.split(",") if x.strip()]
         cfg["fusion_layer_indices"] = layer_indices
@@ -330,34 +331,38 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
     if args.label_smoothing is not None:
         cfg["label_smoothing"] = args.label_smoothing
 
-    fusion_cfg["fusion_mode"] = "residual"
-    fusion_cfg["injection_point"] = "pre_ffn"
-    fusion_cfg.setdefault("use_bottleneck", True)
-    if getattr(args, "bottleneck_dim", None) is not None:
-        fusion_cfg["bottleneck_dim"] = args.bottleneck_dim
-    else:
-        fusion_cfg.setdefault("bottleneck_dim", 256)
-    # Per-layer learned gating
-    if getattr(args, "learned_gate", False):
-        fusion_cfg["use_learned_gate"] = True
-        fusion_cfg["learned_gate_init"] = getattr(args, "learned_gate_init", 0.0)
-    # Cross-layer transport mitigation controls.
-    fusion_cfg["delta_norm_cap_ratio"] = float(getattr(args, "delta_norm_cap_ratio", 0.0))
-    fusion_cfg["delta_norm_cap_eps"] = float(getattr(args, "delta_norm_cap_eps", 1e-6))
-    fusion_cfg["gate_depth_decay"] = float(getattr(args, "gate_depth_decay", 1.0))
-    fusion_cfg["audio_gate_depth_decay"] = float(getattr(args, "audio_gate_depth_decay", 1.0))
-    fusion_cfg["vision_gate_depth_decay"] = float(getattr(args, "vision_gate_depth_decay", 1.0))
-    fusion_cfg["interaction_mixer_enable"] = bool(getattr(args, "icm_enable", False))
-    fusion_cfg["interaction_mixer_dim"] = int(getattr(args, "icm_dim", 512))
-    fusion_cfg["interaction_mixer_heads"] = int(getattr(args, "icm_heads", 8))
-    fusion_cfg["interaction_mixer_layers"] = int(getattr(args, "icm_layers", 1))
-    fusion_cfg["interaction_mixer_dropout"] = float(getattr(args, "icm_dropout", 0.1))
-    fusion_cfg["interaction_mixer_gate_init"] = float(getattr(args, "icm_gate_init", -2.0))
-    fusion_cfg["interaction_mixer_min_modalities"] = int(getattr(args, "icm_min_modalities", 2))
-    fusion_cfg["interaction_mixer_util_target"] = float(getattr(args, "icm_util_target", 0.7))
+    if cfg.get("fusion_type") != "concat":
+        fusion_cfg["fusion_mode"] = "residual"
+        fusion_cfg["injection_point"] = "pre_ffn"
+        fusion_cfg.setdefault("use_bottleneck", True)
+        if getattr(args, "bottleneck_dim", None) is not None:
+            fusion_cfg["bottleneck_dim"] = args.bottleneck_dim
+        else:
+            fusion_cfg.setdefault("bottleneck_dim", 256)
+        # Per-layer learned gating
+        if getattr(args, "learned_gate", False):
+            fusion_cfg["use_learned_gate"] = True
+            fusion_cfg["learned_gate_init"] = getattr(args, "learned_gate_init", 0.0)
+        # Cross-layer transport mitigation controls.
+        fusion_cfg["delta_norm_cap_ratio"] = float(getattr(args, "delta_norm_cap_ratio", 0.0))
+        fusion_cfg["delta_norm_cap_eps"] = float(getattr(args, "delta_norm_cap_eps", 1e-6))
+        fusion_cfg["gate_depth_decay"] = float(getattr(args, "gate_depth_decay", 1.0))
+        fusion_cfg["audio_gate_depth_decay"] = float(getattr(args, "audio_gate_depth_decay", 1.0))
+        fusion_cfg["vision_gate_depth_decay"] = float(getattr(args, "vision_gate_depth_decay", 1.0))
+        fusion_cfg["interaction_mixer_enable"] = bool(getattr(args, "icm_enable", False))
+        fusion_cfg["interaction_mixer_dim"] = int(getattr(args, "icm_dim", 512))
+        fusion_cfg["interaction_mixer_heads"] = int(getattr(args, "icm_heads", 8))
+        fusion_cfg["interaction_mixer_layers"] = int(getattr(args, "icm_layers", 1))
+        fusion_cfg["interaction_mixer_dropout"] = float(getattr(args, "icm_dropout", 0.1))
+        fusion_cfg["interaction_mixer_gate_init"] = float(getattr(args, "icm_gate_init", -2.0))
+        fusion_cfg["interaction_mixer_min_modalities"] = int(getattr(args, "icm_min_modalities", 2))
+        fusion_cfg["interaction_mixer_util_target"] = float(getattr(args, "icm_util_target", 0.7))
     # Slim projector (default ON): output at bottleneck_dim instead of llm_hidden_size
     # Saves ~80% of trainable params. Disable with --no-slim-projector.
-    if getattr(args, "slim_projector", True):
+    # For concat mode, projectors MUST output at full llm_hidden_size.
+    if cfg.get("fusion_type") == "concat":
+        print("[RKCA] Projector outputs at full llm_hidden_size (concat mode)", flush=True)
+    elif getattr(args, "slim_projector", True):
         slim_dim = fusion_cfg.get("bottleneck_dim", 256)
         cfg.setdefault("projector_config", {})["output_dim"] = slim_dim
         print(f"[SlimProjector] Projector output_dim set to {slim_dim} (bottleneck_dim)", flush=True)
