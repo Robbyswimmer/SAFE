@@ -52,6 +52,7 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-composition_interleaved_${SLURM_JOB_ID:-local}}
 WANDB_TAGS=${WANDB_TAGS:-composition,interleaved}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
 SLIM_PROJECTOR=${SLIM_PROJECTOR:-1}       # 0 to disable slim projector (default ON)
+BOTTLENECK_DIM=${BOTTLENECK_DIM:-}         # override fusion bottleneck dim (default: 256 from config)
 EVAL_DEBUG_SAMPLES=${EVAL_DEBUG_SAMPLES:-0}
 MAX_ANSWER_TOKENS=${MAX_ANSWER_TOKENS:-16}
 LAYER_ADDITIVITY_PROBE=${LAYER_ADDITIVITY_PROBE:-1}
@@ -355,6 +356,11 @@ if [ "$SLIM_PROJECTOR" = "0" ]; then
   SLIM_ARGS+=(--no-slim-projector)
 fi
 
+BOTTLENECK_ARGS=()
+if [[ -n "$BOTTLENECK_DIM" ]]; then
+  BOTTLENECK_ARGS+=(--bottleneck-dim "$BOTTLENECK_DIM")
+fi
+
 INIT_ARGS=()
 if [[ -n "$INIT_AUDIO_CKPT" ]]; then
   INIT_ARGS+=(--init-audio-ckpt "$INIT_AUDIO_CKPT")
@@ -420,6 +426,7 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --max-answer-tokens "$MAX_ANSWER_TOKENS" \
   --freeze-audio-encoder \
   "${SLIM_ARGS[@]}" \
+  "${BOTTLENECK_ARGS[@]}" \
   "${INIT_ARGS[@]}" \
   "${GATE_ARGS[@]}" \
   "${ICM_ARGS[@]}" \

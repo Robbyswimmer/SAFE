@@ -26,7 +26,8 @@
       "Bash(chmod:*)",
       "WebFetch(domain:openaccess.thecvf.com)",
       "WebFetch(domain:paperswithcode.com)",
-      "WebFetch(domain:openreview.net)"
+      "WebFetch(domain:openreview.net)",
+      "Bash(sacct:*)"
     ],
     "deny": []
   }

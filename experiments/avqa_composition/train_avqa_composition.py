@@ -2544,7 +2544,7 @@ def parse_args() -> argparse.Namespace:
                    help="Optional comma-separated vision fusion layers (overrides config/modalities)")
     p.add_argument("--num-audio-tokens", type=int, default=8)
 
-    p.add_argument("--train-modality", type=str, default="both", choices=["audio", "image", "both", "interleaved"])
+    p.add_argument("--train-modality", type=str, default="both", choices=["audio", "image", "both", "interleaved", "interleaved_vision_first"])
     p.add_argument("--eval-modalities", type=str, default="both,audio,image")
     p.add_argument("--fusion-gate", type=float, default=0.2)
     p.add_argument("--gate-warmup-steps", type=int, default=0,
@@ -3029,7 +3029,7 @@ def main() -> None:
     eval_modalities = [m.strip() for m in args.eval_modalities.split(",") if m.strip()]
     updates_per_epoch = math.ceil(len(train_loader) / max(1, args.gradient_accumulation_steps))
     # Interleaved mode does 2 passes per epoch (audio + vision), so double the step count
-    passes_per_epoch = 2 if args.train_modality == "interleaved" else 1
+    passes_per_epoch = 2 if args.train_modality in ("interleaved", "interleaved_vision_first") else 1
     total_update_steps = updates_per_epoch * passes_per_epoch * max(0, args.num_epochs)
     scheduler, warmup_steps = build_lr_scheduler(optimizer, total_update_steps, args)
     if scheduler is not None:
@@ -3073,12 +3073,14 @@ def main() -> None:
                 log_payload["probe/best_layer_epsilon"] = top["epsilon_additivity"]
                 log_payload["probe/best_layer_both_extracted"] = top["both_extracted_match"]
             wandb_run.log(log_payload, step=0)
-    elif args.train_modality == "interleaved":
+    elif args.train_modality in ("interleaved", "interleaved_vision_first"):
         # ── Interleaved composition training ──
-        # Each epoch: train audio adapters → train vision adapters → evaluate all 4:
+        # Each epoch: train modality-A adapters → train modality-B adapters → evaluate all 4:
         #   text (baseline), audio+text, vision+text, audio+vision+text (composition)
+        # Default order: audio→vision. Vision-first: vision→audio.
         # This trains both modalities independently within the same model,
         # then evaluates composition (both) to track emergence over time.
+        vision_first = (args.train_modality == "interleaved_vision_first")
         interleaved_eval_modalities = ["text", "audio", "image", "both"]
         global_step = 0
         best_composed_score = -1.0
@@ -3232,18 +3234,25 @@ def main() -> None:
             json.dump(history, f, indent=2)
 
         for epoch in range(args.num_epochs):
-            print(f"\n[epoch {epoch + 1}/{args.num_epochs}] (interleaved)")
+            order_label = "vision→audio" if vision_first else "audio→vision"
+            print(f"\n[epoch {epoch + 1}/{args.num_epochs}] (interleaved, {order_label})")
 
-            # Phase A: Audio training pass
-            print(f"  [phase:audio] training audio adapters...")
-            args_audio = argparse.Namespace(**vars(args))
-            args_audio.train_modality = "audio"
-            audio_loss, global_step = train_epoch(
-                model, train_loader, optimizer, scheduler, scaler, device, args_audio,
+            # Determine phase order
+            first_modality = "image" if vision_first else "audio"
+            second_modality = "audio" if vision_first else "image"
+            first_label = "vision" if vision_first else "audio"
+            second_label = "audio" if vision_first else "vision"
+
+            # Phase A: First modality training pass
+            print(f"  [phase:{first_label}] training {first_label} adapters...")
+            args_first = argparse.Namespace(**vars(args))
+            args_first.train_modality = first_modality
+            first_loss, global_step = train_epoch(
+                model, train_loader, optimizer, scheduler, scaler, device, args_first,
                 use_bf16_amp=use_bf16_amp,
                 wandb_run=wandb_run, global_step=global_step,
             )
-            print(f"  [phase:audio] loss={audio_loss:.4f}")
+            print(f"  [phase:{first_label}] loss={first_loss:.4f}")
 
             if compat_objective_enabled:
                 refresh_every = max(1, int(args.compat_reg_refresh_every))
@@ -3258,19 +3267,23 @@ def main() -> None:
                         use_bf16_amp=use_bf16_amp,
                     )
                 if compatibility_state is None:
-                    print("[compat] Warning: compatibility state unavailable; vision phase will run without unpaired composition objectives.", flush=True)
+                    print("[compat] Warning: compatibility state unavailable; second phase will run without unpaired composition objectives.", flush=True)
 
-            # Phase B: Vision training pass
-            print(f"  [phase:vision] training vision adapters...")
-            args_vision = argparse.Namespace(**vars(args))
-            args_vision.train_modality = "image"
-            vision_loss, global_step = train_epoch(
-                model, train_loader, optimizer, scheduler, scaler, device, args_vision,
+            # Phase B: Second modality training pass
+            print(f"  [phase:{second_label}] training {second_label} adapters...")
+            args_second = argparse.Namespace(**vars(args))
+            args_second.train_modality = second_modality
+            second_loss, global_step = train_epoch(
+                model, train_loader, optimizer, scheduler, scaler, device, args_second,
                 use_bf16_amp=use_bf16_amp,
                 wandb_run=wandb_run, global_step=global_step,
                 compatibility_state=compatibility_state,
             )
-            print(f"  [phase:vision] loss={vision_loss:.4f}")
+            print(f"  [phase:{second_label}] loss={second_loss:.4f}")
+
+            # Map back to audio/vision for logging
+            audio_loss = second_loss if vision_first else first_loss
+            vision_loss = first_loss if vision_first else second_loss
 
             # Phase C: 3-way evaluation
             epoch_result = {
