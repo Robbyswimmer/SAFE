@@ -965,6 +965,87 @@ def collect_audio_shift_subspaces(
 
 
 @torch.no_grad()
+def _collect_rkca_token_bank(
+    model: SAFEModel,
+    dataloader: DataLoader,
+    device: torch.device,
+    args: argparse.Namespace,
+    modality: str,
+    bank_size: int = 128,
+    use_bf16_amp: bool = False,
+) -> Optional[torch.Tensor]:
+    """Collect projector token outputs for one modality.
+
+    Returns: (bank_size, num_tokens, hidden_dim) tensor on CPU, detached.
+    Returns None if no tokens could be collected.
+    """
+    model.eval()
+    collected: List[torch.Tensor] = []
+    token_key = "audio_projector_tokens" if modality == "audio" else "vision_projector_tokens"
+    resolve_mod = "audio" if modality == "audio" else "image"
+
+    def _amp_ctx():
+        if use_bf16_amp and torch.cuda.is_available():
+            return torch.amp.autocast("cuda", dtype=torch.bfloat16)
+        return nullcontext()
+
+    for batch in dataloader:
+        if len(collected) >= bank_size:
+            break
+        mm = resolve_modality_batch(batch, resolve_mod)
+        try:
+            inputs = model.prepare_multimodal_inputs(
+                text=batch["questions"],
+                images=mm["images"],
+                audio=mm["audio"],
+                device=device,
+            )
+        except Exception:
+            continue
+
+        audio_tokens_in = inputs.pop("audio_tokens", None)
+        audio_mask_in = inputs.pop("audio_attention_mask", None)
+
+        try:
+            with _amp_ctx():
+                outputs = model(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs.get("attention_mask"),
+                    labels=inputs.get("labels"),
+                    pixel_values=inputs.get("pixel_values"),
+                    audio_tokens=audio_tokens_in,
+                    audio_attention_mask=audio_mask_in,
+                    gate=1.0,
+                )
+        except Exception:
+            continue
+
+        tokens = outputs.get(token_key) if isinstance(outputs, dict) else None
+        if tokens is not None:
+            collected.append(tokens.detach().cpu().float())
+
+    model.train()
+    if not collected:
+        return None
+    # Stack to (bank_size, num_tokens, hidden_dim)
+    bank = torch.cat(collected, dim=0)[:bank_size]
+    return bank
+
+
+def compute_rkca_subspace_loss(
+    current_tokens: torch.Tensor,      # (B, N_tokens, H) — has grad
+    banked_basis: torch.Tensor,         # (H, rank) — no grad, on device
+) -> torch.Tensor:
+    """Penalize current tokens' projection onto the other modality's subspace."""
+    # Flatten tokens: (B*N, H)
+    flat = current_tokens.reshape(-1, current_tokens.size(-1))
+    # Project onto basis: (B*N, rank)
+    proj = flat.float().matmul(banked_basis.float())
+    # Loss = mean squared projection magnitude
+    return proj.pow(2).mean()
+
+
+@torch.no_grad()
 def collect_vision_shift_subspaces(
     model: SAFEModel,
     dataloader: DataLoader,
@@ -1751,6 +1832,7 @@ def train_epoch(
     wandb_run: Any = None,
     global_step: int = 0,
     compatibility_state: Optional[Dict[str, Any]] = None,
+    rkca_subspace_state: Optional[Dict[str, Any]] = None,
 ) -> tuple:
     model.train()
     total_loss = 0.0
@@ -1782,6 +1864,8 @@ def train_epoch(
     gateadd_prod_batches = 0
     total_route_scale = 0.0
     route_scale_batches = 0
+    total_subspace_reg = 0.0
+    subspace_reg_batches = 0
     total_batches = 0
     num_batches = len(dataloader)
     log_every = max(1, min(100, num_batches // 20))  # Log at least every 100 steps
@@ -2161,6 +2245,24 @@ def train_epoch(
                     )
                     add_warned = True
 
+            # RKCA subspace avoidance
+            if rkca_subspace_state is not None:
+                _sub_basis = rkca_subspace_state["basis"]
+                _sub_lambda = rkca_subspace_state["lambda"]
+
+                if args.train_modality == "audio":
+                    _sub_tokens = outputs.get("audio_projector_tokens") if isinstance(outputs, dict) else None
+                else:
+                    _sub_tokens = outputs.get("vision_projector_tokens") if isinstance(outputs, dict) else None
+
+                if _sub_tokens is not None and _sub_tokens.requires_grad:
+                    sub_loss = compute_rkca_subspace_loss(
+                        _sub_tokens, _sub_basis.to(_sub_tokens.device),
+                    )
+                    loss = loss + _sub_lambda * sub_loss
+                    total_subspace_reg += float(sub_loss.detach())
+                    subspace_reg_batches += 1
+
             loss = loss / args.gradient_accumulation_steps
 
         scaler.scale(loss).backward()
@@ -2232,6 +2334,9 @@ def train_epoch(
             if gateadd_prod_batches > 0:
                 gateprod_avg = total_gateadd_prod / float(max(1, gateadd_prod_batches))
                 compat_suffix += f" gate_prod={gateprod_avg:.4f}"
+            if subspace_reg_batches > 0:
+                subspace_avg = total_subspace_reg / float(max(1, subspace_reg_batches))
+                compat_suffix += f" subspace_reg={subspace_avg:.4f}"
             print(
                 f"  [train] step {step + 1}/{num_batches} "
                 f"loss={avg_loss:.4f} lr={current_lr:.2e} gate={gate_value:.3f}{compat_suffix}",
@@ -2766,6 +2871,18 @@ def parse_args() -> argparse.Namespace:
         compat_transport_normalize=True,
     )
 
+    # RKCA subspace avoidance
+    p.add_argument("--rkca-subspace-enable", action="store_true",
+                   help="Activate subspace avoidance between audio/vision projectors")
+    p.add_argument("--rkca-subspace-lambda", type=float, default=0.05,
+                   help="Weight for subspace avoidance loss")
+    p.add_argument("--rkca-subspace-bank-size", type=int, default=128,
+                   help="Number of token sets to bank per phase")
+    p.add_argument("--rkca-subspace-rank", type=int, default=8,
+                   help="PCA rank for subspace basis")
+    p.add_argument("--rkca-subspace-refit-every", type=int, default=1,
+                   help="Refit basis every N epochs (default: every epoch)")
+
     p.add_argument("--max-samples", type=int, default=0,
                    help="Limit train/val to N samples for quick sanity runs (0=unlimited)")
     p.add_argument("--eval-debug-samples", type=int, default=0,
@@ -3197,6 +3314,18 @@ def main() -> None:
                         flush=True,
                     )
 
+        # RKCA subspace avoidance state
+        rkca_subspace_enabled = bool(getattr(args, "rkca_subspace_enable", False))
+        rkca_subspace_state_first: Optional[Dict[str, Any]] = None
+        rkca_subspace_state_second: Optional[Dict[str, Any]] = None
+        if rkca_subspace_enabled:
+            print(
+                f"[rkca-subspace] enabled lambda={args.rkca_subspace_lambda} "
+                f"bank_size={args.rkca_subspace_bank_size} rank={args.rkca_subspace_rank} "
+                f"refit_every={args.rkca_subspace_refit_every}",
+                flush=True,
+            )
+
         # Epoch 0: text-only baseline before any adapter training
         print("\n[epoch 0/{}] (text-only baseline)".format(args.num_epochs))
         epoch_result = {"epoch": 0, "audio_train_loss": 0.0, "vision_train_loss": 0.0, "eval": {}}
@@ -3243,6 +3372,32 @@ def main() -> None:
             first_label = "vision" if vision_first else "audio"
             second_label = "audio" if vision_first else "vision"
 
+            # RKCA subspace: bank second modality tokens from prior epoch
+            if rkca_subspace_enabled and epoch > 0:
+                refit_every = max(1, int(args.rkca_subspace_refit_every))
+                if epoch % refit_every == 0:
+                    # Bank second modality tokens (trained last epoch) → basis for first modality to avoid
+                    second_mod_name = "audio" if second_modality == "audio" else "vision"
+                    print(f"  [rkca-subspace] banking {second_mod_name} tokens for {first_label} phase...", flush=True)
+                    bank = _collect_rkca_token_bank(
+                        model, train_loader, device, args,
+                        modality=second_mod_name,
+                        bank_size=args.rkca_subspace_bank_size,
+                        use_bf16_amp=use_bf16_amp,
+                    )
+                    if bank is not None:
+                        flat_bank = bank.reshape(-1, bank.size(-1))  # (bank_size*N_tokens, H)
+                        basis = _fit_shift_basis(flat_bank, rank=args.rkca_subspace_rank)
+                        if basis is not None:
+                            rkca_subspace_state_first = {"basis": basis, "lambda": args.rkca_subspace_lambda}
+                            print(f"  [rkca-subspace] fitted basis for {first_label} phase: {tuple(basis.shape)}", flush=True)
+                        else:
+                            rkca_subspace_state_first = None
+                            print(f"  [rkca-subspace] PCA fit failed for {first_label} phase", flush=True)
+                    else:
+                        rkca_subspace_state_first = None
+                        print(f"  [rkca-subspace] no {second_mod_name} tokens collected", flush=True)
+
             # Phase A: First modality training pass
             print(f"  [phase:{first_label}] training {first_label} adapters...")
             args_first = argparse.Namespace(**vars(args))
@@ -3251,6 +3406,7 @@ def main() -> None:
                 model, train_loader, optimizer, scheduler, scaler, device, args_first,
                 use_bf16_amp=use_bf16_amp,
                 wandb_run=wandb_run, global_step=global_step,
+                rkca_subspace_state=rkca_subspace_state_first,
             )
             print(f"  [phase:{first_label}] loss={first_loss:.4f}")
 
@@ -3269,6 +3425,31 @@ def main() -> None:
                 if compatibility_state is None:
                     print("[compat] Warning: compatibility state unavailable; second phase will run without unpaired composition objectives.", flush=True)
 
+            # RKCA subspace: bank first modality tokens → basis for second modality to avoid
+            if rkca_subspace_enabled:
+                refit_every = max(1, int(args.rkca_subspace_refit_every))
+                if rkca_subspace_state_second is None or (epoch % refit_every == 0):
+                    first_mod_name = "audio" if first_modality == "audio" else "vision"
+                    print(f"  [rkca-subspace] banking {first_mod_name} tokens for {second_label} phase...", flush=True)
+                    bank = _collect_rkca_token_bank(
+                        model, train_loader, device, args,
+                        modality=first_mod_name,
+                        bank_size=args.rkca_subspace_bank_size,
+                        use_bf16_amp=use_bf16_amp,
+                    )
+                    if bank is not None:
+                        flat_bank = bank.reshape(-1, bank.size(-1))
+                        basis = _fit_shift_basis(flat_bank, rank=args.rkca_subspace_rank)
+                        if basis is not None:
+                            rkca_subspace_state_second = {"basis": basis, "lambda": args.rkca_subspace_lambda}
+                            print(f"  [rkca-subspace] fitted basis for {second_label} phase: {tuple(basis.shape)}", flush=True)
+                        else:
+                            rkca_subspace_state_second = None
+                            print(f"  [rkca-subspace] PCA fit failed for {second_label} phase", flush=True)
+                    else:
+                        rkca_subspace_state_second = None
+                        print(f"  [rkca-subspace] no {first_mod_name} tokens collected", flush=True)
+
             # Phase B: Second modality training pass
             print(f"  [phase:{second_label}] training {second_label} adapters...")
             args_second = argparse.Namespace(**vars(args))
@@ -3278,6 +3459,7 @@ def main() -> None:
                 use_bf16_amp=use_bf16_amp,
                 wandb_run=wandb_run, global_step=global_step,
                 compatibility_state=compatibility_state,
+                rkca_subspace_state=rkca_subspace_state_second,
             )
             print(f"  [phase:{second_label}] loss={second_loss:.4f}")
 

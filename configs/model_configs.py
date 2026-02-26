@@ -886,6 +886,12 @@ RKCA_CONFIG = {
     "gradient_accumulation_steps": 16,
 }
 
+RKCA_SUBSPACE_CONFIG = {
+    **RKCA_CONFIG,
+    "name": "rkca_subspace",
+    "description": "RKCA with subspace avoidance between modality projectors",
+}
+
 # InternVL 3.5-14B: Qwen3-14B backbone (40 layers, hidden=5120)
 INTERNVL_14B_CONFIG = {
     "name": "internvl_14b",
@@ -1353,6 +1359,7 @@ CONFIGS = {
     "composition_staggered": COMPOSITION_INDEPENDENT_CONFIG,
     "composition_disjoint": COMPOSITION_DISJOINT_CONFIG,
     "rkca": RKCA_CONFIG,
+    "rkca_subspace": RKCA_SUBSPACE_CONFIG,
     "lora_baseline": LORA_BASELINE_CONFIG,
     "internvl_binding": INTERNVL_BINDING_CONFIG,
     "composition_4b_vfirst": COMPOSITION_4B_VFIRST_CONFIG,

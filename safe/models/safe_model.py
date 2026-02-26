@@ -2779,6 +2779,8 @@ class SAFEModel(nn.Module):
                 "icm_gate_mean": icm_aux.get("icm_gate_mean"),
                 "icm_active_modalities_mean": icm_aux.get("icm_active_modalities_mean"),
                 "icm_correction_norm": icm_aux.get("icm_correction_norm"),
+                "audio_projector_tokens": audio_tokens if self.enable_input_concat else None,
+                "vision_projector_tokens": vision_tokens if self.enable_input_concat else None,
             }
         
         resolved_input_ids = input_ids if input_ids is not None else kwargs.pop("input_ids", None)
