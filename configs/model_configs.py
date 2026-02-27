@@ -892,6 +892,54 @@ RKCA_SUBSPACE_CONFIG = {
     "description": "RKCA with subspace avoidance between modality projectors",
 }
 
+RKCA_JOINT_CONFIG = {
+    "name": "rkca_joint",
+    "description": "RKCA joint: concat audio on InternVL 8B with native vision always active",
+    "eval_prompt": "Answer with a single word or number.",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/OpenGVLab_InternVL3_5-8B"),
+    "vision_model_name": "built-in",
+
+    "image_token_id": 151667,
+    "image_seq_length": 256,
+    "downsample_ratio": 0.5,
+    "image_size": [448, 448],
+
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0,
+    },
+
+    "llm_hidden_size": 4096,
+    "audio_embed_dim": 512,
+    "num_audio_tokens": 8,
+    "projector_type": "standard",
+    "projector_config": {
+        "dropout": 0.1, "bottleneck_dim": 1024,
+        "use_swiglu": True, "use_positional_embedding": True,
+    },
+
+    # RKCA concat for audio only — NO vision in modalities
+    "fusion_type": "concat",
+    "fusion_layer_indices": [],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "concat",
+        "modalities": {
+            "audio": {"layer_indices": [], "num_tokens": 8},
+        },
+    },
+
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+    "expected_vram_gb": 42,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+}
+
 # InternVL 3.5-14B: Qwen3-14B backbone (40 layers, hidden=5120)
 INTERNVL_14B_CONFIG = {
     "name": "internvl_14b",
@@ -1360,6 +1408,7 @@ CONFIGS = {
     "composition_disjoint": COMPOSITION_DISJOINT_CONFIG,
     "rkca": RKCA_CONFIG,
     "rkca_subspace": RKCA_SUBSPACE_CONFIG,
+    "rkca_joint": RKCA_JOINT_CONFIG,
     "lora_baseline": LORA_BASELINE_CONFIG,
     "internvl_binding": INTERNVL_BINDING_CONFIG,
     "composition_4b_vfirst": COMPOSITION_4B_VFIRST_CONFIG,

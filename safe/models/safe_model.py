@@ -2052,6 +2052,124 @@ class SAFEModel(nn.Module):
 
         return flags.unsqueeze(-1)
 
+    @torch.no_grad()
+    def _internvl_get_vision_embeds(
+        self,
+        input_ids: torch.Tensor,
+        pixel_values: torch.Tensor,
+    ) -> torch.Tensor:
+        """Extract InternVL vision-merged embeddings without running the LM.
+
+        Steps:
+        1. Embed input_ids via language_model's embedding layer
+        2. Extract visual features via InternVL's vision pipeline
+        3. Scatter visual features into image placeholder positions
+
+        Returns inputs_embeds with vision tokens already merged (detached).
+        """
+        internvl_model = self.base_vl.llm
+        language_model = getattr(internvl_model, "language_model", internvl_model)
+
+        # Step 1: Get text embeddings
+        embed_layer = language_model.get_input_embeddings()
+        inputs_embeds = embed_layer(input_ids)
+
+        # If no pixel_values, return text-only embeddings
+        if pixel_values is None:
+            return inputs_embeds
+
+        # Step 2: Extract visual features via InternVL's vision pipeline
+        # Fallback chain: extract_feature → pixel_values through vision_model + projector
+        vit_embeds = None
+        dtype = next(internvl_model.parameters()).dtype
+        pv = pixel_values.to(dtype=dtype)
+
+        if hasattr(internvl_model, "extract_feature"):
+            try:
+                vit_embeds = internvl_model.extract_feature(pv)
+            except Exception:
+                vit_embeds = None
+
+        if vit_embeds is None and hasattr(internvl_model, "vision_model"):
+            try:
+                vision_out = internvl_model.vision_model(pv)
+                # Get the hidden state from vision model
+                if hasattr(vision_out, "last_hidden_state"):
+                    feats = vision_out.last_hidden_state
+                elif isinstance(vision_out, (tuple, list)):
+                    feats = vision_out[0]
+                else:
+                    feats = vision_out
+                # Apply InternVL's vision-language projector if present
+                projector = getattr(internvl_model, "mlp1", None) or \
+                            getattr(internvl_model, "multi_modal_projector", None)
+                if projector is not None:
+                    # InternVL may pixel-shuffle / downsample before projecting
+                    downsample_ratio = getattr(internvl_model, "downsample_ratio", None)
+                    if downsample_ratio is not None and downsample_ratio < 1.0:
+                        # Pixel shuffle downsample (InternVL standard)
+                        h = w = int(feats.shape[1] ** 0.5)
+                        feats = feats.reshape(feats.shape[0], h, w, -1)
+                        new_h, new_w = int(h * downsample_ratio), int(w * downsample_ratio)
+                        if new_h > 0 and new_w > 0:
+                            # Reshape for pixel shuffle: merge 2x2 patches
+                            sh, sw = h // new_h, w // new_w
+                            feats = feats.reshape(
+                                feats.shape[0], new_h, sh, new_w, sw, feats.shape[-1]
+                            )
+                            feats = feats.permute(0, 1, 3, 2, 4, 5).reshape(
+                                feats.shape[0], new_h * new_w, -1
+                            )
+                    vit_embeds = projector(feats)
+                else:
+                    vit_embeds = feats
+            except Exception:
+                vit_embeds = None
+
+        if vit_embeds is None:
+            # No vision features extractable — return text-only embeddings
+            return inputs_embeds
+
+        # Step 3: Scatter vision features into placeholder positions
+        # Detect image placeholder token id (same pattern as _build_internvl_image_flags)
+        image_token_id = getattr(internvl_model, "img_context_token_id", None)
+        if not isinstance(image_token_id, int) or image_token_id < 0:
+            image_token_id = getattr(getattr(internvl_model, "config", None), "image_token_id", None)
+        if not isinstance(image_token_id, int) or image_token_id < 0:
+            image_token_id = 151667  # InternVL default
+
+        B, S, D = inputs_embeds.shape
+        # Flatten vit_embeds across batch dim if needed (InternVL may return per-tile)
+        n_image_tokens = (input_ids == image_token_id).sum().item()
+
+        if vit_embeds.dim() == 3 and vit_embeds.shape[0] != B:
+            # Multiple tiles per image — flatten tiles into single sequence
+            vit_embeds = vit_embeds.reshape(-1, vit_embeds.shape[-1])
+        elif vit_embeds.dim() == 3:
+            vit_embeds = vit_embeds.reshape(-1, vit_embeds.shape[-1])
+
+        # Match dtype
+        vit_embeds = vit_embeds.to(dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+
+        # Create mask and scatter
+        image_mask = (input_ids == image_token_id)
+        n_placeholders = image_mask.sum().item()
+
+        if n_placeholders > 0 and vit_embeds.shape[0] >= n_placeholders:
+            # Truncate extra vision tokens if more than placeholders
+            vit_flat = vit_embeds[:n_placeholders]
+            inputs_embeds = inputs_embeds.clone()
+            inputs_embeds[image_mask] = vit_flat
+        elif n_placeholders > 0 and vit_embeds.shape[0] > 0:
+            # Fewer vision tokens than placeholders — fill what we can
+            vit_flat = vit_embeds
+            inputs_embeds = inputs_embeds.clone()
+            flat_idx = image_mask.nonzero(as_tuple=False)[:vit_flat.shape[0]]
+            for i, (bi, si) in enumerate(flat_idx):
+                inputs_embeds[bi, si] = vit_flat[i]
+
+        return inputs_embeds
+
     # Rest of the methods remain the same as original...
     def forward(
         self,
@@ -2239,7 +2357,14 @@ class SAFEModel(nn.Module):
             )
 
             # FUSION PATH: Prepare inputs_embeds (skip for InternVL with vision)
-            if internvl_with_vision:
+            if internvl_with_vision and self.enable_input_concat:
+                # RKCA Joint: get vision-merged embeddings, then concat audio
+                base_dtype = next(self.base_vl.llm.parameters()).dtype
+                inputs_embeds = self._internvl_get_vision_embeds(input_ids, pixel_values)
+                inputs_embeds = inputs_embeds.to(base_dtype)
+                _embed_device = inputs_embeds.device
+                internvl_with_vision = False  # Redirect to concat path, not full-model passthrough
+            elif internvl_with_vision:
                 # InternVL handles embedding + vision merge internally.
                 # We still need a reference device/dtype for audio token casting.
                 base_dtype = next(self.base_vl.llm.parameters()).dtype
@@ -3219,7 +3344,14 @@ class SAFEModel(nn.Module):
             base_inputs = {**generation_kwargs}
             base_dtype = next(self.base_vl.llm.parameters()).dtype
 
-            if internvl_with_vision_gen:
+            if internvl_with_vision_gen and self.enable_input_concat:
+                # RKCA Joint generate: get vision-merged embeddings, then fall
+                # through to concat generate path which prepends audio tokens.
+                embeds = self._internvl_get_vision_embeds(
+                    input_ids, pixel_values.to(base_dtype),
+                ).to(base_dtype)
+                internvl_with_vision_gen = False  # Fall through to concat generate
+            elif internvl_with_vision_gen:
                 # InternVL Vision+Audio generate: pass input_ids + pixel_values
                 # to the full model. Audio hooks fire on decoder layers.
                 embeds = None  # Not used
