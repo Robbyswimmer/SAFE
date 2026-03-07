@@ -1,7 +1,17 @@
 #!/bin/bash
+#SBATCH --job-name=ttc-vision
+#SBATCH --output=logs/ttc_vision_%j.out
+#SBATCH --error=logs/ttc_vision_%j.err
+
 set -euo pipefail
 
-SAFE_ROOT="${SAFE_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+if [[ -z "${SAFE_ROOT:-}" ]]; then
+  if [[ -n "${SLURM_SUBMIT_DIR:-}" && -d "${SLURM_SUBMIT_DIR}" ]]; then
+    SAFE_ROOT="${SLURM_SUBMIT_DIR}"
+  else
+    SAFE_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+  fi
+fi
 MODEL_CONFIG="${MODEL_CONFIG:-composition_ttc}"
 DATA_ROOT="${DATA_ROOT:-data/music_avqa}"
 MEDIA_ROOT="${MEDIA_ROOT:-$SAFE_ROOT}"

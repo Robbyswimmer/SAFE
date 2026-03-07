@@ -1,7 +1,17 @@
 #!/bin/bash
+#SBATCH --job-name=ttc-pipeline
+#SBATCH --output=logs/ttc_pipeline_%j.out
+#SBATCH --error=logs/ttc_pipeline_%j.err
+
 set -euo pipefail
 
-SAFE_ROOT="${SAFE_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+if [[ -z "${SAFE_ROOT:-}" ]]; then
+  if [[ -n "${SLURM_SUBMIT_DIR:-}" && -d "${SLURM_SUBMIT_DIR}" ]]; then
+    SAFE_ROOT="${SLURM_SUBMIT_DIR}"
+  else
+    SAFE_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+  fi
+fi
 
 AUDIO_OUT="${AUDIO_OUT:-checkpoints/composition_ttc_audio}"
 VISION_OUT="${VISION_OUT:-checkpoints/composition_ttc_vision}"
