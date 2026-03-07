@@ -2,6 +2,10 @@
 #SBATCH --job-name=ttc-eval-complex
 #SBATCH --output=logs/ttc_eval_complex_%j.out
 #SBATCH --error=logs/ttc_eval_complex_%j.err
+#SBATCH --time=6:00:00
+#SBATCH --mem=96G
+#SBATCH --cpus-per-task=8
+#SBATCH -p gpu
 
 set -euo pipefail
 
