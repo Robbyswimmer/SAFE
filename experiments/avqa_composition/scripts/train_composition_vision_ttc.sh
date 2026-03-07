@@ -12,6 +12,13 @@ if [[ -z "${SAFE_ROOT:-}" ]]; then
     SAFE_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
   fi
 fi
+
+CONDA_ENV=${CONDA_ENV:-safe-env}
+if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+  source "$HOME/miniconda3/etc/profile.d/conda.sh"
+  conda activate "$CONDA_ENV"
+fi
+
 MODEL_CONFIG="${MODEL_CONFIG:-composition_ttc}"
 DATA_ROOT="${DATA_ROOT:-data/music_avqa}"
 MEDIA_ROOT="${MEDIA_ROOT:-$SAFE_ROOT}"
@@ -27,6 +34,7 @@ if [[ "$MAX_SAMPLES" != "0" ]]; then
   MAX_SAMPLES_ARGS+=(--max-samples "$MAX_SAMPLES")
 fi
 
+mkdir -p "$SAFE_ROOT/logs" "$OUTPUT_DIR"
 cd "$SAFE_ROOT"
 
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \

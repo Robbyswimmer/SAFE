@@ -13,6 +13,12 @@ if [[ -z "${SAFE_ROOT:-}" ]]; then
   fi
 fi
 
+CONDA_ENV=${CONDA_ENV:-safe-env}
+if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+  source "$HOME/miniconda3/etc/profile.d/conda.sh"
+  conda activate "$CONDA_ENV"
+fi
+
 AUDIO_OUT="${AUDIO_OUT:-checkpoints/composition_ttc_audio}"
 VISION_OUT="${VISION_OUT:-checkpoints/composition_ttc_vision}"
 BASELINE_OUT="${BASELINE_OUT:-checkpoints/composition_ttc_eval_baseline}"
@@ -21,6 +27,7 @@ SIMPLE_INTER_OUT="${SIMPLE_INTER_OUT:-checkpoints/composition_ttc_eval_simple_in
 COMPLEX_OUT="${COMPLEX_OUT:-checkpoints/composition_ttc_eval_complex}"
 COMPLEX_INTER_OUT="${COMPLEX_INTER_OUT:-checkpoints/composition_ttc_eval_complex_interaction}"
 
+mkdir -p "$SAFE_ROOT/logs"
 cd "$SAFE_ROOT"
 
 OUTPUT_DIR="$AUDIO_OUT" "$SAFE_ROOT/experiments/avqa_composition/scripts/train_composition_audio_ttc.sh"
