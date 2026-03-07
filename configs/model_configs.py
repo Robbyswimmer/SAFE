@@ -745,6 +745,19 @@ COMPOSITION_INDEPENDENT_CONFIG = {
     "gradient_accumulation_steps": 16,
 }
 
+# TTC-focused independent composition.
+# Same staggered modality layout as composition_independent, but named explicitly
+# for the unimodal-train -> compose -> test-time-compute pipeline.
+COMPOSITION_TTC_CONFIG = {
+    **COMPOSITION_STUDY_CONFIG,
+    "name": "composition_ttc",
+    "description": "Independent composition with shared fusion layers for gate/interactions TTC on MUSIC-AVQA",
+}
+COMPOSITION_TTC_CONFIG["fusion_config"] = {
+    **COMPOSITION_STUDY_CONFIG["fusion_config"],
+    "use_learned_gate": False,
+}
+
 # Disjoint composition: contiguous blocks with maximum layer separation.
 # Audio injects at early-mid layers [6,8,10], vision at mid layers [16,18,20].
 # 6 intervening layers (10→16) for Jacobian chain to absorb audio perturbation
@@ -1404,6 +1417,7 @@ CONFIGS = {
     "composition": COMPOSITION_CONFIG,
     "composition_study": COMPOSITION_STUDY_CONFIG,
     "composition_independent": COMPOSITION_INDEPENDENT_CONFIG,
+    "composition_ttc": COMPOSITION_TTC_CONFIG,
     "composition_staggered": COMPOSITION_INDEPENDENT_CONFIG,
     "composition_disjoint": COMPOSITION_DISJOINT_CONFIG,
     "rkca": RKCA_CONFIG,

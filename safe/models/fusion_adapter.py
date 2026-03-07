@@ -632,6 +632,28 @@ class SimpleFusionAdapter(nn.Module):
             return output.to(orig_dtype)
 
         # Get cross-attention residual
+        delta = self.compute_delta(
+            hidden_states=hidden_states,
+            audio_tokens=audio_tokens,
+            attention_mask=attention_mask,
+            supervised_mask=supervised_mask,
+        )
+
+        # Debug: log delta (limited)
+        if self.debug_logging and not hasattr(self, '_fusion_delta_logged'):
+            print(f"[FUSION FWD] delta norm: {delta.norm().item():.2f}, delta range: [{delta.min().item():.3f}, {delta.max().item():.3f}]", flush=True)
+            self._fusion_delta_logged = True
+
+        output = hidden_states + gate_tensor * delta.to(orig_dtype)
+        return output.to(orig_dtype)
+
+    def compute_delta(
+        self,
+        hidden_states: torch.Tensor,
+        audio_tokens: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        supervised_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         delta = self.cross_attention(
             hidden_states=hidden_states,
             audio_tokens=audio_tokens,
@@ -645,13 +667,7 @@ class SimpleFusionAdapter(nn.Module):
             eps=self.delta_norm_cap_eps,
         )
 
-        # Debug: log delta (limited)
-        if self.debug_logging and not hasattr(self, '_fusion_delta_logged'):
-            print(f"[FUSION FWD] delta norm: {delta.norm().item():.2f}, delta range: [{delta.min().item():.3f}, {delta.max().item():.3f}]", flush=True)
-            self._fusion_delta_logged = True
-
-        output = hidden_states + gate_tensor * delta.to(orig_dtype)
-        return output.to(orig_dtype)
+        return delta.to(hidden_states.dtype)
 
 
 class LoRAFusionAdapter(nn.Module):
@@ -778,26 +794,11 @@ class LoRAFusionAdapter(nn.Module):
         """
         # Remember incoming dtype for final output
         orig_dtype = hidden_states.dtype
-        weight = self.cross_attention.base_model.query.weight
-        target_dtype = weight.dtype
-        target_device = weight.device
-        if hidden_states.dtype != target_dtype or hidden_states.device != target_device:
-            hidden_states = hidden_states.to(device=target_device, dtype=target_dtype)
-        if audio_tokens.dtype != target_dtype or audio_tokens.device != target_device:
-            audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
-
-        # Apply cross-attention with LoRA (returns hidden_states + attention_output)
-        delta_states = self.cross_attention(
+        delta_states = self.compute_delta(
             hidden_states=hidden_states,
             audio_tokens=audio_tokens,
             attention_mask=attention_mask,
             supervised_mask=supervised_mask,
-        )
-        delta_states = _apply_delta_norm_cap(
-            hidden_states=hidden_states,
-            delta=delta_states,
-            cap_ratio=self.delta_norm_cap_ratio,
-            eps=self.delta_norm_cap_eps,
         )
 
         base_model = getattr(self.cross_attention, "base_model", None)
@@ -853,6 +854,36 @@ class LoRAFusionAdapter(nn.Module):
         output = output.to(orig_dtype)
 
         return output
+
+    def compute_delta(
+        self,
+        hidden_states: torch.Tensor,
+        audio_tokens: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        supervised_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        orig_dtype = hidden_states.dtype
+        weight = self.cross_attention.base_model.query.weight
+        target_dtype = weight.dtype
+        target_device = weight.device
+        if hidden_states.dtype != target_dtype or hidden_states.device != target_device:
+            hidden_states = hidden_states.to(device=target_device, dtype=target_dtype)
+        if audio_tokens.dtype != target_dtype or audio_tokens.device != target_device:
+            audio_tokens = audio_tokens.to(device=target_device, dtype=target_dtype)
+
+        delta_states = self.cross_attention(
+            hidden_states=hidden_states,
+            audio_tokens=audio_tokens,
+            attention_mask=attention_mask,
+            supervised_mask=supervised_mask,
+        )
+        delta_states = _apply_delta_norm_cap(
+            hidden_states=hidden_states,
+            delta=delta_states,
+            cap_ratio=self.delta_norm_cap_ratio,
+            eps=self.delta_norm_cap_eps,
+        )
+        return delta_states.to(orig_dtype)
 
 
 class MultiLayerFusionAdapter(nn.Module):
@@ -933,6 +964,8 @@ class MultiLayerFusionAdapter(nn.Module):
         self.fusion_layers = self._normalize_layer_mapping(layer_mapping_source)
         self.fusion_layer_indices = sorted({idx for indices in self.fusion_layers.values() for idx in indices})
         self.layer_modalities = self._invert_layer_mapping(self.fusion_layers)
+        self.runtime_gate_overrides: Dict[str, Union[float, torch.Tensor]] = {}
+        self.runtime_interaction_overrides: Dict[int, Union[float, torch.Tensor]] = {}
         self.fusion_adapters = nn.ModuleDict()
         target_modules = unused_kwargs.get("target_modules", None)
         train_base_cross_attention = bool(unused_kwargs.get("train_base_cross_attention", False))
@@ -1000,6 +1033,27 @@ class MultiLayerFusionAdapter(nn.Module):
             for key, param in self.layer_gates.items()
         }
 
+    def set_runtime_gate_overrides(
+        self,
+        overrides: Optional[Dict[str, Union[float, torch.Tensor]]],
+    ) -> None:
+        self.runtime_gate_overrides = dict(overrides or {})
+
+    def clear_runtime_gate_overrides(self) -> None:
+        self.runtime_gate_overrides = {}
+
+    def set_runtime_interaction_overrides(
+        self,
+        overrides: Optional[Dict[int, Union[float, torch.Tensor]]],
+    ) -> None:
+        cleaned: Dict[int, Union[float, torch.Tensor]] = {}
+        for key, value in (overrides or {}).items():
+            cleaned[int(key)] = value
+        self.runtime_interaction_overrides = cleaned
+
+    def clear_runtime_interaction_overrides(self) -> None:
+        self.runtime_interaction_overrides = {}
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1043,6 +1097,7 @@ class MultiLayerFusionAdapter(nn.Module):
 
         output = hidden_states
         target_batch = hidden_states.size(0)
+        applied_updates: Dict[str, torch.Tensor] = {}
         for modality in modalities:
             tokens = modality_tokens.get(modality)
             if tokens is None:
@@ -1101,17 +1156,77 @@ class MultiLayerFusionAdapter(nn.Module):
                 else:
                     modality_gate = float(modality_gate) * float(depth_scale)
 
-            output = adapter(
-                hidden_states=output,
-                audio_tokens=tokens,
-                attention_mask=mask,
-                gate=modality_gate,
-                supervised_mask=supervised_mask,
+            runtime_override = self.runtime_gate_overrides.get(adapter_key)
+            if runtime_override is not None:
+                if isinstance(runtime_override, torch.Tensor):
+                    if runtime_override.device != target_device:
+                        runtime_override = runtime_override.to(target_device)
+                    if isinstance(modality_gate, torch.Tensor):
+                        modality_gate = modality_gate * runtime_override
+                    else:
+                        modality_gate = runtime_override * float(modality_gate)
+                else:
+                    if isinstance(modality_gate, torch.Tensor):
+                        modality_gate = modality_gate * float(runtime_override)
+                    else:
+                        modality_gate = float(modality_gate) * float(runtime_override)
+
+            can_compute_delta = (
+                hasattr(adapter, "compute_delta")
+                and str(getattr(adapter, "fusion_mode", "residual")) == "residual"
             )
+            if can_compute_delta:
+                delta = adapter.compute_delta(
+                    hidden_states=output,
+                    audio_tokens=tokens,
+                    attention_mask=mask,
+                    supervised_mask=supervised_mask,
+                ).to(device=target_device, dtype=output.dtype)
+                update = delta
+                if isinstance(modality_gate, torch.Tensor):
+                    gate_tensor = modality_gate.to(device=target_device, dtype=output.dtype)
+                    while gate_tensor.dim() < update.dim():
+                        gate_tensor = gate_tensor.unsqueeze(-1)
+                    if gate_tensor.size(-1) != 1:
+                        gate_tensor = gate_tensor[..., :1]
+                    update = gate_tensor * update
+                else:
+                    update = float(modality_gate) * update
+                output = output + update
+                applied_updates[modality] = update
+            else:
+                output = adapter(
+                    hidden_states=output,
+                    audio_tokens=tokens,
+                    attention_mask=mask,
+                    gate=modality_gate,
+                    supervised_mask=supervised_mask,
+                )
 
             # Capture latest attention diagnostics for external inspection
             if hasattr(adapter, "last_attention_summary"):
                 self.last_attention_summary = adapter.last_attention_summary
+
+        interaction_override = self.runtime_interaction_overrides.get(int(layer_idx))
+        if (
+            interaction_override is not None
+            and "audio" in applied_updates
+            and "vision" in applied_updates
+        ):
+            interaction_update = applied_updates["audio"].float() * applied_updates["vision"].float()
+            if isinstance(interaction_override, torch.Tensor):
+                interaction_scale = interaction_override.to(device=output.device, dtype=interaction_update.dtype)
+            else:
+                interaction_scale = torch.tensor(
+                    float(interaction_override),
+                    device=output.device,
+                    dtype=interaction_update.dtype,
+                )
+            while interaction_scale.dim() < interaction_update.dim():
+                interaction_scale = interaction_scale.unsqueeze(-1)
+            if interaction_scale.size(-1) != 1:
+                interaction_scale = interaction_scale[..., :1]
+            output = output + (interaction_scale * interaction_update).to(output.dtype)
 
         return output
 

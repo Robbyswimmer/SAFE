@@ -21,7 +21,7 @@ import time
 from collections import defaultdict
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -620,6 +620,512 @@ def _flatten_valid_logits(
     if not valid.any():
         return None
     return flat_logits[valid]
+
+
+def _extract_next_answer_logits(
+    logits: Optional[torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """
+    Return logits used to predict the first answer token.
+    With left-padded prompts, the final input position predicts the first generated token.
+    """
+    if logits is None or not torch.is_tensor(logits):
+        return None
+    if logits.ndim != 3 or logits.size(1) == 0:
+        return None
+
+    if attention_mask is None or not torch.is_tensor(attention_mask):
+        return logits[:, -1, :]
+
+    last_pos = attention_mask.sum(dim=1).long().clamp(min=1) - 1
+    batch_idx = torch.arange(logits.size(0), device=logits.device)
+    return logits[batch_idx, last_pos, :]
+
+
+def _logit_entropy(logits_2d: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if logits_2d is None or not torch.is_tensor(logits_2d):
+        return None
+    probs = F.softmax(logits_2d.float(), dim=-1).clamp_min(1e-8)
+    entropy = -(probs * probs.log()).sum(dim=-1)
+    return entropy.mean()
+
+
+def _slice_eval_batch(batch: Dict[str, Any], idx: int) -> Dict[str, Any]:
+    sliced: Dict[str, Any] = {}
+    for key, value in batch.items():
+        if isinstance(value, list):
+            sliced[key] = [value[idx]]
+        else:
+            sliced[key] = value
+    return sliced
+
+
+def _get_ttc_gate_keys(
+    model: SAFEModel,
+    active_modalities: Sequence[str],
+    active_fusion_layers: Optional[Sequence[int]] = None,
+) -> List[str]:
+    fusion_adapter = getattr(model, "fusion_adapter", None)
+    if fusion_adapter is None:
+        return []
+
+    active_set = {str(m) for m in active_modalities}
+    layer_filter = None
+    if active_fusion_layers is not None:
+        layer_filter = {int(x) for x in active_fusion_layers}
+
+    keys: List[str] = []
+    for modality in sorted(active_set):
+        for layer_idx in _get_modality_fusion_layers(model, modality):
+            if layer_filter is not None and int(layer_idx) not in layer_filter:
+                continue
+            key = f"{modality}:{int(layer_idx)}"
+            if hasattr(fusion_adapter, "fusion_adapters") and key in fusion_adapter.fusion_adapters:
+                keys.append(key)
+    return keys
+
+
+def _set_runtime_gate_overrides(
+    model: SAFEModel,
+    overrides: Optional[Dict[str, torch.Tensor]],
+) -> None:
+    fusion_adapter = getattr(model, "fusion_adapter", None)
+    if fusion_adapter is None or not hasattr(fusion_adapter, "set_runtime_gate_overrides"):
+        return
+    fusion_adapter.set_runtime_gate_overrides(overrides)
+
+
+def _clear_runtime_gate_overrides(model: SAFEModel) -> None:
+    fusion_adapter = getattr(model, "fusion_adapter", None)
+    if fusion_adapter is None or not hasattr(fusion_adapter, "clear_runtime_gate_overrides"):
+        return
+    fusion_adapter.clear_runtime_gate_overrides()
+
+
+def _get_ttc_interaction_layers(
+    model: SAFEModel,
+    active_fusion_layers: Optional[Sequence[int]] = None,
+) -> List[int]:
+    audio_layers = set(_get_modality_fusion_layers(model, "audio"))
+    vision_layers = set(_get_modality_fusion_layers(model, "vision"))
+    shared = sorted(audio_layers.intersection(vision_layers))
+    if active_fusion_layers is None:
+        return shared
+    active_set = {int(x) for x in active_fusion_layers}
+    return [int(x) for x in shared if int(x) in active_set]
+
+
+def _set_runtime_interaction_overrides(
+    model: SAFEModel,
+    overrides: Optional[Dict[int, torch.Tensor]],
+) -> None:
+    fusion_adapter = getattr(model, "fusion_adapter", None)
+    if fusion_adapter is None or not hasattr(fusion_adapter, "set_runtime_interaction_overrides"):
+        return
+    fusion_adapter.set_runtime_interaction_overrides(overrides)
+
+
+def _clear_runtime_interaction_overrides(model: SAFEModel) -> None:
+    fusion_adapter = getattr(model, "fusion_adapter", None)
+    if fusion_adapter is None or not hasattr(fusion_adapter, "clear_runtime_interaction_overrides"):
+        return
+    fusion_adapter.clear_runtime_interaction_overrides()
+
+
+@torch.no_grad()
+def _compute_modality_entropy(
+    model: SAFEModel,
+    batch: Dict[str, Any],
+    device: torch.device,
+    modality: str,
+    args: argparse.Namespace,
+    active_fusion_layers: Optional[Sequence[int]] = None,
+) -> Optional[float]:
+    mm = resolve_modality_batch(batch, modality)
+    inputs = model.prepare_multimodal_inputs(
+        text=batch["questions"],
+        images=mm["images"],
+        audio=mm["audio"],
+        answers=None,
+        device=str(device),
+        training_mode=False,
+    )
+    audio_tokens = inputs.pop("audio_tokens", None)
+    audio_mask = inputs.pop("audio_attention_mask", None)
+    outputs = model(
+        input_ids=inputs["input_ids"],
+        attention_mask=inputs.get("attention_mask"),
+        labels=None,
+        pixel_values=inputs.get("pixel_values"),
+        audio_tokens=audio_tokens,
+        audio_attention_mask=audio_mask,
+        gate=args.fusion_gate,
+        active_fusion_layers=active_fusion_layers,
+    )
+    logits = outputs.get("logits") if isinstance(outputs, dict) else getattr(outputs, "logits", None)
+    next_logits = _extract_next_answer_logits(logits, inputs.get("attention_mask"))
+    entropy = _logit_entropy(next_logits)
+    if entropy is None:
+        return None
+    return float(entropy.detach().item())
+
+
+def _compute_ttc_loss(
+    entropy: torch.Tensor,
+    args: argparse.Namespace,
+    gate_params: Dict[str, torch.nn.Parameter],
+    best_single_entropy: Optional[float],
+    interaction_params: Optional[Dict[int, torch.nn.Parameter]] = None,
+) -> torch.Tensor:
+    gate_reg = torch.stack([(param - 1.0).pow(2) for param in gate_params.values()]).mean()
+    loss = entropy + float(args.ttc_gate_reg_lambda) * gate_reg
+
+    if args.ttc_objective == "entropy_noharm" and best_single_entropy is not None:
+        best_single_t = torch.tensor(
+            float(best_single_entropy),
+            device=entropy.device,
+            dtype=entropy.dtype,
+        )
+        loss = loss + float(args.ttc_noharm_lambda) * F.relu(
+            entropy - best_single_t + float(args.ttc_noharm_margin)
+        )
+
+    if interaction_params:
+        interaction_reg = torch.stack([param.pow(2) for param in interaction_params.values()]).mean()
+        loss = loss + float(args.ttc_interaction_reg_lambda) * interaction_reg
+
+    return loss
+
+
+def _forward_joint_entropy(
+    model: SAFEModel,
+    both_inputs: Dict[str, Any],
+    audio_tokens: Optional[torch.Tensor],
+    audio_mask: Optional[torch.Tensor],
+    args: argparse.Namespace,
+    active_fusion_layers: Optional[Sequence[int]] = None,
+) -> Optional[torch.Tensor]:
+    outputs = model(
+        input_ids=both_inputs["input_ids"],
+        attention_mask=both_inputs.get("attention_mask"),
+        labels=None,
+        pixel_values=both_inputs.get("pixel_values"),
+        audio_tokens=audio_tokens,
+        audio_attention_mask=audio_mask,
+        gate=args.fusion_gate,
+        active_fusion_layers=active_fusion_layers,
+    )
+    logits = outputs.get("logits") if isinstance(outputs, dict) else getattr(outputs, "logits", None)
+    next_logits = _extract_next_answer_logits(logits, both_inputs.get("attention_mask"))
+    return _logit_entropy(next_logits)
+
+
+def _optimize_ttc_gate_overrides(
+    model: SAFEModel,
+    batch: Dict[str, Any],
+    tokenizer,
+    device: torch.device,
+    args: argparse.Namespace,
+    active_fusion_layers: Optional[Sequence[int]] = None,
+) -> Tuple[str, Dict[str, Any]]:
+    gate_keys = _get_ttc_gate_keys(
+        model,
+        active_modalities=("audio", "vision"),
+        active_fusion_layers=active_fusion_layers,
+    )
+    if not gate_keys:
+        raise RuntimeError("TTC requested but no audio/vision fusion gates are available.")
+
+    both_inputs = model.prepare_multimodal_inputs(
+        text=batch["questions"],
+        images=batch["images"],
+        audio=batch["audio"],
+        answers=None,
+        device=str(device),
+        training_mode=False,
+    )
+    audio_tokens = both_inputs.pop("audio_tokens", None)
+    audio_mask = both_inputs.pop("audio_attention_mask", None)
+
+    base_entropy = _compute_modality_entropy(
+        model, batch, device, modality="both", args=args, active_fusion_layers=active_fusion_layers
+    )
+    ref_audio_entropy = None
+    ref_image_entropy = None
+    best_single_entropy = None
+    if args.ttc_objective == "entropy_noharm":
+        ref_audio_entropy = _compute_modality_entropy(
+            model, batch, device, modality="audio", args=args, active_fusion_layers=active_fusion_layers
+        )
+        ref_image_entropy = _compute_modality_entropy(
+            model, batch, device, modality="image", args=args, active_fusion_layers=active_fusion_layers
+        )
+        refs = [x for x in (ref_audio_entropy, ref_image_entropy) if x is not None]
+        if refs:
+            best_single_entropy = min(refs)
+
+    gate_params = {
+        key: torch.nn.Parameter(
+            torch.tensor(float(args.ttc_init_gate), device=device, dtype=torch.float32)
+        )
+        for key in gate_keys
+    }
+    optimizer = AdamW(gate_params.values(), lr=args.ttc_lr, weight_decay=0.0)
+    interaction_layers = _get_ttc_interaction_layers(
+        model,
+        active_fusion_layers=active_fusion_layers,
+    )
+
+    stats: Dict[str, Any] = {
+        "enabled": True,
+        "objective": str(args.ttc_objective),
+        "steps": int(args.ttc_steps),
+        "gate_keys": list(gate_keys),
+        "base_entropy": base_entropy,
+        "audio_entropy": ref_audio_entropy,
+        "image_entropy": ref_image_entropy,
+        "stage_c_enabled": bool(getattr(args, "ttc_interaction_enable", False)),
+        "compute_budget_forward_equiv": float(2 + max(0, int(args.ttc_steps))),
+    }
+
+    try:
+        for _ in range(max(0, int(args.ttc_steps))):
+            optimizer.zero_grad(set_to_none=True)
+            _set_runtime_gate_overrides(model, gate_params)
+            entropy = _forward_joint_entropy(
+                model=model,
+                both_inputs=both_inputs,
+                audio_tokens=audio_tokens,
+                audio_mask=audio_mask,
+                args=args,
+                active_fusion_layers=active_fusion_layers,
+            )
+            if entropy is None:
+                break
+
+            loss = _compute_ttc_loss(
+                entropy=entropy,
+                args=args,
+                gate_params=gate_params,
+                best_single_entropy=best_single_entropy,
+            )
+            loss.backward()
+            optimizer.step()
+            with torch.no_grad():
+                for param in gate_params.values():
+                    param.clamp_(float(args.ttc_gate_min), float(args.ttc_gate_max))
+
+        gate_grad_ratios: Dict[int, float] = {}
+        interaction_params: Dict[int, torch.nn.Parameter] = {}
+        interaction_optimizer = None
+        stage_b_entropy = None
+        if getattr(args, "ttc_interaction_enable", False) and interaction_layers:
+            _set_runtime_gate_overrides(model, gate_params)
+            _clear_runtime_interaction_overrides(model)
+            probe_entropy = _forward_joint_entropy(
+                model=model,
+                both_inputs=both_inputs,
+                audio_tokens=audio_tokens,
+                audio_mask=audio_mask,
+                args=args,
+                active_fusion_layers=active_fusion_layers,
+            )
+            if probe_entropy is not None:
+                stage_b_entropy = float(probe_entropy.detach().item())
+                probe_loss = _compute_ttc_loss(
+                    entropy=probe_entropy,
+                    args=args,
+                    gate_params=gate_params,
+                    best_single_entropy=best_single_entropy,
+                )
+                probe_loss.backward()
+                gate_grad_by_layer: Dict[int, float] = {}
+                for layer in interaction_layers:
+                    layer_norms: List[float] = []
+                    for key in (f"audio:{int(layer)}", f"vision:{int(layer)}"):
+                        param = gate_params.get(key)
+                        if param is not None and param.grad is not None:
+                            layer_norms.append(float(param.grad.detach().norm().item()))
+                    if layer_norms:
+                        gate_grad_by_layer[int(layer)] = sum(layer_norms) / float(len(layer_norms))
+                for param in gate_params.values():
+                    param.grad = None
+
+                interaction_params = {
+                    int(layer): torch.nn.Parameter(
+                        torch.tensor(float(args.ttc_interaction_init), device=device, dtype=torch.float32)
+                    )
+                    for layer in interaction_layers
+                }
+                _set_runtime_interaction_overrides(model, interaction_params)
+                interaction_probe_entropy = _forward_joint_entropy(
+                    model=model,
+                    both_inputs=both_inputs,
+                    audio_tokens=audio_tokens,
+                    audio_mask=audio_mask,
+                    args=args,
+                    active_fusion_layers=active_fusion_layers,
+                )
+                if interaction_probe_entropy is not None:
+                    interaction_probe_loss = _compute_ttc_loss(
+                        entropy=interaction_probe_entropy,
+                        args=args,
+                        gate_params=gate_params,
+                        best_single_entropy=best_single_entropy,
+                        interaction_params=interaction_params,
+                    )
+                    interaction_probe_loss.backward()
+                    for layer, param in interaction_params.items():
+                        grad_norm = float(param.grad.detach().norm().item()) if param.grad is not None else 0.0
+                        ratio = grad_norm / max(gate_grad_by_layer.get(int(layer), 0.0), 1e-8)
+                        gate_grad_ratios[int(layer)] = ratio
+                        param.grad = None
+                    alive_count = sum(1 for ratio in gate_grad_ratios.values() if ratio > 0.1)
+                    weak_count = sum(1 for ratio in gate_grad_ratios.values() if ratio >= 0.01)
+                    stage_c_allowed = (
+                        alive_count >= max(1, math.ceil(len(interaction_layers) / 2.0))
+                        or weak_count == len(interaction_layers)
+                    )
+                    stats["interaction_grad_ratios"] = gate_grad_ratios
+                    stats["interaction_stage_allowed"] = bool(stage_c_allowed)
+                    stats["interaction_stage_threshold"] = {
+                        "alive_ratio": 0.1,
+                        "weak_ratio": 0.01,
+                    }
+                    if stage_c_allowed:
+                        interaction_optimizer = AdamW(
+                            interaction_params.values(),
+                            lr=float(args.ttc_interaction_lr),
+                            weight_decay=0.0,
+                        )
+                    else:
+                        interaction_params = {}
+                _clear_runtime_interaction_overrides(model)
+
+        if interaction_optimizer is not None and interaction_params:
+            _set_runtime_gate_overrides(model, gate_params)
+            for _ in range(max(0, int(args.ttc_interaction_steps))):
+                interaction_optimizer.zero_grad(set_to_none=True)
+                _set_runtime_interaction_overrides(model, interaction_params)
+                entropy = _forward_joint_entropy(
+                    model=model,
+                    both_inputs=both_inputs,
+                    audio_tokens=audio_tokens,
+                    audio_mask=audio_mask,
+                    args=args,
+                    active_fusion_layers=active_fusion_layers,
+                )
+                if entropy is None:
+                    break
+                loss = _compute_ttc_loss(
+                    entropy=entropy,
+                    args=args,
+                    gate_params=gate_params,
+                    best_single_entropy=best_single_entropy,
+                    interaction_params=interaction_params,
+                )
+                loss.backward()
+                interaction_optimizer.step()
+                with torch.no_grad():
+                    for param in interaction_params.values():
+                        param.clamp_(
+                            float(args.ttc_interaction_min),
+                            float(args.ttc_interaction_max),
+                        )
+            stats["compute_budget_forward_equiv"] = float(
+                2 + max(0, int(args.ttc_steps)) + max(0, int(args.ttc_interaction_steps))
+            )
+
+        with torch.no_grad():
+            _set_runtime_gate_overrides(model, gate_params)
+            if interaction_params:
+                _set_runtime_interaction_overrides(model, interaction_params)
+            final_outputs = model.generate(
+                text=None,
+                input_ids=both_inputs["input_ids"],
+                attention_mask=both_inputs.get("attention_mask"),
+                pixel_values=both_inputs.get("pixel_values"),
+                audio_tokens=audio_tokens,
+                audio_attention_mask=audio_mask,
+                active_fusion_layers=active_fusion_layers,
+                gate=args.fusion_gate,
+                max_new_tokens=args.max_answer_tokens,
+                do_sample=False,
+                num_beams=1,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+
+            prompt_width = int(both_inputs["input_ids"].size(1))
+            seq = final_outputs[0]
+            gen = seq[prompt_width:] if seq.size(0) > prompt_width else seq
+            pred = tokenizer.decode(gen, skip_special_tokens=True).strip()
+
+            final_entropy = _forward_joint_entropy(
+                model=model,
+                both_inputs=both_inputs,
+                audio_tokens=audio_tokens,
+                audio_mask=audio_mask,
+                args=args,
+                active_fusion_layers=active_fusion_layers,
+            )
+
+            stats["final_entropy"] = float(final_entropy.detach().item()) if final_entropy is not None else None
+            stats["gate_values"] = {
+                key: float(param.detach().item()) for key, param in gate_params.items()
+            }
+            stats["stage_b_entropy"] = stage_b_entropy
+            if interaction_params:
+                stats["interaction_values"] = {
+                    int(key): float(param.detach().item()) for key, param in interaction_params.items()
+                }
+                stats["stage_c_lower_bound"] = True
+
+        return pred, stats
+    finally:
+        _clear_runtime_gate_overrides(model)
+        _clear_runtime_interaction_overrides(model)
+
+
+@torch.no_grad()
+def _generate_eval_prediction(
+    model: SAFEModel,
+    batch: Dict[str, Any],
+    tokenizer,
+    device: torch.device,
+    modality: str,
+    args: argparse.Namespace,
+    active_fusion_layers: Optional[Sequence[int]] = None,
+) -> str:
+    mm = resolve_modality_batch(batch, modality)
+    inputs = model.prepare_multimodal_inputs(
+        text=batch["questions"],
+        images=mm["images"],
+        audio=mm["audio"],
+        answers=None,
+        device=str(device),
+        training_mode=False,
+    )
+    audio_tokens = inputs.pop("audio_tokens", None)
+    audio_mask = inputs.pop("audio_attention_mask", None)
+    output_ids = model.generate(
+        text=None,
+        input_ids=inputs["input_ids"],
+        attention_mask=inputs.get("attention_mask"),
+        pixel_values=inputs.get("pixel_values"),
+        audio_tokens=audio_tokens,
+        audio_attention_mask=audio_mask,
+        active_fusion_layers=active_fusion_layers,
+        gate=args.fusion_gate,
+        max_new_tokens=args.max_answer_tokens,
+        do_sample=False,
+        num_beams=1,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+    prompt_width = int(inputs["input_ids"].size(1))
+    seq = output_ids[0]
+    gen = seq[prompt_width:] if seq.size(0) > prompt_width else seq
+    return tokenizer.decode(gen, skip_special_tokens=True).strip()
 
 
 def _parse_layer_list(layer_csv: str) -> List[int]:
@@ -2370,12 +2876,17 @@ def evaluate(
 ) -> Dict[str, Any]:
     model.eval()
     eval_start = time.time()
+    ttc_enabled = bool(getattr(args, "ttc_enable", False)) and modality == "both"
 
     exact_total = 0.0
     extracted_total = 0.0
     f1_total = 0.0
     categorical_f1_total = 0.0
     count = 0
+    ttc_count = 0
+    ttc_entropy_before = 0.0
+    ttc_entropy_after = 0.0
+    ttc_gate_means: List[float] = []
     by_type: Dict[str, Dict[str, float]] = defaultdict(
         lambda: {"exact": 0.0, "extracted": 0.0, "f1": 0.0, "categorical_f1": 0.0, "n": 0.0}
     )
@@ -2384,6 +2895,93 @@ def evaluate(
     eval_batches = len(dataloader)
     eval_log_every = max(1, eval_batches // 5)  # Log ~5 times per eval
     for eval_step, batch in enumerate(dataloader):
+        if ttc_enabled:
+            for sample_idx in range(len(batch["questions"])):
+                sample_batch = _slice_eval_batch(batch, sample_idx)
+                try:
+                    pred, ttc_stats = _optimize_ttc_gate_overrides(
+                        model=model,
+                        batch=sample_batch,
+                        tokenizer=tokenizer,
+                        device=device,
+                        args=args,
+                        active_fusion_layers=active_fusion_layers,
+                    )
+                except Exception as exc:
+                    pred = _generate_eval_prediction(
+                        model=model,
+                        batch=sample_batch,
+                        tokenizer=tokenizer,
+                        device=device,
+                        modality=modality,
+                        args=args,
+                        active_fusion_layers=active_fusion_layers,
+                    )
+                    ttc_stats = {
+                        "enabled": False,
+                        "objective": str(args.ttc_objective),
+                        "error": str(exc),
+                    }
+                    if not silent:
+                        print(f"  [eval:{modality}:ttc-warning] fallback_to_standard_generation error={exc}", flush=True)
+                ref = sample_batch["answers"][0]
+                qtype = sample_batch["question_types"][0] if "question_types" in sample_batch else "unknown"
+
+                norm_ref = normalize_answer(ref)
+                norm_pred = normalize_answer(pred)
+                exact = float(norm_pred == norm_ref)
+                extracted_pred = extract_answer(pred)
+                extracted_ref = extract_answer(ref)
+                extracted = float(extracted_pred == extracted_ref)
+                f1 = token_f1(pred, ref)
+                cat_f1 = categorical_f1(pred, ref)
+                exact_total += exact
+                extracted_total += extracted
+                f1_total += f1
+                categorical_f1_total += cat_f1
+                count += 1
+
+                by_type[qtype]["exact"] += exact
+                by_type[qtype]["extracted"] += extracted
+                by_type[qtype]["f1"] += f1
+                by_type[qtype]["categorical_f1"] += cat_f1
+                by_type[qtype]["n"] += 1.0
+
+                if ttc_stats.get("base_entropy") is not None:
+                    ttc_entropy_before += float(ttc_stats["base_entropy"])
+                if ttc_stats.get("final_entropy") is not None:
+                    ttc_entropy_after += float(ttc_stats["final_entropy"])
+                gate_values = ttc_stats.get("gate_values", {})
+                if gate_values:
+                    ttc_gate_means.append(
+                        sum(float(v) for v in gate_values.values()) / float(len(gate_values))
+                    )
+                ttc_count += 1
+
+                if debug_print_budget > 0 and not silent:
+                    print(
+                        f"  [eval:{modality}:ttc] q={sample_batch['questions'][0]!r} "
+                        f"pred={pred!r} extracted={extracted_pred!r} ref={ref!r} "
+                        f"objective={ttc_stats.get('objective')}",
+                        flush=True,
+                    )
+                    debug_print_budget -= 1
+
+            if (eval_step + 1) % eval_log_every == 0 and not silent:
+                running_em = 100.0 * exact_total / max(1, count)
+                running_ext = 100.0 * extracted_total / max(1, count)
+                elapsed = max(1e-6, time.time() - eval_start)
+                avg_batch_sec = elapsed / float(eval_step + 1)
+                eta_sec = avg_batch_sec * float(eval_batches - (eval_step + 1))
+                print(
+                    f"  [eval:{modality}] step {eval_step + 1}/{eval_batches} "
+                    f"raw_em={running_em:.2f}% extracted_em={running_ext:.2f}% "
+                    f"elapsed={elapsed/60.0:.1f}m eta={eta_sec/60.0:.1f}m "
+                    f"ttc={ttc_count}",
+                    flush=True,
+                )
+            continue
+
         mm = resolve_modality_batch(batch, modality)
         inputs = model.prepare_multimodal_inputs(
             text=batch["questions"],
@@ -2488,6 +3086,17 @@ def evaluate(
         "num_samples": count,
         "by_question_type": {},
     }
+    if ttc_enabled:
+        result["ttc"] = {
+            "enabled": True,
+            "objective": str(args.ttc_objective),
+            "num_samples": int(ttc_count),
+            "mean_base_entropy": ttc_entropy_before / max(1, ttc_count),
+            "mean_final_entropy": ttc_entropy_after / max(1, ttc_count),
+            "mean_gate_value": (
+                sum(ttc_gate_means) / float(len(ttc_gate_means)) if ttc_gate_means else None
+            ),
+        }
     for k, v in by_type.items():
         n = max(1.0, v["n"])
         result["by_question_type"][k] = {
@@ -2893,6 +3502,40 @@ def parse_args() -> argparse.Namespace:
                    help="Max validation samples for layer additivity probe (0=full val)")
     p.add_argument("--layer-probe-every", type=int, default=1,
                    help="Run layer additivity probe every N epochs")
+    p.add_argument("--ttc-enable", action="store_true",
+                   help="Enable test-time composition by optimizing runtime gate overrides on 'both' eval")
+    p.add_argument("--ttc-objective", type=str, default="simple", choices=["simple", "entropy_noharm"],
+                   help="TTC objective: simple entropy minimization or entropy + no-harm vs best single modality")
+    p.add_argument("--ttc-steps", type=int, default=5,
+                   help="Number of per-sample TTC optimization steps")
+    p.add_argument("--ttc-lr", type=float, default=5e-2,
+                   help="Learning rate for TTC runtime gate optimization")
+    p.add_argument("--ttc-init-gate", type=float, default=1.0,
+                   help="Initial runtime TTC gate multiplier")
+    p.add_argument("--ttc-gate-min", type=float, default=0.0,
+                   help="Clamp minimum for TTC runtime gate multipliers")
+    p.add_argument("--ttc-gate-max", type=float, default=2.5,
+                   help="Clamp maximum for TTC runtime gate multipliers")
+    p.add_argument("--ttc-gate-reg-lambda", type=float, default=0.02,
+                   help="Quadratic penalty weight for deviating TTC gates from 1.0")
+    p.add_argument("--ttc-noharm-lambda", type=float, default=0.1,
+                   help="Weight on TTC no-harm penalty for the complex objective")
+    p.add_argument("--ttc-noharm-margin", type=float, default=0.0,
+                   help="Margin used in TTC no-harm hinge")
+    p.add_argument("--ttc-interaction-enable", action="store_true",
+                   help="Enable stage-C TTC: freeze gate solution and optimize one interaction scalar per shared layer")
+    p.add_argument("--ttc-interaction-steps", type=int, default=5,
+                   help="Number of stage-C interaction optimization steps")
+    p.add_argument("--ttc-interaction-lr", type=float, default=5e-2,
+                   help="Learning rate for stage-C interaction scalars")
+    p.add_argument("--ttc-interaction-init", type=float, default=0.0,
+                   help="Initial value for stage-C interaction scalars")
+    p.add_argument("--ttc-interaction-min", type=float, default=-0.5,
+                   help="Minimum clamp for stage-C interaction scalars")
+    p.add_argument("--ttc-interaction-max", type=float, default=0.5,
+                   help="Maximum clamp for stage-C interaction scalars")
+    p.add_argument("--ttc-interaction-reg-lambda", type=float, default=0.05,
+                   help="Quadratic penalty on stage-C interaction scalars")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", type=str, default="SAFE-AVQA-Composition")
     p.add_argument("--wandb-run-name", type=str, default=None)
@@ -2970,6 +3613,23 @@ def main() -> None:
                     "layer_additivity_probe": args.layer_additivity_probe,
                     "layer_probe_samples": args.layer_probe_samples,
                     "layer_probe_every": args.layer_probe_every,
+                    "ttc_enable": args.ttc_enable,
+                    "ttc_objective": args.ttc_objective,
+                    "ttc_steps": args.ttc_steps,
+                    "ttc_lr": args.ttc_lr,
+                    "ttc_init_gate": args.ttc_init_gate,
+                    "ttc_gate_min": args.ttc_gate_min,
+                    "ttc_gate_max": args.ttc_gate_max,
+                    "ttc_gate_reg_lambda": args.ttc_gate_reg_lambda,
+                    "ttc_noharm_lambda": args.ttc_noharm_lambda,
+                    "ttc_noharm_margin": args.ttc_noharm_margin,
+                    "ttc_interaction_enable": args.ttc_interaction_enable,
+                    "ttc_interaction_steps": args.ttc_interaction_steps,
+                    "ttc_interaction_lr": args.ttc_interaction_lr,
+                    "ttc_interaction_init": args.ttc_interaction_init,
+                    "ttc_interaction_min": args.ttc_interaction_min,
+                    "ttc_interaction_max": args.ttc_interaction_max,
+                    "ttc_interaction_reg_lambda": args.ttc_interaction_reg_lambda,
                     "compat_reg_enable": args.compat_reg_enable,
                     "compat_reg_lambda": args.compat_reg_lambda,
                     "compat_reg_rank": args.compat_reg_rank,
@@ -3755,6 +4415,8 @@ def main() -> None:
         "eval_modalities": eval_modalities,
         "best_exact_match": best_score,
         "best_modality": args.train_modality,
+        "ttc_enabled": bool(args.ttc_enable),
+        "ttc_objective": str(args.ttc_objective),
         "history_path": str(args.output_dir / "history.json"),
     }
     with (args.output_dir / "results.json").open("w", encoding="utf-8") as f:

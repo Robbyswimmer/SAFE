@@ -6,6 +6,7 @@ These configs mirror the audio configs but for 3D point cloud modality.
 Proves the architecture generalizes to other modalities.
 """
 
+import os
 from typing import Dict, Any
 
 # ModelNet40 Classification Config
@@ -193,6 +194,58 @@ POINTCLOUD_DEMO_CONFIG: Dict[str, Any] = {
 }
 
 
+# ScanQA Joint Config — InternVL 8B with PointBERT + multi-layer fusion
+# Joint training: point cloud sees vision + text (modality=both)
+SCANQA_INTERNVL_CONFIG: Dict[str, Any] = {
+    "name": "scanqa_internvl",
+    "description": "ScanQA joint: PointBERT on InternVL 8B with native vision active",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/OpenGVLab_InternVL3_5-8B"),
+    "vision_model_name": "built-in",
+
+    "pointcloud_encoder_type": "pointbert",
+    "pointcloud_encoder_config": {
+        "model_name": "pointbert-base",
+        "num_points": 8192,
+        "embed_dim": 768,
+        "use_pretrained": True,
+        "checkpoint_path": None,
+        "return_group_tokens": False,
+    },
+
+    "llm_hidden_size": 4096,        # Qwen3-8B
+    "pointcloud_embed_dim": 768,    # PointBERT output
+
+    "projector_type": "standard",
+    "num_tokens": 8,
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [1, 5, 9, 13, 17, 21],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "num_attention_heads": 32,
+        "dropout": 0.1,
+    },
+
+    "freeze_base_vl": True,
+    "freeze_pointcloud_encoder": True,
+    "label_smoothing": 0.1,
+    "dataset": "scanqa",
+    "num_points": 8192,
+    "expected_vram_gb": 42,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+}
+
+
 # Config registry
 POINTCLOUD_CONFIGS: Dict[str, Dict[str, Any]] = {
     "modelnet40": MODELNET40_CONFIG,
@@ -201,6 +254,7 @@ POINTCLOUD_CONFIGS: Dict[str, Dict[str, Any]] = {
     "cap3d_captioning": CAP3D_CONFIG,
     "demo": POINTCLOUD_DEMO_CONFIG,
     "pointcloud_demo": POINTCLOUD_DEMO_CONFIG,
+    "scanqa_internvl": SCANQA_INTERNVL_CONFIG,
 }
 
 

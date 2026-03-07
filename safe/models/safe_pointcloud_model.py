@@ -433,14 +433,17 @@ class SAFEPointCloudModel(nn.Module):
                 if use_composition:
                     # COMPOSITION MODE: Let LLaVA process image+text natively,
                     # while SAFE hooks inject PC tokens as residuals
-                    outputs = self.base_vl.llm(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        pixel_values=pixel_values,
-                        labels=labels,
-                        use_cache=False,
-                        **kwargs,
+                    fwd_kwargs = dict(
+                        input_ids=input_ids, attention_mask=attention_mask,
+                        pixel_values=pixel_values, labels=labels,
+                        use_cache=False, **kwargs,
                     )
+                    if self.base_vl.model_type == "internvl" and pixel_values is not None:
+                        batch = pixel_values.size(0)
+                        fwd_kwargs["image_flags"] = torch.ones(
+                            (batch, 1), dtype=torch.long, device=pixel_values.device
+                        )
+                    outputs = self.base_vl.llm(**fwd_kwargs)
                 else:
                     # PC-ONLY MODE: Use text embeddings directly (no image)
                     inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
@@ -472,14 +475,17 @@ class SAFEPointCloudModel(nn.Module):
 
             # KV augmentation wrapper does not support caching in forward.
             if use_composition:
-                outputs = self.base_vl.llm(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    pixel_values=pixel_values,
-                    labels=labels,
-                    use_cache=False,
-                    **kwargs,
+                fwd_kwargs = dict(
+                    input_ids=input_ids, attention_mask=attention_mask,
+                    pixel_values=pixel_values, labels=labels,
+                    use_cache=False, **kwargs,
                 )
+                if self.base_vl.model_type == "internvl" and pixel_values is not None:
+                    batch = pixel_values.size(0)
+                    fwd_kwargs["image_flags"] = torch.ones(
+                        (batch, 1), dtype=torch.long, device=pixel_values.device
+                    )
+                outputs = self.base_vl.llm(**fwd_kwargs)
             else:
                 inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
                 outputs = self.base_vl.llm(
@@ -493,14 +499,17 @@ class SAFEPointCloudModel(nn.Module):
             # No PC fusion - just process image+text or text-only
             if use_composition:
                 # Image + text through LLaVA (no PC)
-                outputs = self.base_vl.llm(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    pixel_values=pixel_values,
-                    labels=labels,
-                    use_cache=False,
-                    **kwargs,
+                fwd_kwargs = dict(
+                    input_ids=input_ids, attention_mask=attention_mask,
+                    pixel_values=pixel_values, labels=labels,
+                    use_cache=False, **kwargs,
                 )
+                if self.base_vl.model_type == "internvl" and pixel_values is not None:
+                    batch = pixel_values.size(0)
+                    fwd_kwargs["image_flags"] = torch.ones(
+                        (batch, 1), dtype=torch.long, device=pixel_values.device
+                    )
+                outputs = self.base_vl.llm(**fwd_kwargs)
             else:
                 # Text-only
                 inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
@@ -624,14 +633,17 @@ class SAFEPointCloudModel(nn.Module):
             try:
                 if use_composition:
                     # COMPOSITION: LLaVA processes image+text, SAFE adds PC residuals
-                    outputs = self.base_vl.llm.generate(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        pixel_values=pixel_values,
-                        max_new_tokens=max_new_tokens,
-                        num_beams=num_beams,
-                        **generate_kwargs,
+                    gen_kwargs = dict(
+                        input_ids=input_ids, attention_mask=attention_mask,
+                        pixel_values=pixel_values, max_new_tokens=max_new_tokens,
+                        num_beams=num_beams, **generate_kwargs,
                     )
+                    if self.base_vl.model_type == "internvl" and pixel_values is not None:
+                        batch = pixel_values.size(0)
+                        gen_kwargs["image_flags"] = torch.ones(
+                            (batch, 1), dtype=torch.long, device=pixel_values.device
+                        )
+                    outputs = self.base_vl.llm.generate(**gen_kwargs)
                 else:
                     # PC-only: use text embeddings directly
                     inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
@@ -663,14 +675,17 @@ class SAFEPointCloudModel(nn.Module):
                 generate_kwargs["use_cache"] = False
 
             if use_composition:
-                outputs = self.base_vl.llm.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    pixel_values=pixel_values,
-                    max_new_tokens=max_new_tokens,
-                    num_beams=num_beams,
-                    **generate_kwargs,
+                gen_kwargs = dict(
+                    input_ids=input_ids, attention_mask=attention_mask,
+                    pixel_values=pixel_values, max_new_tokens=max_new_tokens,
+                    num_beams=num_beams, **generate_kwargs,
                 )
+                if self.base_vl.model_type == "internvl" and pixel_values is not None:
+                    batch = pixel_values.size(0)
+                    gen_kwargs["image_flags"] = torch.ones(
+                        (batch, 1), dtype=torch.long, device=pixel_values.device
+                    )
+                outputs = self.base_vl.llm.generate(**gen_kwargs)
             else:
                 inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
                 outputs = self.base_vl.llm.generate(
@@ -684,14 +699,17 @@ class SAFEPointCloudModel(nn.Module):
             # No PC fusion
             if use_composition:
                 # Image + text through LLaVA (no PC)
-                outputs = self.base_vl.llm.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    pixel_values=pixel_values,
-                    max_new_tokens=max_new_tokens,
-                    num_beams=num_beams,
-                    **generate_kwargs,
+                gen_kwargs = dict(
+                    input_ids=input_ids, attention_mask=attention_mask,
+                    pixel_values=pixel_values, max_new_tokens=max_new_tokens,
+                    num_beams=num_beams, **generate_kwargs,
                 )
+                if self.base_vl.model_type == "internvl" and pixel_values is not None:
+                    batch = pixel_values.size(0)
+                    gen_kwargs["image_flags"] = torch.ones(
+                        (batch, 1), dtype=torch.long, device=pixel_values.device
+                    )
+                outputs = self.base_vl.llm.generate(**gen_kwargs)
             else:
                 # Text only
                 inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)

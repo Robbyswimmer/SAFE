@@ -1,0 +1,60 @@
+#!/bin/bash
+set -euo pipefail
+
+SAFE_ROOT="${SAFE_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+MODEL_CONFIG="${MODEL_CONFIG:-composition_ttc}"
+DATA_ROOT="${DATA_ROOT:-data/music_avqa}"
+MEDIA_ROOT="${MEDIA_ROOT:-$SAFE_ROOT}"
+OUTPUT_DIR="${OUTPUT_DIR:-checkpoints/composition_ttc_eval_complex}"
+COMPOSE_AUDIO_CKPT="${COMPOSE_AUDIO_CKPT:-checkpoints/composition_ttc_audio/best_model.pt}"
+COMPOSE_VISION_CKPT="${COMPOSE_VISION_CKPT:-checkpoints/composition_ttc_vision/best_model.pt}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
+NUM_AUDIO_TOKENS="${NUM_AUDIO_TOKENS:-8}"
+FUSION_GATE="${FUSION_GATE:-0.2}"
+TTC_STEPS="${TTC_STEPS:-5}"
+TTC_LR="${TTC_LR:-0.05}"
+TTC_GATE_REG_LAMBDA="${TTC_GATE_REG_LAMBDA:-0.02}"
+TTC_NOHARM_LAMBDA="${TTC_NOHARM_LAMBDA:-0.1}"
+TTC_NOHARM_MARGIN="${TTC_NOHARM_MARGIN:-0.0}"
+TTC_INTERACTION_ENABLE="${TTC_INTERACTION_ENABLE:-0}"
+TTC_INTERACTION_STEPS="${TTC_INTERACTION_STEPS:-5}"
+TTC_INTERACTION_LR="${TTC_INTERACTION_LR:-0.05}"
+MAX_SAMPLES="${MAX_SAMPLES:-0}"
+
+MAX_SAMPLES_ARGS=()
+if [[ "$MAX_SAMPLES" != "0" ]]; then
+  MAX_SAMPLES_ARGS+=(--max-samples "$MAX_SAMPLES")
+fi
+
+cd "$SAFE_ROOT"
+
+TTC_INTERACTION_ARGS=()
+if [[ "$TTC_INTERACTION_ENABLE" == "1" ]]; then
+  TTC_INTERACTION_ARGS+=(--ttc-interaction-enable --ttc-interaction-steps "$TTC_INTERACTION_STEPS" --ttc-interaction-lr "$TTC_INTERACTION_LR")
+fi
+
+python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
+  --dataset music_avqa \
+  --model-config "$MODEL_CONFIG" \
+  --train-manifest "$DATA_ROOT/manifests/train.jsonl" \
+  --val-manifest "$DATA_ROOT/manifests/validation.jsonl" \
+  --media-root "$MEDIA_ROOT" \
+  --output-dir "$OUTPUT_DIR" \
+  --batch-size "$BATCH_SIZE" \
+  --num-epochs 0 \
+  --num-audio-tokens "$NUM_AUDIO_TOKENS" \
+  --train-modality both \
+  --eval-modalities text,audio,image,both \
+  --freeze-audio-encoder \
+  --fusion-gate "$FUSION_GATE" \
+  --compose-audio-ckpt "$COMPOSE_AUDIO_CKPT" \
+  --compose-vision-ckpt "$COMPOSE_VISION_CKPT" \
+  --ttc-enable \
+  --ttc-objective entropy_noharm \
+  --ttc-steps "$TTC_STEPS" \
+  --ttc-lr "$TTC_LR" \
+  --ttc-gate-reg-lambda "$TTC_GATE_REG_LAMBDA" \
+  --ttc-noharm-lambda "$TTC_NOHARM_LAMBDA" \
+  --ttc-noharm-margin "$TTC_NOHARM_MARGIN" \
+  "${TTC_INTERACTION_ARGS[@]}" \
+  "${MAX_SAMPLES_ARGS[@]}"

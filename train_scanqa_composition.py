@@ -54,6 +54,7 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent))
 
 from safe.data.scanqa_dataset import ScanQADataset, collate_scanqa_batch
+from configs.pointcloud_configs import get_pointcloud_config
 
 
 def compute_qa_metrics(predictions: List[str], references: List[List[str]]) -> Dict[str, float]:
@@ -140,21 +141,22 @@ class ScanQACompositionModel(nn.Module):
         freeze_llm: bool = True,  # Freeze LLM, only train SAFE adapter
         freeze_encoder: bool = True,
         unfreeze_encoder_last_n: int = 0,
+        config: Optional[Dict] = None,
     ):
         super().__init__()
         self.modality = modality
-        self.llm_model_name = llm_model_name
+        self.llm_model_name = config["llm_model_name"] if config else llm_model_name
 
         if modality == "image":
             # Image-only: Use standalone LLaVA (already trained)
             from transformers import LlavaForConditionalGeneration, AutoProcessor
             print("Loading LLaVA model for image-only mode...")
             self.llava = LlavaForConditionalGeneration.from_pretrained(
-                llm_model_name,
+                self.llm_model_name,
                 torch_dtype=torch.float16,
                 low_cpu_mem_usage=True,
             )
-            self.processor = AutoProcessor.from_pretrained(llm_model_name)
+            self.processor = AutoProcessor.from_pretrained(self.llm_model_name)
 
             # Freeze LLaVA - it's already trained
             for param in self.llava.parameters():
@@ -167,19 +169,37 @@ class ScanQACompositionModel(nn.Module):
             from safe.models.safe_pointcloud_model import SAFEPointCloudModel
             print(f"Loading SAFE point cloud model for {modality} mode...")
 
-            safe_config = {
-                "llm_model_name": llm_model_name,
-                "pointcloud_encoder_type": "pointbert",
-                "pointcloud_encoder_config": {
-                    "model_name": "pointbert-base",
-                    "checkpoint_path": pointcloud_encoder_checkpoint,
-                    "unfreeze_last_n_blocks": unfreeze_encoder_last_n,
-                },
-                "num_tokens": num_tokens,
-                "fusion_layer_indices": fusion_layer_indices,
-                "freeze_base_vl": freeze_llm,
-                "freeze_pointcloud_encoder": freeze_encoder,
-            }
+            if config is not None:
+                safe_config = {
+                    "llm_model_name": config["llm_model_name"],
+                    "vision_model_name": config.get("vision_model_name", "openai/clip-vit-large-patch14"),
+                    "pointcloud_encoder_type": config.get("pointcloud_encoder_type", "pointbert"),
+                    "pointcloud_encoder_config": config.get("pointcloud_encoder_config", {}),
+                    "num_tokens": config.get("num_tokens", num_tokens),
+                    "fusion_type": config.get("fusion_type", "multilayer"),
+                    "fusion_layer_indices": config.get("fusion_layer_indices", fusion_layer_indices),
+                    "lora_rank": config.get("lora_rank", 8),
+                    "fusion_config": config.get("fusion_config", {}),
+                    "freeze_base_vl": config.get("freeze_base_vl", True),
+                    "freeze_pointcloud_encoder": config.get("freeze_pointcloud_encoder", True),
+                    "llm_hidden_size": config.get("llm_hidden_size", 5120),
+                    "pointcloud_embed_dim": config.get("pointcloud_embed_dim", 768),
+                    "label_smoothing": config.get("label_smoothing", 0.0),
+                }
+            else:
+                safe_config = {
+                    "llm_model_name": self.llm_model_name,
+                    "pointcloud_encoder_type": "pointbert",
+                    "pointcloud_encoder_config": {
+                        "model_name": "pointbert-base",
+                        "checkpoint_path": pointcloud_encoder_checkpoint,
+                        "unfreeze_last_n_blocks": unfreeze_encoder_last_n,
+                    },
+                    "num_tokens": num_tokens,
+                    "fusion_layer_indices": fusion_layer_indices,
+                    "freeze_base_vl": freeze_llm,
+                    "freeze_pointcloud_encoder": freeze_encoder,
+                }
 
             self.safe_model = SAFEPointCloudModel(**safe_config)
             self.safe_model.enable_pointcloud_training()
@@ -326,6 +346,8 @@ def parse_args():
     parser.add_argument("--num-points", type=int, default=8192)
 
     # Model
+    parser.add_argument("--model-config", type=str, default=None,
+                        help="Config name from pointcloud_configs.py (e.g. scanqa_internvl)")
     parser.add_argument("--llm-model", type=str, default="llava-hf/llava-1.5-7b-hf")
     parser.add_argument("--fusion-layer-indices", type=str, default="1,5,9,13,17,21")
     parser.add_argument("--num-pointcloud-tokens", type=int, default=8)
@@ -583,6 +605,11 @@ def main():
     print(f"Train samples: {len(train_dataset)}")
     print(f"Val samples: {len(val_dataset)}")
 
+    # Load config if specified
+    config = get_pointcloud_config(args.model_config) if args.model_config else None
+    if config:
+        print(f"Using config: {config['name']} — {config.get('description', '')}")
+
     # Create model
     print("\nCreating model...")
     model = ScanQACompositionModel(
@@ -593,6 +620,7 @@ def main():
         fusion_layer_indices=fusion_layers,
         freeze_llm=args.freeze_llm,
         unfreeze_encoder_last_n=args.unfreeze_encoder_last_n,
+        config=config,
     )
     model = model.to(args.device)
 
