@@ -58,6 +58,7 @@ class SAFEModel(nn.Module):
         vision_embed_dim: int = 1024,
         num_vision_tokens: int = 8,
         vision_projector_config: dict = None,
+        enable_gradient_checkpointing: Optional[bool] = None,
     ):
         super().__init__()
         
@@ -77,7 +78,8 @@ class SAFEModel(nn.Module):
             vision_model_name=vision_model_name,
             llm_hidden_size=llm_hidden_size,
             freeze_vision=freeze_base_vl,
-            freeze_llm=freeze_base_vl
+            freeze_llm=freeze_base_vl,
+            enable_gradient_checkpointing=enable_gradient_checkpointing,
         )
         print(f"[SAFE] ✓ BaseVLModel initialized", flush=True)
         sys.stdout.flush()

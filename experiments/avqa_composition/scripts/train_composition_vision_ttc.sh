@@ -22,6 +22,7 @@ if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
   source "$HOME/miniconda3/etc/profile.d/conda.sh"
   conda activate "$CONDA_ENV"
 fi
+export SAFE_GRAD_CKPT=0
 
 MODEL_CONFIG="${MODEL_CONFIG:-composition_ttc}"
 DATA_ROOT="${DATA_ROOT:-data/music_avqa}"

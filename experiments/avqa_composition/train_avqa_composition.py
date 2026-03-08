@@ -379,7 +379,10 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
         "freeze_base_vl", "freeze_audio_encoder", "label_smoothing",
         "llm_hidden_size", "audio_embed_dim",
         "vision_embed_dim", "num_vision_tokens", "vision_projector_config",
+        "enable_gradient_checkpointing",
     }
+    if "gradient_checkpointing" in cfg and "enable_gradient_checkpointing" not in cfg:
+        cfg["enable_gradient_checkpointing"] = cfg["gradient_checkpointing"]
     return {k: v for k, v in cfg.items() if k in valid_keys}
 
 
@@ -3933,6 +3936,17 @@ def main() -> None:
     model_cfg = build_model_config(args)
     model = SAFEModel(**model_cfg)
     model.enable_audio_training()
+    llm_gc_enabled = bool(
+        getattr(model.base_vl.llm, "is_gradient_checkpointing", False)
+        or getattr(model.base_vl.llm, "gradient_checkpointing", False)
+    )
+    print(f"[info] llm_gradient_checkpointing={llm_gc_enabled}", flush=True)
+    if llm_gc_enabled and bool(getattr(model, "enable_midlayer_fusion", False)):
+        raise RuntimeError(
+            "Gradient checkpointing is enabled while using hook-based multilayer fusion. "
+            "This configuration is known to break adapter gradients. "
+            "Set SAFE_GRAD_CKPT=0 or pass gradient_checkpointing=False in the model config."
+        )
     model.to_device(device)
     if hasattr(model, "get_runtime_device"):
         device = model.get_runtime_device()

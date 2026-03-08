@@ -22,6 +22,7 @@ if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
   source "$HOME/miniconda3/etc/profile.d/conda.sh"
   conda activate "$CONDA_ENV"
 fi
+export SAFE_GRAD_CKPT=0
 
 AUDIO_OUT="${AUDIO_OUT:-checkpoints/composition_ttc_audio}"
 VISION_OUT="${VISION_OUT:-checkpoints/composition_ttc_vision}"
