@@ -651,6 +651,28 @@ def _logit_entropy(logits_2d: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return entropy.mean()
 
 
+def _kl_divergence_from_logits(
+    logits_p: Optional[torch.Tensor],
+    logits_q: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    if logits_p is None or logits_q is None:
+        return None
+    p_log = F.log_softmax(logits_p.float(), dim=-1)
+    q_log = F.log_softmax(logits_q.float(), dim=-1)
+    p = p_log.exp()
+    return (p * (p_log - q_log)).sum(dim=-1).mean()
+
+
+def _parse_float_csv(csv_value: str) -> List[float]:
+    out: List[float] = []
+    for raw in str(csv_value).split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        out.append(float(raw))
+    return out
+
+
 def _slice_eval_batch(batch: Dict[str, Any], idx: int) -> Dict[str, Any]:
     sliced: Dict[str, Any] = {}
     for key, value in batch.items():
@@ -798,7 +820,7 @@ def _compute_ttc_loss(
     return loss
 
 
-def _forward_joint_entropy(
+def _forward_joint_next_logits(
     model: SAFEModel,
     both_inputs: Dict[str, Any],
     audio_tokens: Optional[torch.Tensor],
@@ -817,8 +839,131 @@ def _forward_joint_entropy(
         active_fusion_layers=active_fusion_layers,
     )
     logits = outputs.get("logits") if isinstance(outputs, dict) else getattr(outputs, "logits", None)
-    next_logits = _extract_next_answer_logits(logits, both_inputs.get("attention_mask"))
+    return _extract_next_answer_logits(logits, both_inputs.get("attention_mask"))
+
+
+def _forward_joint_entropy(
+    model: SAFEModel,
+    both_inputs: Dict[str, Any],
+    audio_tokens: Optional[torch.Tensor],
+    audio_mask: Optional[torch.Tensor],
+    args: argparse.Namespace,
+    active_fusion_layers: Optional[Sequence[int]] = None,
+) -> Optional[torch.Tensor]:
+    next_logits = _forward_joint_next_logits(
+        model=model,
+        both_inputs=both_inputs,
+        audio_tokens=audio_tokens,
+        audio_mask=audio_mask,
+        args=args,
+        active_fusion_layers=active_fusion_layers,
+    )
     return _logit_entropy(next_logits)
+
+
+def _build_ttc_candidate_gate_configs(
+    gate_keys: Sequence[str],
+    args: argparse.Namespace,
+) -> List[Tuple[str, Dict[str, float]]]:
+    scales = _parse_float_csv(getattr(args, "ttc_candidate_grid", "0.75,1.0,1.25"))
+    if not scales:
+        scales = [1.0]
+
+    configs: List[Tuple[str, Dict[str, float]]] = []
+    seen = set()
+    for audio_scale in scales:
+        for vision_scale in scales:
+            name = f"a{audio_scale:.2f}_v{vision_scale:.2f}"
+            if name in seen:
+                continue
+            seen.add(name)
+            overrides: Dict[str, float] = {}
+            for key in gate_keys:
+                if key.startswith("audio:"):
+                    overrides[key] = float(audio_scale)
+                elif key.startswith("vision:"):
+                    overrides[key] = float(vision_scale)
+                else:
+                    overrides[key] = 1.0
+            configs.append((name, overrides))
+    return configs
+
+
+@torch.no_grad()
+def _evaluate_ttc_candidate(
+    model: SAFEModel,
+    both_inputs: Dict[str, Any],
+    audio_tokens: Optional[torch.Tensor],
+    audio_mask: Optional[torch.Tensor],
+    args: argparse.Namespace,
+    candidate_overrides: Dict[str, float],
+    best_single_entropy: Optional[float],
+    active_fusion_layers: Optional[Sequence[int]] = None,
+) -> Optional[Dict[str, float]]:
+    gate_tensors = {
+        key: torch.tensor(float(val), device=both_inputs["input_ids"].device, dtype=torch.float32)
+        for key, val in candidate_overrides.items()
+    }
+    _set_runtime_gate_overrides(model, gate_tensors)
+    next_logits = _forward_joint_next_logits(
+        model=model,
+        both_inputs=both_inputs,
+        audio_tokens=audio_tokens,
+        audio_mask=audio_mask,
+        args=args,
+        active_fusion_layers=active_fusion_layers,
+    )
+    entropy = _logit_entropy(next_logits)
+    if entropy is None or next_logits is None:
+        _clear_runtime_gate_overrides(model)
+        return None
+
+    gate_reg = sum((float(v) - 1.0) ** 2 for v in candidate_overrides.values()) / float(max(1, len(candidate_overrides)))
+    score = float(entropy.detach().item()) + float(args.ttc_gate_reg_lambda) * gate_reg
+    noharm_penalty = 0.0
+    if args.ttc_objective == "entropy_noharm" and best_single_entropy is not None:
+        noharm_penalty = max(
+            0.0,
+            float(entropy.detach().item()) - float(best_single_entropy) + float(args.ttc_noharm_margin),
+        )
+        score += float(args.ttc_noharm_lambda) * noharm_penalty
+
+    instability = 0.0
+    stable = True
+    if getattr(args, "ttc_stability_enable", False):
+        perturbed = {}
+        perturb = float(args.ttc_stability_perturb)
+        for idx, (key, val) in enumerate(candidate_overrides.items()):
+            sign = -1.0 if (idx % 2 == 0) else 1.0
+            perturbed[key] = min(
+                float(args.ttc_gate_max),
+                max(float(args.ttc_gate_min), float(val) * (1.0 + sign * perturb)),
+            )
+        perturbed_tensors = {
+            key: torch.tensor(float(val), device=both_inputs["input_ids"].device, dtype=torch.float32)
+            for key, val in perturbed.items()
+        }
+        _set_runtime_gate_overrides(model, perturbed_tensors)
+        perturbed_logits = _forward_joint_next_logits(
+            model=model,
+            both_inputs=both_inputs,
+            audio_tokens=audio_tokens,
+            audio_mask=audio_mask,
+            args=args,
+            active_fusion_layers=active_fusion_layers,
+        )
+        stability_kl = _kl_divergence_from_logits(next_logits, perturbed_logits)
+        instability = float(stability_kl.detach().item()) if stability_kl is not None else float("inf")
+        stable = instability <= float(args.ttc_stability_threshold)
+
+    _clear_runtime_gate_overrides(model)
+    return {
+        "entropy": float(entropy.detach().item()),
+        "score": float(score),
+        "instability": float(instability),
+        "stable": float(stable),
+        "noharm_penalty": float(noharm_penalty),
+    }
 
 
 def _optimize_ttc_gate_overrides(
@@ -876,6 +1021,7 @@ def _optimize_ttc_gate_overrides(
         model,
         active_fusion_layers=active_fusion_layers,
     )
+    search_mode = str(getattr(args, "ttc_search_mode", "gradient")).lower().strip()
 
     stats: Dict[str, Any] = {
         "enabled": True,
@@ -887,39 +1033,98 @@ def _optimize_ttc_gate_overrides(
         "image_entropy": ref_image_entropy,
         "stage_c_enabled": bool(getattr(args, "ttc_interaction_enable", False)),
         "compute_budget_forward_equiv": float(2 + max(0, int(args.ttc_steps))),
+        "search_mode": search_mode,
     }
 
     try:
-        for _ in range(max(0, int(args.ttc_steps))):
-            optimizer.zero_grad(set_to_none=True)
-            _set_runtime_gate_overrides(model, gate_params)
-            entropy = _forward_joint_entropy(
-                model=model,
-                both_inputs=both_inputs,
-                audio_tokens=audio_tokens,
-                audio_mask=audio_mask,
-                args=args,
-                active_fusion_layers=active_fusion_layers,
-            )
-            if entropy is None:
-                break
+        stage_b_entropy = None
+        if search_mode in {"candidate", "hybrid"}:
+            candidates = _build_ttc_candidate_gate_configs(gate_keys, args)
+            candidate_results: List[Dict[str, Any]] = []
+            for name, overrides in candidates:
+                result = _evaluate_ttc_candidate(
+                    model=model,
+                    both_inputs=both_inputs,
+                    audio_tokens=audio_tokens,
+                    audio_mask=audio_mask,
+                    args=args,
+                    candidate_overrides=overrides,
+                    best_single_entropy=best_single_entropy,
+                    active_fusion_layers=active_fusion_layers,
+                )
+                if result is None:
+                    continue
+                candidate_results.append({"name": name, "overrides": overrides, **result})
 
-            loss = _compute_ttc_loss(
-                entropy=entropy,
-                args=args,
-                gate_params=gate_params,
-                best_single_entropy=best_single_entropy,
-            )
-            loss.backward()
-            optimizer.step()
+            stats["candidate_count"] = int(len(candidate_results))
+            stable_candidates = [row for row in candidate_results if bool(row.get("stable", 0.0))]
+            stats["stable_candidate_count"] = int(len(stable_candidates))
+            if candidate_results:
+                stats["candidate_score_range"] = float(
+                    max(row["score"] for row in candidate_results) - min(row["score"] for row in candidate_results)
+                )
+            else:
+                stats["candidate_score_range"] = None
+
+            best_pool = stable_candidates if stable_candidates else candidate_results
+            if best_pool:
+                best_candidate = min(best_pool, key=lambda row: (row["score"], row["entropy"]))
+                for key, param in gate_params.items():
+                    param.data.fill_(float(best_candidate["overrides"][key]))
+                stage_b_entropy = float(best_candidate["entropy"])
+                stats["candidate_selected"] = best_candidate["name"]
+                stats["candidate_selected_stable"] = bool(best_candidate.get("stable", 0.0))
+                stats["stage_b_method"] = "candidate"
+            else:
+                stats["candidate_selected"] = None
+                stats["candidate_selected_stable"] = False
+                stats["stage_b_failure"] = "flat_or_invalid_candidate_landscape"
+                stats["stage_b_method"] = "default"
+
+        if search_mode in {"gradient", "hybrid"}:
+            for _ in range(max(0, int(args.ttc_steps))):
+                optimizer.zero_grad(set_to_none=True)
+                _set_runtime_gate_overrides(model, gate_params)
+                entropy = _forward_joint_entropy(
+                    model=model,
+                    both_inputs=both_inputs,
+                    audio_tokens=audio_tokens,
+                    audio_mask=audio_mask,
+                    args=args,
+                    active_fusion_layers=active_fusion_layers,
+                )
+                if entropy is None:
+                    break
+
+                loss = _compute_ttc_loss(
+                    entropy=entropy,
+                    args=args,
+                    gate_params=gate_params,
+                    best_single_entropy=best_single_entropy,
+                )
+                loss.backward()
+                optimizer.step()
+                with torch.no_grad():
+                    for param in gate_params.values():
+                        param.clamp_(float(args.ttc_gate_min), float(args.ttc_gate_max))
             with torch.no_grad():
-                for param in gate_params.values():
-                    param.clamp_(float(args.ttc_gate_min), float(args.ttc_gate_max))
+                _set_runtime_gate_overrides(model, gate_params)
+                final_stage_b = _forward_joint_entropy(
+                    model=model,
+                    both_inputs=both_inputs,
+                    audio_tokens=audio_tokens,
+                    audio_mask=audio_mask,
+                    args=args,
+                    active_fusion_layers=active_fusion_layers,
+                )
+                if final_stage_b is not None:
+                    stage_b_entropy = float(final_stage_b.detach().item())
+                _clear_runtime_gate_overrides(model)
+            stats["stage_b_method"] = "gradient" if search_mode == "gradient" else "hybrid"
 
         gate_grad_ratios: Dict[int, float] = {}
         interaction_params: Dict[int, torch.nn.Parameter] = {}
         interaction_optimizer = None
-        stage_b_entropy = None
         if getattr(args, "ttc_interaction_enable", False) and interaction_layers:
             _set_runtime_gate_overrides(model, gate_params)
             _clear_runtime_interaction_overrides(model)
@@ -993,6 +1198,8 @@ def _optimize_ttc_gate_overrides(
                         "alive_ratio": 0.1,
                         "weak_ratio": 0.01,
                     }
+                    if not stage_c_allowed:
+                        stats["interaction_failure_mode"] = "dead_interaction_gradients"
                     if stage_c_allowed:
                         interaction_optimizer = AdamW(
                             interaction_params.values(),
@@ -1075,6 +1282,8 @@ def _optimize_ttc_gate_overrides(
                 key: float(param.detach().item()) for key, param in gate_params.items()
             }
             stats["stage_b_entropy"] = stage_b_entropy
+            if stage_b_entropy is not None and stats["final_entropy"] is not None:
+                stats["interaction_gain_over_stage_b"] = float(stage_b_entropy - stats["final_entropy"])
             if interaction_params:
                 stats["interaction_values"] = {
                     int(key): float(param.detach().item()) for key, param in interaction_params.items()
@@ -3506,6 +3715,10 @@ def parse_args() -> argparse.Namespace:
                    help="Enable test-time composition by optimizing runtime gate overrides on 'both' eval")
     p.add_argument("--ttc-objective", type=str, default="simple", choices=["simple", "entropy_noharm"],
                    help="TTC objective: simple entropy minimization or entropy + no-harm vs best single modality")
+    p.add_argument("--ttc-search-mode", type=str, default="gradient", choices=["gradient", "candidate", "hybrid"],
+                   help="Stage-B TTC search policy: gradient descent, black-box candidate search, or candidate+gradient refinement")
+    p.add_argument("--ttc-candidate-grid", type=str, default="0.75,1.0,1.25",
+                   help="Comma-separated gate scales used for candidate/hybrid TTC search")
     p.add_argument("--ttc-steps", type=int, default=5,
                    help="Number of per-sample TTC optimization steps")
     p.add_argument("--ttc-lr", type=float, default=5e-2,
@@ -3522,6 +3735,12 @@ def parse_args() -> argparse.Namespace:
                    help="Weight on TTC no-harm penalty for the complex objective")
     p.add_argument("--ttc-noharm-margin", type=float, default=0.0,
                    help="Margin used in TTC no-harm hinge")
+    p.add_argument("--ttc-stability-enable", action="store_true",
+                   help="Enable a hard TTC stability filter based on prediction KL under small gate perturbations")
+    p.add_argument("--ttc-stability-threshold", type=float, default=0.15,
+                   help="Maximum allowed TTC instability KL before rejecting a candidate")
+    p.add_argument("--ttc-stability-perturb", type=float, default=0.1,
+                   help="Relative gate perturbation used for the TTC stability check")
     p.add_argument("--ttc-interaction-enable", action="store_true",
                    help="Enable stage-C TTC: freeze gate solution and optimize one interaction scalar per shared layer")
     p.add_argument("--ttc-interaction-steps", type=int, default=5,
@@ -3615,6 +3834,8 @@ def main() -> None:
                     "layer_probe_every": args.layer_probe_every,
                     "ttc_enable": args.ttc_enable,
                     "ttc_objective": args.ttc_objective,
+                    "ttc_search_mode": args.ttc_search_mode,
+                    "ttc_candidate_grid": args.ttc_candidate_grid,
                     "ttc_steps": args.ttc_steps,
                     "ttc_lr": args.ttc_lr,
                     "ttc_init_gate": args.ttc_init_gate,
@@ -3623,6 +3844,9 @@ def main() -> None:
                     "ttc_gate_reg_lambda": args.ttc_gate_reg_lambda,
                     "ttc_noharm_lambda": args.ttc_noharm_lambda,
                     "ttc_noharm_margin": args.ttc_noharm_margin,
+                    "ttc_stability_enable": args.ttc_stability_enable,
+                    "ttc_stability_threshold": args.ttc_stability_threshold,
+                    "ttc_stability_perturb": args.ttc_stability_perturb,
                     "ttc_interaction_enable": args.ttc_interaction_enable,
                     "ttc_interaction_steps": args.ttc_interaction_steps,
                     "ttc_interaction_lr": args.ttc_interaction_lr,

@@ -34,6 +34,11 @@ NUM_AUDIO_TOKENS="${NUM_AUDIO_TOKENS:-8}"
 FUSION_GATE="${FUSION_GATE:-0.2}"
 TTC_STEPS="${TTC_STEPS:-5}"
 TTC_LR="${TTC_LR:-0.05}"
+TTC_SEARCH_MODE="${TTC_SEARCH_MODE:-gradient}"
+TTC_CANDIDATE_GRID="${TTC_CANDIDATE_GRID:-0.75,1.0,1.25}"
+TTC_STABILITY_ENABLE="${TTC_STABILITY_ENABLE:-0}"
+TTC_STABILITY_THRESHOLD="${TTC_STABILITY_THRESHOLD:-0.15}"
+TTC_STABILITY_PERTURB="${TTC_STABILITY_PERTURB:-0.1}"
 TTC_INTERACTION_ENABLE="${TTC_INTERACTION_ENABLE:-0}"
 TTC_INTERACTION_STEPS="${TTC_INTERACTION_STEPS:-5}"
 TTC_INTERACTION_LR="${TTC_INTERACTION_LR:-0.05}"
@@ -50,6 +55,11 @@ cd "$SAFE_ROOT"
 TTC_INTERACTION_ARGS=()
 if [[ "$TTC_INTERACTION_ENABLE" == "1" ]]; then
   TTC_INTERACTION_ARGS+=(--ttc-interaction-enable --ttc-interaction-steps "$TTC_INTERACTION_STEPS" --ttc-interaction-lr "$TTC_INTERACTION_LR")
+fi
+
+TTC_STABILITY_ARGS=()
+if [[ "$TTC_STABILITY_ENABLE" == "1" ]]; then
+  TTC_STABILITY_ARGS+=(--ttc-stability-enable --ttc-stability-threshold "$TTC_STABILITY_THRESHOLD" --ttc-stability-perturb "$TTC_STABILITY_PERTURB")
 fi
 
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
@@ -70,7 +80,10 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --compose-vision-ckpt "$COMPOSE_VISION_CKPT" \
   --ttc-enable \
   --ttc-objective simple \
+  --ttc-search-mode "$TTC_SEARCH_MODE" \
+  --ttc-candidate-grid "$TTC_CANDIDATE_GRID" \
   --ttc-steps "$TTC_STEPS" \
   --ttc-lr "$TTC_LR" \
+  "${TTC_STABILITY_ARGS[@]}" \
   "${TTC_INTERACTION_ARGS[@]}" \
   "${MAX_SAMPLES_ARGS[@]}"

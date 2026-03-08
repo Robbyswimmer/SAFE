@@ -26,9 +26,11 @@ fi
 AUDIO_OUT="${AUDIO_OUT:-checkpoints/composition_ttc_audio}"
 VISION_OUT="${VISION_OUT:-checkpoints/composition_ttc_vision}"
 BASELINE_OUT="${BASELINE_OUT:-checkpoints/composition_ttc_eval_baseline}"
-SIMPLE_OUT="${SIMPLE_OUT:-checkpoints/composition_ttc_eval_simple}"
+SIMPLE_CAND_OUT="${SIMPLE_CAND_OUT:-checkpoints/composition_ttc_eval_simple_candidate}"
+SIMPLE_HYBRID_OUT="${SIMPLE_HYBRID_OUT:-checkpoints/composition_ttc_eval_simple_hybrid}"
 SIMPLE_INTER_OUT="${SIMPLE_INTER_OUT:-checkpoints/composition_ttc_eval_simple_interaction}"
-COMPLEX_OUT="${COMPLEX_OUT:-checkpoints/composition_ttc_eval_complex}"
+COMPLEX_CAND_OUT="${COMPLEX_CAND_OUT:-checkpoints/composition_ttc_eval_complex_candidate}"
+COMPLEX_HYBRID_OUT="${COMPLEX_HYBRID_OUT:-checkpoints/composition_ttc_eval_complex_hybrid}"
 COMPLEX_INTER_OUT="${COMPLEX_INTER_OUT:-checkpoints/composition_ttc_eval_complex_interaction}"
 
 mkdir -p "$SAFE_ROOT/logs"
@@ -42,19 +44,39 @@ OUTPUT_DIR="$BASELINE_OUT" \
   "$SAFE_ROOT/experiments/avqa_composition/scripts/eval_composition_ttc_baseline.sh"
 COMPOSE_AUDIO_CKPT="$AUDIO_OUT/best_model.pt" \
 COMPOSE_VISION_CKPT="$VISION_OUT/best_model.pt" \
-OUTPUT_DIR="$SIMPLE_OUT" \
+OUTPUT_DIR="$SIMPLE_CAND_OUT" \
+TTC_SEARCH_MODE=candidate \
+TTC_STABILITY_ENABLE=1 \
+  "$SAFE_ROOT/experiments/avqa_composition/scripts/eval_composition_ttc_simple.sh"
+COMPOSE_AUDIO_CKPT="$AUDIO_OUT/best_model.pt" \
+COMPOSE_VISION_CKPT="$VISION_OUT/best_model.pt" \
+OUTPUT_DIR="$SIMPLE_HYBRID_OUT" \
+TTC_SEARCH_MODE=hybrid \
+TTC_STABILITY_ENABLE=1 \
   "$SAFE_ROOT/experiments/avqa_composition/scripts/eval_composition_ttc_simple.sh"
 COMPOSE_AUDIO_CKPT="$AUDIO_OUT/best_model.pt" \
 COMPOSE_VISION_CKPT="$VISION_OUT/best_model.pt" \
 OUTPUT_DIR="$SIMPLE_INTER_OUT" \
+TTC_SEARCH_MODE=hybrid \
+TTC_STABILITY_ENABLE=1 \
 TTC_INTERACTION_ENABLE=1 \
   "$SAFE_ROOT/experiments/avqa_composition/scripts/eval_composition_ttc_simple.sh"
 COMPOSE_AUDIO_CKPT="$AUDIO_OUT/best_model.pt" \
 COMPOSE_VISION_CKPT="$VISION_OUT/best_model.pt" \
-OUTPUT_DIR="$COMPLEX_OUT" \
+OUTPUT_DIR="$COMPLEX_CAND_OUT" \
+TTC_SEARCH_MODE=candidate \
+TTC_STABILITY_ENABLE=1 \
+  "$SAFE_ROOT/experiments/avqa_composition/scripts/eval_composition_ttc_complex.sh"
+COMPOSE_AUDIO_CKPT="$AUDIO_OUT/best_model.pt" \
+COMPOSE_VISION_CKPT="$VISION_OUT/best_model.pt" \
+OUTPUT_DIR="$COMPLEX_HYBRID_OUT" \
+TTC_SEARCH_MODE=hybrid \
+TTC_STABILITY_ENABLE=1 \
   "$SAFE_ROOT/experiments/avqa_composition/scripts/eval_composition_ttc_complex.sh"
 COMPOSE_AUDIO_CKPT="$AUDIO_OUT/best_model.pt" \
 COMPOSE_VISION_CKPT="$VISION_OUT/best_model.pt" \
 OUTPUT_DIR="$COMPLEX_INTER_OUT" \
+TTC_SEARCH_MODE=hybrid \
+TTC_STABILITY_ENABLE=1 \
 TTC_INTERACTION_ENABLE=1 \
   "$SAFE_ROOT/experiments/avqa_composition/scripts/eval_composition_ttc_complex.sh"
