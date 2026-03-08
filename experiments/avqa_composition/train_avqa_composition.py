@@ -3111,14 +3111,15 @@ def evaluate(
             for sample_idx in range(len(batch["questions"])):
                 sample_batch = _slice_eval_batch(batch, sample_idx)
                 try:
-                    pred, ttc_stats = _optimize_ttc_gate_overrides(
-                        model=model,
-                        batch=sample_batch,
-                        tokenizer=tokenizer,
-                        device=device,
-                        args=args,
-                        active_fusion_layers=active_fusion_layers,
-                    )
+                    with torch.enable_grad():
+                        pred, ttc_stats = _optimize_ttc_gate_overrides(
+                            model=model,
+                            batch=sample_batch,
+                            tokenizer=tokenizer,
+                            device=device,
+                            args=args,
+                            active_fusion_layers=active_fusion_layers,
+                        )
                 except Exception as exc:
                     pred = _generate_eval_prediction(
                         model=model,
