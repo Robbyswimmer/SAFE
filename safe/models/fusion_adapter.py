@@ -965,7 +965,7 @@ class MultiLayerFusionAdapter(nn.Module):
         self.fusion_layer_indices = sorted({idx for indices in self.fusion_layers.values() for idx in indices})
         self.layer_modalities = self._invert_layer_mapping(self.fusion_layers)
         self.runtime_gate_overrides: Dict[str, Union[float, torch.Tensor]] = {}
-        self.runtime_interaction_overrides: Dict[int, Union[float, torch.Tensor]] = {}
+        self.runtime_interaction_overrides: Dict[int, Any] = {}
         self.fusion_adapters = nn.ModuleDict()
         target_modules = unused_kwargs.get("target_modules", None)
         train_base_cross_attention = bool(unused_kwargs.get("train_base_cross_attention", False))
@@ -1044,9 +1044,9 @@ class MultiLayerFusionAdapter(nn.Module):
 
     def set_runtime_interaction_overrides(
         self,
-        overrides: Optional[Dict[int, Union[float, torch.Tensor]]],
+        overrides: Optional[Dict[int, Any]],
     ) -> None:
-        cleaned: Dict[int, Union[float, torch.Tensor]] = {}
+        cleaned: Dict[int, Any] = {}
         for key, value in (overrides or {}).items():
             cleaned[int(key)] = value
         self.runtime_interaction_overrides = cleaned
@@ -1214,19 +1214,63 @@ class MultiLayerFusionAdapter(nn.Module):
             and "vision" in applied_updates
         ):
             interaction_update = applied_updates["audio"].float() * applied_updates["vision"].float()
-            if isinstance(interaction_override, torch.Tensor):
+            interaction_term = interaction_update
+
+            if isinstance(interaction_override, dict):
+                interaction_mode = str(interaction_override.get("mode", "scalar")).strip().lower()
+                if interaction_mode == "diag":
+                    diag = interaction_override.get("diag")
+                    if diag is not None:
+                        if not torch.is_tensor(diag):
+                            diag = torch.tensor(diag, device=output.device, dtype=interaction_update.dtype)
+                        else:
+                            diag = diag.to(device=output.device, dtype=interaction_update.dtype)
+                        diag = torch.tanh(diag)
+                        while diag.dim() < interaction_term.dim():
+                            diag = diag.unsqueeze(0)
+                        interaction_term = interaction_term * diag
+
+                    scale = interaction_override.get("scale", None)
+                    if scale is not None:
+                        if not torch.is_tensor(scale):
+                            scale = torch.tensor(
+                                float(scale),
+                                device=output.device,
+                                dtype=interaction_update.dtype,
+                            )
+                        else:
+                            scale = scale.to(device=output.device, dtype=interaction_update.dtype)
+                        while scale.dim() < interaction_term.dim():
+                            scale = scale.unsqueeze(-1)
+                        if scale.size(-1) != 1:
+                            scale = scale[..., :1]
+                        interaction_term = scale * interaction_term
+                else:
+                    scale = interaction_override.get("scale", 0.0)
+                    if not torch.is_tensor(scale):
+                        scale = torch.tensor(
+                            float(scale),
+                            device=output.device,
+                            dtype=interaction_update.dtype,
+                        )
+                    else:
+                        scale = scale.to(device=output.device, dtype=interaction_update.dtype)
+                    while scale.dim() < interaction_term.dim():
+                        scale = scale.unsqueeze(-1)
+                    if scale.size(-1) != 1:
+                        scale = scale[..., :1]
+                    interaction_term = scale * interaction_term
+            elif isinstance(interaction_override, torch.Tensor):
                 interaction_scale = interaction_override.to(device=output.device, dtype=interaction_update.dtype)
+                while interaction_scale.dim() < interaction_term.dim():
+                    interaction_scale = interaction_scale.unsqueeze(-1)
+                if interaction_scale.size(-1) != 1:
+                    interaction_scale = interaction_scale[..., :1]
+                interaction_term = interaction_scale * interaction_term
             else:
-                interaction_scale = torch.tensor(
-                    float(interaction_override),
-                    device=output.device,
-                    dtype=interaction_update.dtype,
-                )
-            while interaction_scale.dim() < interaction_update.dim():
-                interaction_scale = interaction_scale.unsqueeze(-1)
-            if interaction_scale.size(-1) != 1:
-                interaction_scale = interaction_scale[..., :1]
-            output = output + (interaction_scale * interaction_update).to(output.dtype)
+                interaction_term = float(interaction_override) * interaction_term
+
+            output = output + interaction_term.to(output.dtype)
 
         return output
 

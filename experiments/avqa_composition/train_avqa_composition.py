@@ -743,7 +743,7 @@ def _get_ttc_interaction_layers(
 
 def _set_runtime_interaction_overrides(
     model: SAFEModel,
-    overrides: Optional[Dict[int, torch.Tensor]],
+    overrides: Optional[Dict[int, Any]],
 ) -> None:
     fusion_adapter = getattr(model, "fusion_adapter", None)
     if fusion_adapter is None or not hasattr(fusion_adapter, "set_runtime_interaction_overrides"):
@@ -756,6 +756,106 @@ def _clear_runtime_interaction_overrides(model: SAFEModel) -> None:
     if fusion_adapter is None or not hasattr(fusion_adapter, "clear_runtime_interaction_overrides"):
         return
     fusion_adapter.clear_runtime_interaction_overrides()
+
+
+def _make_ttc_frozen_gate_tensors(
+    gate_params: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    return {
+        key: value.detach()
+        for key, value in gate_params.items()
+    }
+
+
+def _build_ttc_interaction_params(
+    interaction_layers: Sequence[int],
+    hidden_size: int,
+    device: torch.device,
+    args: argparse.Namespace,
+) -> Dict[int, Dict[str, torch.nn.Parameter]]:
+    module_type = str(getattr(args, "ttc_interaction_module", "diag")).strip().lower()
+    params: Dict[int, Dict[str, torch.nn.Parameter]] = {}
+    for layer in interaction_layers:
+        if module_type == "scalar":
+            params[int(layer)] = {
+                "scale": torch.nn.Parameter(
+                    torch.tensor(float(args.ttc_interaction_init), device=device, dtype=torch.float32)
+                )
+            }
+        else:
+            params[int(layer)] = {
+                "scale": torch.nn.Parameter(
+                    torch.tensor(1.0, device=device, dtype=torch.float32)
+                ),
+                "diag": torch.nn.Parameter(
+                    torch.full(
+                        (int(hidden_size),),
+                        float(getattr(args, "ttc_interaction_diag_init", 0.0)),
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                ),
+            }
+    return params
+
+
+def _flatten_ttc_interaction_params(
+    interaction_params: Dict[int, Dict[str, torch.nn.Parameter]],
+) -> List[torch.nn.Parameter]:
+    flat: List[torch.nn.Parameter] = []
+    for per_layer in interaction_params.values():
+        flat.extend(list(per_layer.values()))
+    return flat
+
+
+def _runtime_ttc_interaction_overrides(
+    interaction_params: Dict[int, Dict[str, torch.Tensor]],
+    args: argparse.Namespace,
+) -> Dict[int, Dict[str, torch.Tensor]]:
+    module_type = str(getattr(args, "ttc_interaction_module", "diag")).strip().lower()
+    overrides: Dict[int, Dict[str, torch.Tensor]] = {}
+    for layer, per_layer in interaction_params.items():
+        row: Dict[str, torch.Tensor] = {"mode": module_type}  # type: ignore[assignment]
+        if "scale" in per_layer:
+            row["scale"] = per_layer["scale"]
+        if module_type == "diag" and "diag" in per_layer:
+            row["diag"] = per_layer["diag"]
+        overrides[int(layer)] = row
+    return overrides
+
+
+def _interaction_layer_grad_norms(
+    interaction_params: Dict[int, Dict[str, torch.nn.Parameter]],
+) -> Dict[int, float]:
+    out: Dict[int, float] = {}
+    for layer, per_layer in interaction_params.items():
+        norms: List[float] = []
+        for param in per_layer.values():
+            if param.grad is None:
+                continue
+            grad = param.grad.detach()
+            norms.append(float(grad.norm().item()) / math.sqrt(float(max(1, grad.numel()))))
+        if norms:
+            out[int(layer)] = sum(norms) / float(len(norms))
+    return out
+
+
+def _summarize_interaction_params(
+    interaction_params: Dict[int, Dict[str, torch.nn.Parameter]],
+    args: argparse.Namespace,
+) -> Dict[int, Dict[str, float]]:
+    module_type = str(getattr(args, "ttc_interaction_module", "diag")).strip().lower()
+    summary: Dict[int, Dict[str, float]] = {}
+    for layer, per_layer in interaction_params.items():
+        row: Dict[str, float] = {}
+        if "scale" in per_layer:
+            row["scale"] = float(per_layer["scale"].detach().item())
+        if module_type == "diag" and "diag" in per_layer:
+            diag = torch.tanh(per_layer["diag"].detach())
+            row["diag_mean_abs"] = float(diag.abs().mean().item())
+            row["diag_max_abs"] = float(diag.abs().max().item())
+        summary[int(layer)] = row
+    return summary
 
 
 @torch.no_grad()
@@ -799,9 +899,9 @@ def _compute_modality_entropy(
 def _compute_ttc_loss(
     entropy: torch.Tensor,
     args: argparse.Namespace,
-    gate_params: Dict[str, torch.nn.Parameter],
+    gate_params: Dict[str, torch.Tensor],
     best_single_entropy: Optional[float],
-    interaction_params: Optional[Dict[int, torch.nn.Parameter]] = None,
+    interaction_params: Optional[Any] = None,
 ) -> torch.Tensor:
     gate_reg = torch.stack([(param - 1.0).pow(2) for param in gate_params.values()]).mean()
     loss = entropy + float(args.ttc_gate_reg_lambda) * gate_reg
@@ -817,7 +917,23 @@ def _compute_ttc_loss(
         )
 
     if interaction_params:
-        interaction_reg = torch.stack([param.pow(2) for param in interaction_params.values()]).mean()
+        interaction_tensors: List[torch.Tensor] = []
+        if isinstance(interaction_params, dict):
+            for value in interaction_params.values():
+                if torch.is_tensor(value):
+                    interaction_tensors.append(value)
+                elif isinstance(value, dict):
+                    for inner in value.values():
+                        if torch.is_tensor(inner):
+                            interaction_tensors.append(inner)
+        elif isinstance(interaction_params, (list, tuple)):
+            for value in interaction_params:
+                if torch.is_tensor(value):
+                    interaction_tensors.append(value)
+        if interaction_tensors:
+            interaction_reg = torch.stack([param.pow(2).mean() for param in interaction_tensors]).mean()
+        else:
+            interaction_reg = entropy.new_zeros(())
         loss = loss + float(args.ttc_interaction_reg_lambda) * interaction_reg
 
     return loss
@@ -1134,10 +1250,11 @@ def _optimize_ttc_gate_overrides(
             stats["stage_b_method"] = "gradient" if search_mode == "gradient" else "hybrid"
 
         gate_grad_ratios: Dict[int, float] = {}
-        interaction_params: Dict[int, torch.nn.Parameter] = {}
+        interaction_params: Dict[int, Dict[str, torch.nn.Parameter]] = {}
         interaction_optimizer = None
         if getattr(args, "ttc_interaction_enable", False) and interaction_layers:
-            _set_runtime_gate_overrides(model, gate_params)
+            frozen_gate_params = _make_ttc_frozen_gate_tensors(gate_params)
+            _set_runtime_gate_overrides(model, frozen_gate_params)
             _clear_runtime_interaction_overrides(model)
             probe_entropy = _forward_joint_entropy(
                 model=model,
@@ -1152,7 +1269,7 @@ def _optimize_ttc_gate_overrides(
                 probe_loss = _compute_ttc_loss(
                     entropy=probe_entropy,
                     args=args,
-                    gate_params=gate_params,
+                    gate_params=frozen_gate_params,
                     best_single_entropy=best_single_entropy,
                 )
                 probe_loss.backward()
@@ -1168,13 +1285,16 @@ def _optimize_ttc_gate_overrides(
                 for param in gate_params.values():
                     param.grad = None
 
-                interaction_params = {
-                    int(layer): torch.nn.Parameter(
-                        torch.tensor(float(args.ttc_interaction_init), device=device, dtype=torch.float32)
-                    )
-                    for layer in interaction_layers
-                }
-                _set_runtime_interaction_overrides(model, interaction_params)
+                interaction_params = _build_ttc_interaction_params(
+                    interaction_layers=interaction_layers,
+                    hidden_size=int(getattr(model, "llm_hidden_size", 4096)),
+                    device=device,
+                    args=args,
+                )
+                _set_runtime_interaction_overrides(
+                    model,
+                    _runtime_ttc_interaction_overrides(interaction_params, args),
+                )
                 interaction_probe_entropy = _forward_joint_entropy(
                     model=model,
                     both_inputs=both_inputs,
@@ -1187,16 +1307,18 @@ def _optimize_ttc_gate_overrides(
                     interaction_probe_loss = _compute_ttc_loss(
                         entropy=interaction_probe_entropy,
                         args=args,
-                        gate_params=gate_params,
+                        gate_params=frozen_gate_params,
                         best_single_entropy=best_single_entropy,
                         interaction_params=interaction_params,
                     )
                     interaction_probe_loss.backward()
-                    for layer, param in interaction_params.items():
-                        grad_norm = float(param.grad.detach().norm().item()) if param.grad is not None else 0.0
+                    interaction_grad_norms = _interaction_layer_grad_norms(interaction_params)
+                    for layer, grad_norm in interaction_grad_norms.items():
                         ratio = grad_norm / max(gate_grad_by_layer.get(int(layer), 0.0), 1e-8)
                         gate_grad_ratios[int(layer)] = ratio
-                        param.grad = None
+                    for per_layer in interaction_params.values():
+                        for param in per_layer.values():
+                            param.grad = None
                     alive_count = sum(1 for ratio in gate_grad_ratios.values() if ratio > 0.1)
                     weak_count = sum(1 for ratio in gate_grad_ratios.values() if ratio >= 0.01)
                     stage_c_allowed = (
@@ -1213,7 +1335,7 @@ def _optimize_ttc_gate_overrides(
                         stats["interaction_failure_mode"] = "dead_interaction_gradients"
                     if stage_c_allowed:
                         interaction_optimizer = AdamW(
-                            interaction_params.values(),
+                            _flatten_ttc_interaction_params(interaction_params),
                             lr=float(args.ttc_interaction_lr),
                             weight_decay=0.0,
                         )
@@ -1222,10 +1344,14 @@ def _optimize_ttc_gate_overrides(
                 _clear_runtime_interaction_overrides(model)
 
         if interaction_optimizer is not None and interaction_params:
-            _set_runtime_gate_overrides(model, gate_params)
+            frozen_gate_params = _make_ttc_frozen_gate_tensors(gate_params)
+            _set_runtime_gate_overrides(model, frozen_gate_params)
             for _ in range(max(0, int(args.ttc_interaction_steps))):
                 interaction_optimizer.zero_grad(set_to_none=True)
-                _set_runtime_interaction_overrides(model, interaction_params)
+                _set_runtime_interaction_overrides(
+                    model,
+                    _runtime_ttc_interaction_overrides(interaction_params, args),
+                )
                 entropy = _forward_joint_entropy(
                     model=model,
                     both_inputs=both_inputs,
@@ -1239,18 +1365,24 @@ def _optimize_ttc_gate_overrides(
                 loss = _compute_ttc_loss(
                     entropy=entropy,
                     args=args,
-                    gate_params=gate_params,
+                    gate_params=frozen_gate_params,
                     best_single_entropy=best_single_entropy,
                     interaction_params=interaction_params,
                 )
                 loss.backward()
                 interaction_optimizer.step()
                 with torch.no_grad():
-                    for param in interaction_params.values():
-                        param.clamp_(
-                            float(args.ttc_interaction_min),
-                            float(args.ttc_interaction_max),
-                        )
+                    for per_layer in interaction_params.values():
+                        if "scale" in per_layer:
+                            per_layer["scale"].clamp_(
+                                float(args.ttc_interaction_min),
+                                float(args.ttc_interaction_max),
+                            )
+                        if "diag" in per_layer:
+                            per_layer["diag"].clamp_(
+                                float(args.ttc_interaction_diag_min),
+                                float(args.ttc_interaction_diag_max),
+                            )
             stats["compute_budget_forward_equiv"] = float(
                 2 + max(0, int(args.ttc_steps)) + max(0, int(args.ttc_interaction_steps))
             )
@@ -1258,7 +1390,10 @@ def _optimize_ttc_gate_overrides(
         with torch.no_grad():
             _set_runtime_gate_overrides(model, gate_params)
             if interaction_params:
-                _set_runtime_interaction_overrides(model, interaction_params)
+                _set_runtime_interaction_overrides(
+                    model,
+                    _runtime_ttc_interaction_overrides(interaction_params, args),
+                )
             final_outputs = model.generate(
                 text=None,
                 input_ids=both_inputs["input_ids"],
@@ -1296,9 +1431,7 @@ def _optimize_ttc_gate_overrides(
             if stage_b_entropy is not None and stats["final_entropy"] is not None:
                 stats["interaction_gain_over_stage_b"] = float(stage_b_entropy - stats["final_entropy"])
             if interaction_params:
-                stats["interaction_values"] = {
-                    int(key): float(param.detach().item()) for key, param in interaction_params.items()
-                }
+                stats["interaction_values"] = _summarize_interaction_params(interaction_params, args)
                 stats["stage_c_lower_bound"] = True
 
         return pred, stats
@@ -3754,19 +3887,27 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ttc-stability-perturb", type=float, default=0.1,
                    help="Relative gate perturbation used for the TTC stability check")
     p.add_argument("--ttc-interaction-enable", action="store_true",
-                   help="Enable stage-C TTC: freeze gate solution and optimize one interaction scalar per shared layer")
+                   help="Enable stage-C TTC: freeze gate solution and optimize a joint-only interaction module per shared layer")
+    p.add_argument("--ttc-interaction-module", type=str, default="diag", choices=["scalar", "diag"],
+                   help="Stage-C interaction module type: scalar or diagonal joint-only sidecar")
     p.add_argument("--ttc-interaction-steps", type=int, default=5,
                    help="Number of stage-C interaction optimization steps")
     p.add_argument("--ttc-interaction-lr", type=float, default=5e-2,
-                   help="Learning rate for stage-C interaction scalars")
+                   help="Learning rate for stage-C interaction parameters")
     p.add_argument("--ttc-interaction-init", type=float, default=0.0,
                    help="Initial value for stage-C interaction scalars")
     p.add_argument("--ttc-interaction-min", type=float, default=-0.5,
-                   help="Minimum clamp for stage-C interaction scalars")
+                   help="Minimum clamp for stage-C interaction scalar scales")
     p.add_argument("--ttc-interaction-max", type=float, default=0.5,
-                   help="Maximum clamp for stage-C interaction scalars")
+                   help="Maximum clamp for stage-C interaction scalar scales")
+    p.add_argument("--ttc-interaction-diag-init", type=float, default=0.0,
+                   help="Initial value for diagonal stage-C interaction parameters")
+    p.add_argument("--ttc-interaction-diag-min", type=float, default=-0.5,
+                   help="Minimum clamp for diagonal stage-C interaction parameters")
+    p.add_argument("--ttc-interaction-diag-max", type=float, default=0.5,
+                   help="Maximum clamp for diagonal stage-C interaction parameters")
     p.add_argument("--ttc-interaction-reg-lambda", type=float, default=0.05,
-                   help="Quadratic penalty on stage-C interaction scalars")
+                   help="Quadratic penalty on stage-C interaction parameters")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", type=str, default="SAFE-AVQA-Composition")
     p.add_argument("--wandb-run-name", type=str, default=None)
@@ -3860,11 +4001,15 @@ def main() -> None:
                     "ttc_stability_threshold": args.ttc_stability_threshold,
                     "ttc_stability_perturb": args.ttc_stability_perturb,
                     "ttc_interaction_enable": args.ttc_interaction_enable,
+                    "ttc_interaction_module": args.ttc_interaction_module,
                     "ttc_interaction_steps": args.ttc_interaction_steps,
                     "ttc_interaction_lr": args.ttc_interaction_lr,
                     "ttc_interaction_init": args.ttc_interaction_init,
                     "ttc_interaction_min": args.ttc_interaction_min,
                     "ttc_interaction_max": args.ttc_interaction_max,
+                    "ttc_interaction_diag_init": args.ttc_interaction_diag_init,
+                    "ttc_interaction_diag_min": args.ttc_interaction_diag_min,
+                    "ttc_interaction_diag_max": args.ttc_interaction_diag_max,
                     "ttc_interaction_reg_lambda": args.ttc_interaction_reg_lambda,
                     "compat_reg_enable": args.compat_reg_enable,
                     "compat_reg_lambda": args.compat_reg_lambda,

@@ -62,6 +62,7 @@ OUTPUT_DIR="$SIMPLE_INTER_OUT" \
 TTC_SEARCH_MODE=hybrid \
 TTC_STABILITY_ENABLE=1 \
 TTC_INTERACTION_ENABLE=1 \
+TTC_INTERACTION_MODULE=diag \
   "$SAFE_ROOT/experiments/avqa_composition/scripts/eval_composition_ttc_simple.sh"
 COMPOSE_AUDIO_CKPT="$AUDIO_OUT/best_model.pt" \
 COMPOSE_VISION_CKPT="$VISION_OUT/best_model.pt" \
@@ -81,4 +82,5 @@ OUTPUT_DIR="$COMPLEX_INTER_OUT" \
 TTC_SEARCH_MODE=hybrid \
 TTC_STABILITY_ENABLE=1 \
 TTC_INTERACTION_ENABLE=1 \
+TTC_INTERACTION_MODULE=diag \
   "$SAFE_ROOT/experiments/avqa_composition/scripts/eval_composition_ttc_complex.sh"
