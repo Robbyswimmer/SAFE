@@ -995,6 +995,14 @@ def _optimize_ttc_gate_overrides(
     )
     audio_tokens = both_inputs.pop("audio_tokens", None)
     audio_mask = both_inputs.pop("audio_attention_mask", None)
+    if torch.is_tensor(audio_tokens):
+        audio_tokens = audio_tokens.detach()
+    if torch.is_tensor(audio_mask):
+        audio_mask = audio_mask.detach()
+    for key in ("input_ids", "attention_mask", "pixel_values"):
+        value = both_inputs.get(key)
+        if torch.is_tensor(value):
+            both_inputs[key] = value.detach()
 
     base_entropy = _compute_modality_entropy(
         model, batch, device, modality="both", args=args, active_fusion_layers=active_fusion_layers
