@@ -64,6 +64,55 @@ def normalize_answer(text: str) -> str:
     return " ".join(text.split())
 
 
+DEFAULT_TEXT_PROMPT_PREFIX = (
+    "Use only the question text and general world knowledge. "
+    "Do not assume access to audio or visual evidence."
+)
+DEFAULT_AUDIO_PROMPT_PREFIX = (
+    "Use only auditory evidence from the provided audio. "
+    "Ignore visual priors and answer from what you hear, such as timbre, pitch, rhythm, or source sound."
+)
+DEFAULT_IMAGE_PROMPT_PREFIX = (
+    "Use only visual evidence from the provided image. "
+    "Ignore audio priors and answer from what you see, such as object appearance, motion, count, or scene cues."
+)
+DEFAULT_BOTH_PROMPT_PREFIX = (
+    "Combine auditory and visual evidence. "
+    "Use sound for audio properties, use vision for visual properties, and resolve conflicts by requiring consistency across both modalities."
+)
+
+
+def build_modality_aware_questions(
+    questions: Union[str, Sequence[str]],
+    modality: str,
+    args: argparse.Namespace,
+) -> Union[str, List[str]]:
+    if not getattr(args, "modality_aware_prompts", False):
+        return questions
+
+    if isinstance(questions, str):
+        q_list = [questions]
+        single = True
+    else:
+        q_list = list(questions)
+        single = False
+
+    modality_key = str(modality).strip().lower()
+    if modality_key == "audio":
+        prefix = str(getattr(args, "audio_prompt_prefix", DEFAULT_AUDIO_PROMPT_PREFIX))
+    elif modality_key == "image":
+        prefix = str(getattr(args, "image_prompt_prefix", DEFAULT_IMAGE_PROMPT_PREFIX))
+    elif modality_key == "both":
+        prefix = str(getattr(args, "both_prompt_prefix", DEFAULT_BOTH_PROMPT_PREFIX))
+    else:
+        prefix = str(getattr(args, "text_prompt_prefix", DEFAULT_TEXT_PROMPT_PREFIX))
+
+    prompted = [f"{prefix}\n{q}" for q in q_list]
+    if single:
+        return prompted[0]
+    return prompted
+
+
 # Known MUSIC-AVQA answer vocabulary (from official dataset)
 AVQA_ANSWER_VOCAB = [
     "yes", "no",
@@ -1004,7 +1053,7 @@ def _compute_modality_entropy(
 ) -> Optional[float]:
     mm = resolve_modality_batch(batch, modality)
     inputs = model.prepare_multimodal_inputs(
-        text=batch["questions"],
+        text=build_modality_aware_questions(batch["questions"], modality, args),
         images=mm["images"],
         audio=mm["audio"],
         answers=None,
@@ -1237,7 +1286,7 @@ def _optimize_ttc_gate_overrides(
         raise RuntimeError("TTC requested but no audio/vision fusion gates are available.")
 
     both_inputs = model.prepare_multimodal_inputs(
-        text=batch["questions"],
+        text=build_modality_aware_questions(batch["questions"], "both", args),
         images=batch["images"],
         audio=batch["audio"],
         answers=None,
@@ -1616,7 +1665,7 @@ def _generate_eval_prediction(
 ) -> str:
     mm = resolve_modality_batch(batch, modality)
     inputs = model.prepare_multimodal_inputs(
-        text=batch["questions"],
+        text=build_modality_aware_questions(batch["questions"], modality, args),
         images=mm["images"],
         audio=mm["audio"],
         answers=None,
@@ -1824,7 +1873,7 @@ def collect_audio_shift_subspaces(
     for batch in dataloader:
         mm = resolve_modality_batch(batch, "audio")
         inputs = model.prepare_multimodal_inputs(
-            text=batch["questions"],
+            text=build_modality_aware_questions(batch["questions"], "audio", args),
             images=mm["images"],
             audio=mm["audio"],
             answers=batch["answers"],
@@ -2018,7 +2067,7 @@ def _collect_rkca_token_bank(
         mm = resolve_modality_batch(batch, resolve_mod)
         try:
             inputs = model.prepare_multimodal_inputs(
-                text=batch["questions"],
+                text=build_modality_aware_questions(batch["questions"], resolve_mod, args),
                 images=mm["images"],
                 audio=mm["audio"],
                 device=device,
@@ -2120,7 +2169,7 @@ def collect_vision_shift_subspaces(
     for batch in dataloader:
         mm = resolve_modality_batch(batch, "both")
         inputs = model.prepare_multimodal_inputs(
-            text=batch["questions"],
+            text=build_modality_aware_questions(batch["questions"], "both", args),
             images=mm["images"],
             audio=mm["audio"],
             answers=batch["answers"],
@@ -3005,7 +3054,7 @@ def train_epoch(
                 print(f"  [debug] batch 0: {image_ok}/{len(mm['images'])} samples have images", flush=True)
 
         inputs = model.prepare_multimodal_inputs(
-            text=batch["questions"],
+            text=build_modality_aware_questions(batch["questions"], args.train_modality, args),
             images=mm["images"],
             audio=mm["audio"],
             answers=batch["answers"],
@@ -3505,7 +3554,7 @@ def evaluate(
 
         mm = resolve_modality_batch(batch, modality)
         inputs = model.prepare_multimodal_inputs(
-            text=batch["questions"],
+            text=build_modality_aware_questions(batch["questions"], modality, args),
             images=mm["images"],
             audio=mm["audio"],
             answers=None,
@@ -3808,6 +3857,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--train-modality", type=str, default="both", choices=["audio", "image", "both", "interleaved", "interleaved_vision_first"])
     p.add_argument("--eval-modalities", type=str, default="both,audio,image")
     p.add_argument("--fusion-gate", type=float, default=0.2)
+    p.add_argument("--modality-aware-prompts", action="store_true",
+                   help="Prepend modality-specific instructions so audio/image/both train against different prompt contexts")
+    p.add_argument("--text-prompt-prefix", type=str, default=DEFAULT_TEXT_PROMPT_PREFIX)
+    p.add_argument("--audio-prompt-prefix", type=str, default=DEFAULT_AUDIO_PROMPT_PREFIX)
+    p.add_argument("--image-prompt-prefix", type=str, default=DEFAULT_IMAGE_PROMPT_PREFIX)
+    p.add_argument("--both-prompt-prefix", type=str, default=DEFAULT_BOTH_PROMPT_PREFIX)
     p.add_argument("--gate-warmup-steps", type=int, default=0,
                    help="Linearly warm fusion gate from 0 to --fusion-gate over N optimizer steps")
     p.add_argument("--bottleneck-dim", type=int, default=None,

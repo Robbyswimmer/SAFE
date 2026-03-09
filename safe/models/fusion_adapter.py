@@ -715,19 +715,22 @@ class AffineCompositionOperator(nn.Module):
             return sample.new_zeros(1, 1, self.hidden_size)
 
         example = next(iter(modality_updates.values()))
-        composed = torch.zeros_like(example)
+        orig_dtype = example.dtype
+        param_dtype = next(iter(self.diag_scales.values())).dtype
+        composed = torch.zeros_like(example, dtype=param_dtype)
         for modality, update in modality_updates.items():
             if modality not in self.diag_scales:
                 continue
-            scale = self.diag_scales[modality].to(device=update.device, dtype=update.dtype).view(1, 1, -1)
-            transformed = update * scale
+            update_t = update.to(dtype=param_dtype)
+            scale = self.diag_scales[modality].to(device=update.device, dtype=param_dtype).view(1, 1, -1)
+            transformed = update_t * scale
             if self.rank > 0 and modality in self.down and modality in self.up:
-                transformed = transformed + self.up[modality](self.down[modality](update))
+                transformed = transformed + self.up[modality](self.down[modality](update_t))
             composed = composed + transformed
 
         if self.bias is not None:
-            composed = composed + self.bias.to(device=composed.device, dtype=composed.dtype).view(1, 1, -1)
-        return composed
+            composed = composed + self.bias.to(device=composed.device, dtype=param_dtype).view(1, 1, -1)
+        return composed.to(orig_dtype)
 
 
 class FixedPointCompositionOperator(nn.Module):
@@ -794,14 +797,17 @@ class FixedPointCompositionOperator(nn.Module):
             self.last_summary = None
             return torch.zeros_like(hidden_states)
 
-        z = self.state_in(hidden_states)
+        orig_dtype = hidden_states.dtype
+        module_dtype = self.state_in.weight.dtype
+        hidden_states_t = hidden_states.to(dtype=module_dtype)
+        z = self.state_in(hidden_states_t)
         active_modalities = 0
         projected_updates: Dict[str, torch.Tensor] = {}
         for modality, update in modality_updates.items():
             if modality not in self.modality_inputs:
                 continue
             writer = self.modality_inputs[modality]
-            projected_updates[modality] = writer(update)
+            projected_updates[modality] = writer(update.to(dtype=module_dtype))
             active_modalities += 1
 
         if not projected_updates or active_modalities <= 0:
@@ -830,7 +836,7 @@ class FixedPointCompositionOperator(nn.Module):
             step_delta_norms.append(float((z - z_prev).float().norm(dim=-1).mean().item()))
 
         delta = self.readout(z)
-        scale = torch.tanh(self.output_scale).to(device=delta.device, dtype=delta.dtype)
+        scale = torch.tanh(self.output_scale).to(device=delta.device, dtype=module_dtype)
         scaled_delta = scale * delta
         self.last_summary = {
             "num_steps": int(self.num_steps),
@@ -841,7 +847,7 @@ class FixedPointCompositionOperator(nn.Module):
             "final_update_norm": float(scaled_delta.float().norm(dim=-1).mean().item()),
             "output_scale": float(scale.item()),
         }
-        return scaled_delta
+        return scaled_delta.to(orig_dtype)
 
 
 class LoRAFusionAdapter(nn.Module):

@@ -55,6 +55,11 @@ SLIM_PROJECTOR=${SLIM_PROJECTOR:-1}       # 0 to disable slim projector (default
 BOTTLENECK_DIM=${BOTTLENECK_DIM:-}         # override fusion bottleneck dim (default: 256 from config)
 EVAL_DEBUG_SAMPLES=${EVAL_DEBUG_SAMPLES:-0}
 MAX_ANSWER_TOKENS=${MAX_ANSWER_TOKENS:-16}
+MODALITY_AWARE_PROMPTS=${MODALITY_AWARE_PROMPTS:-0}
+TEXT_PROMPT_PREFIX=${TEXT_PROMPT_PREFIX:-}
+AUDIO_PROMPT_PREFIX=${AUDIO_PROMPT_PREFIX:-}
+IMAGE_PROMPT_PREFIX=${IMAGE_PROMPT_PREFIX:-}
+BOTH_PROMPT_PREFIX=${BOTH_PROMPT_PREFIX:-}
 LAYER_ADDITIVITY_PROBE=${LAYER_ADDITIVITY_PROBE:-1}
 LAYER_PROBE_SAMPLES=${LAYER_PROBE_SAMPLES:-256}
 LAYER_PROBE_EVERY=${LAYER_PROBE_EVERY:-1}
@@ -391,6 +396,23 @@ if [[ "$ICM_ENABLE" == "1" ]]; then
   )
 fi
 
+PROMPT_ARGS=()
+if [[ "$MODALITY_AWARE_PROMPTS" == "1" ]]; then
+  PROMPT_ARGS+=(--modality-aware-prompts)
+  if [[ -n "$TEXT_PROMPT_PREFIX" ]]; then
+    PROMPT_ARGS+=(--text-prompt-prefix "$TEXT_PROMPT_PREFIX")
+  fi
+  if [[ -n "$AUDIO_PROMPT_PREFIX" ]]; then
+    PROMPT_ARGS+=(--audio-prompt-prefix "$AUDIO_PROMPT_PREFIX")
+  fi
+  if [[ -n "$IMAGE_PROMPT_PREFIX" ]]; then
+    PROMPT_ARGS+=(--image-prompt-prefix "$IMAGE_PROMPT_PREFIX")
+  fi
+  if [[ -n "$BOTH_PROMPT_PREFIX" ]]; then
+    PROMPT_ARGS+=(--both-prompt-prefix "$BOTH_PROMPT_PREFIX")
+  fi
+fi
+
 COMPAT_ICM_ARGS=(
   --compat-icm-noharm-start-step "$COMPAT_ICM_NOHARM_START_STEP"
   --compat-icm-util-lambda "$COMPAT_ICM_UTIL_LAMBDA"
@@ -425,6 +447,7 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --eval-modalities "$EVAL_MODALITIES" \
   --max-answer-tokens "$MAX_ANSWER_TOKENS" \
   --freeze-audio-encoder \
+  "${PROMPT_ARGS[@]}" \
   "${SLIM_ARGS[@]}" \
   "${BOTTLENECK_ARGS[@]}" \
   "${INIT_ARGS[@]}" \
