@@ -421,6 +421,68 @@ def build_optimizer(model: SAFEModel, args: argparse.Namespace) -> AdamW:
     return AdamW(param_groups, lr=args.learning_rate, betas=(0.9, 0.95), eps=1e-8)
 
 
+def configure_composition_calibration_trainables(
+    model: SAFEModel,
+    mode: str,
+) -> Dict[str, int]:
+    mode = str(mode).strip().lower()
+
+    for _, param in model.named_parameters():
+        param.requires_grad = False
+
+    counts: Dict[str, int] = {
+        "audio_projector": 0,
+        "vision_projector": 0,
+        "fusion_adapter": 0,
+        "layer_gates": 0,
+        "interaction_mixer": 0,
+        "kv_adapters": 0,
+        "audio_token_embeddings": 0,
+    }
+
+    def _enable_module(module: Optional[torch.nn.Module], key: str) -> None:
+        if module is None:
+            return
+        n = 0
+        for param in module.parameters():
+            param.requires_grad = True
+            n += int(param.numel())
+        counts[key] += n
+
+    if mode == "all":
+        _enable_module(getattr(model, "audio_projector", None), "audio_projector")
+        _enable_module(getattr(model, "vision_projector", None), "vision_projector")
+        _enable_module(getattr(model, "fusion_adapter", None), "fusion_adapter")
+        _enable_module(getattr(model, "interaction_mixer", None), "interaction_mixer")
+        _enable_module(getattr(model, "kv_adapters", None), "kv_adapters")
+        _enable_module(getattr(model, "audio_token_embeddings", None), "audio_token_embeddings")
+    elif mode == "fusion":
+        _enable_module(getattr(model, "fusion_adapter", None), "fusion_adapter")
+    elif mode == "projectors":
+        _enable_module(getattr(model, "audio_projector", None), "audio_projector")
+        _enable_module(getattr(model, "vision_projector", None), "vision_projector")
+    elif mode == "projectors_fusion":
+        _enable_module(getattr(model, "audio_projector", None), "audio_projector")
+        _enable_module(getattr(model, "vision_projector", None), "vision_projector")
+        _enable_module(getattr(model, "fusion_adapter", None), "fusion_adapter")
+    elif mode == "gates":
+        fusion_adapter = getattr(model, "fusion_adapter", None)
+        layer_gates = getattr(fusion_adapter, "layer_gates", None) if fusion_adapter is not None else None
+        if layer_gates is not None:
+            for _, gate_param in layer_gates.items():
+                gate_param.requires_grad = True
+                counts["layer_gates"] += int(gate_param.numel())
+    elif mode == "interaction_mixer":
+        _enable_module(getattr(model, "interaction_mixer", None), "interaction_mixer")
+    else:
+        raise ValueError(
+            f"Unsupported compose_calibration_trainable mode: {mode}. "
+            "Expected one of: all, fusion, projectors, projectors_fusion, gates, interaction_mixer"
+        )
+
+    return counts
+
+
 def build_lr_scheduler(
     optimizer: AdamW,
     total_update_steps: int,
@@ -3692,6 +3754,11 @@ def parse_args() -> argparse.Namespace:
                    help="Path to audio-only adapter checkpoint for composition eval")
     p.add_argument("--compose-vision-ckpt", type=Path, default=None,
                    help="Path to vision-only adapter checkpoint for composition eval")
+    p.add_argument("--compose-calibration-enable", action="store_true",
+                   help="Load composed unimodal checkpoints and continue training on paired data instead of eval-only")
+    p.add_argument("--compose-calibration-trainable", type=str, default="fusion",
+                   choices=["all", "fusion", "projectors", "projectors_fusion", "gates", "interaction_mixer"],
+                   help="Parameter group to calibrate after loading composed unimodal checkpoints")
     p.add_argument("--init-audio-ckpt", type=Path, default=None,
                    help="Optional audio adapter checkpoint to initialize model before training")
     p.add_argument("--init-vision-ckpt", type=Path, default=None,
@@ -3848,6 +3915,10 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--max-samples", type=int, default=0,
                    help="Limit train/val to N samples for quick sanity runs (0=unlimited)")
+    p.add_argument("--train-max-samples", type=int, default=0,
+                   help="Limit only the training set to N samples (0=unlimited)")
+    p.add_argument("--val-max-samples", type=int, default=0,
+                   help="Limit only the validation set to N samples (0=unlimited)")
     p.add_argument("--eval-debug-samples", type=int, default=0,
                    help="Print first N eval predictions per run for decode/debug checks")
     p.add_argument("--layer-additivity-probe", action="store_true",
@@ -3929,6 +4000,12 @@ def main() -> None:
         train_ds.rows = train_ds.rows[:args.max_samples]
         val_ds.rows = val_ds.rows[:args.max_samples]
         print(f"[info] --max-samples={args.max_samples}: truncated datasets")
+    if args.train_max_samples > 0:
+        train_ds.rows = train_ds.rows[:args.train_max_samples]
+        print(f"[info] --train-max-samples={args.train_max_samples}: truncated train set", flush=True)
+    if args.val_max_samples > 0:
+        val_ds.rows = val_ds.rows[:args.val_max_samples]
+        print(f"[info] --val-max-samples={args.val_max_samples}: truncated val set", flush=True)
     print(f"[info] train_samples={len(train_ds)} val_samples={len(val_ds)}")
     print(f"[info] train_media_stats={train_ds.media_stats}")
     print(f"[info] val_media_stats={val_ds.media_stats}")
@@ -4067,6 +4144,10 @@ def main() -> None:
                     "init_vision_ckpt": str(args.init_vision_ckpt) if args.init_vision_ckpt else None,
                     "compose_audio_ckpt": str(args.compose_audio_ckpt) if args.compose_audio_ckpt else None,
                     "compose_vision_ckpt": str(args.compose_vision_ckpt) if args.compose_vision_ckpt else None,
+                    "compose_calibration_enable": args.compose_calibration_enable,
+                    "compose_calibration_trainable": args.compose_calibration_trainable,
+                    "train_max_samples": args.train_max_samples,
+                    "val_max_samples": args.val_max_samples,
                 },
             )
 
@@ -4150,8 +4231,25 @@ def main() -> None:
     if args.compose_audio_ckpt and args.compose_vision_ckpt:
         model.load_modality_adapters(str(args.compose_audio_ckpt), "audio")
         model.load_modality_adapters(str(args.compose_vision_ckpt), "vision")
-        composition_eval_only = True
-        print("[composition] Loaded both modality checkpoints — running eval-only", flush=True)
+        composition_eval_only = not bool(getattr(args, "compose_calibration_enable", False))
+        if composition_eval_only:
+            print("[composition] Loaded both modality checkpoints — running eval-only", flush=True)
+        else:
+            print(
+                "[composition] Loaded both modality checkpoints — running paired calibration "
+                f"with trainable={args.compose_calibration_trainable}",
+                flush=True,
+            )
+            calib_counts = configure_composition_calibration_trainables(
+                model,
+                mode=args.compose_calibration_trainable,
+            )
+            calib_total = sum(calib_counts.values())
+            print(
+                f"[composition-calibration] trainable_total={calib_total:,} "
+                + " ".join(f"{k}={v:,}" for k, v in calib_counts.items() if v > 0),
+                flush=True,
+            )
 
     if args.train_gates_only:
         gate_param_count = 0
@@ -4809,6 +4907,10 @@ def main() -> None:
         "best_modality": args.train_modality,
         "ttc_enabled": bool(args.ttc_enable),
         "ttc_objective": str(args.ttc_objective),
+        "compose_calibration_enabled": bool(args.compose_calibration_enable),
+        "compose_calibration_trainable": str(args.compose_calibration_trainable),
+        "train_max_samples": int(args.train_max_samples),
+        "val_max_samples": int(args.val_max_samples),
         "history_path": str(args.output_dir / "history.json"),
     }
     with (args.output_dir / "results.json").open("w", encoding="utf-8") as f:
