@@ -6,7 +6,7 @@
 #SBATCH --mem=96G
 #SBATCH --cpus-per-task=8
 #SBATCH -p gpu
-# pass --gres=gpu:1 at submit time
+#SBATCH --gres=gpu:1
 
 # RKCA experiment: Input token concatenation (no mid-layer fusion) on Qwen3-8B
 # Modality tokens (audio, vision) are prepended to the text embedding sequence.
@@ -48,6 +48,11 @@ WANDB_TAGS=${WANDB_TAGS:-rkca,composition,concat,interleaved}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
 EVAL_DEBUG_SAMPLES=${EVAL_DEBUG_SAMPLES:-0}
 MAX_ANSWER_TOKENS=${MAX_ANSWER_TOKENS:-16}
+MODALITY_AWARE_PROMPTS=${MODALITY_AWARE_PROMPTS:-0}
+TEXT_PROMPT_PREFIX=${TEXT_PROMPT_PREFIX:-}
+AUDIO_PROMPT_PREFIX=${AUDIO_PROMPT_PREFIX:-}
+IMAGE_PROMPT_PREFIX=${IMAGE_PROMPT_PREFIX:-}
+BOTH_PROMPT_PREFIX=${BOTH_PROMPT_PREFIX:-}
 
 # Qwen-specific env vars
 export SAFE_QWEN_QUANT=none
@@ -115,6 +120,23 @@ if [[ "$EVAL_DEBUG_SAMPLES" != "0" ]]; then
   EVAL_DEBUG_ARGS+=(--eval-debug-samples "$EVAL_DEBUG_SAMPLES")
 fi
 
+PROMPT_ARGS=()
+if [[ "$MODALITY_AWARE_PROMPTS" == "1" ]]; then
+  PROMPT_ARGS+=(--modality-aware-prompts)
+  if [[ -n "$TEXT_PROMPT_PREFIX" ]]; then
+    PROMPT_ARGS+=(--text-prompt-prefix "$TEXT_PROMPT_PREFIX")
+  fi
+  if [[ -n "$AUDIO_PROMPT_PREFIX" ]]; then
+    PROMPT_ARGS+=(--audio-prompt-prefix "$AUDIO_PROMPT_PREFIX")
+  fi
+  if [[ -n "$IMAGE_PROMPT_PREFIX" ]]; then
+    PROMPT_ARGS+=(--image-prompt-prefix "$IMAGE_PROMPT_PREFIX")
+  fi
+  if [[ -n "$BOTH_PROMPT_PREFIX" ]]; then
+    PROMPT_ARGS+=(--both-prompt-prefix "$BOTH_PROMPT_PREFIX")
+  fi
+fi
+
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --model-config "$MODEL_CONFIG" \
@@ -133,6 +155,7 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --max-answer-tokens "$MAX_ANSWER_TOKENS" \
   --freeze-audio-encoder \
   --no-slim-projector \
+  "${PROMPT_ARGS[@]}" \
   "${MAX_SAMPLES_ARGS[@]}" \
   "${EVAL_DEBUG_ARGS[@]}" \
   "${WANDB_ARGS[@]}"
