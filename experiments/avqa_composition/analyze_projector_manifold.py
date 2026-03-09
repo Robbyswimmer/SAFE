@@ -4,8 +4,8 @@ Analyze whether projector tokens land in backbone-compatible, modality-specific 
 
 Primary use case:
   - concat / RKCA checkpoints on MUSIC-AVQA
-  - compare audio projector token summaries to audio-text anchors
-  - compare vision projector token summaries to vision-text anchors
+  - compare audio projector summaries to audio-text anchors built from the same question+answer
+  - compare vision projector summaries to vision-text anchors built from the same question+answer
   - measure role separation, retrieval, linear CKA, and subspace overlap
 """
 
@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -24,17 +23,16 @@ from torch.utils.data import DataLoader, Subset
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 import sys
+
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from experiments.avqa_composition.train_avqa_composition import (  # type: ignore
-    AVQA_ANSWER_VOCAB,
     ManifestAVQADataset,
     build_modality_aware_questions,
     build_model_config,
     collate_avqa,
     extract_answer,
-    parse_args as _unused_parse_args,  # noqa: F401
     resolve_modality_batch,
     set_seed,
 )
@@ -53,10 +51,8 @@ def linear_cka(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> float:
     n = min(int(x.size(0)), int(y.size(0)))
     if n <= 1:
         return 0.0
-    x = x[:n]
-    y = y[:n]
-    x = x - x.mean(dim=0, keepdim=True)
-    y = y - y.mean(dim=0, keepdim=True)
+    x = x[:n] - x[:n].mean(dim=0, keepdim=True)
+    y = y[:n] - y[:n].mean(dim=0, keepdim=True)
     hsic = (x.t().matmul(y)).pow(2).sum()
     norm_x = (x.t().matmul(x)).pow(2).sum().clamp_min(eps).sqrt()
     norm_y = (y.t().matmul(y)).pow(2).sum().clamp_min(eps).sqrt()
@@ -89,14 +85,18 @@ def subspace_overlap(a: torch.Tensor, b: torch.Tensor, rank: int) -> Optional[fl
     return float((svals.pow(2).mean()).item())
 
 
-def make_anchor_statement(answer: str) -> str:
+def make_anchor_statement(question: str, answer: str, modality: str) -> str:
+    q = str(question).strip()
     ans = str(answer).replace("_", " ")
-    return f"The answer is {ans}."
+    if modality == "audio":
+        return f"Question: {q} From the audio, the answer is {ans}."
+    if modality == "image":
+        return f"Question: {q} From the image, the answer is {ans}."
+    return f"Question: {q} The answer is {ans}."
 
 
 def build_analysis_namespace(args: argparse.Namespace) -> argparse.Namespace:
-    # Reuse the training config builder by creating a compatible namespace.
-    ns = argparse.Namespace(
+    return argparse.Namespace(
         model_config=args.model_config,
         llm_model=args.llm_model,
         num_audio_tokens=args.num_audio_tokens,
@@ -129,7 +129,6 @@ def build_analysis_namespace(args: argparse.Namespace) -> argparse.Namespace:
         image_prompt_prefix=getattr(args, "image_prompt_prefix", ""),
         both_prompt_prefix=getattr(args, "both_prompt_prefix", ""),
     )
-    return ns
 
 
 def collect_projector_summaries(
@@ -139,9 +138,10 @@ def collect_projector_summaries(
     prompt_args: argparse.Namespace,
     modality: str,
     max_samples: int,
-) -> Tuple[torch.Tensor, List[str]]:
+) -> Tuple[torch.Tensor, List[str], List[str]]:
     summaries: List[torch.Tensor] = []
     answers: List[str] = []
+    questions: List[str] = []
     model.eval()
     collected = 0
     with torch.no_grad():
@@ -178,34 +178,42 @@ def collect_projector_summaries(
                 )
             pooled = token_states.float().mean(dim=1).cpu()
             batch_answers = [extract_answer(a) for a in batch["answers"]]
-            for vec, ans in zip(pooled, batch_answers):
+            batch_questions = [str(q) for q in batch["questions"]]
+            for vec, ans, question in zip(pooled, batch_answers, batch_questions):
                 summaries.append(vec)
                 answers.append(ans)
+                questions.append(question)
                 collected += 1
                 if max_samples > 0 and collected >= max_samples:
                     break
 
     if not summaries:
         raise RuntimeError(f"No projector summaries collected for modality='{modality}'")
-    return torch.stack(summaries, dim=0), answers
+    return torch.stack(summaries, dim=0), answers, questions
 
 
 def collect_anchor_summaries(
     model: SAFEModel,
+    questions: Sequence[str],
     answers: Sequence[str],
     device: torch.device,
     prompt_args: argparse.Namespace,
     modality: str,
     batch_size: int,
-) -> Dict[str, torch.Tensor]:
-    unique_answers = sorted({extract_answer(a) for a in answers})
-    prompts = [build_modality_aware_questions(make_anchor_statement(ans), modality, prompt_args) for ans in unique_answers]
-    out: Dict[str, torch.Tensor] = {}
+) -> torch.Tensor:
+    prompts = [
+        build_modality_aware_questions(
+            make_anchor_statement(question, extract_answer(answer), modality),
+            modality,
+            prompt_args,
+        )
+        for question, answer in zip(questions, answers)
+    ]
+    rows: List[torch.Tensor] = []
     model.eval()
     with torch.no_grad():
         for start in range(0, len(prompts), batch_size):
             batch_prompts = prompts[start:start + batch_size]
-            batch_answers = unique_answers[start:start + batch_size]
             inputs = model.prepare_multimodal_inputs(
                 text=batch_prompts,
                 images=None,
@@ -228,84 +236,78 @@ def collect_anchor_summaries(
             if last_hidden is None:
                 raise RuntimeError("Anchor hidden states unavailable from model forward pass")
             pooled = pool_masked_mean(last_hidden.float(), inputs["attention_mask"]).cpu()
-            for ans, vec in zip(batch_answers, pooled):
-                out[ans] = vec
-    return out
+            rows.extend([vec for vec in pooled])
+    if not rows:
+        raise RuntimeError(f"No anchor summaries collected for modality='{modality}'")
+    return torch.stack(rows, dim=0)
 
 
 def compute_alignment_metrics(
     summaries: torch.Tensor,
+    questions: Sequence[str],
     answers: Sequence[str],
-    same_anchor: Dict[str, torch.Tensor],
-    wrong_anchor: Dict[str, torch.Tensor],
+    same_anchor_matrix: torch.Tensor,
+    wrong_anchor_matrix: torch.Tensor,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], torch.Tensor]:
-    same_keys = sorted(same_anchor.keys())
-    same_matrix = torch.stack([same_anchor[k] for k in same_keys], dim=0).float()
+    same_matrix = same_anchor_matrix.float()
+    wrong_matrix = wrong_anchor_matrix.float()
     same_norm = F.normalize(same_matrix, dim=-1)
-
-    wrong_keys = sorted(wrong_anchor.keys())
-    wrong_matrix = torch.stack([wrong_anchor[k] for k in wrong_keys], dim=0).float()
     wrong_norm = F.normalize(wrong_matrix, dim=-1)
-
     x = F.normalize(summaries.float(), dim=-1)
+
     sims_same = x.matmul(same_norm.t())
     sims_wrong = x.matmul(wrong_norm.t())
+    combined_matrix = torch.cat([same_norm, wrong_norm], dim=0)
 
     per_sample: List[Dict[str, Any]] = []
-    matched_same_rows: List[torch.Tensor] = []
     same_correct = 0
     combined_correct = 0
     same_cos_vals: List[float] = []
     wrong_cos_vals: List[float] = []
     margin_vals: List[float] = []
 
-    combined_keys = [(k, "same") for k in same_keys] + [(k, "wrong") for k in wrong_keys]
-    combined_matrix = torch.cat([same_norm, wrong_norm], dim=0)
-
-    for idx, ans in enumerate(answers):
-        ans = extract_answer(ans)
-        same_idx = same_keys.index(ans)
-        wrong_idx = wrong_keys.index(ans) if ans in wrong_anchor else None
-        correct_same = float(sims_same[idx, same_idx].item())
-        correct_wrong = float(sims_wrong[idx, wrong_idx].item()) if wrong_idx is not None else float("nan")
+    for idx, (question, answer) in enumerate(zip(questions, answers)):
+        ans = extract_answer(answer)
+        correct_same = float(sims_same[idx, idx].item())
+        correct_wrong = float(sims_wrong[idx, idx].item())
         top_same_idx = int(torch.argmax(sims_same[idx]).item())
         top_combined_idx = int(torch.argmax(x[idx].unsqueeze(0).matmul(combined_matrix.t())).item())
-        top_same_answer = same_keys[top_same_idx]
-        top_combined_answer, top_combined_domain = combined_keys[top_combined_idx]
-        if top_same_answer == ans:
+        top_combined_domain = "same" if top_combined_idx < same_norm.size(0) else "wrong"
+        if top_same_idx == idx:
             same_correct += 1
-        if top_combined_answer == ans and top_combined_domain == "same":
+        if top_combined_idx == idx and top_combined_domain == "same":
             combined_correct += 1
-        if ans in same_anchor:
-            matched_same_rows.append(same_anchor[ans].float())
         same_cos_vals.append(correct_same)
-        if not math.isnan(correct_wrong):
-            wrong_cos_vals.append(correct_wrong)
-            margin_vals.append(correct_same - correct_wrong)
-        per_sample.append({
-            "answer": ans,
-            "cosine_same_anchor": correct_same,
-            "cosine_wrong_modality_anchor": correct_wrong,
-            "margin_same_minus_wrong": (correct_same - correct_wrong) if not math.isnan(correct_wrong) else None,
-            "top1_same_answer": top_same_answer,
-            "top1_combined_answer": top_combined_answer,
-            "top1_combined_domain": top_combined_domain,
-        })
+        wrong_cos_vals.append(correct_wrong)
+        margin_vals.append(correct_same - correct_wrong)
+        per_sample.append(
+            {
+                "question": question,
+                "answer": ans,
+                "cosine_same_anchor": correct_same,
+                "cosine_wrong_modality_anchor": correct_wrong,
+                "margin_same_minus_wrong": correct_same - correct_wrong,
+                "top1_same_index": top_same_idx,
+                "top1_combined_domain": top_combined_domain,
+                "top1_combined_index": top_combined_idx,
+            }
+        )
 
-    matched_anchor_matrix = torch.stack(matched_same_rows, dim=0) if matched_same_rows else torch.zeros_like(summaries)
     metrics = {
         "num_samples": int(len(answers)),
         "mean_cosine_same_anchor": sum(same_cos_vals) / float(max(1, len(same_cos_vals))),
-        "mean_cosine_wrong_modality_anchor": (
-            sum(wrong_cos_vals) / float(max(1, len(wrong_cos_vals))) if wrong_cos_vals else None
-        ),
-        "mean_role_margin": sum(margin_vals) / float(max(1, len(margin_vals))) if margin_vals else None,
+        "mean_cosine_wrong_modality_anchor": sum(wrong_cos_vals) / float(max(1, len(wrong_cos_vals))),
+        "mean_role_margin": sum(margin_vals) / float(max(1, len(margin_vals))),
         "top1_same_retrieval": 100.0 * same_correct / float(max(1, len(answers))),
         "top1_combined_role_correct": 100.0 * combined_correct / float(max(1, len(answers))),
-        "linear_cka_to_same_anchor": linear_cka(summaries, matched_anchor_matrix),
-        "subspace_overlap_to_same_anchor": subspace_overlap(summaries, matched_anchor_matrix, rank=min(8, summaries.size(0) - 1)),
+        "linear_cka_to_same_anchor": linear_cka(summaries, same_matrix),
+        "subspace_overlap_to_same_anchor": subspace_overlap(
+            summaries,
+            same_matrix,
+            rank=min(8, min(int(summaries.size(0)), int(same_matrix.size(0))) - 1),
+        ),
     }
-    return metrics, per_sample, matched_anchor_matrix
+    return metrics, per_sample, same_matrix
 
 
 def parse_args() -> argparse.Namespace:
@@ -323,8 +325,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--llm-model", type=str, default=None)
-    p.add_argument("--slim-projector", action="store_true",
-                   help="Use config defaults as-is. By default this script assumes concat checkpoints use full-output projectors.")
+    p.add_argument(
+        "--slim-projector",
+        action="store_true",
+        help="Use config defaults as-is. By default this script assumes concat checkpoints use full-output projectors.",
+    )
     p.add_argument("--modality-aware-prompts", action="store_true")
     p.add_argument("--text-prompt-prefix", type=str, default="")
     p.add_argument("--audio-prompt-prefix", type=str, default="")
@@ -339,7 +344,6 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     analysis_ns = build_analysis_namespace(args)
-
     model_cfg = build_model_config(analysis_ns)
     model = SAFEModel(**model_cfg)
 
@@ -368,7 +372,7 @@ def main() -> None:
         pin_memory=torch.cuda.is_available(),
     )
 
-    audio_summaries, audio_answers = collect_projector_summaries(
+    audio_summaries, audio_answers, audio_questions = collect_projector_summaries(
         model=model,
         dataloader=dataloader,
         device=device,
@@ -376,7 +380,7 @@ def main() -> None:
         modality="audio",
         max_samples=args.max_samples,
     )
-    vision_summaries, vision_answers = collect_projector_summaries(
+    vision_summaries, vision_answers, vision_questions = collect_projector_summaries(
         model=model,
         dataloader=dataloader,
         device=device,
@@ -385,45 +389,70 @@ def main() -> None:
         max_samples=args.max_samples,
     )
 
-    union_answers = sorted(set(audio_answers) | set(vision_answers) | set(AVQA_ANSWER_VOCAB))
     audio_anchors = collect_anchor_summaries(
         model=model,
-        answers=union_answers,
+        questions=audio_questions,
+        answers=audio_answers,
         device=device,
         prompt_args=analysis_ns,
         modality="audio",
         batch_size=args.batch_size,
     )
-    vision_anchors = collect_anchor_summaries(
+    audio_wrong_anchors = collect_anchor_summaries(
         model=model,
-        answers=union_answers,
+        questions=audio_questions,
+        answers=audio_answers,
         device=device,
         prompt_args=analysis_ns,
         modality="image",
+        batch_size=args.batch_size,
+    )
+    vision_anchors = collect_anchor_summaries(
+        model=model,
+        questions=vision_questions,
+        answers=vision_answers,
+        device=device,
+        prompt_args=analysis_ns,
+        modality="image",
+        batch_size=args.batch_size,
+    )
+    vision_wrong_anchors = collect_anchor_summaries(
+        model=model,
+        questions=vision_questions,
+        answers=vision_answers,
+        device=device,
+        prompt_args=analysis_ns,
+        modality="audio",
         batch_size=args.batch_size,
     )
 
     audio_metrics, audio_rows, audio_anchor_matrix = compute_alignment_metrics(
         summaries=audio_summaries,
+        questions=audio_questions,
         answers=audio_answers,
-        same_anchor=audio_anchors,
-        wrong_anchor=vision_anchors,
+        same_anchor_matrix=audio_anchors,
+        wrong_anchor_matrix=audio_wrong_anchors,
     )
     vision_metrics, vision_rows, vision_anchor_matrix = compute_alignment_metrics(
         summaries=vision_summaries,
+        questions=vision_questions,
         answers=vision_answers,
-        same_anchor=vision_anchors,
-        wrong_anchor=audio_anchors,
+        same_anchor_matrix=vision_anchors,
+        wrong_anchor_matrix=vision_wrong_anchors,
     )
 
     cross_metrics = {
         "audio_vs_vision_projector_cka": linear_cka(audio_summaries, vision_summaries),
         "audio_vs_vision_projector_subspace_overlap": subspace_overlap(
-            audio_summaries, vision_summaries, rank=min(8, min(audio_summaries.size(0), vision_summaries.size(0)) - 1)
+            audio_summaries,
+            vision_summaries,
+            rank=min(8, min(int(audio_summaries.size(0)), int(vision_summaries.size(0))) - 1),
         ),
         "audio_anchor_vs_vision_anchor_cka": linear_cka(audio_anchor_matrix, vision_anchor_matrix),
         "audio_anchor_vs_vision_anchor_subspace_overlap": subspace_overlap(
-            audio_anchor_matrix, vision_anchor_matrix, rank=min(8, min(audio_anchor_matrix.size(0), vision_anchor_matrix.size(0)) - 1)
+            audio_anchor_matrix,
+            vision_anchor_matrix,
+            rank=min(8, min(int(audio_anchor_matrix.size(0)), int(vision_anchor_matrix.size(0))) - 1),
         ),
     }
 
