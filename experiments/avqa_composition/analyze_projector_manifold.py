@@ -122,6 +122,12 @@ def build_analysis_namespace(args: argparse.Namespace) -> argparse.Namespace:
         icm_min_modalities=2,
         icm_util_target=0.7,
         slim_projector=args.slim_projector,
+        fusion_gate=args.fusion_gate,
+        modality_aware_prompts=bool(args.modality_aware_prompts),
+        text_prompt_prefix=getattr(args, "text_prompt_prefix", ""),
+        audio_prompt_prefix=getattr(args, "audio_prompt_prefix", ""),
+        image_prompt_prefix=getattr(args, "image_prompt_prefix", ""),
+        both_prompt_prefix=getattr(args, "both_prompt_prefix", ""),
     )
     return ns
 
@@ -333,18 +339,6 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     analysis_ns = build_analysis_namespace(args)
-    if args.modality_aware_prompts:
-        analysis_ns.modality_aware_prompts = True
-        if args.text_prompt_prefix:
-            analysis_ns.text_prompt_prefix = args.text_prompt_prefix
-        if args.audio_prompt_prefix:
-            analysis_ns.audio_prompt_prefix = args.audio_prompt_prefix
-        if args.image_prompt_prefix:
-            analysis_ns.image_prompt_prefix = args.image_prompt_prefix
-        if args.both_prompt_prefix:
-            analysis_ns.both_prompt_prefix = args.both_prompt_prefix
-    else:
-        analysis_ns.modality_aware_prompts = False
 
     model_cfg = build_model_config(analysis_ns)
     model = SAFEModel(**model_cfg)
