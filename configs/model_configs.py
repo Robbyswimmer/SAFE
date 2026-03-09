@@ -758,6 +758,45 @@ COMPOSITION_TTC_CONFIG["fusion_config"] = {
     "use_learned_gate": False,
 }
 
+# Operator-ladder baselines trained with shared-model interleaved unimodal batches.
+# These keep the same shared fusion layers but replace raw residual addition with a
+# learned composition operator over modality-specific residual updates.
+COMPOSITION_AFFINE_CONFIG = {
+    **COMPOSITION_STUDY_CONFIG,
+    "name": "composition_affine",
+    "description": "Shared-layer affine composition operator on MUSIC-AVQA",
+}
+COMPOSITION_AFFINE_CONFIG["fusion_config"] = {
+    **COMPOSITION_STUDY_CONFIG["fusion_config"],
+    "fusion_mode": "affine",
+    "use_learned_gate": False,
+    "affine_rank": 64,
+}
+
+COMPOSITION_FIXED_POINT_CONFIG = {
+    **COMPOSITION_STUDY_CONFIG,
+    "name": "composition_fixed_point",
+    "description": "Shared-layer fixed-point composition operator on MUSIC-AVQA",
+}
+COMPOSITION_FIXED_POINT_CONFIG["fusion_config"] = {
+    **COMPOSITION_STUDY_CONFIG["fusion_config"],
+    "fusion_mode": "fixed_point",
+    "use_learned_gate": False,
+    "fixed_point_state_dim": 256,
+    "fixed_point_steps": 3,
+    "fixed_point_dropout": 0.1,
+}
+
+COMPOSITION_FIXED_POINT_T1_CONFIG = {
+    **COMPOSITION_FIXED_POINT_CONFIG,
+    "name": "composition_fixed_point_t1",
+    "description": "Shared-layer fixed-point composition operator with one step (T=1) on MUSIC-AVQA",
+}
+COMPOSITION_FIXED_POINT_T1_CONFIG["fusion_config"] = {
+    **COMPOSITION_FIXED_POINT_CONFIG["fusion_config"],
+    "fixed_point_steps": 1,
+}
+
 # Disjoint composition: contiguous blocks with maximum layer separation.
 # Audio injects at early-mid layers [6,8,10], vision at mid layers [16,18,20].
 # 6 intervening layers (10→16) for Jacobian chain to absorb audio perturbation
@@ -1418,6 +1457,9 @@ CONFIGS = {
     "composition_study": COMPOSITION_STUDY_CONFIG,
     "composition_independent": COMPOSITION_INDEPENDENT_CONFIG,
     "composition_ttc": COMPOSITION_TTC_CONFIG,
+    "composition_affine": COMPOSITION_AFFINE_CONFIG,
+    "composition_fixed_point": COMPOSITION_FIXED_POINT_CONFIG,
+    "composition_fixed_point_t1": COMPOSITION_FIXED_POINT_T1_CONFIG,
     "composition_staggered": COMPOSITION_INDEPENDENT_CONFIG,
     "composition_disjoint": COMPOSITION_DISJOINT_CONFIG,
     "rkca": RKCA_CONFIG,

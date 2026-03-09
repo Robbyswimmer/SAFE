@@ -670,6 +670,180 @@ class SimpleFusionAdapter(nn.Module):
         return delta.to(hidden_states.dtype)
 
 
+class AffineCompositionOperator(nn.Module):
+    """
+    First-order composition operator:
+      C({delta_m}) = b + sum_m (diag(scale_m) delta_m + U_m D_m delta_m)
+
+    This stays in the affine/linear family while giving the model a better
+    basis than raw residual addition.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        modalities: List[str],
+        rank: int = 0,
+        use_bias: bool = True,
+    ):
+        super().__init__()
+        self.hidden_size = int(hidden_size)
+        self.modalities = list(modalities)
+        self.rank = int(max(0, rank))
+
+        self.diag_scales = nn.ParameterDict({
+            modality: nn.Parameter(torch.ones(self.hidden_size))
+            for modality in self.modalities
+        })
+        self.bias = nn.Parameter(torch.zeros(self.hidden_size)) if use_bias else None
+
+        self.down = nn.ModuleDict()
+        self.up = nn.ModuleDict()
+        if self.rank > 0:
+            for modality in self.modalities:
+                self.down[modality] = nn.Linear(self.hidden_size, self.rank, bias=False)
+                self.up[modality] = nn.Linear(self.rank, self.hidden_size, bias=False)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        modality_updates: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        del hidden_states  # Unused; kept for a common operator signature.
+        if not modality_updates:
+            sample = next(iter(self.diag_scales.values()))
+            return sample.new_zeros(1, 1, self.hidden_size)
+
+        example = next(iter(modality_updates.values()))
+        composed = torch.zeros_like(example)
+        for modality, update in modality_updates.items():
+            if modality not in self.diag_scales:
+                continue
+            scale = self.diag_scales[modality].to(device=update.device, dtype=update.dtype).view(1, 1, -1)
+            transformed = update * scale
+            if self.rank > 0 and modality in self.down and modality in self.up:
+                transformed = transformed + self.up[modality](self.down[modality](update))
+            composed = composed + transformed
+
+        if self.bias is not None:
+            composed = composed + self.bias.to(device=composed.device, dtype=composed.dtype).view(1, 1, -1)
+        return composed
+
+
+class FixedPointCompositionOperator(nn.Module):
+    """
+    Iterative latent-state composition operator.
+
+    The joint update is the result of running a small shared dynamical system
+    over hidden-state-conditioned latent state z:
+
+      z_{t+1} = LN(z_t + self(z_t) + sum_m write_m(delta_m))
+      delta   = readout(z_T)
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        modalities: List[str],
+        state_dim: int = 256,
+        num_steps: int = 2,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.hidden_size = int(hidden_size)
+        self.modalities = list(modalities)
+        self.state_dim = int(max(8, state_dim))
+        self.num_steps = int(max(1, num_steps))
+        self.last_summary: Optional[Dict[str, Any]] = None
+
+        self.state_in = nn.Linear(self.hidden_size, self.state_dim)
+        self.state_norm = nn.LayerNorm(self.state_dim)
+        self.state_self = nn.Sequential(
+            nn.Linear(self.state_dim, self.state_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.state_dim, self.state_dim),
+        )
+        self.modality_inputs = nn.ModuleDict({
+            modality: nn.Linear(self.hidden_size, self.state_dim)
+            for modality in self.modalities
+        })
+        self.modality_updates = nn.ModuleDict({
+            modality: nn.Sequential(
+                nn.Linear(self.state_dim * 2, self.state_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(self.state_dim, self.state_dim),
+            )
+            for modality in self.modalities
+        })
+        self.readout = nn.Sequential(
+            nn.Linear(self.state_dim, self.state_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.state_dim, self.hidden_size),
+        )
+        self.output_scale = nn.Parameter(torch.tensor(0.1))
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        modality_updates: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        if not modality_updates:
+            self.last_summary = None
+            return torch.zeros_like(hidden_states)
+
+        z = self.state_in(hidden_states)
+        active_modalities = 0
+        projected_updates: Dict[str, torch.Tensor] = {}
+        for modality, update in modality_updates.items():
+            if modality not in self.modality_inputs:
+                continue
+            writer = self.modality_inputs[modality]
+            projected_updates[modality] = writer(update)
+            active_modalities += 1
+
+        if not projected_updates or active_modalities <= 0:
+            self.last_summary = None
+            return torch.zeros_like(hidden_states)
+
+        norm = float(math.sqrt(active_modalities + 1.0))
+        step_self_norms: List[float] = []
+        step_modality_norms: List[Dict[str, float]] = []
+        step_delta_norms: List[float] = []
+        for _ in range(self.num_steps):
+            z_prev = z
+            self_delta = self.state_self(z)
+            z = self.state_norm(z + self_delta / norm)
+            step_self_norms.append(float(self_delta.float().norm(dim=-1).mean().item()))
+
+            modality_step: Dict[str, float] = {}
+            for modality in self.modalities:
+                if modality not in projected_updates:
+                    continue
+                state_input = torch.cat([z, projected_updates[modality]], dim=-1)
+                modality_delta = self.modality_updates[modality](state_input)
+                z = self.state_norm(z + modality_delta / norm)
+                modality_step[modality] = float(modality_delta.float().norm(dim=-1).mean().item())
+            step_modality_norms.append(modality_step)
+            step_delta_norms.append(float((z - z_prev).float().norm(dim=-1).mean().item()))
+
+        delta = self.readout(z)
+        scale = torch.tanh(self.output_scale).to(device=delta.device, dtype=delta.dtype)
+        scaled_delta = scale * delta
+        self.last_summary = {
+            "num_steps": int(self.num_steps),
+            "active_modalities": list(projected_updates.keys()),
+            "self_norms": step_self_norms,
+            "modality_norms": step_modality_norms,
+            "state_delta_norms": step_delta_norms,
+            "final_update_norm": float(scaled_delta.float().norm(dim=-1).mean().item()),
+            "output_scale": float(scale.item()),
+        }
+        return scaled_delta
+
+
 class LoRAFusionAdapter(nn.Module):
     """
     LoRA-based fusion adapter that adds audio cross-attention to LLM layers.
@@ -944,6 +1118,7 @@ class MultiLayerFusionAdapter(nn.Module):
         self.bottleneck_dim = bottleneck_dim
         self.kv_input_dim = kv_input_dim
         self.fusion_mode = str(fusion_mode)
+        self.composition_mode = self.fusion_mode if self.fusion_mode in {"affine", "fixed_point"} else None
         self.film_alpha_scale = float(film_alpha_scale)
         self.film_beta_scale = float(film_beta_scale)
         self.use_ffn = use_ffn
@@ -957,6 +1132,7 @@ class MultiLayerFusionAdapter(nn.Module):
         self.vision_gate_depth_decay = float(max(0.0, vision_gate_depth_decay))
         # Last recorded attention summary from any inner fusion adapter
         self.last_attention_summary: Optional[dict] = None
+        self.last_composition_summary: Optional[dict] = None
         self.extra_config = dict(unused_kwargs)
 
         layer_mapping_source = modalities if modalities is not None else fusion_layer_indices
@@ -967,12 +1143,18 @@ class MultiLayerFusionAdapter(nn.Module):
         self.runtime_gate_overrides: Dict[str, Union[float, torch.Tensor]] = {}
         self.runtime_interaction_overrides: Dict[int, Any] = {}
         self.fusion_adapters = nn.ModuleDict()
+        self.composition_operators = nn.ModuleDict()
         target_modules = unused_kwargs.get("target_modules", None)
         train_base_cross_attention = bool(unused_kwargs.get("train_base_cross_attention", False))
+        affine_rank = int(unused_kwargs.get("affine_rank", 0) or 0)
+        fixed_point_dim = int(unused_kwargs.get("fixed_point_state_dim", bottleneck_dim) or bottleneck_dim)
+        fixed_point_steps = int(unused_kwargs.get("fixed_point_steps", 2) or 2)
+        fixed_point_dropout = float(unused_kwargs.get("fixed_point_dropout", attention_dropout) or attention_dropout)
 
         for modality, indices in self.fusion_layers.items():
             for layer_idx in indices:
                 key = self._adapter_key(modality, layer_idx)
+                adapter_fusion_mode = "residual" if self.composition_mode is not None else self.fusion_mode
                 if self.use_bottleneck:
                     # Use simple bottleneck cross-attention (no PEFT)
                     # Now includes FFN and pre-norm options
@@ -982,7 +1164,7 @@ class MultiLayerFusionAdapter(nn.Module):
                         num_attention_heads=min(num_attention_heads, bottleneck_dim),
                         attention_dropout=attention_dropout,
                         use_tokenwise_gate=self.use_tokenwise_gate,
-                        fusion_mode=self.fusion_mode,
+                        fusion_mode=adapter_fusion_mode,
                         film_alpha_scale=self.film_alpha_scale,
                         film_beta_scale=self.film_beta_scale,
                         use_ffn=use_ffn,
@@ -1006,6 +1188,24 @@ class MultiLayerFusionAdapter(nn.Module):
                         use_tokenwise_gate=self.use_tokenwise_gate,
                         delta_norm_cap_ratio=self.delta_norm_cap_ratio,
                         delta_norm_cap_eps=self.delta_norm_cap_eps,
+                    )
+
+        if self.composition_mode is not None:
+            for layer_idx, layer_modalities in self.layer_modalities.items():
+                layer_key = self._layer_operator_key(layer_idx)
+                if self.composition_mode == "affine":
+                    self.composition_operators[layer_key] = AffineCompositionOperator(
+                        hidden_size=hidden_size,
+                        modalities=layer_modalities,
+                        rank=affine_rank,
+                    )
+                elif self.composition_mode == "fixed_point":
+                    self.composition_operators[layer_key] = FixedPointCompositionOperator(
+                        hidden_size=hidden_size,
+                        modalities=layer_modalities,
+                        state_dim=fixed_point_dim,
+                        num_steps=fixed_point_steps,
+                        dropout=fixed_point_dropout,
                     )
 
         # Per-layer learned gating (Flamingo-style tanh gating)
@@ -1095,6 +1295,7 @@ class MultiLayerFusionAdapter(nn.Module):
         if not modalities:
             return hidden_states
 
+        self.last_composition_summary = None
         output = hidden_states
         target_batch = hidden_states.size(0)
         applied_updates: Dict[str, torch.Tensor] = {}
@@ -1177,7 +1378,7 @@ class MultiLayerFusionAdapter(nn.Module):
             )
             if can_compute_delta:
                 delta = adapter.compute_delta(
-                    hidden_states=output,
+                    hidden_states=hidden_states if self.composition_mode is not None else output,
                     audio_tokens=tokens,
                     attention_mask=mask,
                     supervised_mask=supervised_mask,
@@ -1192,9 +1393,14 @@ class MultiLayerFusionAdapter(nn.Module):
                     update = gate_tensor * update
                 else:
                     update = float(modality_gate) * update
-                output = output + update
                 applied_updates[modality] = update
+                if self.composition_mode is None:
+                    output = output + update
             else:
+                if self.composition_mode is not None:
+                    raise ValueError(
+                        f"Composition mode '{self.composition_mode}' requires delta-capable adapters at layer {layer_idx}"
+                    )
                 output = adapter(
                     hidden_states=output,
                     audio_tokens=tokens,
@@ -1206,6 +1412,27 @@ class MultiLayerFusionAdapter(nn.Module):
             # Capture latest attention diagnostics for external inspection
             if hasattr(adapter, "last_attention_summary"):
                 self.last_attention_summary = adapter.last_attention_summary
+
+        if self.composition_mode is not None and applied_updates:
+            layer_key = self._layer_operator_key(layer_idx)
+            if layer_key in self.composition_operators:
+                operator = self.composition_operators[layer_key]
+                op_param = next(operator.parameters(), None)
+                if op_param is not None and op_param.device != output.device:
+                    operator = operator.to(output.device)
+                    self.composition_operators[layer_key] = operator
+                composed_update = operator(
+                    hidden_states=hidden_states,
+                    modality_updates=applied_updates,
+                ).to(device=output.device, dtype=output.dtype)
+                output = hidden_states + composed_update
+                op_summary = getattr(operator, "last_summary", None)
+                if op_summary is not None:
+                    self.last_composition_summary = {
+                        "layer": int(layer_idx),
+                        "mode": str(self.composition_mode),
+                        **op_summary,
+                    }
 
         interaction_override = self.runtime_interaction_overrides.get(int(layer_idx))
         if (
@@ -1348,6 +1575,10 @@ class MultiLayerFusionAdapter(nn.Module):
     @staticmethod
     def _adapter_key(modality: str, layer_idx: int) -> str:
         return f"{modality}:{layer_idx}"
+
+    @staticmethod
+    def _layer_operator_key(layer_idx: int) -> str:
+        return f"layer:{layer_idx}"
 
     def _normalize_layer_mapping(
         self,

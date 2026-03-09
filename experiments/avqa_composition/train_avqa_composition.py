@@ -332,7 +332,10 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
         cfg["label_smoothing"] = args.label_smoothing
 
     if cfg.get("fusion_type") != "concat":
-        fusion_cfg["fusion_mode"] = "residual"
+        fusion_mode = str(fusion_cfg.get("fusion_mode", "residual")).strip().lower()
+        if fusion_mode not in {"residual", "film", "affine", "fixed_point"}:
+            fusion_mode = "residual"
+        fusion_cfg["fusion_mode"] = fusion_mode
         fusion_cfg["injection_point"] = "pre_ffn"
         fusion_cfg.setdefault("use_bottleneck", True)
         if getattr(args, "bottleneck_dim", None) is not None:
@@ -3401,6 +3404,9 @@ def evaluate(
     ttc_entropy_before = 0.0
     ttc_entropy_after = 0.0
     ttc_gate_means: List[float] = []
+    fixed_point_delta_norms: List[float] = []
+    fixed_point_self_norms: List[List[float]] = []
+    fixed_point_state_step_norms: List[List[float]] = []
     by_type: Dict[str, Dict[str, float]] = defaultdict(
         lambda: {"exact": 0.0, "extracted": 0.0, "f1": 0.0, "categorical_f1": 0.0, "n": 0.0}
     )
@@ -3523,6 +3529,18 @@ def evaluate(
             num_beams=1,
             pad_token_id=tokenizer.pad_token_id,
         )
+        fusion_adapter = getattr(model, "fusion_adapter", None)
+        comp_summary = getattr(fusion_adapter, "last_composition_summary", None) if fusion_adapter is not None else None
+        if modality == "both" and isinstance(comp_summary, dict) and comp_summary.get("mode") == "fixed_point":
+            final_update_norm = comp_summary.get("final_update_norm")
+            if final_update_norm is not None:
+                fixed_point_delta_norms.append(float(final_update_norm))
+            self_norms = comp_summary.get("self_norms")
+            if isinstance(self_norms, list) and self_norms:
+                fixed_point_self_norms.append([float(x) for x in self_norms])
+            state_delta_norms = comp_summary.get("state_delta_norms")
+            if isinstance(state_delta_norms, list) and state_delta_norms:
+                fixed_point_state_step_norms.append([float(x) for x in state_delta_norms])
 
         prompt_mask = inputs.get("attention_mask")
         prompt_width = int(inputs["input_ids"].size(1))
@@ -3611,6 +3629,20 @@ def evaluate(
             "mean_gate_value": (
                 sum(ttc_gate_means) / float(len(ttc_gate_means)) if ttc_gate_means else None
             ),
+        }
+    if fixed_point_delta_norms:
+        def _mean_step(values: List[List[float]]) -> List[float]:
+            max_len = max(len(v) for v in values)
+            out: List[float] = []
+            for idx in range(max_len):
+                elems = [v[idx] for v in values if idx < len(v)]
+                out.append(sum(elems) / float(len(elems)))
+            return out
+
+        result["fixed_point"] = {
+            "mean_final_update_norm": sum(fixed_point_delta_norms) / float(len(fixed_point_delta_norms)),
+            "mean_self_norms_by_step": _mean_step(fixed_point_self_norms) if fixed_point_self_norms else [],
+            "mean_state_delta_norms_by_step": _mean_step(fixed_point_state_step_norms) if fixed_point_state_step_norms else [],
         }
     for k, v in by_type.items():
         n = max(1.0, v["n"])
