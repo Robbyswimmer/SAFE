@@ -55,7 +55,7 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --num-epochs 0 \
   --num-audio-tokens "$NUM_AUDIO_TOKENS" \
   --train-modality both \
-  --eval-modalities text,audio,image,both \
+  --eval-modalities both,text,audio,image \
   --freeze-audio-encoder \
   --fusion-gate "$FUSION_GATE" \
   --compose-audio-ckpt "$COMPOSE_AUDIO_CKPT" \

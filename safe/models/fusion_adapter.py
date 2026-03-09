@@ -1245,6 +1245,37 @@ class MultiLayerFusionAdapter(nn.Module):
                         if scale.size(-1) != 1:
                             scale = scale[..., :1]
                         interaction_term = scale * interaction_term
+                elif interaction_mode == "lowrank":
+                    down = interaction_override.get("down")
+                    up = interaction_override.get("up")
+                    if down is not None and up is not None:
+                        if not torch.is_tensor(down):
+                            down = torch.tensor(down, device=output.device, dtype=interaction_update.dtype)
+                        else:
+                            down = down.to(device=output.device, dtype=interaction_update.dtype)
+                        if not torch.is_tensor(up):
+                            up = torch.tensor(up, device=output.device, dtype=interaction_update.dtype)
+                        else:
+                            up = up.to(device=output.device, dtype=interaction_update.dtype)
+                        down = torch.tanh(down)
+                        up = torch.tanh(up)
+                        interaction_term = interaction_term.matmul(down).matmul(up)
+
+                    scale = interaction_override.get("scale", None)
+                    if scale is not None:
+                        if not torch.is_tensor(scale):
+                            scale = torch.tensor(
+                                float(scale),
+                                device=output.device,
+                                dtype=interaction_update.dtype,
+                            )
+                        else:
+                            scale = scale.to(device=output.device, dtype=interaction_update.dtype)
+                        while scale.dim() < interaction_term.dim():
+                            scale = scale.unsqueeze(-1)
+                        if scale.size(-1) != 1:
+                            scale = scale[..., :1]
+                        interaction_term = scale * interaction_term
                 else:
                     scale = interaction_override.get("scale", 0.0)
                     if not torch.is_tensor(scale):

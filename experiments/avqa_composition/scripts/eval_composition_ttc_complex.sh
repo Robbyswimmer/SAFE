@@ -45,12 +45,16 @@ TTC_STABILITY_ENABLE="${TTC_STABILITY_ENABLE:-0}"
 TTC_STABILITY_THRESHOLD="${TTC_STABILITY_THRESHOLD:-0.15}"
 TTC_STABILITY_PERTURB="${TTC_STABILITY_PERTURB:-0.1}"
 TTC_INTERACTION_ENABLE="${TTC_INTERACTION_ENABLE:-0}"
-TTC_INTERACTION_MODULE="${TTC_INTERACTION_MODULE:-diag}"
+TTC_INTERACTION_MODULE="${TTC_INTERACTION_MODULE:-lowrank}"
 TTC_INTERACTION_STEPS="${TTC_INTERACTION_STEPS:-5}"
 TTC_INTERACTION_LR="${TTC_INTERACTION_LR:-0.05}"
 TTC_INTERACTION_DIAG_INIT="${TTC_INTERACTION_DIAG_INIT:-0.0}"
 TTC_INTERACTION_DIAG_MIN="${TTC_INTERACTION_DIAG_MIN:--0.5}"
 TTC_INTERACTION_DIAG_MAX="${TTC_INTERACTION_DIAG_MAX:-0.5}"
+TTC_INTERACTION_RANK="${TTC_INTERACTION_RANK:-8}"
+TTC_INTERACTION_MATRIX_INIT="${TTC_INTERACTION_MATRIX_INIT:-0.01}"
+TTC_INTERACTION_MATRIX_MIN="${TTC_INTERACTION_MATRIX_MIN:--0.25}"
+TTC_INTERACTION_MATRIX_MAX="${TTC_INTERACTION_MATRIX_MAX:-0.25}"
 MAX_SAMPLES="${MAX_SAMPLES:-0}"
 
 MAX_SAMPLES_ARGS=()
@@ -71,6 +75,10 @@ if [[ "$TTC_INTERACTION_ENABLE" == "1" ]]; then
     --ttc-interaction-diag-init "$TTC_INTERACTION_DIAG_INIT"
     --ttc-interaction-diag-min "$TTC_INTERACTION_DIAG_MIN"
     --ttc-interaction-diag-max "$TTC_INTERACTION_DIAG_MAX"
+    --ttc-interaction-rank "$TTC_INTERACTION_RANK"
+    --ttc-interaction-matrix-init "$TTC_INTERACTION_MATRIX_INIT"
+    --ttc-interaction-matrix-min "$TTC_INTERACTION_MATRIX_MIN"
+    --ttc-interaction-matrix-max "$TTC_INTERACTION_MATRIX_MAX"
   )
 fi
 
@@ -90,7 +98,7 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --num-epochs 0 \
   --num-audio-tokens "$NUM_AUDIO_TOKENS" \
   --train-modality both \
-  --eval-modalities text,audio,image,both \
+  --eval-modalities both,text,audio,image \
   --freeze-audio-encoder \
   --fusion-gate "$FUSION_GATE" \
   --compose-audio-ckpt "$COMPOSE_AUDIO_CKPT" \

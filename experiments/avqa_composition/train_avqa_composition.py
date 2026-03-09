@@ -844,6 +844,20 @@ def _build_ttc_interaction_params(
                     torch.tensor(float(args.ttc_interaction_init), device=device, dtype=torch.float32)
                 )
             }
+        elif module_type == "lowrank":
+            rank = int(getattr(args, "ttc_interaction_rank", 8))
+            init_std = float(getattr(args, "ttc_interaction_matrix_init", 0.01))
+            down = torch.empty((int(hidden_size), rank), device=device, dtype=torch.float32)
+            up = torch.empty((rank, int(hidden_size)), device=device, dtype=torch.float32)
+            torch.nn.init.normal_(down, mean=0.0, std=init_std)
+            torch.nn.init.normal_(up, mean=0.0, std=init_std)
+            params[int(layer)] = {
+                "scale": torch.nn.Parameter(
+                    torch.tensor(1.0, device=device, dtype=torch.float32)
+                ),
+                "down": torch.nn.Parameter(down),
+                "up": torch.nn.Parameter(up),
+            }
         else:
             params[int(layer)] = {
                 "scale": torch.nn.Parameter(
@@ -882,6 +896,11 @@ def _runtime_ttc_interaction_overrides(
             row["scale"] = per_layer["scale"]
         if module_type == "diag" and "diag" in per_layer:
             row["diag"] = per_layer["diag"]
+        if module_type == "lowrank":
+            if "down" in per_layer:
+                row["down"] = per_layer["down"]
+            if "up" in per_layer:
+                row["up"] = per_layer["up"]
         overrides[int(layer)] = row
     return overrides
 
@@ -916,8 +935,59 @@ def _summarize_interaction_params(
             diag = torch.tanh(per_layer["diag"].detach())
             row["diag_mean_abs"] = float(diag.abs().mean().item())
             row["diag_max_abs"] = float(diag.abs().max().item())
+        if module_type == "lowrank":
+            if "down" in per_layer:
+                down = torch.tanh(per_layer["down"].detach())
+                row["down_mean_abs"] = float(down.abs().mean().item())
+                row["down_max_abs"] = float(down.abs().max().item())
+            if "up" in per_layer:
+                up = torch.tanh(per_layer["up"].detach())
+                row["up_mean_abs"] = float(up.abs().mean().item())
+                row["up_max_abs"] = float(up.abs().max().item())
         summary[int(layer)] = row
     return summary
+
+
+def _clone_param_dict_state(
+    params: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    return {key: value.detach().clone() for key, value in params.items()}
+
+
+def _restore_param_dict_state(
+    params: Dict[str, torch.Tensor],
+    state: Optional[Dict[str, torch.Tensor]],
+) -> None:
+    if not state:
+        return
+    with torch.no_grad():
+        for key, value in state.items():
+            if key in params:
+                params[key].copy_(value)
+
+
+def _clone_nested_param_state(
+    params: Dict[int, Dict[str, torch.Tensor]],
+) -> Dict[int, Dict[str, torch.Tensor]]:
+    return {
+        int(layer): {name: tensor.detach().clone() for name, tensor in per_layer.items()}
+        for layer, per_layer in params.items()
+    }
+
+
+def _restore_nested_param_state(
+    params: Dict[int, Dict[str, torch.Tensor]],
+    state: Optional[Dict[int, Dict[str, torch.Tensor]]],
+) -> None:
+    if not state:
+        return
+    with torch.no_grad():
+        for layer, per_layer in state.items():
+            if int(layer) not in params:
+                continue
+            for name, value in per_layer.items():
+                if name in params[int(layer)]:
+                    params[int(layer)][name].copy_(value)
 
 
 @torch.no_grad()
@@ -1271,6 +1341,8 @@ def _optimize_ttc_gate_overrides(
                 stats["stage_b_method"] = "default"
 
         if search_mode in {"gradient", "hybrid"}:
+            best_stage_b_loss = float("inf")
+            best_gate_state = _clone_param_dict_state(gate_params)
             for _ in range(max(0, int(args.ttc_steps))):
                 optimizer.zero_grad(set_to_none=True)
                 _set_runtime_gate_overrides(model, gate_params)
@@ -1291,11 +1363,17 @@ def _optimize_ttc_gate_overrides(
                     gate_params=gate_params,
                     best_single_entropy=best_single_entropy,
                 )
+                current_loss = float(loss.detach().item())
+                if math.isfinite(current_loss) and current_loss < best_stage_b_loss:
+                    best_stage_b_loss = current_loss
+                    best_gate_state = _clone_param_dict_state(gate_params)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(list(gate_params.values()), float(args.max_grad_norm))
                 optimizer.step()
                 with torch.no_grad():
                     for param in gate_params.values():
                         param.clamp_(float(args.ttc_gate_min), float(args.ttc_gate_max))
+            _restore_param_dict_state(gate_params, best_gate_state)
             with torch.no_grad():
                 _set_runtime_gate_overrides(model, gate_params)
                 final_stage_b = _forward_joint_entropy(
@@ -1408,6 +1486,8 @@ def _optimize_ttc_gate_overrides(
         if interaction_optimizer is not None and interaction_params:
             frozen_gate_params = _make_ttc_frozen_gate_tensors(gate_params)
             _set_runtime_gate_overrides(model, frozen_gate_params)
+            best_stage_c_loss = float("inf")
+            best_interaction_state = _clone_nested_param_state(interaction_params)
             for _ in range(max(0, int(args.ttc_interaction_steps))):
                 interaction_optimizer.zero_grad(set_to_none=True)
                 _set_runtime_interaction_overrides(
@@ -1431,7 +1511,15 @@ def _optimize_ttc_gate_overrides(
                     best_single_entropy=best_single_entropy,
                     interaction_params=interaction_params,
                 )
+                current_loss = float(loss.detach().item())
+                if math.isfinite(current_loss) and current_loss < best_stage_c_loss:
+                    best_stage_c_loss = current_loss
+                    best_interaction_state = _clone_nested_param_state(interaction_params)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    _flatten_ttc_interaction_params(interaction_params),
+                    float(args.max_grad_norm),
+                )
                 interaction_optimizer.step()
                 with torch.no_grad():
                     for per_layer in interaction_params.values():
@@ -1445,6 +1533,17 @@ def _optimize_ttc_gate_overrides(
                                 float(args.ttc_interaction_diag_min),
                                 float(args.ttc_interaction_diag_max),
                             )
+                        if "down" in per_layer:
+                            per_layer["down"].clamp_(
+                                float(args.ttc_interaction_matrix_min),
+                                float(args.ttc_interaction_matrix_max),
+                            )
+                        if "up" in per_layer:
+                            per_layer["up"].clamp_(
+                                float(args.ttc_interaction_matrix_min),
+                                float(args.ttc_interaction_matrix_max),
+                            )
+            _restore_nested_param_state(interaction_params, best_interaction_state)
             stats["compute_budget_forward_equiv"] = float(
                 2 + max(0, int(args.ttc_steps)) + max(0, int(args.ttc_interaction_steps))
             )
@@ -3959,7 +4058,7 @@ def parse_args() -> argparse.Namespace:
                    help="Relative gate perturbation used for the TTC stability check")
     p.add_argument("--ttc-interaction-enable", action="store_true",
                    help="Enable stage-C TTC: freeze gate solution and optimize a joint-only interaction module per shared layer")
-    p.add_argument("--ttc-interaction-module", type=str, default="diag", choices=["scalar", "diag"],
+    p.add_argument("--ttc-interaction-module", type=str, default="diag", choices=["scalar", "diag", "lowrank"],
                    help="Stage-C interaction module type: scalar or diagonal joint-only sidecar")
     p.add_argument("--ttc-interaction-steps", type=int, default=5,
                    help="Number of stage-C interaction optimization steps")
@@ -3977,6 +4076,14 @@ def parse_args() -> argparse.Namespace:
                    help="Minimum clamp for diagonal stage-C interaction parameters")
     p.add_argument("--ttc-interaction-diag-max", type=float, default=0.5,
                    help="Maximum clamp for diagonal stage-C interaction parameters")
+    p.add_argument("--ttc-interaction-rank", type=int, default=8,
+                   help="Rank for low-rank stage-C interaction module")
+    p.add_argument("--ttc-interaction-matrix-init", type=float, default=0.01,
+                   help="Initialization std for low-rank interaction matrices")
+    p.add_argument("--ttc-interaction-matrix-min", type=float, default=-0.25,
+                   help="Minimum clamp for low-rank interaction matrices")
+    p.add_argument("--ttc-interaction-matrix-max", type=float, default=0.25,
+                   help="Maximum clamp for low-rank interaction matrices")
     p.add_argument("--ttc-interaction-reg-lambda", type=float, default=0.05,
                    help="Quadratic penalty on stage-C interaction parameters")
     p.add_argument("--wandb", action="store_true")
@@ -4087,6 +4194,10 @@ def main() -> None:
                     "ttc_interaction_diag_init": args.ttc_interaction_diag_init,
                     "ttc_interaction_diag_min": args.ttc_interaction_diag_min,
                     "ttc_interaction_diag_max": args.ttc_interaction_diag_max,
+                    "ttc_interaction_rank": args.ttc_interaction_rank,
+                    "ttc_interaction_matrix_init": args.ttc_interaction_matrix_init,
+                    "ttc_interaction_matrix_min": args.ttc_interaction_matrix_min,
+                    "ttc_interaction_matrix_max": args.ttc_interaction_matrix_max,
                     "ttc_interaction_reg_lambda": args.ttc_interaction_reg_lambda,
                     "compat_reg_enable": args.compat_reg_enable,
                     "compat_reg_lambda": args.compat_reg_lambda,
@@ -4294,6 +4405,8 @@ def main() -> None:
     best_score = -1.0
     history: List[Dict[str, Any]] = []
     eval_modalities = [m.strip() for m in args.eval_modalities.split(",") if m.strip()]
+    if args.ttc_enable and "both" in eval_modalities:
+        eval_modalities = ["both"] + [m for m in eval_modalities if m != "both"]
     updates_per_epoch = math.ceil(len(train_loader) / max(1, args.gradient_accumulation_steps))
     # Interleaved mode does 2 passes per epoch (audio + vision), so double the step count
     passes_per_epoch = 2 if args.train_modality in ("interleaved", "interleaved_vision_first") else 1
