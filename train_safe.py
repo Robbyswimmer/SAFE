@@ -2571,6 +2571,28 @@ def train_epoch(
 
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
 
+            # Comprehensive diagnostics should run before optimizer.step()/zero_grad()
+            # so component gradient summaries reflect the actual update about to be applied.
+            concat_audio_only = _is_concat_audio_only_mode(base_model)
+            if concat_audio_only:
+                diag_frequency = 25 if optimizer_step + 1 <= 500 else 100
+            else:
+                diag_frequency = 10 if optimizer_step + 1 <= 500 else 50
+            if (optimizer_step + 1) % diag_frequency == 0:
+                current_gate = getattr(base_model, "_default_gate", None)
+                avg_loss = step_loss_sum / max(step_micro_batches, 1)
+                _log_comprehensive_diagnostics(
+                    model=model,
+                    base_model=base_model,
+                    optimizer_step=optimizer_step + 1,
+                    epoch=epoch,
+                    loss=avg_loss,
+                    grad_norm=float(grad_norm) if grad_norm is not None else None,
+                    gate_value=current_gate,
+                    wandb_run=wandb_run,
+                    console_log=True,
+                )
+
             # Optimizer step
             if use_amp:
                 scaler.step(optimizer)
@@ -2603,29 +2625,6 @@ def train_epoch(
                     for param in projector.parameters():
                         param.requires_grad = False
                     print(f"\n🔒 [Step {optimizer_step}] Froze audio_projector to prevent suppression", flush=True)
-
-            # Comprehensive diagnostics. Keep concat/audio-only mode quieter since it
-            # has a compact projector-focused summary.
-            concat_audio_only = _is_concat_audio_only_mode(base_model)
-            if concat_audio_only:
-                diag_frequency = 25 if optimizer_step <= 500 else 100
-            else:
-                diag_frequency = 10 if optimizer_step <= 500 else 50
-            if optimizer_step % diag_frequency == 0:
-                # Get current gate value for logging
-                current_gate = getattr(base_model, "_default_gate", None)
-                avg_loss = step_loss_sum / max(step_micro_batches, 1)
-                _log_comprehensive_diagnostics(
-                    model=model,
-                    base_model=base_model,
-                    optimizer_step=optimizer_step,
-                    epoch=epoch,
-                    loss=avg_loss,
-                    grad_norm=float(grad_norm) if grad_norm is not None else None,
-                    gate_value=current_gate,
-                    wandb_run=wandb_run,
-                    console_log=True,
-                )
 
             # W&B logging at optimizer-step granularity
             if wandb_run is not None:
