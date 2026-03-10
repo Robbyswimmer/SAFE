@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset
 from transformers import AutoTokenizer
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from experiments.avqa_composition.train_avqa_composition import ManifestAVQADataset, collate_avqa
 from safe.models.audio_encoders import CLAPAudioEncoder

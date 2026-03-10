@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import random
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -15,7 +16,11 @@ from torch.optim import AdamW
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from transformers import AutoTokenizer
 
-from safe.data.datasets import AudioCapsDataset, ClothoDataset, WavCapsDataset, create_safe_dataloader
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from safe.data.datasets import AudioCapsDataset, ClothoDataset, WavCapsDataset
 from safe.models.audio_encoders import CLAPAudioEncoder
 from train_safe import compute_caption_metrics
 
