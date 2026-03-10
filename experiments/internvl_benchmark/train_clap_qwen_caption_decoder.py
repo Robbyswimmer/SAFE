@@ -177,6 +177,17 @@ class CLAPQwenCaptionDecoder(nn.Module):
         self.final_norm = nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         self.lm_head.weight = self.token_embed.weight
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        nn.init.normal_(self.token_embed.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.pos_embed.weight, mean=0.0, std=0.02)
+        for module in self.audio_to_memory:
+            if isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+        nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.02)
 
     def forward(self, audio_embeddings: torch.Tensor, decoder_input_ids: torch.Tensor) -> torch.Tensor:
         bsz, tgt_len = decoder_input_ids.shape
