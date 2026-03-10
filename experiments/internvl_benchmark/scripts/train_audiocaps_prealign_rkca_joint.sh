@@ -29,7 +29,7 @@ export FP16=0
 export LLM_MODEL_PATH=${LLM_MODEL_PATH:-models/OpenGVLab_InternVL3_5-8B}
 
 MODEL_CONFIG=${MODEL_CONFIG:-rkca_joint_caption16}
-DATA_PATH=${DATA_PATH:-$SAFE_ROOT/data}
+DATA_PATH=${DATA_PATH:-$SAFE_ROOT/experiments/full_training/data}
 OUTPUT_DIR=${OUTPUT_DIR:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/audiocaps_align_rkca_joint_caption16}
 TRAIN_SPLIT=${TRAIN_SPLIT:-train}
 VAL_SPLIT=${VAL_SPLIT:-val}
@@ -115,4 +115,3 @@ fi
 printf '%s\n' "$REUSABLE_CKPT" > "$OUTPUT_DIR/latest_audio_aligned_checkpoint.txt"
 echo "[save] reusable aligned checkpoint -> $REUSABLE_CKPT"
 echo "[save] pointer -> $OUTPUT_DIR/latest_audio_aligned_checkpoint.txt"
-
