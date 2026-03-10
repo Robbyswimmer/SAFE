@@ -272,6 +272,10 @@ def evaluate(
             preds = tokenizer.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
             predictions.extend([" ".join(p.strip().split()) for p in preds])
             references.extend(batch["references"])
+            if len(predictions) <= 2:
+                for pred, refs in zip(preds[:2], batch["references"][:2]):
+                    ref_preview = ", ".join(refs[:2])
+                    print(f"[eval-sample] pred={pred[:160]!r} refs={ref_preview[:200]}", flush=True)
 
     metrics = compute_caption_metrics(predictions, references, compute_bertscore=False)
     metrics["loss"] = total_loss / max(total_batches, 1)
@@ -399,13 +403,29 @@ def main() -> None:
                     raise RuntimeError(
                         f"Label id out of range for decoder vocab: max_label={max_label} logits_vocab={logits.size(-1)}"
                     )
+            if batch_idx == 0 and epoch == 0:
+                min_label = int(valid_labels.min().item()) if valid_labels.numel() > 0 else -1
+                unique_labels = int(torch.unique(valid_labels).numel()) if valid_labels.numel() > 0 else 0
+                print(
+                    f"[debug:init] decoder_input_shape={tuple(decoder_input_ids.shape)} "
+                    f"labels_shape={tuple(labels.shape)} vocab={logits.size(-1)} "
+                    f"label_min={min_label} label_max={max_label if valid_labels.numel() > 0 else -1} "
+                    f"label_unique={unique_labels}",
+                    flush=True,
+                )
+                print(
+                    f"[debug:init] logits_mean={float(logits.mean().item()):.4f} "
+                    f"logits_std={float(logits.std().item()):.4f} "
+                    f"logits_absmax={float(logits.abs().max().item()):.4f}",
+                    flush=True,
+                )
             loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
                 labels.reshape(-1),
                 ignore_index=-100,
             )
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item())
             optimizer.step()
             scheduler.step()
 
@@ -414,10 +434,15 @@ def main() -> None:
             global_step += 1
 
             if (batch_idx + 1) % 100 == 0:
+                logits_detached = logits.detach()
                 print(
                     f"[train] epoch={epoch + 1} step={batch_idx + 1}/{len(train_loader)} "
                     f"loss={running_loss / max(seen_batches, 1):.4f} "
-                    f"lr={scheduler.get_last_lr()[0]:.2e}",
+                    f"lr={scheduler.get_last_lr()[0]:.2e} "
+                    f"grad={grad_norm:.2f} "
+                    f"logit_mean={float(logits_detached.mean().item()):.2f} "
+                    f"logit_std={float(logits_detached.std().item()):.2f} "
+                    f"logit_absmax={float(logits_detached.abs().max().item()):.2f}",
                     flush=True,
                 )
 
