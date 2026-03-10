@@ -1525,7 +1525,7 @@ def evaluate(
                     }
                 )
 
-        if (batch_idx + 1) % 10 == 0:
+        if (batch_idx + 1) % 50 == 0:
             print(f"  Evaluated {batch_idx + 1} batches...", flush=True)
 
     elapsed = time.time() - start_time
@@ -1578,9 +1578,11 @@ def evaluate(
 
     # Log sample predictions
     print(f"\n📝 Sample predictions:", flush=True)
-    for i in range(min(3, len(all_predictions))):
-        print(f"  [{i+1}] Pred: {all_predictions[i]}", flush=True)
-        print(f"      Refs: {all_references[i]}", flush=True)
+    for i in range(min(2, len(all_predictions))):
+        pred = _truncate_for_log(all_predictions[i], max_len=120)
+        refs = ", ".join(_truncate_for_log(r, max_len=80) for r in all_references[i][:2])
+        print(f"  [{i+1}] Pred: {pred}", flush=True)
+        print(f"      Refs: {refs}", flush=True)
 
     # Explicit memory cleanup to prevent OOM during long training runs
     del all_predictions, all_references
@@ -1766,6 +1768,24 @@ def _extract_kv_adapter_metrics(model: Any) -> Dict[str, float]:
     return metrics
 
 
+def _truncate_for_log(text: Any, max_len: int = 120) -> str:
+    value = str(text).strip().replace("\n", " ")
+    value = " ".join(value.split())
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 3] + "..."
+
+
+def _is_concat_audio_only_mode(base_model: Any) -> bool:
+    fusion_type = str(getattr(base_model, "fusion_type", "") or "").strip().lower()
+    if fusion_type == "concat":
+        return True
+    return (
+        getattr(base_model, "fusion_adapter", None) is None
+        and getattr(base_model, "kv_adapters", None) is None
+    )
+
+
 def _log_comprehensive_diagnostics(
     model: Any,
     base_model: Any,
@@ -1800,7 +1820,9 @@ def _log_comprehensive_diagnostics(
     if grad_norm is not None:
         diagnostics["diag/grad_norm_clipped"] = float(grad_norm)
 
-    if gate_value is not None:
+    concat_audio_only = _is_concat_audio_only_mode(base_model)
+
+    if gate_value is not None and not concat_audio_only:
         diagnostics["diag/gate_value"] = float(gate_value)
 
     # 1. Gradient norms per component
@@ -1877,20 +1899,53 @@ def _log_comprehensive_diagnostics(
 
     # 6. Console output (periodic summary)
     if console_log:
+        if concat_audio_only:
+            parts = [
+                f"[DiagCheck] step={optimizer_step}",
+                f"epoch={epoch}",
+                f"loss={loss:.4f}",
+                f"proj_grad={grad_norms['projector']:.2f}",
+            ]
+            if grad_norm is not None:
+                parts.append(f"total_grad={grad_norm:.2f}")
+            if proj_scale is not None:
+                parts.append(f"proj_scale={proj_scale:.4f}")
+            projector_param_mean = diagnostics.get("diag/param_mean/projector")
+            if projector_param_mean is not None:
+                parts.append(f"proj_param_mean={float(projector_param_mean):.4e}")
+            total_grad = grad_norms["projector"]
+            if total_grad < 1.0:
+                parts.append("status=low_grad")
+            elif total_grad < 100.0:
+                parts.append("status=ok")
+            else:
+                parts.append("status=high_grad")
+            print(" | ".join(parts), flush=True)
+            if wandb_run is not None:
+                try:
+                    _wandb_log(wandb_run, diagnostics, step=optimizer_step)
+                except Exception:
+                    pass
+            return diagnostics
+
         lines = [
             f"\n{'='*80}",
             f"[DiagCheck] Step {optimizer_step} | Epoch {epoch} | Loss {loss:.4f}",
             f"{'='*80}",
             f"  Gradient norms:",
-            f"    projector: {grad_norms['projector']:.2f} ({grad_counts['projector']} params)",
-            f"    fusion:    {grad_norms['fusion']:.2f} ({grad_counts['fusion']} params)",
-            f"    kv_adapter: {grad_norms['kv_adapter']:.2f} ({grad_counts['kv_adapter']} params)",
         ]
+
+        if grad_counts["projector"] > 0:
+            lines.append(f"    projector: {grad_norms['projector']:.2f} ({grad_counts['projector']} params)")
+        if grad_counts["fusion"] > 0 or residual_scales:
+            lines.append(f"    fusion:    {grad_norms['fusion']:.2f} ({grad_counts['fusion']} params)")
+        if grad_counts["kv_adapter"] > 0 or kv_metrics:
+            lines.append(f"    kv_adapter: {grad_norms['kv_adapter']:.2f} ({grad_counts['kv_adapter']} params)")
 
         if grad_norm is not None:
             lines.append(f"    total (clipped): {grad_norm:.2f}")
 
-        if gate_value is not None:
+        if gate_value is not None and not concat_audio_only:
             lines.append(f"  Gate value: {gate_value:.3f}")
 
         if proj_scale is not None:
@@ -1924,7 +1979,12 @@ def _log_comprehensive_diagnostics(
         lines.append(f"  Health indicators:")
 
         # Check for gradient collapse
-        total_grad = grad_norms["projector"] + grad_norms["fusion"] + grad_norms["kv_adapter"]
+        active_components = ["projector"]
+        if grad_counts["fusion"] > 0 or residual_scales:
+            active_components.append("fusion")
+        if grad_counts["kv_adapter"] > 0 or kv_metrics:
+            active_components.append("kv_adapter")
+        total_grad = sum(grad_norms[k] for k in active_components)
         if total_grad < 1.0:
             lines.append(f"    ⚠️  LOW GRADIENTS: total audio component grad norm = {total_grad:.4f}")
         elif total_grad < 100.0:
@@ -2458,12 +2518,16 @@ def train_epoch(
         step_samples += len(questions)
         step_micro_batches += 1
 
-        # Gradient health check (first 3 epochs, every 50 batches)
-        # Detects learning failures early by monitoring audio component gradients
-        if epoch <= 3 and batch_idx % 50 == 0:
+        # Gradient health check for early training. In concat/audio-only mode, keep
+        # this sparse because the compact DiagCheck already carries projector health.
+        concat_audio_only = _is_concat_audio_only_mode(base_model)
+        gradcheck_interval = 100 if concat_audio_only else 50
+        if epoch <= 3 and batch_idx % gradcheck_interval == 0:
             proj_grad_norm = 0.0
             fuse_grad_norm = 0.0
             kv_grad_norm = 0.0
+            fuse_grad_count = 0
+            kv_grad_count = 0
             for name, param in model.named_parameters():
                 if param.grad is not None:
                     grad_norm = param.grad.norm().item()
@@ -2471,9 +2535,31 @@ def train_epoch(
                         proj_grad_norm += grad_norm
                     if "fusion_adapter" in name:
                         fuse_grad_norm += grad_norm
+                        fuse_grad_count += 1
                     if "kv_adapter" in name or "kv_augmentation" in name:
                         kv_grad_norm += grad_norm
-            print(f"[GradCheck] epoch={epoch} batch={batch_idx} proj={proj_grad_norm:.6f} fuse={fuse_grad_norm:.6f} kv={kv_grad_norm:.6f}", flush=True)
+                        kv_grad_count += 1
+            if concat_audio_only:
+                grad_status = "low_grad" if proj_grad_norm < 1.0 else ("ok" if proj_grad_norm < 100.0 else "high_grad")
+                # Only emit the sparse projector-only health check periodically or
+                # immediately if gradients look unhealthy.
+                if proj_grad_norm < 1.0 or batch_idx % 500 == 0:
+                    print(
+                        f"[GradCheck] epoch={epoch} batch={batch_idx} "
+                        f"proj={proj_grad_norm:.6f} status={grad_status}",
+                        flush=True,
+                    )
+            elif fuse_grad_count > 0 or kv_grad_count > 0:
+                print(
+                    f"[GradCheck] epoch={epoch} batch={batch_idx} "
+                    f"proj={proj_grad_norm:.6f} fuse={fuse_grad_norm:.6f} kv={kv_grad_norm:.6f}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[GradCheck] epoch={epoch} batch={batch_idx} proj={proj_grad_norm:.6f}",
+                    flush=True,
+                )
             last_proj_grad_norm = float(proj_grad_norm)
             last_fuse_grad_norm = float(fuse_grad_norm)
 
@@ -2518,8 +2604,13 @@ def train_epoch(
                         param.requires_grad = False
                     print(f"\n🔒 [Step {optimizer_step}] Froze audio_projector to prevent suppression", flush=True)
 
-            # Comprehensive diagnostics (every 10 steps during warmup, every 50 steps after)
-            diag_frequency = 10 if optimizer_step <= 500 else 50
+            # Comprehensive diagnostics. Keep concat/audio-only mode quieter since it
+            # has a compact projector-focused summary.
+            concat_audio_only = _is_concat_audio_only_mode(base_model)
+            if concat_audio_only:
+                diag_frequency = 25 if optimizer_step <= 500 else 100
+            else:
+                diag_frequency = 10 if optimizer_step <= 500 else 50
             if optimizer_step % diag_frequency == 0:
                 # Get current gate value for logging
                 current_gate = getattr(base_model, "_default_gate", None)
@@ -2753,6 +2844,8 @@ def train_epoch(
             except Exception:
                 attn_mean = attn_max = None
 
+            concat_audio_only = _is_concat_audio_only_mode(base_model)
+
             log_msg = (
                 f"[Epoch {epoch}] Batch {batch_idx}/{len(dataloader)} | "
                 f"Loss: {avg_loss:.4f} | LR: {lr:.2e} | "
@@ -2763,11 +2856,11 @@ def train_epoch(
                 extras.append(f"audio_norm={audio_token_norm:.2f}")
             if proj_scale is not None:
                 extras.append(f"proj_scale={proj_scale:.3f}")
-            if residual_scale_mean is not None:
+            if residual_scale_mean is not None and not concat_audio_only:
                 extras.append(f"res_scale={residual_scale_mean:.3f}")
-            if delta_q_scale_mean is not None:
+            if delta_q_scale_mean is not None and not concat_audio_only:
                 extras.append(f"dq_scale={delta_q_scale_mean:.3f}")
-            if attn_mean is not None and attn_max is not None:
+            if attn_mean is not None and attn_max is not None and not concat_audio_only:
                 extras.append(f"attn_mean={attn_mean:.4f} attn_max={attn_max:.4f}")
             if extras:
                 log_msg = f"{log_msg} | " + " ".join(extras)
@@ -3604,8 +3697,9 @@ def train(
                     audio_value = row.get("audio")
                     audio_path_value = row.get("audio_path")
 
-                    # Debug: log audio data format for first few samples
-                    if row_idx < 3:
+                    debug_wandb_audio = os.environ.get("DEBUG_WANDB_AUDIO", "0") == "1"
+                    # Optional debug: log audio data format for first few samples
+                    if debug_wandb_audio and row_idx < 3:
                         print(f"[W&B Audio Debug] Sample {row_idx}:", flush=True)
                         print(f"  audio type: {type(audio_value)}", flush=True)
                         if isinstance(audio_value, tuple):
@@ -3624,7 +3718,7 @@ def train(
                             )
                             audio_success_count += 1
                         except Exception as e:
-                            if row_idx < 3:
+                            if debug_wandb_audio and row_idx < 3:
                                 print(f"  [W&B Audio] Failed to create from tensor: {e}", flush=True)
                             audio_cell = None
                     elif audio_path_value:
@@ -3632,7 +3726,7 @@ def train(
                             audio_cell = wandb.Audio(str(audio_path_value))
                             audio_success_count += 1
                         except Exception as e:
-                            if row_idx < 3:
+                            if debug_wandb_audio and row_idx < 3:
                                 print(f"  [W&B Audio] Failed to create from path: {e}", flush=True)
                             audio_cell = None
 
@@ -4526,12 +4620,17 @@ def main():
         kv_adapter_params = breakdown.get("kv_adapter", 0)
         query_adapter_params = breakdown.get("kv_adapter/query_adapter", 0)
 
+        concat_audio_only = _is_concat_audio_only_mode(base_model)
+
         if kv_adapter_params > 0:
             print(f"\n  ✓ KV Adapter parameters detected: {_format_param_count(kv_adapter_params)} (training enabled)")
             if query_adapter_params > 0:
                 print(f"    - Query adapter (ΔQ): {_format_param_count(query_adapter_params)}")
         elif lora_params > 0:
             print(f"\n  ✓ LoRA parameters detected: {_format_param_count(lora_params)} (training enabled)")
+        elif concat_audio_only:
+            print(f"\n  ✓ Concat mode detected: no fusion/KV adapter parameters expected")
+            print(f"    Trainable path is projector-driven audio token injection into the frozen LLM")
         else:
             print(f"\n  ⚠️  WARNING: No LoRA or KV adapter parameters found in trainable params!")
             print(f"     This may indicate adapter weights are frozen")

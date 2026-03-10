@@ -939,6 +939,82 @@ class SAFEModel(nn.Module):
             return counts.most_common(1)[0][0]
         return str(answer)
 
+    def _answers_look_like_captions(self, answers: Optional[Union[str, Sequence[Any]]]) -> bool:
+        if answers is None:
+            return False
+
+        if isinstance(answers, str):
+            samples = [answers]
+        else:
+            samples = []
+            for item in list(answers)[:8]:
+                text = self._select_training_answer(item)
+                if text:
+                    samples.append(text)
+
+        if not samples:
+            return False
+
+        word_counts = [len(str(text).strip().split()) for text in samples if str(text).strip()]
+        if not word_counts:
+            return False
+
+        avg_words = sum(word_counts) / len(word_counts)
+        long_fraction = sum(1 for count in word_counts if count >= 4) / len(word_counts)
+        return avg_words >= 4.0 or long_fraction >= 0.5
+
+    def _texts_look_like_caption_requests(self, texts: Sequence[str]) -> bool:
+        if not texts:
+            return False
+
+        prefixes = (
+            "describe what you hear",
+            "describe the audio",
+            "what is happening in the audio",
+            "what do you hear",
+            "caption the audio",
+        )
+        matches = 0
+        total = 0
+        for text in texts[:8]:
+            if not isinstance(text, str):
+                continue
+            stripped = text.strip().lower()
+            if not stripped:
+                continue
+            total += 1
+            if any(stripped.startswith(prefix) for prefix in prefixes):
+                matches += 1
+        return total > 0 and (matches / total) >= 0.5
+
+    def _resolve_prompt_mode(
+        self,
+        texts: Sequence[str],
+        images: Optional[Union[torch.Tensor, List]],
+        answers: Optional[Union[str, Sequence[Any]]],
+        training_mode: bool,
+    ) -> str:
+        has_any_image = False
+        if images is None:
+            has_any_image = False
+        elif isinstance(images, list):
+            has_any_image = any(img is not None for img in images)
+        elif isinstance(images, torch.Tensor):
+            has_any_image = bool(images.numel() > 0)
+        else:
+            has_any_image = True
+
+        if has_any_image:
+            return "qa"
+
+        if training_mode and self._answers_look_like_captions(answers):
+            return "caption"
+
+        if self._texts_look_like_caption_requests(texts):
+            return "caption"
+
+        return "qa"
+
     def _apply_answers_to_inputs(
         self,
         inputs: Dict[str, torch.Tensor],
@@ -1609,6 +1685,12 @@ class SAFEModel(nn.Module):
         else:
             texts = list(text)
 
+        prompt_mode = self._resolve_prompt_mode(
+            texts=texts,
+            images=images,
+            answers=answers,
+            training_mode=training_mode,
+        )
         batch_size = len(texts)
 
         # Convert images to PIL format
@@ -1627,7 +1709,8 @@ class SAFEModel(nn.Module):
             pil_images.append(None)
         pil_images = pil_images[:batch_size]
 
-        instruction = "Answer with exactly one short answer token (single word or number)."
+        qa_instruction = "Answer with exactly one short answer token (single word or number)."
+        caption_instruction = "Describe what you hear in one short sentence."
         newline_ids = tokenizer.encode("\n", add_special_tokens=False)
 
         has_chat_template = bool(getattr(tokenizer, "chat_template", None)) and hasattr(
@@ -1636,7 +1719,19 @@ class SAFEModel(nn.Module):
 
         def _build_text_ids(question: str) -> List[int]:
             # Keep InternVL prompts aligned with Qwen path and suppress reasoning traces.
-            user_text = f"/no_think\n{instruction}\nQuestion: {question}\nAnswer:"
+            question_text = str(question or "").strip()
+            if prompt_mode == "caption":
+                generic_questions = {
+                    "what is happening in the audio?",
+                    "describe the audio.",
+                    "what do you hear?",
+                }
+                if question_text.lower() in generic_questions or not question_text:
+                    user_text = f"/no_think\n{caption_instruction}"
+                else:
+                    user_text = f"/no_think\n{caption_instruction}\nFocus: {question_text}"
+            else:
+                user_text = f"/no_think\n{qa_instruction}\nQuestion: {question_text}\nAnswer:"
             if has_chat_template:
                 try:
                     message = [{"role": "user", "content": user_text}]
