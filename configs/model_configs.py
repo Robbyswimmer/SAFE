@@ -1002,6 +1002,7 @@ RKCA_JOINT_CAPTION16_CONFIG = {
     **RKCA_JOINT_CONFIG,
     "name": "rkca_joint_caption16",
     "description": "InternVL 3.5-8B concat audio with higher-capacity projector for AudioCaps -> MUSIC-AVQA",
+    "eval_prompt": "Describe what you hear in one short sentence.",
     "num_audio_tokens": 16,
     "projector_config": {
         **RKCA_JOINT_CONFIG["projector_config"],
