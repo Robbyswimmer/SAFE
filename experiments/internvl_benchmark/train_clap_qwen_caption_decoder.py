@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from experiments.avqa_composition.train_avqa_composition import ManifestAVQADataset
 from safe.data.datasets import AudioCapsDataset, ClothoDataset, WavCapsDataset
 from safe.models.audio_encoders import CLAPAudioEncoder
 from train_safe import compute_caption_metrics
@@ -68,13 +69,16 @@ class CaptionBatchCollator:
         sample_ids: List[str] = []
 
         for sample in batch:
-            cap = _pick_caption(sample.get("answers"), train=self.train)
+            raw_answers = sample.get("answers")
+            if raw_answers is None:
+                raw_answers = sample.get("answer")
+            cap = _pick_caption(raw_answers, train=self.train)
             audio_source = sample.get("audio")
             if audio_source is None:
                 audio_source = sample.get("audio_path")
             if audio_source is None or not cap:
                 continue
-            refs_raw = sample.get("answers")
+            refs_raw = raw_answers
             refs: List[str] = []
             if isinstance(refs_raw, str):
                 refs = [refs_raw.strip()] if refs_raw.strip() else []
@@ -231,7 +235,21 @@ class CLAPQwenCaptionDecoder(nn.Module):
         return generated[:, 1:]
 
 
-def build_datasets(data_path: str, use_wavcaps: bool) -> Tuple[Dataset, Dataset]:
+def build_datasets(
+    data_path: str,
+    use_wavcaps: bool,
+    dataset_mode: str,
+    train_manifest: Optional[str],
+    val_manifest: Optional[str],
+    media_root: Optional[str],
+) -> Tuple[Dataset, Dataset]:
+    if dataset_mode == "music_avqa":
+        if not train_manifest or not val_manifest or not media_root:
+            raise ValueError("music_avqa mode requires --train-manifest, --val-manifest, and --media-root")
+        train_dataset: Dataset = ManifestAVQADataset(Path(train_manifest), Path(media_root))
+        val_dataset: Dataset = ManifestAVQADataset(Path(val_manifest), Path(media_root))
+        return train_dataset, val_dataset
+
     train_parts: List[Dataset] = [AudioCapsDataset(data_path, split="train"), ClothoDataset(data_path, split="train")]
     if use_wavcaps:
         try:
@@ -299,9 +317,13 @@ def evaluate(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a lightweight CLAP->Qwen caption decoder.")
+    parser.add_argument("--dataset-mode", type=str, default="audiocaption", choices=["audiocaption", "music_avqa"])
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument("--llm-model", type=str, default="models/OpenGVLab_InternVL3_5-8B")
+    parser.add_argument("--train-manifest", type=str, default="")
+    parser.add_argument("--val-manifest", type=str, default="")
+    parser.add_argument("--media-root", type=str, default="")
     parser.add_argument("--use-wavcaps", action="store_true")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--val-batch-size", type=int, default=32)
@@ -347,7 +369,14 @@ def main() -> None:
     vocab = tokenizer.get_vocab()
     vocab_size = int(max(vocab.values()) + 1)
 
-    train_dataset, val_dataset = build_datasets(args.data_path, use_wavcaps=args.use_wavcaps)
+    train_dataset, val_dataset = build_datasets(
+        data_path=args.data_path,
+        use_wavcaps=args.use_wavcaps,
+        dataset_mode=args.dataset_mode,
+        train_manifest=args.train_manifest or None,
+        val_manifest=args.val_manifest or None,
+        media_root=args.media_root or None,
+    )
     train_dataset = maybe_subset(train_dataset, args.max_train_samples)
     val_dataset = maybe_subset(val_dataset, args.max_val_samples)
 
