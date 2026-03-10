@@ -616,7 +616,20 @@ def main() -> None:
             num_workers=args.num_workers,
             collate_fn=collate_avqa,
         )
-        llm_cfg = get_config(args.holdout_model_config)
+        holdout_cfg_name = args.holdout_model_config
+        if holdout_cfg_name == "internvl":
+            # For this experiment, holdout evaluation should use the raw frozen
+            # InternVL base model with image + text only. In this repo the
+            # "internvl" config includes residual audio fusion adapters, which
+            # is the wrong evaluation path here. Remap to the plain concat/raw
+            # InternVL wrapper config instead.
+            holdout_cfg_name = "rkca_joint"
+            print(
+                "[holdout] remapping holdout_model_config=internvl -> rkca_joint "
+                "to use the raw frozen InternVL text+image path",
+                flush=True,
+            )
+        llm_cfg = get_config(holdout_cfg_name)
         holdout_model = create_model(llm_cfg).to(device)
         holdout_ckpt = Path(args.holdout_checkpoint) if args.holdout_checkpoint else None
         if holdout_ckpt is not None and holdout_ckpt.exists():
