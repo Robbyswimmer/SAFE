@@ -30,8 +30,11 @@ MEDIA_ROOT=${MEDIA_ROOT:-$SAFE_ROOT/data/music_avqa}
 TRAIN_MANIFEST=${TRAIN_MANIFEST:-$SAFE_ROOT/data/music_avqa/manifests/train.jsonl}
 VAL_MANIFEST=${VAL_MANIFEST:-$SAFE_ROOT/data/music_avqa/manifests/validation.jsonl}
 OUTPUT_DIR=${OUTPUT_DIR:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/clap_music_avqa_answer_decoder}
+HOLDOUT_MODEL_CONFIG=${HOLDOUT_MODEL_CONFIG:-rkca_joint}
+HOLDOUT_CHECKPOINT=${HOLDOUT_CHECKPOINT:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/vision_audio_from_audiocaps_align_rkca_joint_caption16/checkpoint_best.pt}
 BATCH_SIZE=${BATCH_SIZE:-32}
 VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-32}
+HOLDOUT_BATCH_SIZE=${HOLDOUT_BATCH_SIZE:-2}
 NUM_EPOCHS=${NUM_EPOCHS:-10}
 NUM_WORKERS=${NUM_WORKERS:-2}
 LEARNING_RATE=${LEARNING_RATE:-1e-4}
@@ -55,4 +58,7 @@ python3 experiments/internvl_benchmark/train_clap_qwen_caption_decoder.py \
   --num-epochs "$NUM_EPOCHS" \
   --learning-rate "$LEARNING_RATE" \
   --max-length "$MAX_LENGTH" \
-  --max-new-tokens "$MAX_NEW_TOKENS"
+  --max-new-tokens "$MAX_NEW_TOKENS" \
+  --holdout-model-config "$HOLDOUT_MODEL_CONFIG" \
+  --holdout-checkpoint "$HOLDOUT_CHECKPOINT" \
+  --holdout-batch-size "$HOLDOUT_BATCH_SIZE"
