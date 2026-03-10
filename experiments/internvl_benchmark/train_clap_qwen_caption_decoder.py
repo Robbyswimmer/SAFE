@@ -263,6 +263,7 @@ def evaluate(
     references: List[List[str]] = []
     total_loss = 0.0
     total_batches = 0
+    printed_examples = 0
     with torch.no_grad():
         for batch in dataloader:
             if len(batch["audio"]) == 0:
@@ -283,10 +284,13 @@ def evaluate(
             preds = tokenizer.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
             predictions.extend([" ".join(p.strip().split()) for p in preds])
             references.extend(batch["references"])
-            if len(predictions) <= 2:
-                for pred, refs in zip(preds[:2], batch["references"][:2]):
+            if printed_examples < 2:
+                for pred, refs in zip(preds[: 2 - printed_examples], batch["references"][: 2 - printed_examples]):
                     ref_preview = ", ".join(refs[:2])
                     print(f"[eval-sample] pred={pred[:160]!r} refs={ref_preview[:200]}", flush=True)
+                    printed_examples += 1
+                    if printed_examples >= 2:
+                        break
 
     metrics = compute_caption_metrics(predictions, references, compute_bertscore=False)
     metrics["loss"] = total_loss / max(total_batches, 1)
