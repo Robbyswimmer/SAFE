@@ -6,6 +6,7 @@ import json
 import math
 import random
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -33,6 +34,23 @@ from experiments.avqa_composition.train_avqa_composition import ManifestAVQAData
 from safe.data.datasets import AudioCapsDataset, ClothoDataset, WavCapsDataset
 from safe.models.audio_encoders import CLAPAudioEncoder
 from train_safe import compute_caption_metrics, create_model, load_checkpoint
+
+
+warnings.filterwarnings(
+    "ignore",
+    message=".*torchaudio.load_with_torchcodec.*",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=".*StreamingMediaDecoder has been deprecated.*",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=".*`torch_dtype` is deprecated! Use `dtype` instead!.*",
+    category=UserWarning,
+)
 
 
 def set_seed(seed: int) -> None:
@@ -647,10 +665,48 @@ def main() -> None:
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    best_cider = -1.0
+    if args.dataset_mode == "music_avqa":
+        best_metric_name = "extracted_em"
+        best_metric = -1.0
+    else:
+        best_metric_name = "cider"
+        best_metric = -1.0
     global_step = 0
     with (output_dir / "args.json").open("w", encoding="utf-8") as f:
         json.dump(vars(args), f, indent=2)
+
+    # Initial validation before any training update.
+    if args.dataset_mode == "music_avqa":
+        init_metrics = evaluate_music_avqa_answers(
+            model=model,
+            clap=clap,
+            dataloader=val_loader,
+            tokenizer=tokenizer,
+            device=device,
+            max_new_tokens=args.max_new_tokens,
+        )
+    else:
+        init_metrics = evaluate(
+            model=model,
+            clap=clap,
+            dataloader=val_loader,
+            tokenizer=tokenizer,
+            device=device,
+            max_new_tokens=args.max_new_tokens,
+        )
+    print(f"[init-eval] {json.dumps(init_metrics, indent=2)}", flush=True)
+    if holdout_loader is not None and holdout_base_model is not None and holdout_tokenizer is not None:
+        evaluate_music_avqa_holdouts(
+            decoder=model,
+            clap=clap,
+            dataloader=holdout_loader,
+            base_model=holdout_base_model,
+            tokenizer=holdout_tokenizer,
+            device=device,
+            max_new_tokens=args.max_new_tokens,
+            output_dir=output_dir,
+            epoch_index=-1,
+        )
 
     for epoch in range(args.num_epochs):
         model.train()
@@ -761,10 +817,15 @@ def main() -> None:
             },
         }
         torch.save(checkpoint, output_dir / "checkpoint_last.pt")
-        if metrics.get("cider", 0.0) > best_cider:
-            best_cider = float(metrics["cider"])
+        metric_value = float(metrics.get(best_metric_name, 0.0))
+        if metric_value > best_metric:
+            best_metric = metric_value
             torch.save(checkpoint, output_dir / "checkpoint_best.pt")
-            print(f"[save] best checkpoint -> {output_dir / 'checkpoint_best.pt'}", flush=True)
+            print(
+                f"[save] best checkpoint -> {output_dir / 'checkpoint_best.pt'} "
+                f"({best_metric_name}={metric_value:.4f})",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":

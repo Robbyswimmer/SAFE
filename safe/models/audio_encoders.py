@@ -346,7 +346,7 @@ class CLAPAudioEncoder(nn.Module):
                 
         # Extract embeddings - CLAP expects numpy arrays
         # CRITICAL: Disable autocast to prevent fp16 numerical instability in CLAP
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):
+        with torch.no_grad(), torch.amp.autocast("cuda", enabled=False):
             # Convert to numpy for CLAP
             if isinstance(audio_batch, torch.Tensor):
                 audio_numpy = audio_batch.detach().cpu().float().numpy()  # Ensure fp32
