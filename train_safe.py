@@ -4095,8 +4095,7 @@ def main():
 
     # Model configuration
     parser.add_argument("--model-config", type=str, default="phase1",
-                        choices=["demo", "full", "multimodal", "phase1", "kv_augment"],
-                        help="Model configuration name")
+                        help="Model configuration name (any key from configs.model_configs.CONFIGS)")
     parser.add_argument("--fusion-layer-indices", type=str, default=None,
                         help="Comma-separated layer indices for fusion injection (e.g., '8,16,24'). "
                              "Overrides the config default.")

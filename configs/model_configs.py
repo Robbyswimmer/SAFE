@@ -992,6 +992,29 @@ RKCA_JOINT_CONFIG = {
     "gradient_accumulation_steps": 8,
 }
 
+# Higher-capacity InternVL 3.5-8B concat configuration for caption pre-alignment
+# and downstream AVQA. The main increase is projector capacity:
+# - 16 audio tokens instead of 8
+# - 2048 projector bottleneck instead of 1024
+# This keeps the simple concat interface but gives the projector more room to
+# preserve description-level audio information before MUSIC-AVQA fine-tuning.
+RKCA_JOINT_CAPTION16_CONFIG = {
+    **RKCA_JOINT_CONFIG,
+    "name": "rkca_joint_caption16",
+    "description": "InternVL 3.5-8B concat audio with higher-capacity projector for AudioCaps -> MUSIC-AVQA",
+    "num_audio_tokens": 16,
+    "projector_config": {
+        **RKCA_JOINT_CONFIG["projector_config"],
+        "bottleneck_dim": 2048,
+    },
+}
+RKCA_JOINT_CAPTION16_CONFIG["fusion_config"] = {
+    **RKCA_JOINT_CONFIG["fusion_config"],
+    "modalities": {
+        "audio": {"layer_indices": [], "num_tokens": 16},
+    },
+}
+
 # InternVL 3.5-14B: Qwen3-14B backbone (40 layers, hidden=5120)
 INTERNVL_14B_CONFIG = {
     "name": "internvl_14b",
@@ -1465,6 +1488,7 @@ CONFIGS = {
     "rkca": RKCA_CONFIG,
     "rkca_subspace": RKCA_SUBSPACE_CONFIG,
     "rkca_joint": RKCA_JOINT_CONFIG,
+    "rkca_joint_caption16": RKCA_JOINT_CAPTION16_CONFIG,
     "lora_baseline": LORA_BASELINE_CONFIG,
     "internvl_binding": INTERNVL_BINDING_CONFIG,
     "composition_4b_vfirst": COMPOSITION_4B_VFIRST_CONFIG,
