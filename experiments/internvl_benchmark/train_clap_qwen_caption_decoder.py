@@ -606,7 +606,7 @@ def main() -> None:
     holdout_loader: Optional[DataLoader] = None
     holdout_base_model: Optional[Any] = None
     holdout_tokenizer: Optional[Any] = None
-    if args.dataset_mode == "music_avqa" and args.holdout_checkpoint:
+    if args.dataset_mode == "music_avqa" and args.holdout_model_config:
         holdout_dataset = ManifestAVQADataset(Path(args.val_manifest), Path(args.media_root))
         holdout_dataset = maybe_subset(holdout_dataset, args.max_val_samples)
         holdout_loader = DataLoader(
@@ -616,10 +616,10 @@ def main() -> None:
             num_workers=args.num_workers,
             collate_fn=collate_avqa,
         )
-        holdout_ckpt = Path(args.holdout_checkpoint)
-        if holdout_ckpt.exists() and args.holdout_model_config:
-            llm_cfg = get_config(args.holdout_model_config)
-            holdout_model = create_model(llm_cfg).to(device)
+        llm_cfg = get_config(args.holdout_model_config)
+        holdout_model = create_model(llm_cfg).to(device)
+        holdout_ckpt = Path(args.holdout_checkpoint) if args.holdout_checkpoint else None
+        if holdout_ckpt is not None and holdout_ckpt.exists():
             load_checkpoint(
                 model=holdout_model,
                 optimizer=None,
@@ -627,15 +627,12 @@ def main() -> None:
                 checkpoint_path=holdout_ckpt,
                 device=device,
             )
-            holdout_model.eval()
-            holdout_base_model = holdout_model.module if hasattr(holdout_model, "module") else holdout_model
-            holdout_tokenizer = holdout_base_model.base_vl.tokenizer
+            print(f"[holdout] loaded checkpoint: {holdout_ckpt}", flush=True)
         else:
-            print(
-                f"[holdout-warning] holdout checkpoint missing or holdout model config unset; "
-                f"skipping end-of-epoch composition eval ({holdout_ckpt})",
-                flush=True,
-            )
+            print("[holdout] using raw frozen base model (no holdout checkpoint provided)", flush=True)
+        holdout_model.eval()
+        holdout_base_model = holdout_model.module if hasattr(holdout_model, "module") else holdout_model
+        holdout_tokenizer = holdout_base_model.base_vl.tokenizer
 
     clap = CLAPAudioEncoder(freeze=True).to(device)
     clap.eval()
