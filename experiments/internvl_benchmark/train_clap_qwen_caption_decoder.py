@@ -69,7 +69,10 @@ class CaptionBatchCollator:
 
         for sample in batch:
             cap = _pick_caption(sample.get("answers"), train=self.train)
-            if sample.get("audio") is None or not cap:
+            audio_source = sample.get("audio")
+            if audio_source is None:
+                audio_source = sample.get("audio_path")
+            if audio_source is None or not cap:
                 continue
             refs_raw = sample.get("answers")
             refs: List[str] = []
@@ -79,7 +82,7 @@ class CaptionBatchCollator:
                 refs = [str(x).strip() for x in refs_raw if str(x).strip()]
             if not refs:
                 refs = [cap]
-            audio.append(sample["audio"])
+            audio.append(audio_source)
             captions.append(cap)
             references.append(refs)
             sample_ids.append(str(sample.get("sample_id", "")))
