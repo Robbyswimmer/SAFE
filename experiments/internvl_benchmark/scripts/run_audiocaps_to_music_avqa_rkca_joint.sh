@@ -2,7 +2,7 @@
 #SBATCH --job-name=a2avqa-rkca
 #SBATCH --output=logs/audiocaps_to_avqa_%j.out
 #SBATCH --error=logs/audiocaps_to_avqa_%j.err
-#SBATCH --time=96:00:00
+#SBATCH --time=72:00:00
 #SBATCH --mem=96G
 #SBATCH --cpus-per-task=8
 #SBATCH -p gpu
@@ -36,4 +36,3 @@ OUTPUT_DIR="$STAGE1_OUTPUT_DIR" bash experiments/internvl_benchmark/scripts/trai
 INIT_AUDIO_CKPT="$STAGE1_OUTPUT_DIR/audio_aligned_best.pt" \
 OUTPUT_DIR="$STAGE2_OUTPUT_DIR" \
 bash experiments/internvl_benchmark/scripts/train_music_avqa_from_audiocaps_align_rkca_joint.sh
-
