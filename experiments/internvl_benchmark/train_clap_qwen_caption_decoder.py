@@ -324,6 +324,69 @@ def evaluate(
     return metrics
 
 
+def evaluate_music_avqa_answers(
+    model: CLAPQwenCaptionDecoder,
+    clap: CLAPAudioEncoder,
+    dataloader: DataLoader,
+    tokenizer: Any,
+    device: torch.device,
+    max_new_tokens: int,
+) -> Dict[str, float]:
+    model.eval()
+    raw_correct = 0
+    extracted_correct = 0
+    total = 0
+    total_f1 = 0.0
+    total_cat_f1 = 0.0
+    total_loss = 0.0
+    total_batches = 0
+    printed_examples = 0
+
+    with torch.no_grad():
+        for batch in dataloader:
+            if len(batch["audio"]) == 0:
+                continue
+            decoder_input_ids = batch["decoder_input_ids"].to(device)
+            labels = batch["labels"].to(device)
+            audio_embeddings = clap(batch["audio"]).to(device)
+            logits = model(audio_embeddings, decoder_input_ids)
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                labels.reshape(-1),
+                ignore_index=-100,
+            )
+            total_loss += float(loss.item())
+            total_batches += 1
+
+            generated_ids = model.generate(audio_embeddings, tokenizer, max_new_tokens=max_new_tokens)
+            preds = tokenizer.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+            preds = [" ".join(p.strip().split()) for p in preds]
+
+            for pred, refs in zip(preds, batch["references"]):
+                ref = refs[0] if refs else ""
+                pred_norm = normalize_answer(pred)
+                ref_norm = normalize_answer(ref)
+                pred_extracted = extract_answer(pred)
+                ref_extracted = extract_answer(ref)
+                raw_correct += int(pred_norm == ref_norm)
+                extracted_correct += int(pred_extracted == ref_extracted)
+                total_f1 += token_f1(pred, ref)
+                total_cat_f1 += categorical_f1(pred, ref)
+                total += 1
+                if printed_examples < 2:
+                    print(f"[eval-sample] pred={pred[:160]!r} refs={ref[:200]}", flush=True)
+                    printed_examples += 1
+
+    return {
+        "raw_em": 100.0 * raw_correct / max(total, 1),
+        "extracted_em": 100.0 * extracted_correct / max(total, 1),
+        "f1": 100.0 * total_f1 / max(total, 1),
+        "cat_f1": 100.0 * total_cat_f1 / max(total, 1),
+        "loss": total_loss / max(total_batches, 1),
+        "n": total,
+    }
+
+
 def build_holdout_prompt(question: str, caption: str, mode: str) -> str:
     if mode == "caption":
         return (
@@ -347,26 +410,13 @@ def evaluate_music_avqa_holdouts(
     decoder: CLAPQwenCaptionDecoder,
     clap: CLAPAudioEncoder,
     dataloader: DataLoader,
-    llm_model_config: str,
-    llm_checkpoint: str,
+    base_model: Any,
+    tokenizer: Any,
     device: torch.device,
     max_new_tokens: int,
     output_dir: Path,
     epoch_index: int,
 ) -> None:
-    llm_cfg = get_config(llm_model_config)
-    holdout_model = create_model(llm_cfg).to(device)
-    load_checkpoint(
-        model=holdout_model,
-        optimizer=None,
-        scheduler=None,
-        checkpoint_path=Path(llm_checkpoint),
-        device=device,
-    )
-    holdout_model.eval()
-    base_model = holdout_model.module if hasattr(holdout_model, "module") else holdout_model
-    tokenizer = base_model.base_vl.tokenizer
-
     summaries: Dict[str, Dict[str, float]] = {}
     for mode in ("image", "caption", "both"):
         raw_correct = 0
@@ -452,10 +502,6 @@ def evaluate_music_avqa_holdouts(
     with (output_dir / f"holdout_epoch_{epoch_index + 1}.json").open("w", encoding="utf-8") as f:
         json.dump(summaries, f, indent=2)
 
-    del holdout_model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a lightweight CLAP->Qwen caption decoder.")
@@ -540,6 +586,8 @@ def main() -> None:
         collate_fn=CaptionBatchCollator(tokenizer, args.max_length, train=False),
     )
     holdout_loader: Optional[DataLoader] = None
+    holdout_base_model: Optional[Any] = None
+    holdout_tokenizer: Optional[Any] = None
     if args.dataset_mode == "music_avqa" and args.holdout_checkpoint:
         holdout_dataset = ManifestAVQADataset(Path(args.val_manifest), Path(args.media_root))
         holdout_dataset = maybe_subset(holdout_dataset, args.max_val_samples)
@@ -550,6 +598,26 @@ def main() -> None:
             num_workers=args.num_workers,
             collate_fn=collate_avqa,
         )
+        holdout_ckpt = Path(args.holdout_checkpoint)
+        if holdout_ckpt.exists() and args.holdout_model_config:
+            llm_cfg = get_config(args.holdout_model_config)
+            holdout_model = create_model(llm_cfg).to(device)
+            load_checkpoint(
+                model=holdout_model,
+                optimizer=None,
+                scheduler=None,
+                checkpoint_path=holdout_ckpt,
+                device=device,
+            )
+            holdout_model.eval()
+            holdout_base_model = holdout_model.module if hasattr(holdout_model, "module") else holdout_model
+            holdout_tokenizer = holdout_base_model.base_vl.tokenizer
+        else:
+            print(
+                f"[holdout-warning] holdout checkpoint missing or holdout model config unset; "
+                f"skipping end-of-epoch composition eval ({holdout_ckpt})",
+                flush=True,
+            )
 
     clap = CLAPAudioEncoder(freeze=True).to(device)
     clap.eval()
@@ -646,22 +714,32 @@ def main() -> None:
                     flush=True,
                 )
 
-        metrics = evaluate(
-            model=model,
-            clap=clap,
-            dataloader=val_loader,
-            tokenizer=tokenizer,
-            device=device,
-            max_new_tokens=args.max_new_tokens,
-        )
+        if args.dataset_mode == "music_avqa":
+            metrics = evaluate_music_avqa_answers(
+                model=model,
+                clap=clap,
+                dataloader=val_loader,
+                tokenizer=tokenizer,
+                device=device,
+                max_new_tokens=args.max_new_tokens,
+            )
+        else:
+            metrics = evaluate(
+                model=model,
+                clap=clap,
+                dataloader=val_loader,
+                tokenizer=tokenizer,
+                device=device,
+                max_new_tokens=args.max_new_tokens,
+            )
         print(f"[eval] epoch={epoch + 1} {json.dumps(metrics, indent=2)}", flush=True)
-        if holdout_loader is not None and args.holdout_model_config:
+        if holdout_loader is not None and holdout_base_model is not None and holdout_tokenizer is not None:
             evaluate_music_avqa_holdouts(
                 decoder=model,
                 clap=clap,
                 dataloader=holdout_loader,
-                llm_model_config=args.holdout_model_config,
-                llm_checkpoint=args.holdout_checkpoint,
+                base_model=holdout_base_model,
+                tokenizer=holdout_tokenizer,
                 device=device,
                 max_new_tokens=args.max_new_tokens,
                 output_dir=output_dir,
