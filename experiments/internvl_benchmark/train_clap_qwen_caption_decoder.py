@@ -260,7 +260,7 @@ def evaluate(
             loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
                 labels.reshape(-1),
-                ignore_index=tokenizer.pad_token_id,
+                ignore_index=-100,
             )
             total_loss += float(loss.item())
             total_batches += 1
@@ -322,6 +322,8 @@ def main() -> None:
     if tokenizer.eos_token_id is None:
         raise ValueError("Tokenizer must provide eos_token_id")
     start_token_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
+    vocab = tokenizer.get_vocab()
+    vocab_size = int(max(vocab.values()) + 1)
 
     train_dataset, val_dataset = build_datasets(args.data_path, use_wavcaps=args.use_wavcaps)
     train_dataset = maybe_subset(train_dataset, args.max_train_samples)
@@ -346,7 +348,7 @@ def main() -> None:
     clap.eval()
 
     model = CLAPQwenCaptionDecoder(
-        vocab_size=len(tokenizer),
+        vocab_size=vocab_size,
         pad_token_id=int(tokenizer.pad_token_id),
         start_token_id=int(start_token_id),
         d_model=args.hidden_dim,
@@ -387,10 +389,17 @@ def main() -> None:
             labels = batch["labels"].to(device)
             audio_embeddings = clap(batch["audio"]).to(device)
             logits = model(audio_embeddings, decoder_input_ids)
+            valid_labels = labels[labels >= 0]
+            if valid_labels.numel() > 0:
+                max_label = int(valid_labels.max().item())
+                if max_label >= logits.size(-1):
+                    raise RuntimeError(
+                        f"Label id out of range for decoder vocab: max_label={max_label} logits_vocab={logits.size(-1)}"
+                    )
             loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
                 labels.reshape(-1),
-                ignore_index=tokenizer.pad_token_id,
+                ignore_index=-100,
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

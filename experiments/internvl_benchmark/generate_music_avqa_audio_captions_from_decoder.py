@@ -44,9 +44,10 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     start_token_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
+    vocab_size = int(max(tokenizer.get_vocab().values()) + 1)
 
     model = CLAPQwenCaptionDecoder(
-        vocab_size=len(tokenizer),
+        vocab_size=vocab_size,
         pad_token_id=int(tokenizer.pad_token_id),
         start_token_id=int(start_token_id),
         d_model=int(cfg["hidden_dim"]),
