@@ -392,7 +392,7 @@ def evaluate_music_avqa_answers(
                 total_cat_f1 += categorical_f1(pred, ref)
                 total += 1
                 if printed_examples < 2:
-                    print(f"[eval-sample] pred={pred[:160]!r} refs={ref[:200]}", flush=True)
+                    print(f"[decoder-eval-sample] pred={pred[:160]!r} refs={ref[:200]}", flush=True)
                     printed_examples += 1
 
     return {
@@ -406,7 +406,7 @@ def evaluate_music_avqa_answers(
 
 
 def build_holdout_prompt(question: str, caption: str, mode: str) -> str:
-    if mode == "caption":
+    if mode == "audio":
         return (
             f"From audio: {caption}\n"
             f"Question: {question}\n"
@@ -436,14 +436,16 @@ def evaluate_music_avqa_holdouts(
     epoch_index: int,
 ) -> None:
     summaries: Dict[str, Dict[str, float]] = {}
-    for mode in ("image", "caption", "both"):
+    phase_label = "init" if epoch_index < 0 else str(epoch_index + 1)
+    for mode in ("image", "audio", "both"):
         raw_correct = 0
         extracted_correct = 0
         total = 0
         total_f1 = 0.0
         total_cat_f1 = 0.0
+        printed_examples = 0
         with torch.no_grad():
-            for batch in dataloader:
+            for batch_idx, batch in enumerate(dataloader):
                 audio_embeddings = clap(batch["audio"]).to(device)
                 generated_ids = decoder.generate(audio_embeddings, tokenizer, max_new_tokens=max_new_tokens)
                 captions = tokenizer.batch_decode(
@@ -501,6 +503,21 @@ def evaluate_music_avqa_holdouts(
                     total_f1 += token_f1(pred, ref)
                     total_cat_f1 += categorical_f1(pred, ref)
                     total += 1
+                    if printed_examples < 2:
+                        print(
+                            f"[holdout-sample:{mode}] pred={pred[:160]!r} ref={ref[:120]!r}",
+                            flush=True,
+                        )
+                        printed_examples += 1
+
+                if (batch_idx + 1) % 100 == 0:
+                    print(
+                        f"[eval:{mode}] step={batch_idx + 1}/{len(dataloader)} "
+                        f"raw_em={100.0 * raw_correct / max(total, 1):.2f}% "
+                        f"extracted_em={100.0 * extracted_correct / max(total, 1):.2f}% "
+                        f"cat_f1={100.0 * total_cat_f1 / max(total, 1):.2f}",
+                        flush=True,
+                    )
 
         summaries[mode] = {
             "raw_em": 100.0 * raw_correct / max(total, 1),
@@ -510,14 +527,16 @@ def evaluate_music_avqa_holdouts(
             "n": total,
         }
         print(
-            f"[holdout] epoch={epoch_index + 1} mode={mode} "
+            f"[eval:{mode}] complete phase={phase_label} "
             f"raw_em={summaries[mode]['raw_em']:.2f} "
             f"extracted_em={summaries[mode]['extracted_em']:.2f} "
-            f"cat_f1={summaries[mode]['cat_f1']:.2f}",
+            f"cat_f1={summaries[mode]['cat_f1']:.2f} "
+            f"n={summaries[mode]['n']}",
             flush=True,
         )
 
-    with (output_dir / f"holdout_epoch_{epoch_index + 1}.json").open("w", encoding="utf-8") as f:
+    holdout_name = "holdout_epoch_init.json" if epoch_index < 0 else f"holdout_epoch_{epoch_index + 1}.json"
+    with (output_dir / holdout_name).open("w", encoding="utf-8") as f:
         json.dump(summaries, f, indent=2)
 
 
