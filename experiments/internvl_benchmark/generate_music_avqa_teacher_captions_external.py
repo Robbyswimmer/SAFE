@@ -451,10 +451,23 @@ def main() -> None:
     output_path = Path(args.output_manifest)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    import time
+
+    total_batches = len(dataloader)
     rows_written = 0
     row_cursor = 0
+    t_start = time.time()
+
+    print(
+        f"[external-teacher] Starting captioning: {len(raw_rows)} samples, "
+        f"{total_batches} batches (batch_size={args.batch_size}), backend={backend}",
+        flush=True,
+    )
+
     with output_path.open("w", encoding="utf-8") as f:
         for batch_idx, batch in enumerate(dataloader):
+            t_batch = time.time()
+
             if backend == "qwen_omni":
                 captions = _generate_batch_qwen_omni(
                     processor=processor,
@@ -480,6 +493,8 @@ def main() -> None:
                     num_beams=args.num_beams,
                 )
 
+            batch_sec = time.time() - t_batch
+
             for i, caption in enumerate(captions):
                 source_row = dict(raw_rows[row_cursor])
                 source_row["sample_id"] = batch["sample_ids"][i]
@@ -491,10 +506,17 @@ def main() -> None:
                 rows_written += 1
                 row_cursor += 1
 
-            if (batch_idx + 1) % 25 == 0:
+            elapsed = time.time() - t_start
+            avg_per_sample = elapsed / rows_written if rows_written else 0
+            remaining = avg_per_sample * (len(raw_rows) - rows_written)
+
+            if (batch_idx + 1) % 5 == 0 or batch_idx == 0:
                 print(
-                    f"[external-teacher] batches={batch_idx + 1} rows={rows_written} "
-                    f"last_caption={captions[0][:160]!r}",
+                    f"[external-teacher] batch {batch_idx + 1}/{total_batches} "
+                    f"| rows={rows_written}/{len(raw_rows)} "
+                    f"| batch={batch_sec:.1f}s | avg={avg_per_sample:.1f}s/sample "
+                    f"| elapsed={elapsed:.0f}s | ETA={remaining:.0f}s "
+                    f"| caption={captions[0][:120]!r}",
                     flush=True,
                 )
 
