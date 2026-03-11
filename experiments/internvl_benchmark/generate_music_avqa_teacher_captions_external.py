@@ -123,7 +123,15 @@ def _generate_batch(
             return_tensors="pt",
             padding=True,
         )
-    proc = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in proc.items()}
+    model_dtype = getattr(model, "dtype", None)
+    cast_proc: Dict[str, Any] = {}
+    for k, v in proc.items():
+        if isinstance(v, torch.Tensor):
+            v = v.to(device)
+            if model_dtype is not None and torch.is_floating_point(v):
+                v = v.to(dtype=model_dtype)
+        cast_proc[k] = v
+    proc = cast_proc
     generated = model.generate(
         **proc,
         max_new_tokens=max_new_tokens,
