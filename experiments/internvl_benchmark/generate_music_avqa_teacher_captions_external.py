@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -529,6 +530,14 @@ def main() -> None:
                 rows_written += 1
                 row_cursor += 1
 
+            # Flush each completed batch so long-running teacher jobs can be
+            # inspected and consumed incrementally for smoke tests.
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+
             elapsed = time.time() - t_start
             avg_per_sample = elapsed / rows_written if rows_written else 0
             remaining = avg_per_sample * (len(raw_rows) - rows_written)
@@ -539,7 +548,7 @@ def main() -> None:
                     f"| rows={rows_written}/{len(raw_rows)} "
                     f"| batch={batch_sec:.1f}s | avg={avg_per_sample:.1f}s/sample "
                     f"| elapsed={elapsed:.0f}s | ETA={remaining:.0f}s "
-                    f"| caption={captions[0][:120]!r}",
+                    f"| caption={captions[0]!r}",
                     flush=True,
                 )
 

@@ -36,7 +36,7 @@ QWEN_CPU_OFFLOAD=${QWEN_CPU_OFFLOAD:-0}
 # Qwen-Omni: process one sample at a time (chat-template model), more tokens for detail
 if [[ "$TEACHER_BACKEND" == "qwen_omni" ]] || [[ "$TEACHER_MODEL" == *qwen*omni* ]] || [[ "$TEACHER_MODEL" == *Qwen*Omni* ]]; then
     BATCH_SIZE=${BATCH_SIZE:-1}
-    MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-256}
+    MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-128}
     NUM_BEAMS=${NUM_BEAMS:-1}
     NUM_WORKERS=${NUM_WORKERS:-0}
 else
