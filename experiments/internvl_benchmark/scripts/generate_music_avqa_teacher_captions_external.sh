@@ -30,6 +30,8 @@ MEDIA_ROOT=${MEDIA_ROOT:-$SAFE_ROOT/data/music_avqa}
 OUTPUT_MANIFEST=${OUTPUT_MANIFEST:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_validation_external.jsonl}
 CAPTION_FIELD=${CAPTION_FIELD:-teacher_caption_raw}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
+QWEN_QUANTIZATION=${QWEN_QUANTIZATION:-4bit}
+QWEN_CPU_OFFLOAD=${QWEN_CPU_OFFLOAD:-0}
 
 # Qwen-Omni: process one sample at a time (chat-template model), more tokens for detail
 if [[ "$TEACHER_BACKEND" == "qwen_omni" ]] || [[ "$TEACHER_MODEL" == *qwen*omni* ]] || [[ "$TEACHER_MODEL" == *Qwen*Omni* ]]; then
@@ -58,4 +60,6 @@ python3 experiments/internvl_benchmark/generate_music_avqa_teacher_captions_exte
   --num-workers "$NUM_WORKERS" \
   --max-samples "$MAX_SAMPLES" \
   --max-new-tokens "$MAX_NEW_TOKENS" \
-  --num-beams "$NUM_BEAMS"
+  --num-beams "$NUM_BEAMS" \
+  --qwen-quantization "$QWEN_QUANTIZATION" \
+  $( [[ "$QWEN_CPU_OFFLOAD" == "1" ]] && printf '%s' '--qwen-cpu-offload' )

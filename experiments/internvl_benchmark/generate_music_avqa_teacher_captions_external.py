@@ -33,7 +33,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--num-beams", type=int, default=4)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--no-quantize", action="store_true", help="Disable quantization (requires 80GB+ VRAM for large models)")
+    parser.add_argument(
+        "--qwen-quantization",
+        type=str,
+        default="4bit",
+        choices=["4bit", "8bit", "none"],
+        help="Quantization mode for Qwen Omni teacher.",
+    )
+    parser.add_argument("--qwen-cpu-offload", action="store_true", help="Enable CPU offload for quantized Qwen Omni loads.")
     return parser.parse_args()
 
 
@@ -75,7 +82,10 @@ def _looks_like_qwen_omni(model_path: Path) -> bool:
 
 
 def _load_teacher_qwen_omni(
-    model_path: Path, device: torch.device, quantize: bool = True,
+    model_path: Path,
+    device: torch.device,
+    quantization: str = "4bit",
+    cpu_offload: bool = False,
 ) -> Tuple[str, Any, Any]:
     try:
         from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
@@ -101,14 +111,24 @@ def _load_teacher_qwen_omni(
         trust_remote_code=True,
     )
 
-    if quantize:
+    if quantization != "none":
         from transformers import BitsAndBytesConfig
-        load_kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_quant_type="nf4",
-        )
-        print("[qwen_omni] Loading in 4-bit (nf4) quantization", flush=True)
+        if quantization == "8bit":
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_8bit=True,
+                llm_int8_enable_fp32_cpu_offload=cpu_offload,
+            )
+            print("[qwen_omni] Loading in 8-bit quantization", flush=True)
+        else:
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_type="nf4",
+                llm_int8_enable_fp32_cpu_offload=cpu_offload,
+            )
+            print("[qwen_omni] Loading in 4-bit (nf4) quantization", flush=True)
+        if cpu_offload:
+            print("[qwen_omni] CPU offload enabled for quantized load", flush=True)
     else:
         print("[qwen_omni] Loading without quantization (requires 80GB+ VRAM)", flush=True)
 
@@ -163,13 +183,22 @@ def _load_teacher_conette(model_path: Path, device: torch.device) -> Tuple[str, 
 
 
 def _load_teacher(
-    model_path: Path, device: torch.device, backend: str, quantize: bool = True,
+    model_path: Path,
+    device: torch.device,
+    backend: str,
+    qwen_quantization: str = "4bit",
+    cpu_offload: bool = False,
 ) -> Tuple[str, Any, Any]:
     load_errors: List[str] = []
 
     if backend in {"auto", "qwen_omni"} and _looks_like_qwen_omni(model_path):
         try:
-            return _load_teacher_qwen_omni(model_path, device, quantize=quantize)
+            return _load_teacher_qwen_omni(
+                model_path,
+                device,
+                quantization=qwen_quantization,
+                cpu_offload=cpu_offload,
+            )
         except Exception as exc:
             load_errors.append(f"qwen_omni: {exc}")
             if backend == "qwen_omni":
@@ -417,7 +446,8 @@ def main() -> None:
 
     backend, processor, model = _load_teacher(
         model_path, device, args.teacher_backend,
-        quantize=not args.no_quantize,
+        qwen_quantization=args.qwen_quantization,
+        cpu_offload=args.qwen_cpu_offload,
     )
 
     raw_rows: List[Dict[str, Any]] = []
