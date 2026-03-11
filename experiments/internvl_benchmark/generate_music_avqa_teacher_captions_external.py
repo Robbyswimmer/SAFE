@@ -373,9 +373,25 @@ def _generate_batch_qwen_omni(
         getattr(processor, "feature_extractor", None), "sampling_rate", 16000
     )
 
-    # Build chat template text once (audio-only captioner, no text prompt)
+    # Build a task-focused instruction once. We want captions that preserve the
+    # audio attributes most useful for MUSIC-AVQA composition with vision.
     conversation = [
-        {"role": "user", "content": [{"type": "audio", "audio": "input.wav"}]},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Describe this audio for music audio-visual question answering in one concise sentence. "
+                        "Mention the audible instrument or sound source names, how many distinct sources are sounding if clear, "
+                        "which source is most prominent, whether the sound is loud or soft, fast or slow, foreground or background, "
+                        "and any cues that would help identify which visible object is producing the sound. "
+                        "Focus only on what is actually audible and do not mention visual content."
+                    ),
+                },
+                {"type": "audio", "audio": "input.wav"},
+            ],
+        },
     ]
     template_text = processor.apply_chat_template(
         conversation, add_generation_prompt=True, tokenize=False
