@@ -107,12 +107,22 @@ def _generate_batch(
 ) -> List[str]:
     target_sr = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", 16000)
     inputs_audio = _prepare_audio_batch(audio_batch, target_sr)
-    proc = processor(
-        audios=inputs_audio,
-        sampling_rate=target_sr,
-        return_tensors="pt",
-        padding=True,
-    )
+    # Whisper-style processors expect `audio=...`; some other speech processors also
+    # accept the singular form. Try that first, then fall back to `audios=...`.
+    try:
+        proc = processor(
+            audio=inputs_audio,
+            sampling_rate=target_sr,
+            return_tensors="pt",
+            padding=True,
+        )
+    except TypeError:
+        proc = processor(
+            audios=inputs_audio,
+            sampling_rate=target_sr,
+            return_tensors="pt",
+            padding=True,
+        )
     proc = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in proc.items()}
     generated = model.generate(
         **proc,
