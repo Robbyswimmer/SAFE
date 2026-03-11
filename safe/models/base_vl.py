@@ -320,7 +320,9 @@ class BaseVLModel(nn.Module):
                     "low_cpu_mem_usage": False,
                     "trust_remote_code": True,
                 }
-                kwargs.update(load_device_kwargs)
+                # Do not pass sharded/device_map kwargs through the legacy custom
+                # path; in this environment they can force meta-tensor loading and
+                # break trust_remote_code models during eval.
                 if quant_cfg is not None:
                     kwargs["quantization_config"] = quant_cfg
                 if torch_dtype is not None:
