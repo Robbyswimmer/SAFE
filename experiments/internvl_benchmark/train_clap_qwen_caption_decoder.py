@@ -436,6 +436,7 @@ def evaluate_music_avqa_holdouts(
     epoch_index: int,
 ) -> None:
     summaries: Dict[str, Dict[str, float]] = {}
+    sample_print_limits = {"image": 2, "audio": 6, "both": 6}
     phase_label = "init" if epoch_index < 0 else str(epoch_index + 1)
     for mode in ("image", "audio", "both"):
         raw_correct = 0
@@ -493,7 +494,7 @@ def evaluate_music_avqa_holdouts(
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=True,
                 )
-                for pred, ref in zip(preds, batch["answers"]):
+                for i, (pred, ref) in enumerate(zip(preds, batch["answers"])):
                     pred_norm = normalize_answer(pred)
                     ref_norm = normalize_answer(ref)
                     pred_extracted = extract_answer(pred)
@@ -503,9 +504,15 @@ def evaluate_music_avqa_holdouts(
                     total_f1 += token_f1(pred, ref)
                     total_cat_f1 += categorical_f1(pred, ref)
                     total += 1
-                    if printed_examples < 2:
+                    if printed_examples < sample_print_limits[mode]:
+                        question = batch["questions"][i]
+                        caption = captions[i]
+                        image_flag = batch["images"][i] is not None
                         print(
-                            f"[holdout-sample:{mode}] pred={pred[:160]!r} ref={ref[:120]!r}",
+                            f"[holdout-sample:{mode}] q={question[:120]!r} "
+                            f"audio_text={caption[:120]!r} "
+                            f"pred={pred[:80]!r} ref={ref[:80]!r} "
+                            f"has_image={image_flag}",
                             flush=True,
                         )
                         printed_examples += 1
