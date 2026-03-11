@@ -20,7 +20,8 @@ AUDIO_CAPTION_TEACHERS = {
     # Practical default: lightweight and easy to run.
     "whisper-small-audio-captioning": "MU-NLPC/whisper-small-audio-captioning",
     # Stronger classical system; may need extra repo-specific integration later.
-    "conette-base": "Labbeti/conette-base",
+    "conette-base": "Labbeti/conette",
+    "conette": "Labbeti/conette",
     # Heavier Omni captioner kept as alias for completeness, but not the recommended default.
     "qwen-omni-captioner": "Qwen/Qwen3-Omni-30B-A3B-Captioner",
 }

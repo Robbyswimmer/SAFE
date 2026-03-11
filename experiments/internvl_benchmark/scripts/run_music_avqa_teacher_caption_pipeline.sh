@@ -58,6 +58,7 @@ mkdir -p logs "$DECODER_OUTPUT_DIR"
 if [[ "$TEACHER_BACKEND" == "external" ]]; then
   python3 experiments/internvl_benchmark/generate_music_avqa_teacher_captions_external.py \
     --teacher-model "$TEACHER_MODEL" \
+    --teacher-backend "${EXTERNAL_TEACHER_BACKEND:-auto}" \
     --manifest "$TRAIN_MANIFEST" \
     --media-root "$MEDIA_ROOT" \
     --output-manifest "$TEACHER_TRAIN_MANIFEST" \
@@ -79,6 +80,7 @@ python3 experiments/internvl_benchmark/build_music_avqa_semantic_targets.py \
 if [[ "$TEACHER_BACKEND" == "external" ]]; then
   python3 experiments/internvl_benchmark/generate_music_avqa_teacher_captions_external.py \
     --teacher-model "$TEACHER_MODEL" \
+    --teacher-backend "${EXTERNAL_TEACHER_BACKEND:-auto}" \
     --manifest "$VAL_MANIFEST" \
     --media-root "$MEDIA_ROOT" \
     --output-manifest "$TEACHER_VAL_MANIFEST" \

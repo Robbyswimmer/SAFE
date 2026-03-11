@@ -24,21 +24,32 @@ if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
 fi
 
 TEACHER_MODEL=${TEACHER_MODEL:-$SAFE_ROOT/models/audio_caption_teacher}
+TEACHER_BACKEND=${TEACHER_BACKEND:-auto}
 MANIFEST=${MANIFEST:-$SAFE_ROOT/data/music_avqa/manifests/validation.jsonl}
 MEDIA_ROOT=${MEDIA_ROOT:-$SAFE_ROOT/data/music_avqa}
 OUTPUT_MANIFEST=${OUTPUT_MANIFEST:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_validation_external.jsonl}
 CAPTION_FIELD=${CAPTION_FIELD:-teacher_caption_raw}
-BATCH_SIZE=${BATCH_SIZE:-8}
-NUM_WORKERS=${NUM_WORKERS:-2}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
-MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-64}
-NUM_BEAMS=${NUM_BEAMS:-4}
+
+# Qwen-Omni: process one sample at a time (chat-template model), more tokens for detail
+if [[ "$TEACHER_BACKEND" == "qwen_omni" ]] || [[ "$TEACHER_MODEL" == *qwen*omni* ]] || [[ "$TEACHER_MODEL" == *Qwen*Omni* ]]; then
+    BATCH_SIZE=${BATCH_SIZE:-1}
+    MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-256}
+    NUM_BEAMS=${NUM_BEAMS:-1}
+    NUM_WORKERS=${NUM_WORKERS:-0}
+else
+    BATCH_SIZE=${BATCH_SIZE:-8}
+    MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-64}
+    NUM_BEAMS=${NUM_BEAMS:-4}
+    NUM_WORKERS=${NUM_WORKERS:-2}
+fi
 
 cd "$SAFE_ROOT"
 mkdir -p logs "$(dirname "$OUTPUT_MANIFEST")"
 
 python3 experiments/internvl_benchmark/generate_music_avqa_teacher_captions_external.py \
   --teacher-model "$TEACHER_MODEL" \
+  --teacher-backend "$TEACHER_BACKEND" \
   --manifest "$MANIFEST" \
   --media-root "$MEDIA_ROOT" \
   --output-manifest "$OUTPUT_MANIFEST" \
