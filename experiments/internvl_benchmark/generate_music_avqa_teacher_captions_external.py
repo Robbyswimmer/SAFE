@@ -33,6 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--num-beams", type=int, default=4)
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--load-in-8bit", action="store_true", help="Load model in 8-bit quantization (fits 30B MoE in 48GB)")
+    parser.add_argument("--load-in-4bit", action="store_true", help="Load model in 4-bit quantization")
     return parser.parse_args()
 
 
@@ -73,7 +75,10 @@ def _looks_like_qwen_omni(model_path: Path) -> bool:
     return False
 
 
-def _load_teacher_qwen_omni(model_path: Path, device: torch.device) -> Tuple[str, Any, Any]:
+def _load_teacher_qwen_omni(
+    model_path: Path, device: torch.device,
+    load_in_8bit: bool = False, load_in_4bit: bool = False,
+) -> Tuple[str, Any, Any]:
     try:
         from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
     except ImportError:
@@ -91,13 +96,29 @@ def _load_teacher_qwen_omni(model_path: Path, device: torch.device) -> Tuple[str
     print(f"[qwen_omni] Loading processor from {model_path} ...", flush=True)
     processor = Qwen3OmniMoeProcessor.from_pretrained(str(model_path))
 
-    print(f"[qwen_omni] Loading model from {model_path} (attn={attn_impl}) ...", flush=True)
-    model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-        str(model_path),
+    load_kwargs: Dict[str, Any] = dict(
         dtype="auto",
         device_map="auto",
         attn_implementation=attn_impl,
         trust_remote_code=True,
+    )
+
+    if load_in_8bit or load_in_4bit:
+        from transformers import BitsAndBytesConfig
+        if load_in_8bit:
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+            print("[qwen_omni] Loading in 8-bit quantization", flush=True)
+        else:
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_type="nf4",
+            )
+            print("[qwen_omni] Loading in 4-bit (nf4) quantization", flush=True)
+
+    print(f"[qwen_omni] Loading model from {model_path} (attn={attn_impl}) ...", flush=True)
+    model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+        str(model_path), **load_kwargs,
     )
     model.eval()
     print(f"[qwen_omni] Model loaded (device={model.device}, dtype={model.dtype})", flush=True)
@@ -145,12 +166,17 @@ def _load_teacher_conette(model_path: Path, device: torch.device) -> Tuple[str, 
     return "conette", None, model
 
 
-def _load_teacher(model_path: Path, device: torch.device, backend: str) -> Tuple[str, Any, Any]:
+def _load_teacher(
+    model_path: Path, device: torch.device, backend: str,
+    load_in_8bit: bool = False, load_in_4bit: bool = False,
+) -> Tuple[str, Any, Any]:
     load_errors: List[str] = []
 
     if backend in {"auto", "qwen_omni"} and _looks_like_qwen_omni(model_path):
         try:
-            return _load_teacher_qwen_omni(model_path, device)
+            return _load_teacher_qwen_omni(
+                model_path, device, load_in_8bit=load_in_8bit, load_in_4bit=load_in_4bit,
+            )
         except Exception as exc:
             load_errors.append(f"qwen_omni: {exc}")
             if backend == "qwen_omni":
@@ -396,7 +422,10 @@ def main() -> None:
     if not model_path.exists():
         raise FileNotFoundError(f"Teacher model path not found: {model_path}")
 
-    backend, processor, model = _load_teacher(model_path, device, args.teacher_backend)
+    backend, processor, model = _load_teacher(
+        model_path, device, args.teacher_backend,
+        load_in_8bit=args.load_in_8bit, load_in_4bit=args.load_in_4bit,
+    )
 
     raw_rows: List[Dict[str, Any]] = []
     with Path(args.manifest).open("r", encoding="utf-8") as f:
