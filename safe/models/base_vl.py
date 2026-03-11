@@ -314,7 +314,10 @@ class BaseVLModel(nn.Module):
             def _try_load_internvl_custom(quant_cfg, torch_dtype, attn_implementation):
                 """Fallback: load via AutoModel with trust_remote_code (legacy path)."""
                 kwargs = {
-                    "low_cpu_mem_usage": True,
+                    # The custom InternVL path is more brittle under meta-tensor
+                    # initialization on this cluster/transformers combination.
+                    # Use the safer non-meta load path for eval/inference.
+                    "low_cpu_mem_usage": False,
                     "trust_remote_code": True,
                 }
                 kwargs.update(load_device_kwargs)
