@@ -82,15 +82,21 @@ def _load_teacher_qwen_omni(model_path: Path, device: torch.device) -> Tuple[str
             "Install with: pip install --upgrade transformers"
         )
 
+    # Prefer flash_attention_2, fall back to sdpa if flash_attn not installed
+    attn_impl = "flash_attention_2"
+    if importlib.util.find_spec("flash_attn") is None:
+        attn_impl = "sdpa"
+        print("[qwen_omni] flash_attn not installed, using SDPA attention", flush=True)
+
     print(f"[qwen_omni] Loading processor from {model_path} ...", flush=True)
     processor = Qwen3OmniMoeProcessor.from_pretrained(str(model_path))
 
-    print(f"[qwen_omni] Loading model from {model_path} ...", flush=True)
+    print(f"[qwen_omni] Loading model from {model_path} (attn={attn_impl}) ...", flush=True)
     model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         str(model_path),
-        torch_dtype="auto",
+        dtype="auto",
         device_map="auto",
-        attn_implementation="flash_attention_2",
+        attn_implementation=attn_impl,
         trust_remote_code=True,
     )
     model.eval()
