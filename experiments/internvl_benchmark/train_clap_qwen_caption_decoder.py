@@ -30,7 +30,6 @@ from experiments.avqa_composition.train_avqa_composition import (
     normalize_answer,
     token_f1,
 )
-from experiments.avqa_composition.train_avqa_composition import ManifestAVQADataset
 from safe.data.datasets import AudioCapsDataset, ClothoDataset, WavCapsDataset
 from safe.models.audio_encoders import CLAPAudioEncoder
 from train_safe import compute_caption_metrics, create_model, load_checkpoint
@@ -60,25 +59,45 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _pick_caption(answer: Any, train: bool) -> Optional[str]:
-    if answer is None:
+def _pick_caption(value: Any, train: bool) -> Optional[str]:
+    if value is None:
         return None
-    if isinstance(answer, str):
-        text = answer.strip()
+    if isinstance(value, str):
+        text = value.strip()
         return text if text else None
-    if isinstance(answer, (list, tuple)):
-        cleaned = [str(x).strip() for x in answer if str(x).strip()]
+    if isinstance(value, (list, tuple)):
+        cleaned = [str(x).strip() for x in value if str(x).strip()]
         if not cleaned:
             return None
         return random.choice(cleaned) if train else cleaned[0]
     return None
 
 
+class MusicAVQATextTargetDataset(Dataset):
+    def __init__(self, manifest_path: Path, media_root: Path, target_field: str) -> None:
+        self.manifest_path = manifest_path
+        self.media_root = media_root
+        self.target_field = target_field
+        self.base = ManifestAVQADataset(manifest_path, media_root)
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        item = self.base[idx]
+        row = self.base.rows[idx]
+        item["target_text"] = row.get(self.target_field, "")
+        item["audio_path"] = row.get("audio_path", "")
+        item["image_path"] = row.get("image_path", "")
+        return item
+
+
 class CaptionBatchCollator:
-    def __init__(self, tokenizer: Any, max_length: int, train: bool) -> None:
+    def __init__(self, tokenizer: Any, max_length: int, train: bool, target_field: str = "answer") -> None:
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.train = train
+        self.target_field = target_field
         self.start_token_id = (
             tokenizer.bos_token_id
             if tokenizer.bos_token_id is not None
@@ -99,13 +118,16 @@ class CaptionBatchCollator:
             raw_answers = sample.get("answers")
             if raw_answers is None:
                 raw_answers = sample.get("answer")
-            cap = _pick_caption(raw_answers, train=self.train)
+            raw_target = sample.get("target_text")
+            if raw_target in (None, ""):
+                raw_target = raw_answers
+            cap = _pick_caption(raw_target, train=self.train)
             audio_source = sample.get("audio")
             if audio_source is None:
                 audio_source = sample.get("audio_path")
             if audio_source is None or not cap:
                 continue
-            refs_raw = raw_answers
+            refs_raw = raw_target
             refs: List[str] = []
             if isinstance(refs_raw, str):
                 refs = [refs_raw.strip()] if refs_raw.strip() else []
@@ -269,12 +291,13 @@ def build_datasets(
     train_manifest: Optional[str],
     val_manifest: Optional[str],
     media_root: Optional[str],
+    target_field: str,
 ) -> Tuple[Dataset, Dataset]:
     if dataset_mode == "music_avqa":
         if not train_manifest or not val_manifest or not media_root:
             raise ValueError("music_avqa mode requires --train-manifest, --val-manifest, and --media-root")
-        train_dataset: Dataset = ManifestAVQADataset(Path(train_manifest), Path(media_root))
-        val_dataset: Dataset = ManifestAVQADataset(Path(val_manifest), Path(media_root))
+        train_dataset = MusicAVQATextTargetDataset(Path(train_manifest), Path(media_root), target_field)
+        val_dataset = MusicAVQATextTargetDataset(Path(val_manifest), Path(media_root), target_field)
         return train_dataset, val_dataset
 
     train_parts: List[Dataset] = [AudioCapsDataset(data_path, split="train"), ClothoDataset(data_path, split="train")]
@@ -556,6 +579,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-manifest", type=str, default="")
     parser.add_argument("--val-manifest", type=str, default="")
     parser.add_argument("--media-root", type=str, default="")
+    parser.add_argument("--target-field", type=str, default="answer")
     parser.add_argument("--use-wavcaps", action="store_true")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--val-batch-size", type=int, default=32)
@@ -611,6 +635,7 @@ def main() -> None:
         train_manifest=args.train_manifest or None,
         val_manifest=args.val_manifest or None,
         media_root=args.media_root or None,
+        target_field=args.target_field,
     )
     train_dataset = maybe_subset(train_dataset, args.max_train_samples)
     val_dataset = maybe_subset(val_dataset, args.max_val_samples)
@@ -620,14 +645,14 @@ def main() -> None:
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        collate_fn=CaptionBatchCollator(tokenizer, args.max_length, train=True),
+        collate_fn=CaptionBatchCollator(tokenizer, args.max_length, train=True, target_field=args.target_field),
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.val_batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        collate_fn=CaptionBatchCollator(tokenizer, args.max_length, train=False),
+        collate_fn=CaptionBatchCollator(tokenizer, args.max_length, train=False, target_field=args.target_field),
     )
     holdout_loader: Optional[DataLoader] = None
     holdout_base_model: Optional[Any] = None
@@ -850,6 +875,7 @@ def main() -> None:
                 "max_length": args.max_length,
                 "num_memory_tokens": args.num_memory_tokens,
                 "llm_model": args.llm_model,
+                "target_field": args.target_field,
             },
         }
         torch.save(checkpoint, output_dir / "checkpoint_last.pt")

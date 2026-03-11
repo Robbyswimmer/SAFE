@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=str, required=True)
     parser.add_argument("--media-root", type=str, required=True)
     parser.add_argument("--caption-field", type=str, required=True)
-    parser.add_argument("--input-mode", type=str, choices=["both", "caption", "image"], default="both")
+    parser.add_argument("--input-mode", type=str, choices=["both", "caption", "image", "both_null"], default="both")
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=2)
@@ -120,6 +120,12 @@ def build_prompt(caption: str, question: str, input_mode: str) -> str:
         )
     if input_mode == "image":
         return (
+            f"Question: {question}\n"
+            "Answer with exactly one short answer token (single word or number)."
+        )
+    if input_mode == "both_null":
+        return (
+            "From audio:\n"
             f"Question: {question}\n"
             "Answer with exactly one short answer token (single word or number)."
         )
@@ -177,7 +183,7 @@ def main() -> None:
                 build_prompt(caption=cap, question=q, input_mode=args.input_mode)
                 for cap, q in zip(batch["captions"], batch["questions"])
             ]
-            images = batch["images"] if args.input_mode in {"both", "image"} else None
+            images = batch["images"] if args.input_mode in {"both", "image", "both_null"} else None
 
             generation_inputs = base_model.prepare_multimodal_inputs(
                 text=prompts,
