@@ -33,6 +33,8 @@ TRAIN_MANIFEST=${TRAIN_MANIFEST:-$SAFE_ROOT/data/music_avqa/manifests/train.json
 VAL_MANIFEST=${VAL_MANIFEST:-$SAFE_ROOT/data/music_avqa/manifests/validation.jsonl}
 TEACHER_CHECKPOINT=${TEACHER_CHECKPOINT:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/audiocaps_align_rkca_joint_caption16/audio_aligned_best.pt}
 TEACHER_CONFIG=${TEACHER_CONFIG:-rkca_joint_caption16}
+TEACHER_BACKEND=${TEACHER_BACKEND:-internal}
+TEACHER_MODEL=${TEACHER_MODEL:-$SAFE_ROOT/models/audio_caption_teacher}
 TEACHER_TRAIN_MANIFEST=${TEACHER_TRAIN_MANIFEST:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_train.jsonl}
 TEACHER_VAL_MANIFEST=${TEACHER_VAL_MANIFEST:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_validation.jsonl}
 SEMANTIC_TRAIN_MANIFEST=${SEMANTIC_TRAIN_MANIFEST:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_train_semantic.jsonl}
@@ -42,32 +44,58 @@ TARGET_FIELD=${TARGET_FIELD:-teacher_caption_structured}
 NUM_EPOCHS=${NUM_EPOCHS:-10}
 LEARNING_RATE=${LEARNING_RATE:-1e-4}
 
+if [[ -z "${RAW_CAPTION_FIELD:-}" ]]; then
+  if [[ "$TEACHER_BACKEND" == "external" ]]; then
+    RAW_CAPTION_FIELD=teacher_caption_raw
+  else
+    RAW_CAPTION_FIELD=rich_audio_caption
+  fi
+fi
+
 cd "$SAFE_ROOT"
 mkdir -p logs "$DECODER_OUTPUT_DIR"
 
-python3 experiments/internvl_benchmark/generate_music_avqa_audio_captions.py \
-  --model-config "$TEACHER_CONFIG" \
-  --checkpoint "$TEACHER_CHECKPOINT" \
-  --manifest "$TRAIN_MANIFEST" \
-  --media-root "$MEDIA_ROOT" \
-  --output-manifest "$TEACHER_TRAIN_MANIFEST"
+if [[ "$TEACHER_BACKEND" == "external" ]]; then
+  python3 experiments/internvl_benchmark/generate_music_avqa_teacher_captions_external.py \
+    --teacher-model "$TEACHER_MODEL" \
+    --manifest "$TRAIN_MANIFEST" \
+    --media-root "$MEDIA_ROOT" \
+    --output-manifest "$TEACHER_TRAIN_MANIFEST" \
+    --caption-field teacher_caption_raw
+else
+  python3 experiments/internvl_benchmark/generate_music_avqa_audio_captions.py \
+    --model-config "$TEACHER_CONFIG" \
+    --checkpoint "$TEACHER_CHECKPOINT" \
+    --manifest "$TRAIN_MANIFEST" \
+    --media-root "$MEDIA_ROOT" \
+    --output-manifest "$TEACHER_TRAIN_MANIFEST"
+fi
 
 python3 experiments/internvl_benchmark/build_music_avqa_semantic_targets.py \
   --input-manifest "$TEACHER_TRAIN_MANIFEST" \
   --output-manifest "$SEMANTIC_TRAIN_MANIFEST" \
-  --raw-caption-field rich_audio_caption
+  --raw-caption-field "$RAW_CAPTION_FIELD"
 
-python3 experiments/internvl_benchmark/generate_music_avqa_audio_captions.py \
-  --model-config "$TEACHER_CONFIG" \
-  --checkpoint "$TEACHER_CHECKPOINT" \
-  --manifest "$VAL_MANIFEST" \
-  --media-root "$MEDIA_ROOT" \
-  --output-manifest "$TEACHER_VAL_MANIFEST"
+if [[ "$TEACHER_BACKEND" == "external" ]]; then
+  python3 experiments/internvl_benchmark/generate_music_avqa_teacher_captions_external.py \
+    --teacher-model "$TEACHER_MODEL" \
+    --manifest "$VAL_MANIFEST" \
+    --media-root "$MEDIA_ROOT" \
+    --output-manifest "$TEACHER_VAL_MANIFEST" \
+    --caption-field teacher_caption_raw
+else
+  python3 experiments/internvl_benchmark/generate_music_avqa_audio_captions.py \
+    --model-config "$TEACHER_CONFIG" \
+    --checkpoint "$TEACHER_CHECKPOINT" \
+    --manifest "$VAL_MANIFEST" \
+    --media-root "$MEDIA_ROOT" \
+    --output-manifest "$TEACHER_VAL_MANIFEST"
+fi
 
 python3 experiments/internvl_benchmark/build_music_avqa_semantic_targets.py \
   --input-manifest "$TEACHER_VAL_MANIFEST" \
   --output-manifest "$SEMANTIC_VAL_MANIFEST" \
-  --raw-caption-field rich_audio_caption
+  --raw-caption-field "$RAW_CAPTION_FIELD"
 
 python3 experiments/internvl_benchmark/train_clap_qwen_caption_decoder.py \
   --dataset-mode music_avqa \
