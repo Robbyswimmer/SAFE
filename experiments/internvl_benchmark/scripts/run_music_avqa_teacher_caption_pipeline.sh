@@ -63,8 +63,7 @@ if [[ "$TEACHER_BACKEND" == "external" ]]; then
     --media-root "$MEDIA_ROOT" \
     --output-manifest "$TEACHER_TRAIN_MANIFEST" \
     --caption-field teacher_caption_raw \
-    ${LOAD_IN_8BIT:+--load-in-8bit} \
-    ${LOAD_IN_4BIT:+--load-in-4bit}
+    ${NO_QUANTIZE:+--no-quantize}
 else
   python3 experiments/internvl_benchmark/generate_music_avqa_audio_captions.py \
     --model-config "$TEACHER_CONFIG" \
@@ -87,8 +86,7 @@ if [[ "$TEACHER_BACKEND" == "external" ]]; then
     --media-root "$MEDIA_ROOT" \
     --output-manifest "$TEACHER_VAL_MANIFEST" \
     --caption-field teacher_caption_raw \
-    ${LOAD_IN_8BIT:+--load-in-8bit} \
-    ${LOAD_IN_4BIT:+--load-in-4bit}
+    ${NO_QUANTIZE:+--no-quantize}
 else
   python3 experiments/internvl_benchmark/generate_music_avqa_audio_captions.py \
     --model-config "$TEACHER_CONFIG" \

@@ -58,6 +58,4 @@ python3 experiments/internvl_benchmark/generate_music_avqa_teacher_captions_exte
   --num-workers "$NUM_WORKERS" \
   --max-samples "$MAX_SAMPLES" \
   --max-new-tokens "$MAX_NEW_TOKENS" \
-  --num-beams "$NUM_BEAMS" \
-  ${LOAD_IN_8BIT:+--load-in-8bit} \
-  ${LOAD_IN_4BIT:+--load-in-4bit}
+  --num-beams "$NUM_BEAMS"

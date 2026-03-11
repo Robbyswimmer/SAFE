@@ -33,8 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--num-beams", type=int, default=4)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--load-in-8bit", action="store_true", help="Load model in 8-bit quantization (fits 30B MoE in 48GB)")
-    parser.add_argument("--load-in-4bit", action="store_true", help="Load model in 4-bit quantization")
+    parser.add_argument("--no-quantize", action="store_true", help="Disable quantization (requires 80GB+ VRAM for large models)")
     return parser.parse_args()
 
 
@@ -76,8 +75,7 @@ def _looks_like_qwen_omni(model_path: Path) -> bool:
 
 
 def _load_teacher_qwen_omni(
-    model_path: Path, device: torch.device,
-    load_in_8bit: bool = False, load_in_4bit: bool = False,
+    model_path: Path, device: torch.device, quantize: bool = True,
 ) -> Tuple[str, Any, Any]:
     try:
         from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
@@ -103,18 +101,16 @@ def _load_teacher_qwen_omni(
         trust_remote_code=True,
     )
 
-    if load_in_8bit or load_in_4bit:
+    if quantize:
         from transformers import BitsAndBytesConfig
-        if load_in_8bit:
-            load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
-            print("[qwen_omni] Loading in 8-bit quantization", flush=True)
-        else:
-            load_kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.bfloat16,
-                bnb_4bit_quant_type="nf4",
-            )
-            print("[qwen_omni] Loading in 4-bit (nf4) quantization", flush=True)
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_type="nf4",
+        )
+        print("[qwen_omni] Loading in 4-bit (nf4) quantization", flush=True)
+    else:
+        print("[qwen_omni] Loading without quantization (requires 80GB+ VRAM)", flush=True)
 
     print(f"[qwen_omni] Loading model from {model_path} (attn={attn_impl}) ...", flush=True)
     model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
@@ -167,16 +163,13 @@ def _load_teacher_conette(model_path: Path, device: torch.device) -> Tuple[str, 
 
 
 def _load_teacher(
-    model_path: Path, device: torch.device, backend: str,
-    load_in_8bit: bool = False, load_in_4bit: bool = False,
+    model_path: Path, device: torch.device, backend: str, quantize: bool = True,
 ) -> Tuple[str, Any, Any]:
     load_errors: List[str] = []
 
     if backend in {"auto", "qwen_omni"} and _looks_like_qwen_omni(model_path):
         try:
-            return _load_teacher_qwen_omni(
-                model_path, device, load_in_8bit=load_in_8bit, load_in_4bit=load_in_4bit,
-            )
+            return _load_teacher_qwen_omni(model_path, device, quantize=quantize)
         except Exception as exc:
             load_errors.append(f"qwen_omni: {exc}")
             if backend == "qwen_omni":
@@ -424,7 +417,7 @@ def main() -> None:
 
     backend, processor, model = _load_teacher(
         model_path, device, args.teacher_backend,
-        load_in_8bit=args.load_in_8bit, load_in_4bit=args.load_in_4bit,
+        quantize=not args.no_quantize,
     )
 
     raw_rows: List[Dict[str, Any]] = []
