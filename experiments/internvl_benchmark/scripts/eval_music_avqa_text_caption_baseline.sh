@@ -29,11 +29,11 @@ export FP16=0
 export LLM_MODEL_PATH=${LLM_MODEL_PATH:-models/OpenGVLab_InternVL3_5-8B}
 
 MODEL_CONFIG=${MODEL_CONFIG:-rkca_joint}
-CHECKPOINT=${CHECKPOINT:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/vision_audio_from_audiocaps_align_rkca_joint_caption16/checkpoint_best.pt}
+CHECKPOINT=${CHECKPOINT:-}
 MANIFEST=${MANIFEST:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/music_avqa_validation_audio_captions.jsonl}
 MEDIA_ROOT=${MEDIA_ROOT:-$SAFE_ROOT/data/music_avqa}
 CAPTION_FIELD=${CAPTION_FIELD:-rich_audio_caption}
-INPUT_MODE=${INPUT_MODE:-both}
+INPUT_MODE=${INPUT_MODE:-image,caption,both_null,both}
 OUTPUT_DIR=${OUTPUT_DIR:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/text_caption_baseline_${CAPTION_FIELD}_${INPUT_MODE}}
 BATCH_SIZE=${BATCH_SIZE:-2}
 NUM_WORKERS=${NUM_WORKERS:-2}

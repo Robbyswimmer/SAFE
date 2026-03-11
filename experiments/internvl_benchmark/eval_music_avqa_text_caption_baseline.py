@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset, Subset
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from configs.model_configs import get_config
 from experiments.avqa_composition.train_avqa_composition import (
@@ -96,11 +101,16 @@ def collate_cached_caption_avqa(batch: Sequence[Dict[str, Any]]) -> Dict[str, An
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate MUSIC-AVQA using cached audio captions as text.")
     parser.add_argument("--model-config", type=str, default="rkca_joint")
-    parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--checkpoint", type=str, default="")
     parser.add_argument("--manifest", type=str, required=True)
     parser.add_argument("--media-root", type=str, required=True)
     parser.add_argument("--caption-field", type=str, required=True)
-    parser.add_argument("--input-mode", type=str, choices=["both", "caption", "image", "both_null"], default="both")
+    parser.add_argument(
+        "--input-mode",
+        type=str,
+        default="both",
+        help="One mode or a comma-separated list from {image,caption,both_null,both}.",
+    )
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=2)
@@ -136,40 +146,28 @@ def build_prompt(caption: str, question: str, input_mode: str) -> str:
     )
 
 
-def main() -> None:
-    args = parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+def parse_input_modes(input_mode_arg: str) -> List[str]:
+    valid = {"both", "caption", "image", "both_null"}
+    modes = [x.strip() for x in input_mode_arg.split(",") if x.strip()]
+    if not modes:
+        raise ValueError("No input modes provided.")
+    invalid = [m for m in modes if m not in valid]
+    if invalid:
+        raise ValueError(f"Invalid input modes: {invalid}. Valid modes: {sorted(valid)}")
+    return modes
 
-    model_config = get_config(args.model_config)
-    model = create_model(model_config).to(device)
-    load_checkpoint(
-        model=model,
-        optimizer=None,
-        scheduler=None,
-        checkpoint_path=Path(args.checkpoint),
-        device=device,
-    )
-    model.eval()
-    base_model = model.module if hasattr(model, "module") else model
-    tokenizer = base_model.base_vl.tokenizer
 
-    dataset: Dataset = CachedCaptionAVQADataset(
-        manifest_path=Path(args.manifest),
-        media_root=Path(args.media_root),
-        caption_field=args.caption_field,
-    )
-    if args.max_samples and args.max_samples > 0:
-        dataset = Subset(dataset, list(range(min(args.max_samples, len(dataset)))))  # type: ignore[assignment]
-    dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        collate_fn=collate_cached_caption_avqa,
-    )
-
+def evaluate_mode(
+    *,
+    base_model: Any,
+    tokenizer: Any,
+    dataloader: DataLoader,
+    device: torch.device,
+    input_mode: str,
+    caption_field: str,
+    max_new_tokens: int,
+    num_beams: int,
+) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
     predictions_out: List[Dict[str, Any]] = []
     raw_correct = 0
     extracted_correct = 0
@@ -180,10 +178,10 @@ def main() -> None:
     with torch.no_grad():
         for batch_idx, batch in enumerate(dataloader):
             prompts = [
-                build_prompt(caption=cap, question=q, input_mode=args.input_mode)
+                build_prompt(caption=cap, question=q, input_mode=input_mode)
                 for cap, q in zip(batch["captions"], batch["questions"])
             ]
-            images = batch["images"] if args.input_mode in {"both", "image", "both_null"} else None
+            images = batch["images"] if input_mode in {"both", "image", "both_null"} else None
 
             generation_inputs = base_model.prepare_multimodal_inputs(
                 text=prompts,
@@ -204,9 +202,9 @@ def main() -> None:
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 pixel_values=pixel_values,
-                max_new_tokens=args.max_new_tokens,
+                max_new_tokens=max_new_tokens,
                 min_new_tokens=1,
-                num_beams=args.num_beams,
+                num_beams=num_beams,
                 repetition_penalty=1.05,
                 no_repeat_ngram_size=3,
                 do_sample=False,
@@ -244,8 +242,9 @@ def main() -> None:
                         "question_type": batch["question_types"][i],
                         "question": batch["questions"][i],
                         "answer": batch["answers"][i],
-                        "caption_field": args.caption_field,
+                        "caption_field": caption_field,
                         "caption": batch["captions"][i],
+                        "input_mode": input_mode,
                         "prediction_raw": pred,
                         "prediction_extracted": pred_extracted,
                     }
@@ -253,32 +252,108 @@ def main() -> None:
 
             if (batch_idx + 1) % 100 == 0:
                 print(
-                    f"[eval-caption] step={batch_idx + 1} raw_em={100.0 * raw_correct / max(total, 1):.2f}% "
+                    f"[eval:{input_mode}] step={batch_idx + 1} raw_em={100.0 * raw_correct / max(total, 1):.2f}% "
                     f"extracted_em={100.0 * extracted_correct / max(total, 1):.2f}% "
-                    f"caption_field={args.caption_field} input_mode={args.input_mode}",
+                    f"cat_f1={100.0 * total_cat_f1 / max(total, 1):.2f}",
                     flush=True,
                 )
 
     summary = {
-        "checkpoint": args.checkpoint,
-        "model_config": args.model_config,
-        "manifest": args.manifest,
-        "caption_field": args.caption_field,
-        "input_mode": args.input_mode,
+        "caption_field": caption_field,
+        "input_mode": input_mode,
         "n": total,
         "raw_em": 100.0 * raw_correct / max(total, 1),
         "extracted_em": 100.0 * extracted_correct / max(total, 1),
         "f1": 100.0 * total_f1 / max(total, 1),
         "cat_f1": 100.0 * total_cat_f1 / max(total, 1),
     }
+    print(
+        f"[eval:{input_mode}] complete raw_em={summary['raw_em']:.2f} extracted_em={summary['extracted_em']:.2f} "
+        f"cat_f1={summary['cat_f1']:.2f} n={summary['n']}",
+        flush=True,
+    )
+    return summary, predictions_out
 
-    with (output_dir / "results.json").open("w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
-    with (output_dir / "predictions.jsonl").open("w", encoding="utf-8") as f:
-        for row in predictions_out:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    print(f"[summary] {json.dumps(summary, indent=2)}", flush=True)
+def main() -> None:
+    args = parse_args()
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    model_config = get_config(args.model_config)
+    model = create_model(model_config).to(device)
+    if args.checkpoint:
+        load_checkpoint(
+            model=model,
+            optimizer=None,
+            scheduler=None,
+            checkpoint_path=Path(args.checkpoint),
+            device=device,
+        )
+    else:
+        print("[eval] using raw frozen base model (no checkpoint provided)", flush=True)
+    model.eval()
+    base_model = model.module if hasattr(model, "module") else model
+    tokenizer = base_model.base_vl.tokenizer
+
+    dataset: Dataset = CachedCaptionAVQADataset(
+        manifest_path=Path(args.manifest),
+        media_root=Path(args.media_root),
+        caption_field=args.caption_field,
+    )
+    if args.max_samples and args.max_samples > 0:
+        dataset = Subset(dataset, list(range(min(args.max_samples, len(dataset)))))  # type: ignore[assignment]
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate_cached_caption_avqa,
+    )
+
+    mode_summaries: Dict[str, Any] = {}
+    modes = parse_input_modes(args.input_mode)
+    for mode in modes:
+        mode_output_dir = output_dir / mode if len(modes) > 1 else output_dir
+        mode_output_dir.mkdir(parents=True, exist_ok=True)
+        summary, predictions_out = evaluate_mode(
+            base_model=base_model,
+            tokenizer=tokenizer,
+            dataloader=dataloader,
+            device=device,
+            input_mode=mode,
+            caption_field=args.caption_field,
+            max_new_tokens=args.max_new_tokens,
+            num_beams=args.num_beams,
+        )
+        summary.update(
+            {
+                "checkpoint": args.checkpoint,
+                "model_config": args.model_config,
+                "manifest": args.manifest,
+            }
+        )
+        mode_summaries[mode] = summary
+        with (mode_output_dir / "results.json").open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        with (mode_output_dir / "predictions.jsonl").open("w", encoding="utf-8") as f:
+            for row in predictions_out:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    if len(modes) > 1:
+        combined = {
+            "checkpoint": args.checkpoint,
+            "model_config": args.model_config,
+            "manifest": args.manifest,
+            "caption_field": args.caption_field,
+            "modes": mode_summaries,
+        }
+        with (output_dir / "results_all_modes.json").open("w", encoding="utf-8") as f:
+            json.dump(combined, f, indent=2)
+        print(f"[summary] {json.dumps(combined, indent=2)}", flush=True)
+    else:
+        print(f"[summary] {json.dumps(mode_summaries[modes[0]], indent=2)}", flush=True)
 
 
 if __name__ == "__main__":
