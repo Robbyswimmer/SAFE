@@ -29,6 +29,7 @@ MANIFEST=${MANIFEST:-$SAFE_ROOT/data/music_avqa/manifests/validation.jsonl}
 MEDIA_ROOT=${MEDIA_ROOT:-$SAFE_ROOT/data/music_avqa}
 OUTPUT_MANIFEST=${OUTPUT_MANIFEST:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_validation_external.jsonl}
 CAPTION_FIELD=${CAPTION_FIELD:-teacher_caption_raw}
+CAPTION_INSTRUCTION=${CAPTION_INSTRUCTION:-}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
 QWEN_QUANTIZATION=${QWEN_QUANTIZATION:-4bit}
 QWEN_CPU_OFFLOAD=${QWEN_CPU_OFFLOAD:-0}
@@ -49,17 +50,28 @@ fi
 cd "$SAFE_ROOT"
 mkdir -p logs "$(dirname "$OUTPUT_MANIFEST")"
 
-python3 experiments/internvl_benchmark/generate_music_avqa_teacher_captions_external.py \
-  --teacher-model "$TEACHER_MODEL" \
-  --teacher-backend "$TEACHER_BACKEND" \
-  --manifest "$MANIFEST" \
-  --media-root "$MEDIA_ROOT" \
-  --output-manifest "$OUTPUT_MANIFEST" \
-  --caption-field "$CAPTION_FIELD" \
-  --batch-size "$BATCH_SIZE" \
-  --num-workers "$NUM_WORKERS" \
-  --max-samples "$MAX_SAMPLES" \
-  --max-new-tokens "$MAX_NEW_TOKENS" \
-  --num-beams "$NUM_BEAMS" \
-  --qwen-quantization "$QWEN_QUANTIZATION" \
-  $( [[ "$QWEN_CPU_OFFLOAD" == "1" ]] && printf '%s' '--qwen-cpu-offload' )
+CMD=(
+  python3 experiments/internvl_benchmark/generate_music_avqa_teacher_captions_external.py
+  --teacher-model "$TEACHER_MODEL"
+  --teacher-backend "$TEACHER_BACKEND"
+  --manifest "$MANIFEST"
+  --media-root "$MEDIA_ROOT"
+  --output-manifest "$OUTPUT_MANIFEST"
+  --caption-field "$CAPTION_FIELD"
+  --batch-size "$BATCH_SIZE"
+  --num-workers "$NUM_WORKERS"
+  --max-samples "$MAX_SAMPLES"
+  --max-new-tokens "$MAX_NEW_TOKENS"
+  --num-beams "$NUM_BEAMS"
+  --qwen-quantization "$QWEN_QUANTIZATION"
+)
+
+if [[ -n "$CAPTION_INSTRUCTION" ]]; then
+  CMD+=(--caption-instruction "$CAPTION_INSTRUCTION")
+fi
+
+if [[ "$QWEN_CPU_OFFLOAD" == "1" ]]; then
+  CMD+=(--qwen-cpu-offload)
+fi
+
+"${CMD[@]}"

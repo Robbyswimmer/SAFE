@@ -122,25 +122,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_prompt(caption: str, question: str, input_mode: str) -> str:
-    if input_mode == "caption":
-        return (
-            f"From audio: {caption}\n"
-            f"Question: {question}\n"
-            "Answer with exactly one short answer token (single word or number)."
-        )
-    if input_mode == "image":
-        return (
-            f"Question: {question}\n"
-            "Answer with exactly one short answer token (single word or number)."
-        )
-    if input_mode == "both_null":
-        return (
-            "From audio:\n"
-            f"Question: {question}\n"
-            "Answer with exactly one short answer token (single word or number)."
-        )
+    SYSTEM_INSTRUCTION = (
+        "You are answering questions about a music performance. "
+        "You may be given a video frame and/or a description of what is heard in the audio. "
+        "Use all available information to answer. "
+        "If one modality is missing, rely on what you have."
+    )
+
+    if input_mode in ("caption", "both"):
+        audio_line = f"Audio description: {caption}"
+    else:
+        audio_line = "Audio description: not available"
+
     return (
-        f"From audio: {caption}\n"
+        f"{SYSTEM_INSTRUCTION}\n\n"
+        f"{audio_line}\n"
         f"Question: {question}\n"
         "Answer with exactly one short answer token (single word or number)."
     )

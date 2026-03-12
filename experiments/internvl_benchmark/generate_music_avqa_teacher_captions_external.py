@@ -35,6 +35,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-beams", type=int, default=4)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument(
+        "--caption-instruction",
+        type=str,
+        default="",
+        help="Optional task-specific instruction for teacher caption generation.",
+    )
+    parser.add_argument(
         "--qwen-quantization",
         type=str,
         default="4bit",
@@ -364,6 +370,7 @@ def _generate_batch_qwen_omni(
     audio_batch: Sequence[Any],
     max_new_tokens: int,
     num_beams: int,
+    caption_instruction: str = "",
 ) -> List[str]:
     """Generate captions with Qwen3-Omni-Captioner (audio-only, single-turn)."""
     import numpy as np
@@ -375,19 +382,21 @@ def _generate_batch_qwen_omni(
 
     # Build a task-focused instruction once. We want captions that preserve the
     # audio attributes most useful for MUSIC-AVQA composition with vision.
+    if not caption_instruction:
+        caption_instruction = (
+            "Describe only the audible evidence needed for music audio-visual QA in one sentence: "
+            "which instruments or sources are sounding, how many distinct sources are active if clear, "
+            "which source is most prominent, whether the sound is loud or soft or fast or slow, "
+            "and any cues that would distinguish a sounding instrument from a visible but silent one. "
+            "Do not mention visual content, and avoid generic filler."
+        )
     conversation = [
         {
             "role": "user",
             "content": [
                 {
                     "type": "text",
-                    "text": (
-                        "Describe this audio for music audio-visual question answering in one concise sentence. "
-                        "Mention the audible instrument or sound source names, how many distinct sources are sounding if clear, "
-                        "which source is most prominent, whether the sound is loud or soft, fast or slow, foreground or background, "
-                        "and any cues that would help identify which visible object is producing the sound. "
-                        "Focus only on what is actually audible and do not mention visual content."
-                    ),
+                    "text": caption_instruction,
                 },
                 {"type": "audio", "audio": "input.wav"},
             ],
@@ -515,6 +524,7 @@ def main() -> None:
                     audio_batch=batch["audio"],
                     max_new_tokens=args.max_new_tokens,
                     num_beams=args.num_beams,
+                    caption_instruction=args.caption_instruction,
                 )
             elif backend == "conette":
                 captions = _generate_batch_conette(
