@@ -311,22 +311,32 @@ class BaseVLModel(nn.Module):
             def _try_load_internvl_custom(quant_cfg, torch_dtype, attn_implementation):
                 """Fallback: load via AutoModel with trust_remote_code (legacy path)."""
                 kwargs = {
-                    # The custom InternVL path is more brittle under meta-tensor
-                    # initialization on this cluster/transformers combination.
-                    # Use the safer non-meta load path for eval/inference.
                     "low_cpu_mem_usage": False,
                     "trust_remote_code": True,
                 }
-                # Do not pass sharded/device_map kwargs through the legacy custom
-                # path; in this environment they can force meta-tensor loading and
-                # break trust_remote_code models during eval.
                 if quant_cfg is not None:
                     kwargs["quantization_config"] = quant_cfg
                 if torch_dtype is not None:
                     kwargs["torch_dtype"] = torch_dtype
                 if attn_implementation is not None:
                     kwargs["attn_implementation"] = attn_implementation
-                return AutoModel.from_pretrained(llm_model_name, **kwargs)
+
+                try:
+                    return AutoModel.from_pretrained(llm_model_name, **kwargs)
+                except RuntimeError as e:
+                    if "meta" not in str(e).lower():
+                        raise
+                    # Newer transformers can hit meta-tensor init even with
+                    # low_cpu_mem_usage=False.  Force CPU placement to
+                    # materialize all parameters, then let caller .to(device).
+                    print(
+                        "[BaseVL] Meta-tensor error detected, retrying with "
+                        "device_map={'': 'cpu'}",
+                        flush=True,
+                    )
+                    kwargs["device_map"] = {"": "cpu"}
+                    kwargs["low_cpu_mem_usage"] = True
+                    return AutoModel.from_pretrained(llm_model_name, **kwargs)
 
             quant_mode = (qwen_quantization or "auto").lower()
             tried = []
