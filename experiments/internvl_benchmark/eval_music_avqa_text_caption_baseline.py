@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -10,12 +11,12 @@ from typing import Any, Dict, List, Optional, Sequence
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset, Subset
+from transformers import AutoImageProcessor, AutoModel, AutoProcessor, AutoTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from configs.model_configs import get_config
 from experiments.avqa_composition.train_avqa_composition import (
     categorical_f1,
     extract_answer,
@@ -100,8 +101,20 @@ def collate_cached_caption_avqa(batch: Sequence[Dict[str, Any]]) -> Dict[str, An
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate MUSIC-AVQA using cached audio captions as text.")
+    parser.add_argument(
+        "--model-backend",
+        type=str,
+        default="raw_internvl",
+        choices=["raw_internvl", "safe"],
+        help="Use raw InternVL directly or route through SAFEModel.",
+    )
     parser.add_argument("--model-config", type=str, default="rkca_joint")
     parser.add_argument("--checkpoint", type=str, default="")
+    parser.add_argument(
+        "--llm-model",
+        type=str,
+        default=os.environ.get("LLM_MODEL_PATH", "models/OpenGVLab_InternVL3_5-8B"),
+    )
     parser.add_argument("--manifest", type=str, required=True)
     parser.add_argument("--media-root", type=str, required=True)
     parser.add_argument("--caption-field", type=str, required=True)
@@ -153,10 +166,300 @@ def parse_input_modes(input_mode_arg: str) -> List[str]:
     return modes
 
 
+def _convert_to_pil(image: Any) -> Optional[Image.Image]:
+    if image is None:
+        return None
+    if isinstance(image, Image.Image):
+        return image
+    if isinstance(image, torch.Tensor):
+        tensor = image
+        if tensor.dim() == 4:
+            tensor = tensor[0]
+        elif tensor.dim() == 2:
+            tensor = tensor.unsqueeze(0).repeat(3, 1, 1)
+        if tensor.dim() != 3:
+            return None
+        if tensor.shape[0] == 3:
+            tensor = tensor.permute(1, 2, 0)
+        if tensor.max() <= 1.0:
+            tensor = (tensor * 255).clamp(0, 255)
+        return Image.fromarray(tensor.cpu().numpy().astype("uint8"))
+    return None
+
+
+class SafeEvalEngine:
+    def __init__(self, base_model: Any, tokenizer: Any) -> None:
+        self.base_model = base_model
+        self.tokenizer = tokenizer
+
+    def generate_batch(
+        self,
+        prompts: Sequence[str],
+        images: Optional[Sequence[Optional[Image.Image]]],
+        device: torch.device,
+        max_new_tokens: int,
+        num_beams: int,
+    ) -> List[str]:
+        generation_inputs = self.base_model.prepare_multimodal_inputs(
+            text=list(prompts),
+            images=list(images) if images is not None else None,
+            audio=None,
+            answers=None,
+            device=str(device),
+            training_mode=False,
+        )
+
+        input_ids = generation_inputs["input_ids"].to(device)
+        attention_mask = generation_inputs["attention_mask"].to(device)
+        pixel_values = generation_inputs.get("pixel_values")
+        if pixel_values is not None:
+            pixel_values = pixel_values.to(device)
+
+        generated_ids = self.base_model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            max_new_tokens=max_new_tokens,
+            min_new_tokens=1,
+            num_beams=num_beams,
+            repetition_penalty=1.05,
+            no_repeat_ngram_size=3,
+            do_sample=False,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+
+        prompt_len = int(input_ids.shape[1])
+        if generated_ids.dim() == 2 and generated_ids.size(1) > prompt_len:
+            decoded_ids = generated_ids[:, prompt_len:]
+        else:
+            decoded_ids = generated_ids
+
+        return self.tokenizer.batch_decode(
+            decoded_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True,
+        )
+
+
+class RawInternVLEvalEngine:
+    def __init__(self, llm_model: str, device: torch.device) -> None:
+        self.device = device
+        model_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        self.model = AutoModel.from_pretrained(
+            llm_model,
+            trust_remote_code=True,
+            torch_dtype=model_dtype,
+            low_cpu_mem_usage=False,
+        ).to(device)
+        self.model.eval()
+        self.tokenizer = AutoTokenizer.from_pretrained(llm_model, trust_remote_code=True)
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
+        try:
+            self.image_processor = AutoImageProcessor.from_pretrained(llm_model)
+        except Exception:
+            self.image_processor = AutoProcessor.from_pretrained(llm_model, trust_remote_code=True)
+        self._ensure_img_context_token()
+        self._prep_logged = False
+
+    def _ensure_img_context_token(self) -> None:
+        if hasattr(self.model, "img_context_token_id") and self.model.img_context_token_id is None:
+            img_token_id = getattr(self.model.config, "image_token_id", None)
+            if img_token_id is None:
+                try:
+                    img_token_id = self.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
+                    if img_token_id == self.tokenizer.unk_token_id:
+                        img_token_id = None
+                except Exception:
+                    img_token_id = None
+            if img_token_id is not None:
+                self.model.img_context_token_id = img_token_id
+
+    def _lookup_token_id(self, config_names: Sequence[str], token_candidates: Sequence[str]) -> Optional[int]:
+        for name in config_names:
+            value = getattr(self.model.config, name, None)
+            if isinstance(value, int) and value >= 0:
+                return value
+        unk_id = getattr(self.tokenizer, "unk_token_id", None)
+        for token in token_candidates:
+            try:
+                value = self.tokenizer.convert_tokens_to_ids(token)
+            except Exception:
+                continue
+            if isinstance(value, list):
+                value = value[0] if value else None
+            if isinstance(value, int) and value >= 0 and (unk_id is None or value != unk_id):
+                return value
+        return None
+
+    def _build_text_ids(self, prompt: str) -> List[int]:
+        user_text = f"/no_think\n{prompt.strip()}"
+        if bool(getattr(self.tokenizer, "chat_template", None)) and hasattr(self.tokenizer, "apply_chat_template"):
+            try:
+                message = [{"role": "user", "content": user_text}]
+                try:
+                    prompt_ids = self.tokenizer.apply_chat_template(
+                        message,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                        enable_thinking=False,
+                    )
+                except TypeError:
+                    prompt_ids = self.tokenizer.apply_chat_template(
+                        message,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                    )
+                if torch.is_tensor(prompt_ids):
+                    prompt_ids = prompt_ids.tolist()
+                if prompt_ids and isinstance(prompt_ids[0], list):
+                    prompt_ids = prompt_ids[0]
+                if isinstance(prompt_ids, list) and prompt_ids:
+                    return [int(tok) for tok in prompt_ids]
+            except Exception:
+                pass
+        return self.tokenizer.encode(f"USER: {user_text}\nASSISTANT:", add_special_tokens=True)
+
+    def _prepare_inputs(
+        self,
+        prompts: Sequence[str],
+        images: Optional[Sequence[Optional[Image.Image]]],
+    ) -> Dict[str, torch.Tensor]:
+        image_token_id = getattr(self.model, "img_context_token_id", None)
+        if not isinstance(image_token_id, int) or image_token_id < 0:
+            image_token_id = getattr(self.model.config, "image_token_id", 151667)
+        image_seq_length = getattr(self.model.config, "image_seq_length", None)
+        runtime_image_tokens = getattr(self.model, "num_image_token", None)
+        if isinstance(runtime_image_tokens, int) and runtime_image_tokens > 0:
+            image_seq_length = runtime_image_tokens
+        if not isinstance(image_seq_length, int) or image_seq_length <= 0:
+            image_seq_length = 256
+        image_start_token_id = self._lookup_token_id(
+            ("img_start_token_id", "image_start_token_id", "vision_start_token_id"),
+            ("<img>", "<image_start>", "<|vision_start|>"),
+        )
+        image_end_token_id = self._lookup_token_id(
+            ("img_end_token_id", "image_end_token_id", "vision_end_token_id"),
+            ("</img>", "<image_end>", "<|vision_end|>"),
+        )
+        newline_ids = self.tokenizer.encode("\n", add_special_tokens=False)
+
+        pil_images = [_convert_to_pil(img) for img in (images or [None] * len(prompts))]
+        if len(pil_images) < len(prompts):
+            pil_images.extend([None] * (len(prompts) - len(pil_images)))
+        pil_images = pil_images[: len(prompts)]
+
+        valid_pixel_images: List[Image.Image] = []
+        image_indices: List[int] = []
+        all_input_ids: List[torch.Tensor] = []
+        for idx, prompt in enumerate(prompts):
+            has_image = pil_images[idx] is not None
+            text_ids = self._build_text_ids(prompt)
+            if has_image:
+                sample_ids: List[int] = []
+                if image_start_token_id is not None:
+                    sample_ids.append(image_start_token_id)
+                sample_ids.extend([int(image_token_id)] * int(image_seq_length))
+                if image_end_token_id is not None:
+                    sample_ids.append(image_end_token_id)
+                if newline_ids:
+                    sample_ids.extend(newline_ids)
+                sample_ids.extend(text_ids)
+                valid_pixel_images.append(pil_images[idx])  # type: ignore[arg-type]
+                image_indices.append(idx)
+            else:
+                sample_ids = text_ids
+            all_input_ids.append(torch.tensor(sample_ids, dtype=torch.long))
+
+        max_len = max(ids.size(0) for ids in all_input_ids)
+        pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+        input_ids = torch.full((len(prompts), max_len), pad_id, dtype=torch.long)
+        attention_mask = torch.zeros((len(prompts), max_len), dtype=torch.long)
+        for idx, ids in enumerate(all_input_ids):
+            start = max_len - ids.size(0)
+            input_ids[idx, start:] = ids
+            attention_mask[idx, start:] = 1
+
+        result: Dict[str, torch.Tensor] = {
+            "input_ids": input_ids.to(self.device),
+            "attention_mask": attention_mask.to(self.device),
+        }
+        if valid_pixel_images:
+            pixel_inputs = self.image_processor(images=valid_pixel_images, return_tensors="pt")
+            pixel_values = pixel_inputs["pixel_values"]
+            if len(valid_pixel_images) < len(prompts):
+                full_pv = torch.zeros(
+                    (len(prompts),) + tuple(pixel_values.shape[1:]),
+                    dtype=pixel_values.dtype,
+                )
+                for pv_idx, batch_idx in enumerate(image_indices):
+                    full_pv[batch_idx] = pixel_values[pv_idx]
+                pixel_values = full_pv
+            result["pixel_values"] = pixel_values.to(self.device)
+        if not self._prep_logged:
+            print(
+                f"[RawInternVLPrep] image_token_id={image_token_id} image_seq_length={image_seq_length} "
+                f"img_start_id={image_start_token_id} img_end_id={image_end_token_id}",
+                flush=True,
+            )
+            self._prep_logged = True
+        return result
+
+    def generate_batch(
+        self,
+        prompts: Sequence[str],
+        images: Optional[Sequence[Optional[Image.Image]]],
+        device: torch.device,
+        max_new_tokens: int,
+        num_beams: int,
+    ) -> List[str]:
+        del device  # the raw engine owns its device placement
+        inputs = self._prepare_inputs(prompts, images)
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+        pixel_values = inputs.get("pixel_values")
+        gen_kwargs = dict(
+            max_new_tokens=max_new_tokens,
+            min_new_tokens=1,
+            num_beams=num_beams,
+            repetition_penalty=1.05,
+            no_repeat_ngram_size=3,
+            do_sample=False,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+        with torch.no_grad():
+            if pixel_values is not None:
+                generated_ids = self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    **gen_kwargs,
+                )
+            else:
+                gen_model = getattr(self.model, "language_model", self.model)
+                generated_ids = gen_model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    **gen_kwargs,
+                )
+        prompt_len = int(input_ids.shape[1])
+        if generated_ids.dim() == 2 and generated_ids.size(1) > prompt_len:
+            decoded_ids = generated_ids[:, prompt_len:]
+        else:
+            decoded_ids = generated_ids
+        return self.tokenizer.batch_decode(
+            decoded_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True,
+        )
+
+
 def evaluate_mode(
     *,
-    base_model: Any,
-    tokenizer: Any,
+    engine: Any,
     dataloader: DataLoader,
     device: torch.device,
     input_mode: str,
@@ -178,46 +481,12 @@ def evaluate_mode(
                 for cap, q in zip(batch["captions"], batch["questions"])
             ]
             images = batch["images"] if input_mode in {"both", "image", "both_null"} else None
-
-            generation_inputs = base_model.prepare_multimodal_inputs(
-                text=prompts,
+            batch_predictions = engine.generate_batch(
+                prompts=prompts,
                 images=images,
-                audio=None,
-                answers=None,
-                device=str(device),
-                training_mode=False,
-            )
-
-            input_ids = generation_inputs["input_ids"].to(device)
-            attention_mask = generation_inputs["attention_mask"].to(device)
-            pixel_values = generation_inputs.get("pixel_values")
-            if pixel_values is not None:
-                pixel_values = pixel_values.to(device)
-
-            generated_ids = base_model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                pixel_values=pixel_values,
+                device=device,
                 max_new_tokens=max_new_tokens,
-                min_new_tokens=1,
                 num_beams=num_beams,
-                repetition_penalty=1.05,
-                no_repeat_ngram_size=3,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-
-            prompt_len = int(input_ids.shape[1])
-            if generated_ids.dim() == 2 and generated_ids.size(1) > prompt_len:
-                decoded_ids = generated_ids[:, prompt_len:]
-            else:
-                decoded_ids = generated_ids
-
-            batch_predictions = tokenizer.batch_decode(
-                decoded_ids,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=True,
             )
 
             for i, pred in enumerate(batch_predictions):
@@ -277,21 +546,29 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model_config = get_config(args.model_config)
-    model = create_model(model_config).to(device)
-    if args.checkpoint:
-        load_checkpoint(
-            model=model,
-            optimizer=None,
-            scheduler=None,
-            checkpoint_path=Path(args.checkpoint),
-            device=device,
-        )
+    if args.model_backend == "safe":
+        from configs.model_configs import get_config
+
+        model_config = get_config(args.model_config)
+        model = create_model(model_config).to(device)
+        if args.checkpoint:
+            load_checkpoint(
+                model=model,
+                optimizer=None,
+                scheduler=None,
+                checkpoint_path=Path(args.checkpoint),
+                device=device,
+            )
+        else:
+            print("[eval] using raw frozen base model (no checkpoint provided)", flush=True)
+        model.eval()
+        base_model = model.module if hasattr(model, "module") else model
+        engine: Any = SafeEvalEngine(base_model=base_model, tokenizer=base_model.base_vl.tokenizer)
     else:
-        print("[eval] using raw frozen base model (no checkpoint provided)", flush=True)
-    model.eval()
-    base_model = model.module if hasattr(model, "module") else model
-    tokenizer = base_model.base_vl.tokenizer
+        if args.checkpoint:
+            raise ValueError("raw_internvl backend does not support SAFE checkpoints; use --model-backend safe")
+        print(f"[eval] loading raw InternVL directly from {args.llm_model}", flush=True)
+        engine = RawInternVLEvalEngine(llm_model=args.llm_model, device=device)
 
     dataset: Dataset = CachedCaptionAVQADataset(
         manifest_path=Path(args.manifest),
@@ -314,8 +591,7 @@ def main() -> None:
         mode_output_dir = output_dir / mode if len(modes) > 1 else output_dir
         mode_output_dir.mkdir(parents=True, exist_ok=True)
         summary, predictions_out = evaluate_mode(
-            base_model=base_model,
-            tokenizer=tokenizer,
+            engine=engine,
             dataloader=dataloader,
             device=device,
             input_mode=mode,

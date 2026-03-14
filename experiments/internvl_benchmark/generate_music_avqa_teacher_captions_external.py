@@ -27,6 +27,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=str, required=True)
     parser.add_argument("--media-root", type=str, required=True)
     parser.add_argument("--output-manifest", type=str, required=True)
+    parser.add_argument(
+        "--dedup-by-audio",
+        action="store_true",
+        help="Caption each unique audio_path once, then expand back to all rows.",
+    )
+    parser.add_argument(
+        "--caption-cache-manifest",
+        type=str,
+        default="",
+        help="Optional JSONL cache of unique clip/audio captions.",
+    )
     parser.add_argument("--caption-field", type=str, default="teacher_caption_raw")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=2)
@@ -54,6 +65,16 @@ def parse_args() -> argparse.Namespace:
 def _clean_caption(text: str) -> str:
     text = " ".join((text or "").strip().split())
     return text
+
+
+def _audio_dedup_key(row: Dict[str, Any], fallback_idx: int) -> str:
+    audio_path = str(row.get("audio_path", "") or "").strip()
+    if audio_path:
+        return f"audio_path:{audio_path}"
+    sample_id = str(row.get("sample_id", "") or "").strip()
+    if sample_id:
+        return f"sample_id:{sample_id}"
+    return f"row:{fallback_idx}"
 
 
 def _looks_like_conette(model_path: Path) -> bool:
@@ -489,6 +510,28 @@ def main() -> None:
         raw_rows = raw_rows[:limit]
         dataset = Subset(dataset, list(range(limit)))  # type: ignore[assignment]
 
+    index_by_key: Dict[str, List[int]] = {}
+    first_index_by_key: Dict[str, int] = {}
+    ordered_keys: List[str] = []
+    for idx, row in enumerate(raw_rows):
+        key = _audio_dedup_key(row, idx)
+        if key not in index_by_key:
+            index_by_key[key] = []
+            first_index_by_key[key] = idx
+            ordered_keys.append(key)
+        index_by_key[key].append(idx)
+
+    if args.dedup_by_audio:
+        unique_indices = [first_index_by_key[key] for key in ordered_keys]
+        dataset = Subset(dataset, unique_indices)  # type: ignore[assignment]
+        print(
+            f"[external-teacher] audio dedup enabled: {len(raw_rows)} rows -> "
+            f"{len(unique_indices)} unique clips",
+            flush=True,
+        )
+    else:
+        unique_indices = list(range(len(raw_rows)))
+
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -506,6 +549,12 @@ def main() -> None:
     rows_written = 0
     row_cursor = 0
     t_start = time.time()
+    unique_captions_written = 0
+    cache_path = Path(args.caption_cache_manifest) if args.caption_cache_manifest else None
+    cache_file = None
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_path.open("w", encoding="utf-8")
 
     print(
         f"[external-teacher] Starting captioning: {len(raw_rows)} samples, "
@@ -513,70 +562,94 @@ def main() -> None:
         flush=True,
     )
 
-    with output_path.open("w", encoding="utf-8") as f:
-        for batch_idx, batch in enumerate(dataloader):
-            t_batch = time.time()
+    try:
+        with output_path.open("w", encoding="utf-8") as f:
+            for batch_idx, batch in enumerate(dataloader):
+                t_batch = time.time()
 
-            if backend == "qwen_omni":
-                captions = _generate_batch_qwen_omni(
-                    processor=processor,
-                    model=model,
-                    audio_batch=batch["audio"],
-                    max_new_tokens=args.max_new_tokens,
-                    num_beams=args.num_beams,
-                    caption_instruction=args.caption_instruction,
-                )
-            elif backend == "conette":
-                captions = _generate_batch_conette(
-                    model=model,
-                    audio_batch=batch["audio"],
-                    max_new_tokens=args.max_new_tokens,
-                    num_beams=args.num_beams,
-                )
-            else:
-                captions = _generate_batch_transformers(
-                    processor=processor,
-                    model=model,
-                    audio_batch=batch["audio"],
-                    device=device,
-                    max_new_tokens=args.max_new_tokens,
-                    num_beams=args.num_beams,
-                )
+                if backend == "qwen_omni":
+                    captions = _generate_batch_qwen_omni(
+                        processor=processor,
+                        model=model,
+                        audio_batch=batch["audio"],
+                        max_new_tokens=args.max_new_tokens,
+                        num_beams=args.num_beams,
+                        caption_instruction=args.caption_instruction,
+                    )
+                elif backend == "conette":
+                    captions = _generate_batch_conette(
+                        model=model,
+                        audio_batch=batch["audio"],
+                        max_new_tokens=args.max_new_tokens,
+                        num_beams=args.num_beams,
+                    )
+                else:
+                    captions = _generate_batch_transformers(
+                        processor=processor,
+                        model=model,
+                        audio_batch=batch["audio"],
+                        device=device,
+                        max_new_tokens=args.max_new_tokens,
+                        num_beams=args.num_beams,
+                    )
 
-            batch_sec = time.time() - t_batch
+                batch_sec = time.time() - t_batch
 
-            for i, caption in enumerate(captions):
-                source_row = dict(raw_rows[row_cursor])
-                source_row["sample_id"] = batch["sample_ids"][i]
-                source_row["question"] = batch["questions"][i]
-                source_row["answer"] = batch["answers"][i]
-                source_row["question_type"] = batch["question_types"][i]
-                source_row[args.caption_field] = caption
-                f.write(json.dumps(source_row, ensure_ascii=False) + "\n")
-                rows_written += 1
-                row_cursor += 1
+                for i, caption in enumerate(captions):
+                    unique_row_idx = unique_indices[row_cursor]
+                    key = _audio_dedup_key(raw_rows[unique_row_idx], unique_row_idx)
+                    member_indices = index_by_key[key]
+                    unique_captions_written += 1
 
-            # Flush each completed batch so long-running teacher jobs can be
-            # inspected and consumed incrementally for smoke tests.
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError:
-                pass
+                    if cache_file is not None:
+                        cache_row = {
+                            "dedup_key": key,
+                            "audio_path": raw_rows[unique_row_idx].get("audio_path", ""),
+                            "sample_id": raw_rows[unique_row_idx].get("sample_id", ""),
+                            args.caption_field: caption,
+                            "num_rows": len(member_indices),
+                        }
+                        cache_file.write(json.dumps(cache_row, ensure_ascii=False) + "\n")
 
-            elapsed = time.time() - t_start
-            avg_per_sample = elapsed / rows_written if rows_written else 0
-            remaining = avg_per_sample * (len(raw_rows) - rows_written)
+                    for source_idx in member_indices:
+                        source_row = dict(raw_rows[source_idx])
+                        source_row[args.caption_field] = caption
+                        f.write(json.dumps(source_row, ensure_ascii=False) + "\n")
+                        rows_written += 1
 
-            if (batch_idx + 1) % 5 == 0 or batch_idx == 0:
-                print(
-                    f"[external-teacher] batch {batch_idx + 1}/{total_batches} "
-                    f"| rows={rows_written}/{len(raw_rows)} "
-                    f"| batch={batch_sec:.1f}s | avg={avg_per_sample:.1f}s/sample "
-                    f"| elapsed={elapsed:.0f}s | ETA={remaining:.0f}s "
-                    f"| caption={captions[0]!r}",
-                    flush=True,
-                )
+                    row_cursor += 1
+
+                # Flush each completed batch so long-running teacher jobs can be
+                # inspected and consumed incrementally for smoke tests.
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+                if cache_file is not None:
+                    cache_file.flush()
+                    try:
+                        os.fsync(cache_file.fileno())
+                    except OSError:
+                        pass
+
+                elapsed = time.time() - t_start
+                avg_per_unique = elapsed / unique_captions_written if unique_captions_written else 0
+                remaining = avg_per_unique * (len(unique_indices) - unique_captions_written)
+
+                if (batch_idx + 1) % 5 == 0 or batch_idx == 0:
+                    print(
+                        f"[external-teacher] batch {batch_idx + 1}/{total_batches} "
+                        f"| unique={unique_captions_written}/{len(unique_indices)} "
+                        f"| rows={rows_written}/{len(raw_rows)} "
+                        f"| batch={batch_sec:.1f}s | avg={avg_per_unique:.1f}s/clip "
+                        f"| elapsed={elapsed:.0f}s | ETA={remaining:.0f}s "
+                        f"| caption={captions[0]!r}",
+                        flush=True,
+                    )
+    finally:
+        if cache_file is not None:
+            cache_file.close()
 
     print(
         json.dumps(
@@ -586,7 +659,10 @@ def main() -> None:
                 "manifest": args.manifest,
                 "output_manifest": str(output_path),
                 "caption_field": args.caption_field,
+                "dedup_by_audio": args.dedup_by_audio,
+                "unique_clips_captioned": unique_captions_written,
                 "rows_written": rows_written,
+                "caption_cache_manifest": str(cache_path) if cache_path is not None else "",
             },
             indent=2,
         ),

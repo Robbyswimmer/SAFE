@@ -66,6 +66,7 @@ fi
 export SAFE_OFFLOAD_FOLDER=${SAFE_OFFLOAD_FOLDER:-$SAFE_ROOT/.hf_offload}
 
 MODEL_CONFIG=${MODEL_CONFIG:-rkca_joint}
+MODEL_BACKEND=${MODEL_BACKEND:-raw_internvl}
 CHECKPOINT=${CHECKPOINT:-}
 MANIFEST=${MANIFEST:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/music_avqa_validation_audio_captions.jsonl}
 MEDIA_ROOT=${MEDIA_ROOT:-$SAFE_ROOT/data/music_avqa}
@@ -81,8 +82,10 @@ mkdir -p "$OUTPUT_DIR" logs
 mkdir -p "$SAFE_OFFLOAD_FOLDER"
 
 python3 experiments/internvl_benchmark/eval_music_avqa_text_caption_baseline.py \
+  --model-backend "$MODEL_BACKEND" \
   --model-config "$MODEL_CONFIG" \
   --checkpoint "$CHECKPOINT" \
+  --llm-model "$LLM_MODEL_PATH" \
   --manifest "$MANIFEST" \
   --media-root "$MEDIA_ROOT" \
   --caption-field "$CAPTION_FIELD" \

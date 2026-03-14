@@ -28,11 +28,13 @@ TEACHER_BACKEND=${TEACHER_BACKEND:-auto}
 MANIFEST=${MANIFEST:-$SAFE_ROOT/data/music_avqa/manifests/validation.jsonl}
 MEDIA_ROOT=${MEDIA_ROOT:-$SAFE_ROOT/data/music_avqa}
 OUTPUT_MANIFEST=${OUTPUT_MANIFEST:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_validation_external.jsonl}
+CAPTION_CACHE_MANIFEST=${CAPTION_CACHE_MANIFEST:-}
 CAPTION_FIELD=${CAPTION_FIELD:-teacher_caption_raw}
 CAPTION_INSTRUCTION=${CAPTION_INSTRUCTION:-}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
 QWEN_QUANTIZATION=${QWEN_QUANTIZATION:-4bit}
 QWEN_CPU_OFFLOAD=${QWEN_CPU_OFFLOAD:-0}
+DEDUP_BY_AUDIO=${DEDUP_BY_AUDIO:-1}
 
 # Qwen-Omni: process one sample at a time (chat-template model), more tokens for detail
 if [[ "$TEACHER_BACKEND" == "qwen_omni" ]] || [[ "$TEACHER_MODEL" == *qwen*omni* ]] || [[ "$TEACHER_MODEL" == *Qwen*Omni* ]]; then
@@ -70,8 +72,16 @@ if [[ -n "$CAPTION_INSTRUCTION" ]]; then
   CMD+=(--caption-instruction "$CAPTION_INSTRUCTION")
 fi
 
+if [[ -n "$CAPTION_CACHE_MANIFEST" ]]; then
+  CMD+=(--caption-cache-manifest "$CAPTION_CACHE_MANIFEST")
+fi
+
 if [[ "$QWEN_CPU_OFFLOAD" == "1" ]]; then
   CMD+=(--qwen-cpu-offload)
+fi
+
+if [[ "$DEDUP_BY_AUDIO" == "1" ]]; then
+  CMD+=(--dedup-by-audio)
 fi
 
 "${CMD[@]}"
