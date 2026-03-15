@@ -74,18 +74,38 @@ def _pick_caption(value: Any, train: bool) -> Optional[str]:
 
 
 class MusicAVQATextTargetDataset(Dataset):
-    def __init__(self, manifest_path: Path, media_root: Path, target_field: str) -> None:
+    def __init__(
+        self,
+        manifest_path: Path,
+        media_root: Path,
+        target_field: str,
+        dedup_by_audio: bool = False,
+    ) -> None:
         self.manifest_path = manifest_path
         self.media_root = media_root
         self.target_field = target_field
         self.base = ManifestAVQADataset(manifest_path, media_root)
+        self.indices = list(range(len(self.base)))
+        if dedup_by_audio:
+            unique_indices: List[int] = []
+            seen_keys = set()
+            for idx, row in enumerate(self.base.rows):
+                key = str(row.get("audio_path", "") or "").strip()
+                if not key:
+                    key = str(row.get("sample_id", f"row_{idx}") or f"row_{idx}")
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                unique_indices.append(idx)
+            self.indices = unique_indices
 
     def __len__(self) -> int:
-        return len(self.base)
+        return len(self.indices)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        item = self.base[idx]
-        row = self.base.rows[idx]
+        base_idx = self.indices[idx]
+        item = self.base[base_idx]
+        row = self.base.rows[base_idx]
         item["target_text"] = row.get(self.target_field, "")
         item["audio_path"] = row.get("audio_path", "")
         item["image_path"] = row.get("image_path", "")
@@ -262,6 +282,10 @@ class CLAPQwenCaptionDecoder(nn.Module):
         tokenizer: Any,
         max_new_tokens: int = 32,
         num_beams: int = 1,
+        allowed_token_ids: Optional[torch.Tensor] = None,
+        do_sample: bool = False,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
     ) -> torch.Tensor:
         if num_beams != 1:
             raise NotImplementedError("Beam search not implemented for lightweight decoder yet")
@@ -276,7 +300,31 @@ class CLAPQwenCaptionDecoder(nn.Module):
         finished = torch.zeros(bsz, dtype=torch.bool, device=audio_embeddings.device)
         for _ in range(max_new_tokens):
             logits = self.forward(audio_embeddings, generated)
-            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            next_logits = logits[:, -1, :]
+            if temperature <= 0:
+                temperature = 1.0
+            if do_sample:
+                next_logits = next_logits / temperature
+            if allowed_token_ids is not None:
+                constrained = torch.full_like(next_logits, float("-inf"))
+                constrained[:, allowed_token_ids] = next_logits[:, allowed_token_ids]
+                next_logits = constrained
+            if do_sample:
+                if top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(next_logits, descending=True, dim=-1)
+                    sorted_probs = torch.softmax(sorted_logits, dim=-1)
+                    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+                    sorted_mask = cumulative_probs > top_p
+                    sorted_mask[..., 1:] = sorted_mask[..., :-1].clone()
+                    sorted_mask[..., 0] = False
+                    sorted_logits = sorted_logits.masked_fill(sorted_mask, float("-inf"))
+                    filtered = torch.full_like(next_logits, float("-inf"))
+                    filtered.scatter_(1, sorted_indices, sorted_logits)
+                    next_logits = filtered
+                probs = torch.softmax(next_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                next_token = next_logits.argmax(dim=-1, keepdim=True)
             generated = torch.cat([generated, next_token], dim=1)
             finished |= next_token.squeeze(1).eq(eos_id)
             if finished.all():
@@ -292,12 +340,17 @@ def build_datasets(
     val_manifest: Optional[str],
     media_root: Optional[str],
     target_field: str,
+    dedup_by_audio: bool,
 ) -> Tuple[Dataset, Dataset]:
     if dataset_mode == "music_avqa":
         if not train_manifest or not val_manifest or not media_root:
             raise ValueError("music_avqa mode requires --train-manifest, --val-manifest, and --media-root")
-        train_dataset = MusicAVQATextTargetDataset(Path(train_manifest), Path(media_root), target_field)
-        val_dataset = MusicAVQATextTargetDataset(Path(val_manifest), Path(media_root), target_field)
+        train_dataset = MusicAVQATextTargetDataset(
+            Path(train_manifest), Path(media_root), target_field, dedup_by_audio=dedup_by_audio
+        )
+        val_dataset = MusicAVQATextTargetDataset(
+            Path(val_manifest), Path(media_root), target_field, dedup_by_audio=dedup_by_audio
+        )
         return train_dataset, val_dataset
 
     train_parts: List[Dataset] = [AudioCapsDataset(data_path, split="train"), ClothoDataset(data_path, split="train")]
@@ -325,6 +378,7 @@ def evaluate(
     tokenizer: Any,
     device: torch.device,
     max_new_tokens: int,
+    allowed_token_ids: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
     model.eval()
     predictions: List[str] = []
@@ -348,7 +402,12 @@ def evaluate(
             total_loss += float(loss.item())
             total_batches += 1
 
-            generated_ids = model.generate(audio_embeddings, tokenizer, max_new_tokens=max_new_tokens)
+            generated_ids = model.generate(
+                audio_embeddings,
+                tokenizer,
+                max_new_tokens=max_new_tokens,
+                allowed_token_ids=allowed_token_ids,
+            )
             preds = tokenizer.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
             predictions.extend([" ".join(p.strip().split()) for p in preds])
             references.extend(batch["references"])
@@ -372,6 +431,7 @@ def evaluate_music_avqa_answers(
     tokenizer: Any,
     device: torch.device,
     max_new_tokens: int,
+    allowed_token_ids: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
     model.eval()
     raw_correct = 0
@@ -399,7 +459,12 @@ def evaluate_music_avqa_answers(
             total_loss += float(loss.item())
             total_batches += 1
 
-            generated_ids = model.generate(audio_embeddings, tokenizer, max_new_tokens=max_new_tokens)
+            generated_ids = model.generate(
+                audio_embeddings,
+                tokenizer,
+                max_new_tokens=max_new_tokens,
+                allowed_token_ids=allowed_token_ids,
+            )
             preds = tokenizer.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
             preds = [" ".join(p.strip().split()) for p in preds]
 
@@ -457,6 +522,7 @@ def evaluate_music_avqa_holdouts(
     max_new_tokens: int,
     output_dir: Path,
     epoch_index: int,
+    allowed_token_ids: Optional[torch.Tensor] = None,
 ) -> None:
     summaries: Dict[str, Dict[str, float]] = {}
     sample_print_limits = {"image": 2, "audio": 6, "both": 6}
@@ -471,7 +537,12 @@ def evaluate_music_avqa_holdouts(
         with torch.no_grad():
             for batch_idx, batch in enumerate(dataloader):
                 audio_embeddings = clap(batch["audio"]).to(device)
-                generated_ids = decoder.generate(audio_embeddings, tokenizer, max_new_tokens=max_new_tokens)
+                generated_ids = decoder.generate(
+                    audio_embeddings,
+                    tokenizer,
+                    max_new_tokens=max_new_tokens,
+                    allowed_token_ids=allowed_token_ids,
+                )
                 captions = tokenizer.batch_decode(
                     generated_ids,
                     skip_special_tokens=True,
@@ -580,6 +651,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-manifest", type=str, default="")
     parser.add_argument("--media-root", type=str, default="")
     parser.add_argument("--target-field", type=str, default="answer")
+    parser.add_argument("--dedup-by-audio", action="store_true")
+    parser.add_argument("--constrained-decoding", action="store_true")
     parser.add_argument("--use-wavcaps", action="store_true")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--val-batch-size", type=int, default=32)
@@ -612,6 +685,52 @@ def maybe_subset(dataset: Dataset, max_samples: int) -> Dataset:
     return dataset
 
 
+def iter_target_texts(dataset: Dataset) -> List[str]:
+    if isinstance(dataset, torch.utils.data.Subset):
+        parent = dataset.dataset
+        subset_indices = list(dataset.indices)
+        if isinstance(parent, MusicAVQATextTargetDataset):
+            texts = []
+            for rel_idx in subset_indices:
+                base_idx = parent.indices[rel_idx]
+                text = str(parent.base.rows[base_idx].get(parent.target_field, "") or "").strip()
+                if text:
+                    texts.append(text)
+            return texts
+        return []
+    if isinstance(dataset, MusicAVQATextTargetDataset):
+        texts = []
+        for base_idx in dataset.indices:
+            text = str(dataset.base.rows[base_idx].get(dataset.target_field, "") or "").strip()
+            if text:
+                texts.append(text)
+        return texts
+    return []
+
+
+def build_allowed_token_ids(
+    tokenizer: Any,
+    texts: Sequence[str],
+) -> torch.Tensor:
+    allowed = set()
+    special_ids = [
+        tokenizer.pad_token_id,
+        tokenizer.eos_token_id,
+        tokenizer.bos_token_id,
+    ]
+    for token_id in special_ids:
+        if token_id is not None:
+            allowed.add(int(token_id))
+    for text in texts:
+        encoded = tokenizer(
+            text,
+            add_special_tokens=False,
+            return_attention_mask=False,
+        )["input_ids"]
+        allowed.update(int(x) for x in encoded)
+    return torch.tensor(sorted(allowed), dtype=torch.long)
+
+
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
@@ -636,6 +755,7 @@ def main() -> None:
         val_manifest=args.val_manifest or None,
         media_root=args.media_root or None,
         target_field=args.target_field,
+        dedup_by_audio=args.dedup_by_audio,
     )
     train_dataset = maybe_subset(train_dataset, args.max_train_samples)
     val_dataset = maybe_subset(val_dataset, args.max_val_samples)
@@ -701,6 +821,30 @@ def main() -> None:
     clap = CLAPAudioEncoder(freeze=True).to(device)
     clap.eval()
 
+    allowed_token_ids: Optional[torch.Tensor] = None
+    if args.constrained_decoding:
+        target_texts = iter_target_texts(train_dataset) + iter_target_texts(val_dataset)
+        allowed_token_ids = build_allowed_token_ids(tokenizer, target_texts).to(device)
+        allowed_vocab_preview = tokenizer.batch_decode(
+            allowed_token_ids[: min(32, allowed_token_ids.numel())].unsqueeze(1),
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+        print(
+            f"[constraint] enabled allowed_tokens={allowed_token_ids.numel()} "
+            f"preview={allowed_vocab_preview[:12]}",
+            flush=True,
+        )
+        with (output_dir / "allowed_token_ids.json").open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "count": int(allowed_token_ids.numel()),
+                    "token_ids": [int(x) for x in allowed_token_ids.tolist()],
+                },
+                f,
+                indent=2,
+            )
+
     model = CLAPQwenCaptionDecoder(
         vocab_size=vocab_size,
         pad_token_id=int(tokenizer.pad_token_id),
@@ -745,6 +889,7 @@ def main() -> None:
             tokenizer=tokenizer,
             device=device,
             max_new_tokens=args.max_new_tokens,
+            allowed_token_ids=allowed_token_ids,
         )
     else:
         init_metrics = evaluate(
@@ -754,20 +899,22 @@ def main() -> None:
             tokenizer=tokenizer,
             device=device,
             max_new_tokens=args.max_new_tokens,
+            allowed_token_ids=allowed_token_ids,
         )
     print(f"[init-eval] {json.dumps(init_metrics, indent=2)}", flush=True)
     if holdout_loader is not None and holdout_base_model is not None and holdout_tokenizer is not None:
-        evaluate_music_avqa_holdouts(
-            decoder=model,
-            clap=clap,
-            dataloader=holdout_loader,
-            base_model=holdout_base_model,
-            tokenizer=holdout_tokenizer,
-            device=device,
-            max_new_tokens=args.max_new_tokens,
-            output_dir=output_dir,
-            epoch_index=-1,
-        )
+            evaluate_music_avqa_holdouts(
+                decoder=model,
+                clap=clap,
+                dataloader=holdout_loader,
+                base_model=holdout_base_model,
+                tokenizer=holdout_tokenizer,
+                device=device,
+                max_new_tokens=args.max_new_tokens,
+                output_dir=output_dir,
+                epoch_index=-1,
+                allowed_token_ids=allowed_token_ids,
+            )
 
     for epoch in range(args.num_epochs):
         model.train()
@@ -839,6 +986,7 @@ def main() -> None:
                 tokenizer=tokenizer,
                 device=device,
                 max_new_tokens=args.max_new_tokens,
+                allowed_token_ids=allowed_token_ids,
             )
         else:
             metrics = evaluate(
@@ -848,6 +996,7 @@ def main() -> None:
                 tokenizer=tokenizer,
                 device=device,
                 max_new_tokens=args.max_new_tokens,
+                allowed_token_ids=allowed_token_ids,
             )
         print(f"[eval] epoch={epoch + 1} {json.dumps(metrics, indent=2)}", flush=True)
         if holdout_loader is not None and holdout_base_model is not None and holdout_tokenizer is not None:
@@ -861,6 +1010,7 @@ def main() -> None:
                 max_new_tokens=args.max_new_tokens,
                 output_dir=output_dir,
                 epoch_index=epoch,
+                allowed_token_ids=allowed_token_ids,
             )
 
         checkpoint = {
@@ -876,6 +1026,8 @@ def main() -> None:
                 "num_memory_tokens": args.num_memory_tokens,
                 "llm_model": args.llm_model,
                 "target_field": args.target_field,
+                "dedup_by_audio": args.dedup_by_audio,
+                "constrained_decoding": args.constrained_decoding,
             },
         }
         torch.save(checkpoint, output_dir / "checkpoint_last.pt")
