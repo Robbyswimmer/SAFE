@@ -14,15 +14,27 @@ from torch.utils.data import DataLoader, Dataset, Subset
 from transformers import AutoImageProcessor, AutoModel, AutoProcessor, AutoTokenizer
 
 # ── Compatibility shim ──────────────────────────────────────────────────
-# Newer transformers (>=4.47) expects models to have `all_tied_weights_keys`
-# but the cached InternVL model code only defines `_tied_weights_keys`.
-# Add a fallback property so from_pretrained doesn't crash.
+# Newer transformers (>=4.47) expects `all_tied_weights_keys` on models.
+# Submodels like Qwen3Model set it in post_init(), but wrapper models
+# like InternVLChatModel (from cached remote code) never do, causing
+# mark_tied_weights_as_initialized to crash.  Patch that method to
+# lazily populate the attribute when missing.
 try:
     from transformers import PreTrainedModel as _PTM
-    if not hasattr(_PTM, "all_tied_weights_keys"):
-        _PTM.all_tied_weights_keys = property(
-            lambda self: {k: k for k in (getattr(self, "_tied_weights_keys", None) or [])}
-        )
+    _orig_mark_tied = getattr(_PTM, "mark_tied_weights_as_initialized", None)
+    if _orig_mark_tied is not None:
+        def _safe_mark_tied(self, loading_info):
+            if not hasattr(self, "all_tied_weights_keys"):
+                try:
+                    self.all_tied_weights_keys = self.get_expanded_tied_weights_keys(
+                        all_submodels=False
+                    )
+                except Exception:
+                    self.all_tied_weights_keys = {
+                        k: k for k in (getattr(self, "_tied_weights_keys", None) or [])
+                    }
+            return _orig_mark_tied(self, loading_info)
+        _PTM.mark_tied_weights_as_initialized = _safe_mark_tied
 except Exception:
     pass
 
