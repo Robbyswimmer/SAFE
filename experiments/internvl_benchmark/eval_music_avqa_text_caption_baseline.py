@@ -258,23 +258,31 @@ class RawInternVLEvalEngine:
                 raise
             print(
                 "[RawInternVL] Meta-tensor init detected, retrying with "
-                "CPU-forced tensor factories",
+                "numpy-backed torch.linspace to bypass meta .item() errors",
                 flush=True,
             )
-            # Monkey-patch tensor factory functions whose results may have
-            # .item() called on them during model __init__ (e.g. drop-path
-            # rate computation via torch.linspace).  Explicit device='cpu'
-            # overrides any active TorchFunctionMode (including meta-device
-            # contexts from transformers / accelerate) because those hooks
-            # only inject a device when 'device' is absent from kwargs.
-            _orig_linspace = torch.linspace
-            _orig_arange = torch.arange
+            # Root cause: InternVisionEncoder.__init__ does
+            #   [x.item() for x in torch.linspace(0, rate, n)]
+            # but a TorchFunctionMode from transformers/accelerate forces
+            # torch.linspace onto the meta device where .item() is invalid.
+            #
+            # Previous attempts to pass device='cpu' through the original
+            # torch.linspace failed because TorchFunctionMode intercepts
+            # at C++ dispatch level, overriding explicit kwargs.
+            #
+            # Fix: replace torch.linspace with a plain Python function that
+            # computes values via numpy and converts with torch.from_numpy.
+            # Because it is NOT a torch op, TorchFunctionMode dispatch never
+            # fires.  And torch.from_numpy is not a "device constructor" so
+            # device modes leave it alone -- it always returns a CPU tensor.
+            import numpy as _np
 
-            def _cpu_wrap(fn):
-                def _wrapper(*args, **kwargs):
-                    kwargs["device"] = "cpu"
-                    return fn(*args, **kwargs)
-                return _wrapper
+            _orig_linspace = torch.linspace
+
+            def _np_linspace(start, end, steps, **_kw):
+                arr = _np.linspace(float(start), float(end), int(steps),
+                                   dtype=_np.float64)
+                return torch.from_numpy(arr.copy())
 
             prev_default = None
             try:
@@ -283,12 +291,9 @@ class RawInternVLEvalEngine:
                         prev_default = torch.get_default_device()
                     except Exception:
                         pass
-                # Clear ALL device hooks (None removes them entirely,
-                # unlike "cpu" which keeps the hook active).
                 if hasattr(torch, "set_default_device"):
                     torch.set_default_device(None)
-                torch.linspace = _cpu_wrap(_orig_linspace)
-                torch.arange = _cpu_wrap(_orig_arange)
+                torch.linspace = _np_linspace
                 self.model = AutoModel.from_pretrained(
                     llm_model,
                     trust_remote_code=True,
@@ -298,7 +303,6 @@ class RawInternVLEvalEngine:
                 )
             finally:
                 torch.linspace = _orig_linspace
-                torch.arange = _orig_arange
                 if prev_default is not None and hasattr(torch, "set_default_device"):
                     try:
                         torch.set_default_device(prev_default)
