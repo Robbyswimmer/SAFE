@@ -30,6 +30,10 @@ from experiments.avqa_composition.train_avqa_composition import (
     normalize_answer,
     token_f1,
 )
+from experiments.internvl_benchmark.eval_music_avqa_text_caption_baseline import (
+    RawInternVLEvalEngine,
+    SafeEvalEngine,
+)
 from safe.data.datasets import AudioCapsDataset, ClothoDataset, WavCapsDataset
 from safe.models.audio_encoders import CLAPAudioEncoder
 from train_safe import compute_caption_metrics, create_model, load_checkpoint
@@ -516,8 +520,7 @@ def evaluate_music_avqa_holdouts(
     decoder: CLAPQwenCaptionDecoder,
     clap: CLAPAudioEncoder,
     dataloader: DataLoader,
-    base_model: Any,
-    tokenizer: Any,
+    engine: Any,
     device: torch.device,
     max_new_tokens: int,
     output_dir: Path,
@@ -554,39 +557,12 @@ def evaluate_music_avqa_holdouts(
                     for q, cap in zip(batch["questions"], captions)
                 ]
                 images = batch["images"] if mode in {"image", "both"} else None
-                generation_inputs = base_model.prepare_multimodal_inputs(
-                    text=prompts,
+                preds = engine.generate_batch(
+                    prompts=prompts,
                     images=images,
-                    audio=None,
-                    answers=None,
-                    device=str(device),
-                    training_mode=False,
-                )
-                input_ids = generation_inputs["input_ids"].to(device)
-                attention_mask = generation_inputs["attention_mask"].to(device)
-                pixel_values = generation_inputs.get("pixel_values")
-                if pixel_values is not None:
-                    pixel_values = pixel_values.to(device)
-
-                output_ids = base_model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    pixel_values=pixel_values,
+                    device=device,
                     max_new_tokens=8,
-                    min_new_tokens=1,
                     num_beams=1,
-                    repetition_penalty=1.05,
-                    no_repeat_ngram_size=3,
-                    do_sample=False,
-                    pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                )
-                prompt_len = int(input_ids.shape[1])
-                decoded_ids = output_ids[:, prompt_len:] if output_ids.dim() == 2 and output_ids.size(1) > prompt_len else output_ids
-                preds = tokenizer.batch_decode(
-                    decoded_ids,
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=True,
                 )
                 for i, (pred, ref) in enumerate(zip(preds, batch["answers"])):
                     pred_norm = normalize_answer(pred)
@@ -676,6 +652,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--holdout-model-config", type=str, default="")
     parser.add_argument("--holdout-checkpoint", type=str, default="")
     parser.add_argument("--holdout-batch-size", type=int, default=2)
+    parser.add_argument("--holdout-backend", type=str, default="raw_internvl", choices=["raw_internvl", "safe"])
     return parser.parse_args()
 
 
@@ -775,8 +752,7 @@ def main() -> None:
         collate_fn=CaptionBatchCollator(tokenizer, args.max_length, train=False, target_field=args.target_field),
     )
     holdout_loader: Optional[DataLoader] = None
-    holdout_base_model: Optional[Any] = None
-    holdout_tokenizer: Optional[Any] = None
+    holdout_engine: Optional[Any] = None
     if args.dataset_mode == "music_avqa" and args.holdout_model_config:
         holdout_dataset = ManifestAVQADataset(Path(args.val_manifest), Path(args.media_root))
         holdout_dataset = maybe_subset(holdout_dataset, args.max_val_samples)
@@ -787,36 +763,38 @@ def main() -> None:
             num_workers=args.num_workers,
             collate_fn=collate_avqa,
         )
-        holdout_cfg_name = args.holdout_model_config
-        if holdout_cfg_name == "internvl":
-            # For this experiment, holdout evaluation should use the raw frozen
-            # InternVL base model with image + text only. In this repo the
-            # "internvl" config includes residual audio fusion adapters, which
-            # is the wrong evaluation path here. Remap to the plain concat/raw
-            # InternVL wrapper config instead.
-            holdout_cfg_name = "rkca_joint"
-            print(
-                "[holdout] remapping holdout_model_config=internvl -> rkca_joint "
-                "to use the raw frozen InternVL text+image path",
-                flush=True,
-            )
-        llm_cfg = get_config(holdout_cfg_name)
-        holdout_model = create_model(llm_cfg).to(device)
-        holdout_ckpt = Path(args.holdout_checkpoint) if args.holdout_checkpoint else None
-        if holdout_ckpt is not None and holdout_ckpt.exists():
-            load_checkpoint(
-                model=holdout_model,
-                optimizer=None,
-                scheduler=None,
-                checkpoint_path=holdout_ckpt,
-                device=device,
-            )
-            print(f"[holdout] loaded checkpoint: {holdout_ckpt}", flush=True)
+        if args.holdout_backend == "raw_internvl":
+            print(f"[holdout] loading raw InternVL directly from {args.llm_model}", flush=True)
+            holdout_engine = RawInternVLEvalEngine(llm_model=args.llm_model, device=device)
         else:
-            print("[holdout] using raw frozen base model (no holdout checkpoint provided)", flush=True)
-        holdout_model.eval()
-        holdout_base_model = holdout_model.module if hasattr(holdout_model, "module") else holdout_model
-        holdout_tokenizer = holdout_base_model.base_vl.tokenizer
+            holdout_cfg_name = args.holdout_model_config
+            if holdout_cfg_name == "internvl":
+                holdout_cfg_name = "rkca_joint"
+                print(
+                    "[holdout] remapping holdout_model_config=internvl -> rkca_joint "
+                    "to use the raw frozen InternVL text+image path",
+                    flush=True,
+                )
+            llm_cfg = get_config(holdout_cfg_name)
+            holdout_model = create_model(llm_cfg).to(device)
+            holdout_ckpt = Path(args.holdout_checkpoint) if args.holdout_checkpoint else None
+            if holdout_ckpt is not None and holdout_ckpt.exists():
+                load_checkpoint(
+                    model=holdout_model,
+                    optimizer=None,
+                    scheduler=None,
+                    checkpoint_path=holdout_ckpt,
+                    device=device,
+                )
+                print(f"[holdout] loaded checkpoint: {holdout_ckpt}", flush=True)
+            else:
+                print("[holdout] using raw frozen base model (no holdout checkpoint provided)", flush=True)
+            holdout_model.eval()
+            holdout_base_model = holdout_model.module if hasattr(holdout_model, "module") else holdout_model
+            holdout_engine = SafeEvalEngine(
+                base_model=holdout_base_model,
+                tokenizer=holdout_base_model.base_vl.tokenizer,
+            )
 
     clap = CLAPAudioEncoder(freeze=True).to(device)
     clap.eval()
@@ -902,19 +880,18 @@ def main() -> None:
             allowed_token_ids=allowed_token_ids,
         )
     print(f"[init-eval] {json.dumps(init_metrics, indent=2)}", flush=True)
-    if holdout_loader is not None and holdout_base_model is not None and holdout_tokenizer is not None:
-            evaluate_music_avqa_holdouts(
-                decoder=model,
-                clap=clap,
-                dataloader=holdout_loader,
-                base_model=holdout_base_model,
-                tokenizer=holdout_tokenizer,
-                device=device,
-                max_new_tokens=args.max_new_tokens,
-                output_dir=output_dir,
-                epoch_index=-1,
-                allowed_token_ids=allowed_token_ids,
-            )
+    if holdout_loader is not None and holdout_engine is not None:
+        evaluate_music_avqa_holdouts(
+            decoder=model,
+            clap=clap,
+            dataloader=holdout_loader,
+            engine=holdout_engine,
+            device=device,
+            max_new_tokens=args.max_new_tokens,
+            output_dir=output_dir,
+            epoch_index=-1,
+            allowed_token_ids=allowed_token_ids,
+        )
 
     for epoch in range(args.num_epochs):
         model.train()
@@ -999,13 +976,12 @@ def main() -> None:
                 allowed_token_ids=allowed_token_ids,
             )
         print(f"[eval] epoch={epoch + 1} {json.dumps(metrics, indent=2)}", flush=True)
-        if holdout_loader is not None and holdout_base_model is not None and holdout_tokenizer is not None:
+        if holdout_loader is not None and holdout_engine is not None:
             evaluate_music_avqa_holdouts(
                 decoder=model,
                 clap=clap,
                 dataloader=holdout_loader,
-                base_model=holdout_base_model,
-                tokenizer=holdout_tokenizer,
+                engine=holdout_engine,
                 device=device,
                 max_new_tokens=args.max_new_tokens,
                 output_dir=output_dir,

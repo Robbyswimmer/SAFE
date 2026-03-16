@@ -33,6 +33,7 @@ TARGET_FIELD=${TARGET_FIELD:-teacher_caption_structured}
 OUTPUT_DIR=${OUTPUT_DIR:-$SAFE_ROOT/experiments/internvl_benchmark/outputs/clap_music_avqa_text_target_decoder}
 HOLDOUT_MODEL_CONFIG=${HOLDOUT_MODEL_CONFIG:-rkca_joint}
 HOLDOUT_CHECKPOINT=${HOLDOUT_CHECKPOINT:-}
+HOLDOUT_BACKEND=${HOLDOUT_BACKEND:-raw_internvl}
 DEDUP_BY_AUDIO=${DEDUP_BY_AUDIO:-1}
 CONSTRAINED_DECODING=${CONSTRAINED_DECODING:-1}
 
@@ -59,6 +60,7 @@ CMD=(
   --holdout-model-config "$HOLDOUT_MODEL_CONFIG"
   --holdout-checkpoint "$HOLDOUT_CHECKPOINT"
   --holdout-batch-size "${HOLDOUT_BATCH_SIZE:-2}"
+  --holdout-backend "$HOLDOUT_BACKEND"
 )
 
 if [[ "$DEDUP_BY_AUDIO" == "1" ]]; then
