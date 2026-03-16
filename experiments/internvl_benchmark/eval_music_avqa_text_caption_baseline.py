@@ -246,14 +246,38 @@ class RawInternVLEvalEngine:
     def __init__(self, llm_model: str, device: torch.device) -> None:
         self.device = device
         model_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-        self.model = AutoModel.from_pretrained(
-            llm_model,
-            trust_remote_code=True,
-            torch_dtype=model_dtype,
-            low_cpu_mem_usage=False,
-        ).to(device)
+        try:
+            self.model = AutoModel.from_pretrained(
+                llm_model,
+                trust_remote_code=True,
+                torch_dtype=model_dtype,
+                low_cpu_mem_usage=False,
+            )
+        except RuntimeError as exc:
+            if "meta tensors" not in str(exc).lower():
+                raise
+            print(
+                "[RawInternVL] Meta-tensor init detected, retrying with "
+                "device_map={'': 'cpu'}",
+                flush=True,
+            )
+            self.model = AutoModel.from_pretrained(
+                llm_model,
+                trust_remote_code=True,
+                torch_dtype=model_dtype,
+                low_cpu_mem_usage=True,
+                device_map={"": "cpu"},
+            )
+        self.model = self.model.to(device)
         self.model.eval()
-        self.tokenizer = AutoTokenizer.from_pretrained(llm_model, trust_remote_code=True)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                llm_model,
+                trust_remote_code=True,
+                fix_mistral_regex=True,
+            )
+        except TypeError:
+            self.tokenizer = AutoTokenizer.from_pretrained(llm_model, trust_remote_code=True)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "left"
