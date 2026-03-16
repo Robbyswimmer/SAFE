@@ -258,21 +258,37 @@ class RawInternVLEvalEngine:
                 raise
             print(
                 "[RawInternVL] Meta-tensor init detected, retrying with "
-                "explicit CPU default-device materialization",
+                "CPU-forced tensor factories",
                 flush=True,
             )
-            reset_default_device = None
+            # Monkey-patch tensor factory functions whose results may have
+            # .item() called on them during model __init__ (e.g. drop-path
+            # rate computation via torch.linspace).  Explicit device='cpu'
+            # overrides any active TorchFunctionMode (including meta-device
+            # contexts from transformers / accelerate) because those hooks
+            # only inject a device when 'device' is absent from kwargs.
+            _orig_linspace = torch.linspace
+            _orig_arange = torch.arange
+
+            def _cpu_wrap(fn):
+                def _wrapper(*args, **kwargs):
+                    kwargs["device"] = "cpu"
+                    return fn(*args, **kwargs)
+                return _wrapper
+
+            prev_default = None
             try:
                 if hasattr(torch, "get_default_device"):
                     try:
                         prev_default = torch.get_default_device()
                     except Exception:
-                        prev_default = None
-                else:
-                    prev_default = None
+                        pass
+                # Clear ALL device hooks (None removes them entirely,
+                # unlike "cpu" which keeps the hook active).
                 if hasattr(torch, "set_default_device"):
-                    reset_default_device = prev_default
-                    torch.set_default_device("cpu")
+                    torch.set_default_device(None)
+                torch.linspace = _cpu_wrap(_orig_linspace)
+                torch.arange = _cpu_wrap(_orig_arange)
                 self.model = AutoModel.from_pretrained(
                     llm_model,
                     trust_remote_code=True,
@@ -281,9 +297,11 @@ class RawInternVLEvalEngine:
                     device_map=None,
                 )
             finally:
-                if reset_default_device is not None and hasattr(torch, "set_default_device"):
+                torch.linspace = _orig_linspace
+                torch.arange = _orig_arange
+                if prev_default is not None and hasattr(torch, "set_default_device"):
                     try:
-                        torch.set_default_device(reset_default_device)
+                        torch.set_default_device(prev_default)
                     except Exception:
                         pass
         self.model = self.model.to(device)
