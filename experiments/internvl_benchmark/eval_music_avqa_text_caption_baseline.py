@@ -257,43 +257,60 @@ class RawInternVLEvalEngine:
             if "meta tensors" not in str(exc).lower():
                 raise
             print(
-                "[RawInternVL] Meta-tensor init detected, retrying with "
-                "numpy-backed torch.linspace to bypass meta .item() errors",
+                "[RawInternVL] Meta-tensor init detected; patching "
+                "InternVisionEncoder to use pure-Python linspace",
                 flush=True,
             )
             # Root cause: InternVisionEncoder.__init__ does
             #   [x.item() for x in torch.linspace(0, rate, n)]
-            # but a TorchFunctionMode from transformers/accelerate forces
-            # torch.linspace onto the meta device where .item() is invalid.
+            # but from_pretrained wraps model construction in a meta-device
+            # TorchFunctionMode (via accelerate / init_empty_weights), so
+            # torch.linspace produces meta tensors and .item() crashes.
+            # This persists even with low_cpu_mem_usage=False in some
+            # transformers + accelerate + PyTorch version combinations.
             #
-            # Previous attempts to pass device='cpu' through the original
-            # torch.linspace failed because TorchFunctionMode intercepts
-            # at C++ dispatch level, overriding explicit kwargs.
-            #
-            # Fix: replace torch.linspace with a plain Python function that
-            # computes values via numpy and converts with torch.from_numpy.
-            # Because it is NOT a torch op, TorchFunctionMode dispatch never
-            # fires.  And torch.from_numpy is not a "device constructor" so
-            # device modes leave it alone -- it always returns a CPU tensor.
-            import numpy as _np
+            # Fix: after the first failed load the InternVL modules are
+            # cached in sys.modules.  We patch InternVisionEncoder.__init__
+            # to temporarily swap torch.linspace with a PURE PYTHON version
+            # that never touches PyTorch, making it completely immune to any
+            # device context / TorchFunctionMode.
+            _patched_cls = None
+            _orig_enc_init = None
+            for _mn, _mod in list(sys.modules.items()):
+                if hasattr(_mod, "InternVisionEncoder"):
+                    _patched_cls = _mod.InternVisionEncoder
+                    _orig_enc_init = _patched_cls.__init__
 
-            _orig_linspace = torch.linspace
+                    def _patched_enc_init(self, config, _real=_orig_enc_init):
+                        class _Scalar:
+                            """Float wrapper with .item() for linspace compat."""
+                            __slots__ = ("_v",)
+                            def __init__(s, v): s._v = v  # noqa: N805
+                            def item(s): return s._v  # noqa: N805
+                            def __float__(s): return s._v  # noqa: N805
 
-            def _np_linspace(start, end, steps, **_kw):
-                arr = _np.linspace(float(start), float(end), int(steps),
-                                   dtype=_np.float64)
-                return torch.from_numpy(arr.copy())
+                        def _py_linspace(start, end, steps, **_kw):
+                            start = float(start)
+                            end = float(end)
+                            steps = int(steps)
+                            if steps <= 0:
+                                return []
+                            if steps == 1:
+                                return [_Scalar(start)]
+                            return [_Scalar(start + (end - start) * i / (steps - 1))
+                                    for i in range(steps)]
 
-            prev_default = None
+                        _saved = torch.linspace
+                        torch.linspace = _py_linspace
+                        try:
+                            _real(self, config)
+                        finally:
+                            torch.linspace = _saved
+
+                    _patched_cls.__init__ = _patched_enc_init
+                    break
+
             try:
-                if hasattr(torch, "get_default_device"):
-                    try:
-                        prev_default = torch.get_default_device()
-                    except Exception:
-                        pass
-                if hasattr(torch, "set_default_device"):
-                    torch.set_default_device(None)
-                torch.linspace = _np_linspace
                 self.model = AutoModel.from_pretrained(
                     llm_model,
                     trust_remote_code=True,
@@ -302,12 +319,8 @@ class RawInternVLEvalEngine:
                     device_map=None,
                 )
             finally:
-                torch.linspace = _orig_linspace
-                if prev_default is not None and hasattr(torch, "set_default_device"):
-                    try:
-                        torch.set_default_device(prev_default)
-                    except Exception:
-                        pass
+                if _patched_cls is not None and _orig_enc_init is not None:
+                    _patched_cls.__init__ = _orig_enc_init
         self.model = self.model.to(device)
         self.model.eval()
         try:
