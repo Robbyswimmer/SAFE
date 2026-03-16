@@ -42,6 +42,12 @@ else
 fi
 conda activate "$CONDA_ENV"
 
+PYTHON_BIN=${PYTHON_BIN:-$(command -v python)}
+if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
+  echo "[env] Failed to resolve python after activating ${CONDA_ENV}" >&2
+  exit 2
+fi
+
 # ─── Experiment config ───────────────────────────────────────────────
 export LLM_MODEL_PATH=${LLM_MODEL_PATH:-models/OpenGVLab_InternVL3_5-8B}
 
@@ -106,9 +112,13 @@ mkdir -p "$SAFE_OFFLOAD_FOLDER"
 
 cd "$SAFE_ROOT"
 
+echo "[env] CONDA_ENV=${CONDA_ENV}"
+echo "[env] python=${PYTHON_BIN}"
+echo "[env] python_version=$("${PYTHON_BIN}" -V 2>&1)"
+
 REQUIRE_CUDA=${REQUIRE_CUDA:-1}
 if [[ "$REQUIRE_CUDA" == "1" ]]; then
-  python3 -c "import torch,sys; ok=torch.cuda.is_available() and torch.cuda.device_count()>0; print(f'[cuda_check] available={torch.cuda.is_available()} count={torch.cuda.device_count()}'); sys.exit(0 if ok else 2)"
+  "${PYTHON_BIN}" -c "import torch,sys; ok=torch.cuda.is_available() and torch.cuda.device_count()>0; print(f'[cuda_check] available={torch.cuda.is_available()} count={torch.cuda.device_count()}'); sys.exit(0 if ok else 2)"
 fi
 
 WANDB_ARGS=()
@@ -129,7 +139,7 @@ echo "SAFE_MAX_MEM: ${SAFE_MAX_MEMORY:-auto}"
 echo "============================================"
 echo ""
 
-python3 "$SAFE_ROOT/train_scanqa_composition.py" \
+"${PYTHON_BIN}" "$SAFE_ROOT/train_scanqa_composition.py" \
   --model-config "$MODEL_CONFIG" \
   --data-path "$DATA_ROOT" \
   --modality "$MODALITY" \
