@@ -13,6 +13,19 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset, Subset
 from transformers import AutoImageProcessor, AutoModel, AutoProcessor, AutoTokenizer
 
+# ── Compatibility shim ──────────────────────────────────────────────────
+# Newer transformers (>=4.47) expects models to have `all_tied_weights_keys`
+# but the cached InternVL model code only defines `_tied_weights_keys`.
+# Add a fallback property so from_pretrained doesn't crash.
+try:
+    from transformers import PreTrainedModel as _PTM
+    if not hasattr(_PTM, "all_tied_weights_keys"):
+        _PTM.all_tied_weights_keys = property(
+            lambda self: {k: k for k in (getattr(self, "_tied_weights_keys", None) or [])}
+        )
+except Exception:
+    pass
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
