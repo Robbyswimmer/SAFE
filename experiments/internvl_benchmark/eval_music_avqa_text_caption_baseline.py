@@ -246,6 +246,38 @@ class RawInternVLEvalEngine:
     def __init__(self, llm_model: str, device: torch.device) -> None:
         self.device = device
         model_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+
+        # Wrap torch.linspace BEFORE from_pretrained to handle meta tensor
+        # .item() errors.  from_pretrained may internally use a meta-device
+        # TorchFunctionMode (via accelerate / init_empty_weights) causing
+        # torch.linspace to produce meta tensors.  InternVisionEncoder does
+        #   dpr = [x.item() for x in torch.linspace(0, rate, n)]
+        # which crashes because .item() is invalid on meta tensors.
+        #
+        # This wrapper lets the real torch.linspace run, then checks whether
+        # the result landed on the meta device.  If so it falls back to pure
+        # Python arithmetic — no torch ops, immune to any device context.
+        _orig_ls = torch.linspace
+
+        class _Scalar:
+            """Minimal float wrapper with .item() to mimic a tensor element."""
+            __slots__ = ("_v",)
+            def __init__(s, v): s._v = v  # noqa: N805
+            def item(s): return s._v  # noqa: N805
+            def __float__(s): return s._v  # noqa: N805
+
+        def _safe_linspace(start, end, steps, **kw):
+            result = _orig_ls(start, end, steps, **kw)
+            if result.is_meta:
+                s, e, n = float(start), float(end), int(steps)
+                if n <= 0:
+                    return []
+                if n == 1:
+                    return [_Scalar(s)]
+                return [_Scalar(s + (e - s) * i / (n - 1)) for i in range(n)]
+            return result
+
+        torch.linspace = _safe_linspace
         try:
             self.model = AutoModel.from_pretrained(
                 llm_model,
@@ -253,74 +285,8 @@ class RawInternVLEvalEngine:
                 torch_dtype=model_dtype,
                 low_cpu_mem_usage=False,
             )
-        except RuntimeError as exc:
-            if "meta tensors" not in str(exc).lower():
-                raise
-            print(
-                "[RawInternVL] Meta-tensor init detected; patching "
-                "InternVisionEncoder to use pure-Python linspace",
-                flush=True,
-            )
-            # Root cause: InternVisionEncoder.__init__ does
-            #   [x.item() for x in torch.linspace(0, rate, n)]
-            # but from_pretrained wraps model construction in a meta-device
-            # TorchFunctionMode (via accelerate / init_empty_weights), so
-            # torch.linspace produces meta tensors and .item() crashes.
-            # This persists even with low_cpu_mem_usage=False in some
-            # transformers + accelerate + PyTorch version combinations.
-            #
-            # Fix: after the first failed load the InternVL modules are
-            # cached in sys.modules.  We patch InternVisionEncoder.__init__
-            # to temporarily swap torch.linspace with a PURE PYTHON version
-            # that never touches PyTorch, making it completely immune to any
-            # device context / TorchFunctionMode.
-            _patched_cls = None
-            _orig_enc_init = None
-            for _mn, _mod in list(sys.modules.items()):
-                if hasattr(_mod, "InternVisionEncoder"):
-                    _patched_cls = _mod.InternVisionEncoder
-                    _orig_enc_init = _patched_cls.__init__
-
-                    def _patched_enc_init(self, config, _real=_orig_enc_init):
-                        class _Scalar:
-                            """Float wrapper with .item() for linspace compat."""
-                            __slots__ = ("_v",)
-                            def __init__(s, v): s._v = v  # noqa: N805
-                            def item(s): return s._v  # noqa: N805
-                            def __float__(s): return s._v  # noqa: N805
-
-                        def _py_linspace(start, end, steps, **_kw):
-                            start = float(start)
-                            end = float(end)
-                            steps = int(steps)
-                            if steps <= 0:
-                                return []
-                            if steps == 1:
-                                return [_Scalar(start)]
-                            return [_Scalar(start + (end - start) * i / (steps - 1))
-                                    for i in range(steps)]
-
-                        _saved = torch.linspace
-                        torch.linspace = _py_linspace
-                        try:
-                            _real(self, config)
-                        finally:
-                            torch.linspace = _saved
-
-                    _patched_cls.__init__ = _patched_enc_init
-                    break
-
-            try:
-                self.model = AutoModel.from_pretrained(
-                    llm_model,
-                    trust_remote_code=True,
-                    torch_dtype=torch.float32,
-                    low_cpu_mem_usage=False,
-                    device_map=None,
-                )
-            finally:
-                if _patched_cls is not None and _orig_enc_init is not None:
-                    _patched_cls.__init__ = _orig_enc_init
+        finally:
+            torch.linspace = _orig_ls
         self.model = self.model.to(device)
         self.model.eval()
         try:
