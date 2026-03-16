@@ -258,16 +258,34 @@ class RawInternVLEvalEngine:
                 raise
             print(
                 "[RawInternVL] Meta-tensor init detected, retrying with "
-                "device_map={'': 'cpu'}",
+                "explicit CPU default-device materialization",
                 flush=True,
             )
-            self.model = AutoModel.from_pretrained(
-                llm_model,
-                trust_remote_code=True,
-                torch_dtype=model_dtype,
-                low_cpu_mem_usage=True,
-                device_map={"": "cpu"},
-            )
+            reset_default_device = None
+            try:
+                if hasattr(torch, "get_default_device"):
+                    try:
+                        prev_default = torch.get_default_device()
+                    except Exception:
+                        prev_default = None
+                else:
+                    prev_default = None
+                if hasattr(torch, "set_default_device"):
+                    reset_default_device = prev_default
+                    torch.set_default_device("cpu")
+                self.model = AutoModel.from_pretrained(
+                    llm_model,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float32,
+                    low_cpu_mem_usage=False,
+                    device_map=None,
+                )
+            finally:
+                if reset_default_device is not None and hasattr(torch, "set_default_device"):
+                    try:
+                        torch.set_default_device(reset_default_device)
+                    except Exception:
+                        pass
         self.model = self.model.to(device)
         self.model.eval()
         try:
