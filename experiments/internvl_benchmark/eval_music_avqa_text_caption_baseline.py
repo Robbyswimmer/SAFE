@@ -465,7 +465,7 @@ class RawInternVLEvalEngine:
                 for pv_idx, batch_idx in enumerate(image_indices):
                     full_pv[batch_idx] = pixel_values[pv_idx]
                 pixel_values = full_pv
-            result["pixel_values"] = pixel_values.to(self.device)
+            result["pixel_values"] = pixel_values.to(device=self.device, dtype=self.model.dtype)
         if not self._prep_logged:
             print(
                 f"[RawInternVLPrep] image_token_id={image_token_id} image_seq_length={image_seq_length} "
