@@ -34,6 +34,7 @@ DATA_ROOT=${DATA_ROOT:-$SAFE_ROOT/data}
 OUTPUT_DIR=${OUTPUT_DIR:-$SAFE_ROOT/outputs/scanqa_1b}
 MODALITY=${MODALITY:-both}
 BATCH_SIZE=${BATCH_SIZE:-4}
+GRAD_ACCUM=${GRAD_ACCUM:-2}
 EPOCHS=${EPOCHS:-20}
 LR=${LR:-5e-5}
 WANDB=${WANDB:-1}
@@ -60,6 +61,10 @@ echo "MODEL:       $LLM_MODEL_PATH"
 echo "CONFIG:      $MODEL_CONFIG"
 echo "DATA_ROOT:   $DATA_ROOT"
 echo "OUTPUT_DIR:  $OUTPUT_DIR"
+echo "BATCH_SIZE:  $BATCH_SIZE"
+echo "GRAD_ACCUM:  $GRAD_ACCUM"
+echo "EFF_BATCH:   $((BATCH_SIZE * GRAD_ACCUM))"
+echo "LR:          $LR"
 echo "============================================"
 
 python -c "import torch,sys; print(f'[cuda] avail={torch.cuda.is_available()} count={torch.cuda.device_count()}'); sys.exit(0 if torch.cuda.is_available() else 2)"
@@ -75,6 +80,7 @@ python "$SAFE_ROOT/train_scanqa_composition.py" \
     --modality "$MODALITY" \
     --output-dir "$OUTPUT_DIR" \
     --batch-size "$BATCH_SIZE" \
+    --gradient-accumulation-steps "$GRAD_ACCUM" \
     --num-epochs "$EPOCHS" \
     --safe-lr "$LR" \
     --freeze-llm \

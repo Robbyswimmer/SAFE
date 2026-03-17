@@ -238,6 +238,7 @@ SCANQA_INTERNVL_CONFIG: Dict[str, Any] = {
     "freeze_base_vl": True,
     "freeze_pointcloud_encoder": True,
     "label_smoothing": 0.1,
+    "safe_lr": 1e-5,
     "dataset": "scanqa",
     "num_points": 8192,
     "expected_vram_gb": 42,
@@ -269,17 +270,17 @@ SCANQA_INTERNVL_4B_CONFIG: Dict[str, Any] = {
     "pointcloud_embed_dim": 768,    # PointBERT output
 
     "projector_type": "standard",
-    "num_tokens": 8,
+    "num_tokens": 16,               # Stronger multimodal signal for larger frozen backbone
     "projector_config": {
         "dropout": 0.1,
-        "bottleneck_dim": 512,       # Smaller projector for 4B
+        "bottleneck_dim": 768,       # Slightly wider projector for the larger backbone
         "use_swiglu": True,
         "use_positional_embedding": True,
     },
 
     "fusion_type": "multilayer",
-    "fusion_layer_indices": [1, 7, 13, 19, 25, 31],  # Spread across 36 layers
-    "lora_rank": 8,
+    "fusion_layer_indices": [5, 11, 17, 23, 29, 35],  # Shift later to better match semantics
+    "lora_rank": 16,
     "fusion_config": {
         "fusion_mode": "residual",
         "injection_point": "pre_ffn",
@@ -290,6 +291,7 @@ SCANQA_INTERNVL_4B_CONFIG: Dict[str, Any] = {
     "freeze_base_vl": True,
     "freeze_pointcloud_encoder": True,
     "label_smoothing": 0.1,
+    "safe_lr": 2e-5,
     "dataset": "scanqa",
     "num_points": 8192,
     "expected_vram_gb": 20,
@@ -342,6 +344,7 @@ SCANQA_INTERNVL_1B_CONFIG: Dict[str, Any] = {
     "freeze_base_vl": True,
     "freeze_pointcloud_encoder": True,
     "label_smoothing": 0.1,
+    "safe_lr": 5e-5,
     "dataset": "scanqa",
     "num_points": 8192,
     "expected_vram_gb": 8,

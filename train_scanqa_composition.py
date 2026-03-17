@@ -21,8 +21,10 @@ import argparse
 import json
 import math
 import os
+import random
 import sys
 from collections import defaultdict
+from functools import lru_cache
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import time
@@ -94,6 +96,123 @@ def token_f1(pred: str, ref: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+@lru_cache(maxsize=100000)
+def _lcs_length(pred_tokens: tuple[str, ...], ref_tokens: tuple[str, ...]) -> int:
+    """Longest common subsequence length for token tuples."""
+    m = len(pred_tokens)
+    n = len(ref_tokens)
+    if m == 0 or n == 0:
+        return 0
+
+    prev = [0] * (n + 1)
+    curr = [0] * (n + 1)
+    for i in range(1, m + 1):
+        curr[0] = 0
+        for j in range(1, n + 1):
+            if pred_tokens[i - 1] == ref_tokens[j - 1]:
+                curr[j] = prev[j - 1] + 1
+            else:
+                curr[j] = max(prev[j], curr[j - 1])
+        prev, curr = curr, prev
+    return prev[n]
+
+
+def rouge_l_score(pred: str, ref: str) -> float:
+    """Compute ROUGE-L F1 on whitespace-tokenized, normalized strings."""
+    p = tuple(normalize_answer(pred).split())
+    r = tuple(normalize_answer(ref).split())
+    if not p and not r:
+        return 1.0
+    if not p or not r:
+        return 0.0
+
+    lcs = _lcs_length(p, r)
+    if lcs == 0:
+        return 0.0
+
+    precision = lcs / len(p)
+    recall = lcs / len(r)
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+
+def compute_cider(predictions: List[str], references: List[List[str]]) -> float:
+    """Compute CIDEr (0-100 scale) when pycocoevalcap is available."""
+    try:
+        from pycocoevalcap.cider.cider import Cider
+    except ImportError:
+        return 0.0
+
+    gts = {str(i): [str(r) for r in refs if str(r).strip()] for i, refs in enumerate(references)}
+    res = {str(i): [str(pred)] for i, pred in enumerate(predictions)}
+
+    try:
+        cider_scorer = Cider()
+        score, _ = cider_scorer.compute_score(gts, res)
+        return float(score) * 100.0
+    except Exception:
+        return 0.0
+
+
+def _dedupe_texts(values: List[str]) -> List[str]:
+    """Deduplicate strings while preserving order."""
+    seen = set()
+    result = []
+    for value in values:
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def select_training_answers(
+    batch: Dict[str, Any],
+    strategy: str = "random",
+) -> List[str]:
+    """Select one supervision target per sample from the available references."""
+    selected: List[str] = []
+    primary_answers = batch.get("answers", [])
+    all_answers = batch.get("all_answers", [])
+
+    for primary, refs in zip(primary_answers, all_answers):
+        candidates = _dedupe_texts(list(refs) if isinstance(refs, list) else [refs])
+        if not candidates:
+            candidates = _dedupe_texts([primary])
+        if not candidates:
+            candidates = [""]
+
+        if strategy == "first":
+            chosen = candidates[0]
+        elif strategy == "shortest":
+            chosen = min(candidates, key=lambda text: (len(text.split()), len(text)))
+        else:
+            chosen = random.choice(candidates)
+        selected.append(chosen)
+
+    return selected
+
+
+def _pad_tokenized_sequences(
+    sequences: List[List[int]],
+    pad_value: int,
+    *,
+    dtype: torch.dtype = torch.long,
+) -> torch.Tensor:
+    """Pad a jagged list of token ID sequences into a dense tensor."""
+    if not sequences:
+        return torch.empty(0, 0, dtype=dtype)
+
+    max_len = max(len(seq) for seq in sequences)
+    output = torch.full((len(sequences), max_len), pad_value, dtype=dtype)
+    for row_idx, seq in enumerate(sequences):
+        if seq:
+            output[row_idx, :len(seq)] = torch.tensor(seq, dtype=dtype)
+    return output
+
+
 def compute_qa_metrics(predictions: List[str], references: List[List[str]]) -> Dict[str, float]:
     """
     Compute QA evaluation metrics.
@@ -105,11 +224,8 @@ def compute_qa_metrics(predictions: List[str], references: List[List[str]]) -> D
     Returns:
         Dictionary with BLEU-1, BLEU-4, METEOR, exact_match, norm_em, token_f1
     """
-    _zero = {"bleu1": 0.0, "bleu4": 0.0, "meteor": 0.0,
+    _zero = {"bleu1": 0.0, "bleu4": 0.0, "meteor": 0.0, "rouge_l": 0.0, "cider": 0.0,
              "exact_match": 0.0, "norm_em": 0.0, "token_f1": 0.0}
-
-    if not NLTK_AVAILABLE:
-        return _zero
 
     if len(predictions) == 0:
         return _zero
@@ -117,6 +233,7 @@ def compute_qa_metrics(predictions: List[str], references: List[List[str]]) -> D
     bleu1_scores = []
     bleu4_scores = []
     meteor_scores = []
+    rouge_l_scores = []
     exact_matches = []
     norm_em_scores = []
     token_f1_scores = []
@@ -139,8 +256,12 @@ def compute_qa_metrics(predictions: List[str], references: List[List[str]]) -> D
         best_f1 = max((token_f1(pred, ref) for ref in refs if ref), default=0.0)
         token_f1_scores.append(best_f1)
 
+        # ROUGE-L (best across references)
+        best_rouge_l = max((rouge_l_score(pred, ref) for ref in refs if ref), default=0.0)
+        rouge_l_scores.append(best_rouge_l)
+
         # BLEU scores
-        if pred_tokens and ref_tokens_list:
+        if pred_tokens and ref_tokens_list and NLTK_AVAILABLE:
             bleu1 = sentence_bleu(ref_tokens_list, pred_tokens,
                                   weights=(1.0, 0, 0, 0),
                                   smoothing_function=smoother.method1)
@@ -159,10 +280,13 @@ def compute_qa_metrics(predictions: List[str], references: List[List[str]]) -> D
             meteor_scores.append(0.0)
 
     n = len(bleu1_scores)
+    cider = compute_cider(predictions, references)
     return {
         "bleu1": sum(bleu1_scores) / n * 100 if n > 0 else 0.0,
         "bleu4": sum(bleu4_scores) / n * 100 if n > 0 else 0.0,
         "meteor": sum(meteor_scores) / n * 100 if n > 0 else 0.0,
+        "rouge_l": sum(rouge_l_scores) / len(rouge_l_scores) * 100 if rouge_l_scores else 0.0,
+        "cider": cider,
         "exact_match": sum(exact_matches) / len(exact_matches) * 100 if exact_matches else 0.0,
         "norm_em": sum(norm_em_scores) / len(norm_em_scores) * 100 if norm_em_scores else 0.0,
         "token_f1": sum(token_f1_scores) / len(token_f1_scores) * 100 if token_f1_scores else 0.0,
@@ -406,6 +530,87 @@ class ScanQACompositionModel(nn.Module):
         """Get trainable parameters (only SAFE adapter components, LLM is frozen)."""
         return [p for p in self.parameters() if p.requires_grad]
 
+    def supported_eval_modalities(self) -> List[str]:
+        """Return the eval modality ablations this model can run."""
+        if hasattr(self, "safe_model"):
+            return ["text", "image", "pointcloud", "both"]
+        return ["text", "image"]
+
+    @torch.no_grad()
+    def generate_for_eval(
+        self,
+        eval_modality: str,
+        pointclouds: Optional[torch.Tensor] = None,
+        images: Optional[List] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        max_new_tokens: int = 32,
+        **generate_kwargs,
+    ) -> torch.Tensor:
+        """Generate under an explicit evaluation condition."""
+        eval_modality = str(eval_modality).lower()
+
+        if pixel_values is None and images is not None and eval_modality in {"image", "both"}:
+            pixel_values = self._process_images(images, input_ids.device)
+
+        if eval_modality == "text":
+            if hasattr(self, "safe_model"):
+                return self.safe_model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=max_new_tokens,
+                    **generate_kwargs,
+                )
+            return self.llava.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                **generate_kwargs,
+            )
+
+        if eval_modality == "image":
+            if hasattr(self, "safe_model"):
+                return self.safe_model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    max_new_tokens=max_new_tokens,
+                    **generate_kwargs,
+                )
+            return self.llava.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                max_new_tokens=max_new_tokens,
+                **generate_kwargs,
+            )
+
+        if eval_modality == "pointcloud":
+            if not hasattr(self, "safe_model"):
+                raise ValueError("pointcloud eval requested, but model has no SAFE pointcloud path")
+            return self.safe_model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pointcloud=pointclouds,
+                max_new_tokens=max_new_tokens,
+                **generate_kwargs,
+            )
+
+        if eval_modality == "both":
+            if not hasattr(self, "safe_model"):
+                raise ValueError("both-modality eval requested, but model has no SAFE pointcloud path")
+            return self.safe_model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pointcloud=pointclouds,
+                pixel_values=pixel_values,
+                max_new_tokens=max_new_tokens,
+                **generate_kwargs,
+            )
+
+        raise ValueError(f"Unsupported eval_modality: {eval_modality}")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="ScanQA Composition Training")
@@ -420,23 +625,34 @@ def parse_args():
     parser.add_argument("--model-config", type=str, default=None,
                         help="Config name from pointcloud_configs.py (e.g. scanqa_internvl)")
     parser.add_argument("--llm-model", type=str, default="llava-hf/llava-1.5-7b-hf")
-    parser.add_argument("--fusion-layer-indices", type=str, default="1,5,9,13,17,21")
-    parser.add_argument("--num-pointcloud-tokens", type=int, default=8)
+    parser.add_argument("--fusion-layer-indices", type=str, default=None)
+    parser.add_argument("--num-pointcloud-tokens", type=int, default=None)
     parser.add_argument("--encoder-checkpoint", type=str, default=None)
     parser.add_argument("--unfreeze-encoder-last-n", type=int, default=0)
     parser.add_argument("--freeze-llm", action="store_true", help="Freeze LLM (use linear probe)")
 
     # Training
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-epochs", type=int, default=20)
-    parser.add_argument("--safe-lr", type=float, default=1e-5)
+    parser.add_argument("--safe-lr", type=float, default=None)
+    parser.add_argument("--label-smoothing", type=float, default=None)
     parser.add_argument("--lr-scheduler", type=str, default="cosine")
     parser.add_argument("--warmup-steps", type=int, default=200)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=None)
+    parser.add_argument(
+        "--train-answer-mode",
+        type=str,
+        default="random",
+        choices=["random", "first", "shortest"],
+        help="How to select one supervision target from ScanQA's multiple references",
+    )
 
     # Generation
     parser.add_argument("--max-answer-tokens", type=int, default=32)
+    parser.add_argument("--eval-num-beams", type=int, default=1)
+    parser.add_argument("--eval-repetition-penalty", type=float, default=1.1)
+    parser.add_argument("--eval-no-repeat-ngram-size", type=int, default=3)
 
     # Gate warmup (matches AVQA setup)
     parser.add_argument("--gate-warmup-epochs", type=int, default=2,
@@ -445,6 +661,12 @@ def parse_args():
     # Eval
     parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--max-eval-samples", type=int, default=500)
+    parser.add_argument(
+        "--eval-modalities",
+        type=str,
+        default="auto",
+        help="Comma-separated eval ablations to run each epoch: auto,text,image,pointcloud,both",
+    )
 
     # Logging
     parser.add_argument("--log-every", type=int, default=50,
@@ -475,49 +697,82 @@ def prepare_qa_inputs(batch, tokenizer, device, max_length=256):
 
     # Format: "Question: {q}\nAnswer: {a}"
     prompts = [f"Question: {q}\nAnswer:" for q in questions]
-    full_texts = [f"Question: {q}\nAnswer: {a}" for q, a in zip(questions, answers)]
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        pad_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
 
-    # Tokenize full texts (for training)
-    full_encodings = tokenizer(
-        full_texts,
-        padding=True,
-        truncation=True,
-        max_length=max_length,
-        return_tensors="pt",
+    prompt_token_lists: List[List[int]] = []
+    full_token_lists: List[List[int]] = []
+    label_token_lists: List[List[int]] = []
+
+    for prompt, answer in zip(prompts, answers):
+        prompt_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]
+        answer_text = str(answer).strip()
+        answer_prefix = f" {answer_text}" if answer_text else ""
+        answer_ids = tokenizer(answer_prefix, add_special_tokens=False)["input_ids"]
+        if tokenizer.eos_token_id is not None:
+            answer_ids = answer_ids + [tokenizer.eos_token_id]
+
+        prompt_ids = list(prompt_ids)
+        answer_ids = list(answer_ids)
+
+        if len(prompt_ids) >= max_length:
+            prompt_ids = prompt_ids[:max_length]
+            answer_ids = []
+        else:
+            remaining = max_length - len(prompt_ids)
+            answer_ids = answer_ids[:remaining]
+
+        input_ids = prompt_ids + answer_ids
+        labels = ([-100] * len(prompt_ids)) + answer_ids
+
+        prompt_token_lists.append(prompt_ids[:max_length])
+        full_token_lists.append(input_ids)
+        label_token_lists.append(labels)
+
+    input_ids = _pad_tokenized_sequences(full_token_lists, pad_token_id)
+    attention_mask = _pad_tokenized_sequences(
+        [[1] * len(seq) for seq in full_token_lists],
+        0,
     )
-
-    # Create labels: -100 for prompt tokens, actual tokens for answer
-    # We need to find where each prompt ends in the tokenized full text
-    labels = full_encodings["input_ids"].clone()
-
-    for i, (prompt, full_text) in enumerate(zip(prompts, full_texts)):
-        # Tokenize prompt without padding to get actual length
-        prompt_ids = tokenizer(prompt, add_special_tokens=True, return_tensors="pt")["input_ids"][0]
-        prompt_len = len(prompt_ids)
-
-        # Mask prompt tokens in labels (set to -100 to ignore in loss)
-        labels[i, :prompt_len] = -100
-
-        # Also mask padding tokens
-        pad_mask = full_encodings["attention_mask"][i] == 0
-        labels[i, pad_mask] = -100
-
-    # Tokenize prompts for generation (separate)
-    prompt_encodings = tokenizer(
-        prompts,
-        padding=True,
-        truncation=True,
-        max_length=max_length,
-        return_tensors="pt",
+    labels = _pad_tokenized_sequences(label_token_lists, -100)
+    prompt_input_ids = _pad_tokenized_sequences(prompt_token_lists, pad_token_id)
+    prompt_attention_mask = _pad_tokenized_sequences(
+        [[1] * len(seq) for seq in prompt_token_lists],
+        0,
     )
 
     return {
-        "input_ids": full_encodings["input_ids"].to(device),
-        "attention_mask": full_encodings["attention_mask"].to(device),
+        "input_ids": input_ids.to(device),
+        "attention_mask": attention_mask.to(device),
         "labels": labels.to(device),
-        "prompt_input_ids": prompt_encodings["input_ids"].to(device),
-        "prompt_attention_mask": prompt_encodings["attention_mask"].to(device),
+        "prompt_input_ids": prompt_input_ids.to(device),
+        "prompt_attention_mask": prompt_attention_mask.to(device),
     }
+
+
+def compute_answer_ce_loss(
+    logits: Optional[torch.Tensor],
+    labels: torch.Tensor,
+    *,
+    label_smoothing: float = 0.0,
+) -> Optional[torch.Tensor]:
+    """Compute causal LM loss over answer tokens only."""
+    if logits is None:
+        return None
+
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    valid = (shift_labels != -100).any()
+    if not bool(valid.item() if torch.is_tensor(valid) else valid):
+        return None
+
+    return F.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+        ignore_index=-100,
+        label_smoothing=float(max(label_smoothing, 0.0)),
+    )
 
 
 def _compute_gate_value(epoch, batch_idx, total_batches, gate_warmup_epochs=2):
@@ -545,6 +800,8 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
     use_amp = False
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     gate_warmup_epochs = getattr(args, "gate_warmup_epochs", 2)
+    label_smoothing = float(getattr(args, "label_smoothing", 0.0) or 0.0)
+    train_answer_mode = getattr(args, "train_answer_mode", "random")
 
     total_steps = len(dataloader)
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
@@ -563,7 +820,10 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
         gate = _compute_gate_value(epoch, batch_idx, total_steps, gate_warmup_epochs)
 
         # Prepare inputs
-        qa_inputs = prepare_qa_inputs(batch, tokenizer, device)
+        train_answers = select_training_answers(batch, strategy=train_answer_mode)
+        train_batch = dict(batch)
+        train_batch["answers"] = train_answers
+        qa_inputs = prepare_qa_inputs(train_batch, tokenizer, device)
 
         kwargs = {
             "input_ids": qa_inputs["input_ids"],
@@ -581,21 +841,18 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
         with torch.amp.autocast("cuda", enabled=use_amp):
             outputs = model(**kwargs)
             loss = outputs["loss"]
+            logits = outputs.get("logits")
+
+        manual_loss = compute_answer_ce_loss(
+            logits,
+            kwargs["labels"],
+            label_smoothing=label_smoothing,
+        )
+        if manual_loss is not None:
+            loss = manual_loss
 
         if loss is None:
             continue
-
-        # Recover loss if it doesn't require grad (matches AVQA fallback)
-        if not loss.requires_grad:
-            logits = outputs.get("logits")
-            if logits is not None:
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = kwargs["labels"][..., 1:].contiguous()
-                loss = F.cross_entropy(
-                    shift_logits.view(-1, shift_logits.size(-1)),
-                    shift_labels.view(-1),
-                    ignore_index=-100,
-                )
 
         loss = loss / args.gradient_accumulation_steps
         scaler.scale(loss).backward()
@@ -636,9 +893,10 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, device, args, tokenizer, max_samples=None):
+def evaluate(model, dataloader, device, args, tokenizer, max_samples=None, eval_modality: Optional[str] = None):
     """Evaluate model with generation."""
     model.eval()
+    modality_key = str(eval_modality or args.modality).lower()
 
     all_predictions = []
     all_references = []
@@ -668,16 +926,20 @@ def evaluate(model, dataloader, device, args, tokenizer, max_samples=None):
             "attention_mask": prompt_encodings["attention_mask"].to(device),
             "max_new_tokens": args.max_answer_tokens,
             "do_sample": False,
+            "num_beams": args.eval_num_beams,
+            "repetition_penalty": args.eval_repetition_penalty,
+            "no_repeat_ngram_size": args.eval_no_repeat_ngram_size,
             "pad_token_id": tokenizer.pad_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
         }
 
-        if args.modality in ["pointcloud", "both"] and batch.get("pointclouds") is not None:
+        if modality_key in ["pointcloud", "both"] and batch.get("pointclouds") is not None:
             kwargs["pointclouds"] = batch["pointclouds"].to(device)
-        if args.modality in ["image", "both"] and batch.get("images") is not None:
+        if modality_key in ["image", "both"] and batch.get("images") is not None:
             kwargs["images"] = batch["images"]
 
         # Generate
-        output_ids = model.generate(**kwargs)
+        output_ids = model.generate_for_eval(eval_modality=modality_key, **kwargs)
 
         # Decode predictions
         for i, ids in enumerate(output_ids):
@@ -697,6 +959,21 @@ def evaluate(model, dataloader, device, args, tokenizer, max_samples=None):
     return metrics, all_predictions, all_references
 
 
+def resolve_eval_modalities(args, model: ScanQACompositionModel) -> List[str]:
+    """Resolve requested eval ablations against model capabilities."""
+    supported = model.supported_eval_modalities()
+    requested = str(getattr(args, "eval_modalities", "auto") or "auto").strip().lower()
+    if requested == "auto":
+        return supported
+
+    selected = []
+    for item in requested.split(","):
+        key = item.strip().lower()
+        if key and key in supported and key not in selected:
+            selected.append(key)
+    return selected or supported
+
+
 def main():
     args = parse_args()
 
@@ -713,30 +990,58 @@ def main():
     else:
         args._smoke_max_steps = None
 
+    config = get_pointcloud_config(args.model_config) if args.model_config else None
+
+    if args.batch_size is None:
+        args.batch_size = int(config.get("recommended_batch_size", 4)) if config else 4
+    if args.safe_lr is None:
+        args.safe_lr = float(config.get("safe_lr", 1e-5)) if config else 1e-5
+    if args.label_smoothing is None:
+        args.label_smoothing = float(config.get("label_smoothing", 0.0)) if config else 0.0
+    if args.gradient_accumulation_steps is None:
+        args.gradient_accumulation_steps = (
+            int(config.get("gradient_accumulation_steps", 4)) if config else 4
+        )
+    if args.num_pointcloud_tokens is None:
+        args.num_pointcloud_tokens = int(config.get("num_tokens", 8)) if config else 8
+
+    if args.fusion_layer_indices is None:
+        default_layers = config.get("fusion_layer_indices") if config else None
+        if not default_layers:
+            default_layers = [1, 5, 9, 13, 17, 21]
+        fusion_layers = [int(x) for x in default_layers]
+        args.fusion_layer_indices = ",".join(str(x) for x in fusion_layers)
+    else:
+        fusion_layers = [int(x.strip()) for x in args.fusion_layer_indices.split(",") if x.strip()]
+
     print("=" * 60)
     print("ScanQA Composition Training")
     print("=" * 60)
+    if config:
+        print(f"Model config:     {config['name']}")
     print(f"Modality:        {args.modality}")
     print(f"Data path:       {args.data_path}")
     print(f"Output dir:      {args.output_dir}")
     print(f"Batch size:      {args.batch_size}")
     print(f"Epochs:          {args.num_epochs}")
     print(f"LR:              {args.safe_lr}")
+    print(f"Label smooth:    {args.label_smoothing}")
     print(f"Grad accum:      {args.gradient_accumulation_steps}")
+    print(f"Effective batch: {args.batch_size * args.gradient_accumulation_steps}")
+    print(f"PC tokens:       {args.num_pointcloud_tokens}")
+    print(f"Fusion layers:   {fusion_layers}")
+    print(f"Train answers:   {args.train_answer_mode}")
     print(f"Log every:       {args.log_every}")
     print(f"Eval every:      {args.eval_every} epoch(s)")
     print(f"Max eval samp:   {args.max_eval_samples}")
     print(f"Gate warmup:     {args.gate_warmup_epochs} epoch(s)")
     print(f"Optimizer:       AdamW (grouped, betas=0.9/0.95)")
-    print(f"AMP:             enabled")
+    print(f"AMP:             disabled")
     print(f"Smoke test:      {args.smoke_test}")
     print("=" * 60)
 
     # Create output dir
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-
-    # Parse fusion layers
-    fusion_layers = [int(x) for x in args.fusion_layer_indices.split(",")]
 
     # Create datasets
     print("\nLoading datasets...")
@@ -746,14 +1051,6 @@ def main():
         modality=args.modality,
         num_points=args.num_points,
     )
-    val_dataset = ScanQADataset(
-        args.data_path,
-        split="val",
-        modality=args.modality,
-        num_points=args.num_points,
-        augment=False,
-    )
-
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -762,20 +1059,9 @@ def main():
         collate_fn=collate_scanqa_batch,
         pin_memory=True,
     )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        collate_fn=collate_scanqa_batch,
-        pin_memory=True,
-    )
 
     print(f"Train samples: {len(train_dataset)}")
-    print(f"Val samples: {len(val_dataset)}")
 
-    # Load config if specified
-    config = get_pointcloud_config(args.model_config) if args.model_config else None
     if config:
         print(f"Using config: {config['name']} — {config.get('description', '')}")
 
@@ -795,6 +1081,27 @@ def main():
 
     if args.fp16:
         model = model.half()
+
+    eval_modalities = resolve_eval_modalities(args, model)
+    eval_dataset_modality = "both" if "both" in eval_modalities or "pointcloud" in eval_modalities else "image"
+    val_dataset = ScanQADataset(
+        args.data_path,
+        split="val",
+        modality=eval_dataset_modality,
+        num_points=args.num_points,
+        augment=False,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate_scanqa_batch,
+        pin_memory=True,
+    )
+    print(f"Val samples: {len(val_dataset)}")
+    print(f"Eval modalities: {eval_modalities}")
+    print(f"Eval subset:     {eval_dataset_modality}")
 
     # Get tokenizer
     if args.modality in ["pointcloud", "both"]:
@@ -877,51 +1184,87 @@ def main():
 
         # Evaluate
         if (epoch + 1) % args.eval_every == 0:
-            val_metrics, predictions, references = evaluate(
-                model, val_loader, args.device, args,
-                tokenizer, args.max_eval_samples
-            )
+            eval_results: Dict[str, Dict[str, float]] = {}
+            sample_predictions: List[str] = []
+            sample_references: List[List[str]] = []
+            sample_modality = "both" if "both" in eval_modalities else eval_modalities[0]
 
-            print(f"Val Metrics:")
-            print(f"  BLEU-1: {val_metrics['bleu1']:.2f}")
-            print(f"  BLEU-4: {val_metrics['bleu4']:.2f}")
-            print(f"  METEOR: {val_metrics['meteor']:.2f}")
-            print(f"  Exact Match: {val_metrics['exact_match']:.2f}")
-            print(f"  Norm EM:     {val_metrics['norm_em']:.2f}")
-            print(f"  Token F1:    {val_metrics['token_f1']:.2f}")
+            for eval_key in eval_modalities:
+                val_metrics, predictions, references = evaluate(
+                    model, val_loader, args.device, args,
+                    tokenizer, args.max_eval_samples, eval_modality=eval_key
+                )
+                eval_results[eval_key] = val_metrics
+                if eval_key == sample_modality:
+                    sample_predictions = predictions
+                    sample_references = references
 
-            # Show some examples
-            print("\nSample predictions:")
-            for i in range(min(3, len(predictions))):
-                print(f"  Pred: {predictions[i]}")
-                print(f"  Refs: {references[i][:2]}")
+                print(f"Val Metrics [{eval_key}]:")
+                print(f"  BLEU-1: {val_metrics['bleu1']:.2f}")
+                print(f"  BLEU-4: {val_metrics['bleu4']:.2f}")
+                print(f"  METEOR: {val_metrics['meteor']:.2f}")
+                print(f"  ROUGE-L: {val_metrics['rouge_l']:.2f}")
+                print(f"  CIDEr:   {val_metrics['cider']:.2f}")
+                print(f"  Exact Match: {val_metrics['exact_match']:.2f}")
+                print(f"  Norm EM:     {val_metrics['norm_em']:.2f}")
+                print(f"  Token F1:    {val_metrics['token_f1']:.2f}")
+
+            # Show some examples from the composition condition when available.
+            print(f"\nSample predictions [{sample_modality}]:")
+            for i in range(min(3, len(sample_predictions))):
+                print(f"  Pred: {sample_predictions[i]}")
+                print(f"  Refs: {sample_references[i][:2]}")
                 print()
 
-            # Save best
-            if val_metrics["bleu4"] > best_bleu4:
-                best_bleu4 = val_metrics["bleu4"]
+            if "both" in eval_results:
+                score_modality = "both"
+            elif args.modality in eval_results:
+                score_modality = args.modality
+            else:
+                score_modality = next(iter(eval_results))
+            score_metrics = eval_results[score_modality]
+
+            # Save best using the composition condition when available.
+            if score_metrics["bleu4"] > best_bleu4:
+                best_bleu4 = score_metrics["bleu4"]
                 torch.save({
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "best_bleu4": best_bleu4,
-                    "val_metrics": val_metrics,
+                    "score_modality": score_modality,
+                    "eval_results": eval_results,
                     "args": vars(args),
                 }, Path(args.output_dir) / "best_model.pt")
-                print(f"New best! Saved checkpoint (BLEU-4: {best_bleu4:.2f})")
+                print(f"New best! Saved checkpoint ({score_modality} BLEU-4: {best_bleu4:.2f})")
 
             if args.wandb and wandb:
-                wandb.log({
+                log_payload = {
                     "epoch": epoch + 1,
                     "train_loss": train_metrics["loss"],
-                    "val_bleu1": val_metrics["bleu1"],
-                    "val_bleu4": val_metrics["bleu4"],
-                    "val_meteor": val_metrics["meteor"],
-                    "val_exact_match": val_metrics["exact_match"],
-                    "val_norm_em": val_metrics["norm_em"],
-                    "val_token_f1": val_metrics["token_f1"],
                     "best_bleu4": best_bleu4,
                     "lr": scheduler.get_last_lr()[0],
-                })
+                }
+                for eval_key, val_metrics in eval_results.items():
+                    prefix = f"val/{eval_key}"
+                    log_payload[f"{prefix}/bleu1"] = val_metrics["bleu1"]
+                    log_payload[f"{prefix}/bleu4"] = val_metrics["bleu4"]
+                    log_payload[f"{prefix}/meteor"] = val_metrics["meteor"]
+                    log_payload[f"{prefix}/rouge_l"] = val_metrics["rouge_l"]
+                    log_payload[f"{prefix}/cider"] = val_metrics["cider"]
+                    log_payload[f"{prefix}/exact_match"] = val_metrics["exact_match"]
+                    log_payload[f"{prefix}/norm_em"] = val_metrics["norm_em"]
+                    log_payload[f"{prefix}/token_f1"] = val_metrics["token_f1"]
+                if "both" in eval_results:
+                    strongest_single_bleu4 = max(
+                        eval_results.get("image", {}).get("bleu4", float("-inf")),
+                        eval_results.get("pointcloud", {}).get("bleu4", float("-inf")),
+                        eval_results.get("text", {}).get("bleu4", float("-inf")),
+                    )
+                    if strongest_single_bleu4 != float("-inf"):
+                        log_payload["val/composition_gain_bleu4"] = (
+                            eval_results["both"]["bleu4"] - strongest_single_bleu4
+                        )
+                wandb.log(log_payload)
 
     print(f"\nTraining complete! Best BLEU-4: {best_bleu4:.2f}")
 
