@@ -301,7 +301,14 @@ class ThreeDQADownloader:
 
         self.scanqa_dir.mkdir(parents=True, exist_ok=True)
 
-        all_ok = True
+        # First, look for annotations already present in subdirectories
+        # (e.g. from a previous repo clone into data/scanqa/ScanQA_v1.0/ or data/scanqa/repo/)
+        self._find_local_scanqa_annotations()
+
+        required_splits = ["train", "val"]  # test is optional (often not publicly available)
+        optional_splits = ["test"]
+        have_required = True
+
         for split in SCANQA_SPLITS:
             filename = f"ScanQA_v1.0_{split}.json"
             dest = self.scanqa_dir / filename
@@ -333,15 +340,37 @@ class ThreeDQADownloader:
                     self.logger.warning(f"    Failed: {e}")
 
             if not downloaded:
-                self.logger.error(f"  Could not download {filename} from any URL")
-                all_ok = False
+                if split in optional_splits:
+                    self.logger.info(
+                        f"  {filename} not available (test split is often not public), skipping."
+                    )
+                else:
+                    self.logger.error(f"  Could not download {filename} from any URL")
+                    have_required = False
 
-        if all_ok:
-            self._log_scanqa_stats()
+        # Log stats for whatever we have
+        self._log_scanqa_stats()
+
+        if have_required:
             self.progress["completed_steps"].append("scanqa")
             self._save_progress()
 
-        return all_ok
+        return have_required
+
+    def _find_local_scanqa_annotations(self):
+        """Search for ScanQA JSONs in subdirectories and copy them up if needed."""
+        for split in SCANQA_SPLITS:
+            filename = f"ScanQA_v1.0_{split}.json"
+            dest = self.scanqa_dir / filename
+            if dest.exists():
+                continue
+
+            # Search common subdirectory patterns
+            candidates = list(self.scanqa_dir.rglob(filename))
+            if candidates:
+                src = candidates[0]
+                shutil.copy2(str(src), str(dest))
+                self.logger.info(f"  Found local {filename} at {src.relative_to(self.scanqa_dir)}")
 
     def _log_scanqa_stats(self):
         """Log ScanQA statistics."""
