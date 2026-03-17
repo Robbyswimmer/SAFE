@@ -777,11 +777,8 @@ class SAFEPointCloudModel(nn.Module):
                     pixel_values=gen_pixel_values, max_new_tokens=max_new_tokens,
                     num_beams=num_beams, **generate_kwargs,
                 )
-                if self.base_vl.model_type == "internvl" and pixel_values is not None:
-                    batch = pixel_values.size(0)
-                    gen_kwargs["image_flags"] = torch.ones(
-                        (batch, 1), dtype=torch.long, device=pixel_values.device
-                    )
+                # Note: do NOT pass image_flags — InternVL's generate() builds
+                # it internally but leaks remaining kwargs to language_model.generate().
                 outputs = self.base_vl.llm.generate(**gen_kwargs)
             else:
                 # Custom InternVL generate() expects input_ids rather than inputs_embeds.
@@ -806,11 +803,8 @@ class SAFEPointCloudModel(nn.Module):
                     pixel_values=gen_pixel_values, max_new_tokens=max_new_tokens,
                     num_beams=num_beams, **generate_kwargs,
                 )
-                if self.base_vl.model_type == "internvl" and pixel_values is not None:
-                    batch = pixel_values.size(0)
-                    gen_kwargs["image_flags"] = torch.ones(
-                        (batch, 1), dtype=torch.long, device=pixel_values.device
-                    )
+                # Note: do NOT pass image_flags — InternVL's generate() builds
+                # it internally but leaks remaining kwargs to language_model.generate().
                 outputs = self.base_vl.llm.generate(**gen_kwargs)
             else:
                 # Text only
