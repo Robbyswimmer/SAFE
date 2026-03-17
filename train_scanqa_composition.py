@@ -213,7 +213,15 @@ class ScanQACompositionModel(nn.Module):
             else:
                 self.processor = None
 
-            self.llm_hidden_size = self.safe_model.base_vl.llm.config.hidden_size
+            # InternVLChatConfig nests hidden_size under llm_config / text_config
+            _cfg = self.safe_model.base_vl.llm.config
+            self.llm_hidden_size = getattr(
+                _cfg, "hidden_size",
+                getattr(
+                    getattr(_cfg, "llm_config", getattr(_cfg, "text_config", None)),
+                    "hidden_size", 4096
+                ),
+            )
 
     def _process_images(self, images: List, device) -> torch.Tensor:
         """Process PIL images to pixel_values tensor."""
