@@ -18,6 +18,7 @@ import json
 import os
 import struct
 import numpy as np
+from io import BytesIO
 from pathlib import Path
 from tqdm import tqdm
 from PIL import Image
@@ -145,7 +146,6 @@ def extract_middle_frame(sens_path: Path, output_path: Path) -> bool:
         reader.close()
 
         # Decode JPEG
-        from io import BytesIO
         img = Image.open(BytesIO(color_data))
         img.save(str(output_path))
 
@@ -156,10 +156,97 @@ def extract_middle_frame(sens_path: Path, output_path: Path) -> bool:
         return False
 
 
+def sample_evenly_spaced_indices(num_frames: int, num_samples: int) -> list[int]:
+    """Choose approximately-evenly-spaced frame indices across a sequence."""
+    if num_frames <= 0 or num_samples <= 0:
+        return []
+    if num_frames <= num_samples:
+        return list(range(num_frames))
+    positions = np.linspace(0, num_frames - 1, num=num_samples)
+    indices = [int(round(x)) for x in positions]
+    deduped: list[int] = []
+    seen = set()
+    for idx in indices:
+        idx = max(0, min(num_frames - 1, idx))
+        if idx in seen:
+            continue
+        seen.add(idx)
+        deduped.append(idx)
+    return deduped
+
+
+def extract_frame_image(sens_path: Path, frame_idx: int) -> Image.Image | None:
+    """Extract a single RGB frame from a .sens file as a PIL image."""
+    try:
+        reader = SensReader(str(sens_path))
+        target_idx = max(0, min(int(frame_idx), int(reader.num_frames) - 1))
+        reader.file.seek(0)
+        reader._read_header()
+        color_data, _, _ = reader.read_frame(target_idx)
+        reader.close()
+        return Image.open(BytesIO(color_data)).convert("RGB")
+    except Exception as e:
+        print(f"Error extracting frame {frame_idx} from {sens_path}: {e}")
+        return None
+
+
+def load_scene_frames(scene_dir: Path, sens_file: Path, num_views: int) -> list[Image.Image]:
+    """Load multiple representative RGB frames for a scene."""
+    color_dir = scene_dir / "color"
+    if color_dir.exists():
+        frames = sorted(color_dir.glob("*.jpg"))
+        if frames:
+            selected = sample_evenly_spaced_indices(len(frames), num_views)
+            images: list[Image.Image] = []
+            for idx in selected:
+                try:
+                    images.append(Image.open(frames[idx]).convert("RGB"))
+                except Exception:
+                    continue
+            if images:
+                return images
+
+    if sens_file.exists():
+        try:
+            reader = SensReader(str(sens_file))
+            num_frames = int(reader.num_frames)
+            reader.close()
+        except Exception:
+            num_frames = 0
+        selected = sample_evenly_spaced_indices(num_frames, num_views)
+        images = [img for idx in selected if (img := extract_frame_image(sens_file, idx)) is not None]
+        if images:
+            return images
+
+    return []
+
+
+def save_image_montage(images: list[Image.Image], output_path: Path, tile_size: tuple[int, int] = (448, 448)) -> bool:
+    """Save a simple 2x2 montage from a list of PIL images."""
+    if not images:
+        return False
+
+    cols = 2
+    rows = max(1, int(np.ceil(len(images) / cols)))
+    width, height = tile_size
+    canvas = Image.new("RGB", (cols * width, rows * height))
+
+    for idx, image in enumerate(images):
+        resized = image.resize((width, height), getattr(Image, "Resampling", Image).BILINEAR)
+        x = (idx % cols) * width
+        y = (idx // cols) * height
+        canvas.paste(resized, (x, y))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(str(output_path))
+    return True
+
+
 def preprocess_scene(
     scene_dir: Path,
     output_dir: Path,
     num_points: int = 8192,
+    num_views: int = 4,
 ) -> dict:
     """Preprocess a single scene."""
     scene_id = scene_dir.name
@@ -167,24 +254,30 @@ def preprocess_scene(
     # Output paths
     pc_output = output_dir / "pointclouds" / f"{scene_id}.npy"
     img_output = output_dir / "images" / f"{scene_id}.jpg"
+    mv_img_output = output_dir / "multiview_images" / f"{scene_id}.jpg"
 
-    # Load mesh and extract point cloud
-    mesh_file = scene_dir / f"{scene_id}_vh_clean_2.ply"
-    if not mesh_file.exists():
-        mesh_file = scene_dir / f"{scene_id}_vh_clean.ply"
-    if not mesh_file.exists():
-        return None
+    if pc_output.exists():
+        existing_pc = np.load(str(pc_output), mmap_mode="r")
+        num_saved_points = int(existing_pc.shape[0])
+    else:
+        # Load mesh and extract point cloud
+        mesh_file = scene_dir / f"{scene_id}_vh_clean_2.ply"
+        if not mesh_file.exists():
+            mesh_file = scene_dir / f"{scene_id}_vh_clean.ply"
+        if not mesh_file.exists():
+            return None
 
-    points = load_ply_mesh(mesh_file)
+        points = load_ply_mesh(mesh_file)
 
-    # Subsample
-    if len(points) > num_points:
-        indices = np.random.choice(len(points), num_points, replace=False)
-        points = points[indices]
+        # Subsample
+        if len(points) > num_points:
+            indices = np.random.choice(len(points), num_points, replace=False)
+            points = points[indices]
 
-    # Save point cloud
-    pc_output.parent.mkdir(parents=True, exist_ok=True)
-    np.save(str(pc_output), points)
+        # Save point cloud
+        pc_output.parent.mkdir(parents=True, exist_ok=True)
+        np.save(str(pc_output), points)
+        num_saved_points = int(len(points))
 
     # Extract RGB frame from .sens file
     sens_file = scene_dir / f"{scene_id}.sens"
@@ -199,6 +292,10 @@ def preprocess_scene(
                     mid_frame = frames[len(frames) // 2]
                     Image.open(mid_frame).save(str(img_output))
 
+    scene_frames = load_scene_frames(scene_dir, sens_file, num_views=max(1, int(num_views)))
+    if scene_frames:
+        save_image_montage(scene_frames, mv_img_output)
+
     # Get scene type
     scene_type = load_scene_type(scene_dir)
 
@@ -207,7 +304,8 @@ def preprocess_scene(
         "scene_type": scene_type,
         "pointcloud_path": f"pointclouds/{scene_id}.npy",
         "image_path": f"images/{scene_id}.jpg",
-        "num_points": len(points),
+        "multiview_image_path": f"multiview_images/{scene_id}.jpg",
+        "num_points": num_saved_points,
     }
 
 
@@ -216,6 +314,7 @@ def main():
     parser.add_argument("--scannet-root", type=str, required=True, help="Path to ScanNet download")
     parser.add_argument("--output-dir", type=str, default="experiments/full_training/data", help="Output directory")
     parser.add_argument("--num-points", type=int, default=8192, help="Points per scene")
+    parser.add_argument("--num-views", type=int, default=4, help="Number of RGB views to tile into a montage")
     args = parser.parse_args()
 
     scannet_root = Path(args.scannet_root)
@@ -247,7 +346,7 @@ def main():
             if not scene_dir.exists():
                 continue
 
-            sample = preprocess_scene(scene_dir, output_dir, args.num_points)
+            sample = preprocess_scene(scene_dir, output_dir, args.num_points, args.num_views)
             if sample:
                 samples.append(sample)
 

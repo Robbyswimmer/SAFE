@@ -50,6 +50,7 @@ class SQA3DDataset(Dataset):
         transform=None,
         max_answer_length: int = 64,
         include_situation: bool = False,
+        prefer_multiview_images: bool = True,
     ):
         self.data_path = Path(data_path)
         self.split = split.lower()
@@ -60,6 +61,7 @@ class SQA3DDataset(Dataset):
         self.transform = transform
         self.max_answer_length = max_answer_length
         self.include_situation = include_situation
+        self.prefer_multiview_images = prefer_multiview_images
 
         # Load QA pairs
         self.samples = self._load_samples()
@@ -71,6 +73,9 @@ class SQA3DDataset(Dataset):
         print(f"[SQA3D] Unique scenes: {len(self.scene_data)}")
         if include_situation:
             print(f"[SQA3D] Situation context: enabled")
+        if modality in {"image", "both"}:
+            preferred = "multiview" if prefer_multiview_images else "single-view"
+            print(f"[SQA3D] Image source: {preferred} when available")
 
     def _load_samples(self) -> List[Dict]:
         """Load QA pairs from SQA3D JSON files (questions + annotations)."""
@@ -196,11 +201,22 @@ class SQA3DDataset(Dataset):
 
         for scene_id in scene_ids:
             pc_path = scannet_dir / "pointclouds" / f"{scene_id}.npy"
-            img_path = scannet_dir / "images" / f"{scene_id}.jpg"
+            single_img_path = scannet_dir / "images" / f"{scene_id}.jpg"
+            multiview_img_path = scannet_dir / "multiview_images" / f"{scene_id}.jpg"
+
+            preferred_img_path = None
+            if self.prefer_multiview_images and multiview_img_path.exists():
+                preferred_img_path = multiview_img_path
+            elif single_img_path.exists():
+                preferred_img_path = single_img_path
+            elif multiview_img_path.exists():
+                preferred_img_path = multiview_img_path
 
             scene_data[scene_id] = {
                 "pointcloud_path": pc_path if pc_path.exists() else None,
-                "image_path": img_path if img_path.exists() else None,
+                "image_path": preferred_img_path,
+                "single_image_path": single_img_path if single_img_path.exists() else None,
+                "multiview_image_path": multiview_img_path if multiview_img_path.exists() else None,
             }
 
         # Filter samples to only include scenes with required data
