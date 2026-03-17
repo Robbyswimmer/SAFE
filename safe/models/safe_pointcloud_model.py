@@ -439,6 +439,10 @@ class SAFEPointCloudModel(nn.Module):
                         use_cache=False, **kwargs,
                     )
                     if self.base_vl.model_type == "internvl" and pixel_values is not None:
+                        # Ensure pixel_values match model dtype (bf16 vs fp16)
+                        model_dtype = next(self.base_vl.llm.parameters()).dtype
+                        if pixel_values.dtype != model_dtype:
+                            fwd_kwargs["pixel_values"] = pixel_values.to(dtype=model_dtype)
                         batch = pixel_values.size(0)
                         fwd_kwargs["image_flags"] = torch.ones(
                             (batch, 1), dtype=torch.long, device=pixel_values.device

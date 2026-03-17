@@ -226,7 +226,13 @@ class ScanQACompositionModel(nn.Module):
     def _process_images(self, images: List, device) -> torch.Tensor:
         """Process PIL images to pixel_values tensor."""
         processed = self.processor(images=images, return_tensors="pt")
-        pixel_values = processed["pixel_values"].to(device=device, dtype=torch.float16)
+        # Match model dtype (InternVL uses bfloat16, not float16)
+        model_dtype = torch.bfloat16
+        if hasattr(self, "safe_model"):
+            model_dtype = next(self.safe_model.base_vl.llm.parameters()).dtype
+        elif hasattr(self, "llava"):
+            model_dtype = next(self.llava.parameters()).dtype
+        pixel_values = processed["pixel_values"].to(device=device, dtype=model_dtype)
         return pixel_values
 
     def forward(
