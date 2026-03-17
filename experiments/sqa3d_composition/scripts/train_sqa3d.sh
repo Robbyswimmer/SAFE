@@ -10,7 +10,13 @@
 
 set -euo pipefail
 
-SAFE_ROOT="${SAFE_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+# Get SAFE root — prefer SLURM_SUBMIT_DIR (set by sbatch to the dir you ran sbatch from)
+if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+    SAFE_ROOT="${SAFE_ROOT:-$SLURM_SUBMIT_DIR}"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SAFE_ROOT="${SAFE_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+fi
 
 CONDA_ENV=${CONDA_ENV:-safe-env}
 if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
