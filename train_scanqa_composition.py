@@ -22,6 +22,7 @@ import json
 import math
 import os
 import sys
+from collections import defaultdict
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import time
@@ -59,6 +60,40 @@ from safe.data.scanqa_dataset import ScanQADataset, collate_scanqa_batch
 from configs.pointcloud_configs import get_pointcloud_config
 
 
+def normalize_answer(text: str) -> str:
+    """Normalize LLM-generated answer by stripping preamble, lowercasing, etc."""
+    text = (text or "").strip().lower()
+    # Strip common LLM preamble patterns
+    for prefix in ("the answer is", "answer:", "a:", "it is", "this is"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    text = text.strip().rstrip(".")
+    return " ".join(text.split())
+
+
+def token_f1(pred: str, ref: str) -> float:
+    """Compute token-level F1 between normalized prediction and reference."""
+    p = normalize_answer(pred).split()
+    r = normalize_answer(ref).split()
+    if not p and not r:
+        return 1.0
+    if not p or not r:
+        return 0.0
+    common = 0
+    r_counts: Dict[str, int] = defaultdict(int)
+    for t in r:
+        r_counts[t] += 1
+    for t in p:
+        if r_counts[t] > 0:
+            common += 1
+            r_counts[t] -= 1
+    if common == 0:
+        return 0.0
+    precision = common / len(p)
+    recall = common / len(r)
+    return 2 * precision * recall / (precision + recall)
+
+
 def compute_qa_metrics(predictions: List[str], references: List[List[str]]) -> Dict[str, float]:
     """
     Compute QA evaluation metrics.
@@ -68,18 +103,23 @@ def compute_qa_metrics(predictions: List[str], references: List[List[str]]) -> D
         references: List of lists of reference answer strings
 
     Returns:
-        Dictionary with BLEU-1, BLEU-4, METEOR scores
+        Dictionary with BLEU-1, BLEU-4, METEOR, exact_match, norm_em, token_f1
     """
+    _zero = {"bleu1": 0.0, "bleu4": 0.0, "meteor": 0.0,
+             "exact_match": 0.0, "norm_em": 0.0, "token_f1": 0.0}
+
     if not NLTK_AVAILABLE:
-        return {"bleu1": 0.0, "bleu4": 0.0, "meteor": 0.0, "exact_match": 0.0}
+        return _zero
 
     if len(predictions) == 0:
-        return {"bleu1": 0.0, "bleu4": 0.0, "meteor": 0.0, "exact_match": 0.0}
+        return _zero
 
     bleu1_scores = []
     bleu4_scores = []
     meteor_scores = []
     exact_matches = []
+    norm_em_scores = []
+    token_f1_scores = []
 
     smoother = SmoothingFunction()
 
@@ -87,9 +127,17 @@ def compute_qa_metrics(predictions: List[str], references: List[List[str]]) -> D
         pred_tokens = pred.lower().split()
         ref_tokens_list = [ref.lower().split() for ref in refs if ref]
 
-        # Exact match (against any reference)
+        # Raw exact match (against any reference)
         exact = any(pred.lower().strip() == ref.lower().strip() for ref in refs if ref)
         exact_matches.append(float(exact))
+
+        # Normalized exact match (strips LLM preamble)
+        norm_exact = any(normalize_answer(pred) == normalize_answer(ref) for ref in refs if ref)
+        norm_em_scores.append(float(norm_exact))
+
+        # Token F1 (max across references)
+        best_f1 = max((token_f1(pred, ref) for ref in refs if ref), default=0.0)
+        token_f1_scores.append(best_f1)
 
         # BLEU scores
         if pred_tokens and ref_tokens_list:
@@ -116,6 +164,8 @@ def compute_qa_metrics(predictions: List[str], references: List[List[str]]) -> D
         "bleu4": sum(bleu4_scores) / n * 100 if n > 0 else 0.0,
         "meteor": sum(meteor_scores) / n * 100 if n > 0 else 0.0,
         "exact_match": sum(exact_matches) / len(exact_matches) * 100 if exact_matches else 0.0,
+        "norm_em": sum(norm_em_scores) / len(norm_em_scores) * 100 if norm_em_scores else 0.0,
+        "token_f1": sum(token_f1_scores) / len(token_f1_scores) * 100 if token_f1_scores else 0.0,
     }
 
 
@@ -837,6 +887,8 @@ def main():
             print(f"  BLEU-4: {val_metrics['bleu4']:.2f}")
             print(f"  METEOR: {val_metrics['meteor']:.2f}")
             print(f"  Exact Match: {val_metrics['exact_match']:.2f}")
+            print(f"  Norm EM:     {val_metrics['norm_em']:.2f}")
+            print(f"  Token F1:    {val_metrics['token_f1']:.2f}")
 
             # Show some examples
             print("\nSample predictions:")
@@ -865,6 +917,8 @@ def main():
                     "val_bleu4": val_metrics["bleu4"],
                     "val_meteor": val_metrics["meteor"],
                     "val_exact_match": val_metrics["exact_match"],
+                    "val_norm_em": val_metrics["norm_em"],
+                    "val_token_f1": val_metrics["token_f1"],
                     "best_bleu4": best_bleu4,
                     "lr": scheduler.get_last_lr()[0],
                 })
