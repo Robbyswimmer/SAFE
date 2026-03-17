@@ -22,6 +22,8 @@ import json
 import math
 import os
 import sys
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
