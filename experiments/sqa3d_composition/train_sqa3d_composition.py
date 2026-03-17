@@ -269,8 +269,10 @@ def train_epoch(
     optimizer.zero_grad()
 
     def _amp_context():
-        if args.fp16 and torch.cuda.is_available():
-            return torch.amp.autocast("cuda", enabled=True, dtype=torch.float16)
+        # InternVL runs in bf16 / model-native mixed precision and already has
+        # gradient checkpointing enabled internally. Extra autocast here can
+        # change checkpointed tensor boundaries between forward and recompute.
+        # Match the stable ScanQA path by disabling AMP in the outer trainer.
         return nullcontext()
 
     total_loss = 0.0
@@ -575,7 +577,10 @@ def main() -> None:
     total_optimizer_steps = math.ceil(len(train_loader) * int(args.num_epochs) * passes_per_epoch / max(1, int(args.gradient_accumulation_steps)))
     optimizer = build_optimizer(model, args)
     scheduler = build_scheduler(optimizer, total_optimizer_steps, args)
-    scaler = GradScaler(enabled=bool(args.fp16))
+    # Keep the GradScaler object for the existing training flow, but disable it.
+    # InternVL handles its own mixed precision; external AMP/scaling caused
+    # checkpoint tensor-count mismatches in backward recomputation.
+    scaler = GradScaler(enabled=False)
 
     print(f"Train samples:     {len(train_ds)}")
     print(f"Val samples:       {len(val_ds)}")
@@ -584,7 +589,8 @@ def main() -> None:
     print(f"Batch size:        {args.batch_size}")
     print(f"Grad accum:        {args.gradient_accumulation_steps}")
     print(f"Effective batch:   {args.batch_size * args.gradient_accumulation_steps}")
-    print(f"FP16:              {args.fp16}")
+    print(f"FP16 flag:         {args.fp16}")
+    print(f"AMP:               disabled (model-native mixed precision)")
     print(f"SAFE LR:           {args.safe_lr}")
     print(f"Fusion gate:       {args.fusion_gate}")
     print(f"Include situation: {args.include_situation}")
