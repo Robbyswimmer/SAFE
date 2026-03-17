@@ -55,6 +55,9 @@ EPOCHS=${EPOCHS:-20}
 TRAIN_MODALITY=${TRAIN_MODALITY:-interleaved}
 EVAL_MODALITIES=${EVAL_MODALITIES:-both,pointcloud,image,text}
 FUSION_GATE=${FUSION_GATE:-1.0}
+MAX_SAMPLES=${MAX_SAMPLES:-0}
+TRAIN_MAX_SAMPLES=${TRAIN_MAX_SAMPLES:-0}
+VAL_MAX_SAMPLES=${VAL_MAX_SAMPLES:-0}
 WANDB=${WANDB:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-SAFE-SQA3D-Composition}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-${MODEL_TAG}_${SLURM_JOB_ID:-local}}
@@ -69,6 +72,17 @@ if [[ "$WANDB" == "1" ]]; then
   WANDB_ARGS+=(--wandb --wandb-project "$WANDB_PROJECT" --wandb-run-name "$WANDB_RUN_NAME" --wandb-tags "$WANDB_TAGS")
 fi
 
+SAMPLE_ARGS=()
+if [[ "$MAX_SAMPLES" != "0" ]]; then
+  SAMPLE_ARGS+=(--max-samples "$MAX_SAMPLES")
+fi
+if [[ "$TRAIN_MAX_SAMPLES" != "0" ]]; then
+  SAMPLE_ARGS+=(--train-max-samples "$TRAIN_MAX_SAMPLES")
+fi
+if [[ "$VAL_MAX_SAMPLES" != "0" ]]; then
+  SAMPLE_ARGS+=(--val-max-samples "$VAL_MAX_SAMPLES")
+fi
+
 python3 "$SAFE_ROOT/experiments/sqa3d_composition/train_sqa3d_composition.py" \
   --model-config "$MODEL_CONFIG" \
   --data-path "$DATA_PATH" \
@@ -80,4 +94,5 @@ python3 "$SAFE_ROOT/experiments/sqa3d_composition/train_sqa3d_composition.py" \
   --fusion-gate "$FUSION_GATE" \
   --include-situation \
   --fp16 \
+  "${SAMPLE_ARGS[@]}" \
   "${WANDB_ARGS[@]}"

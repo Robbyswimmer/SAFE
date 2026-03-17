@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
@@ -668,6 +668,12 @@ def parse_args():
     # Eval
     parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--max-eval-samples", type=int, default=500)
+    parser.add_argument("--max-samples", type=int, default=0,
+                        help="Cap both train and val datasets to N samples (0=full datasets)")
+    parser.add_argument("--train-max-samples", type=int, default=0,
+                        help="Cap only the train dataset to N samples (0=full train set)")
+    parser.add_argument("--val-max-samples", type=int, default=0,
+                        help="Cap only the val dataset to N samples (0=full val set)")
     parser.add_argument(
         "--eval-modalities",
         type=str,
@@ -1012,6 +1018,14 @@ def resolve_eval_modalities(args, model: ScanQACompositionModel) -> List[str]:
     return selected or supported
 
 
+def maybe_limit_dataset(dataset, max_samples: int):
+    """Optionally truncate a dataset for faster debugging runs."""
+    max_samples = int(max_samples or 0)
+    if max_samples <= 0 or len(dataset) <= max_samples:
+        return dataset
+    return Subset(dataset, list(range(max_samples)))
+
+
 def main():
     args = parse_args()
 
@@ -1027,6 +1041,11 @@ def main():
         args.wandb = False
     else:
         args._smoke_max_steps = None
+
+    if not getattr(args, "train_max_samples", 0):
+        args.train_max_samples = int(getattr(args, "max_samples", 0) or 0)
+    if not getattr(args, "val_max_samples", 0):
+        args.val_max_samples = int(getattr(args, "max_samples", 0) or 0)
 
     config = get_pointcloud_config(args.model_config) if args.model_config else None
 
@@ -1072,6 +1091,8 @@ def main():
     print(f"Log every:       {args.log_every}")
     print(f"Eval every:      {args.eval_every} epoch(s)")
     print(f"Max eval samp:   {args.max_eval_samples}")
+    print(f"Train subset:    {args.train_max_samples or 'full'}")
+    print(f"Val subset:      {args.val_max_samples or 'full'}")
     print(f"Gate warmup:     {args.gate_warmup_epochs} epoch(s)")
     print(f"Optimizer:       AdamW (grouped, betas=0.9/0.95)")
     print(f"AMP:             disabled")
@@ -1089,6 +1110,7 @@ def main():
         modality=args.modality,
         num_points=args.num_points,
     )
+    train_dataset = maybe_limit_dataset(train_dataset, args.train_max_samples)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -1129,6 +1151,7 @@ def main():
         num_points=args.num_points,
         augment=False,
     )
+    val_dataset = maybe_limit_dataset(val_dataset, args.val_max_samples)
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
