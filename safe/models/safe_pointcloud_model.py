@@ -431,18 +431,70 @@ class SAFEPointCloudModel(nn.Module):
 
             try:
                 if use_composition:
-                    # COMPOSITION MODE: Let LLaVA process image+text natively,
+                    # COMPOSITION MODE: Let VLM process image+text natively,
                     # while SAFE hooks inject PC tokens as residuals
-                    fwd_kwargs = dict(
-                        input_ids=input_ids, attention_mask=attention_mask,
-                        pixel_values=pixel_values, labels=labels,
-                        use_cache=False, **kwargs,
-                    )
+                    comp_input_ids = input_ids
+                    comp_attn_mask = attention_mask
+                    comp_labels = labels
+                    comp_pixel_values = pixel_values
+
                     if self.base_vl.model_type == "internvl" and pixel_values is not None:
                         # Ensure pixel_values match model dtype (bf16 vs fp16)
                         model_dtype = next(self.base_vl.llm.parameters()).dtype
                         if pixel_values.dtype != model_dtype:
-                            fwd_kwargs["pixel_values"] = pixel_values.to(dtype=model_dtype)
+                            comp_pixel_values = pixel_values.to(dtype=model_dtype)
+
+                        # InternVL needs <IMG_CONTEXT> placeholder tokens in input_ids
+                        # so it knows where to inject vision embeddings.
+                        img_token_id = getattr(self.base_vl.llm, "img_context_token_id", None)
+                        if img_token_id is None:
+                            img_token_id = getattr(self.base_vl.llm.config, "image_token_id", 151671)
+
+                        # Number of vision tokens InternVL's ViT produces per image
+                        num_img_tokens = getattr(self.base_vl.llm.config, "image_seq_length", 256)
+
+                        bsz = input_ids.size(0)
+                        device = input_ids.device
+
+                        # Prepend <IMG_CONTEXT> * num_img_tokens to input_ids
+                        img_ids = torch.full(
+                            (bsz, num_img_tokens), img_token_id,
+                            dtype=input_ids.dtype, device=device,
+                        )
+                        comp_input_ids = torch.cat([img_ids, input_ids], dim=1)
+
+                        # Extend attention mask
+                        if attention_mask is not None:
+                            img_mask = torch.ones(
+                                (bsz, num_img_tokens),
+                                dtype=attention_mask.dtype, device=device,
+                            )
+                            comp_attn_mask = torch.cat([img_mask, attention_mask], dim=1)
+
+                        # Extend labels (ignore image token positions)
+                        if labels is not None:
+                            img_labels = torch.full(
+                                (bsz, num_img_tokens), -100,
+                                dtype=labels.dtype, device=device,
+                            )
+                            comp_labels = torch.cat([img_labels, labels], dim=1)
+
+                        if not hasattr(self, "_internvl_img_prefix_logged"):
+                            self._internvl_img_prefix_logged = True
+                            print(
+                                f"[SAFE-PC] Prepending {num_img_tokens} <IMG_CONTEXT> tokens "
+                                f"(id={img_token_id}) to input_ids for InternVL vision",
+                                flush=True,
+                            )
+
+                    fwd_kwargs = dict(
+                        input_ids=comp_input_ids,
+                        attention_mask=comp_attn_mask,
+                        pixel_values=comp_pixel_values,
+                        labels=comp_labels,
+                        use_cache=False, **kwargs,
+                    )
+                    if self.base_vl.model_type == "internvl" and pixel_values is not None:
                         batch = pixel_values.size(0)
                         fwd_kwargs["image_flags"] = torch.ones(
                             (batch, 1), dtype=torch.long, device=pixel_values.device
@@ -636,10 +688,40 @@ class SAFEPointCloudModel(nn.Module):
 
             try:
                 if use_composition:
-                    # COMPOSITION: LLaVA processes image+text, SAFE adds PC residuals
+                    # COMPOSITION: VLM processes image+text, SAFE adds PC residuals
+                    gen_input_ids = input_ids
+                    gen_attn_mask = attention_mask
+                    gen_pixel_values = pixel_values
+
+                    if self.base_vl.model_type == "internvl" and pixel_values is not None:
+                        # Dtype alignment
+                        model_dtype = next(self.base_vl.llm.parameters()).dtype
+                        if pixel_values.dtype != model_dtype:
+                            gen_pixel_values = pixel_values.to(dtype=model_dtype)
+
+                        # Prepend <IMG_CONTEXT> placeholders for InternVL
+                        img_token_id = getattr(self.base_vl.llm, "img_context_token_id", None)
+                        if img_token_id is None:
+                            img_token_id = getattr(self.base_vl.llm.config, "image_token_id", 151671)
+                        num_img_tokens = getattr(self.base_vl.llm.config, "image_seq_length", 256)
+
+                        bsz = input_ids.size(0)
+                        device = input_ids.device
+                        img_ids = torch.full(
+                            (bsz, num_img_tokens), img_token_id,
+                            dtype=input_ids.dtype, device=device,
+                        )
+                        gen_input_ids = torch.cat([img_ids, input_ids], dim=1)
+                        if attention_mask is not None:
+                            img_mask = torch.ones(
+                                (bsz, num_img_tokens),
+                                dtype=attention_mask.dtype, device=device,
+                            )
+                            gen_attn_mask = torch.cat([img_mask, attention_mask], dim=1)
+
                     gen_kwargs = dict(
-                        input_ids=input_ids, attention_mask=attention_mask,
-                        pixel_values=pixel_values, max_new_tokens=max_new_tokens,
+                        input_ids=gen_input_ids, attention_mask=gen_attn_mask,
+                        pixel_values=gen_pixel_values, max_new_tokens=max_new_tokens,
                         num_beams=num_beams, **generate_kwargs,
                     )
                     if self.base_vl.model_type == "internvl" and pixel_values is not None:

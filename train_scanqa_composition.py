@@ -380,6 +380,14 @@ def parse_args():
     parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--max-eval-samples", type=int, default=500)
 
+    # Logging
+    parser.add_argument("--log-every", type=int, default=50,
+                        help="Print loss every N steps")
+
+    # Smoke test
+    parser.add_argument("--smoke-test", action="store_true",
+                        help="Quick 10-step train + eval to verify everything works")
+
     # Hardware
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--fp16", action="store_true")
@@ -451,13 +459,22 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
     model.train()
 
     total_loss = 0.0
+    interval_loss = 0.0
     num_batches = 0
+    interval_batches = 0
+    log_every = getattr(args, "log_every", 50)
+    max_steps = getattr(args, "_smoke_max_steps", None)
 
+    total_steps = len(dataloader)
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
 
     optimizer.zero_grad()
 
     for batch_idx, batch in enumerate(pbar):
+        if max_steps is not None and batch_idx >= max_steps:
+            print(f"[smoke-test] Stopping training after {max_steps} steps", flush=True)
+            break
+
         if not batch:
             continue
 
@@ -491,12 +508,31 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
             scheduler.step()
             optimizer.zero_grad()
 
-        total_loss += loss.item() * args.gradient_accumulation_steps
+        step_loss = loss.item() * args.gradient_accumulation_steps
+        total_loss += step_loss
+        interval_loss += step_loss
         num_batches += 1
+        interval_batches += 1
 
-        pbar.set_postfix({"loss": total_loss / num_batches})
+        avg_loss = total_loss / num_batches
+        pbar.set_postfix({"loss": f"{avg_loss:.4f}"})
 
-    return {"loss": total_loss / max(num_batches, 1)}
+        # Detailed interval logging
+        if num_batches % log_every == 0:
+            cur_lr = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else args.safe_lr
+            int_avg = interval_loss / interval_batches
+            print(
+                f"\n[train] epoch={epoch+1} step={batch_idx+1}/{total_steps} "
+                f"loss={avg_loss:.4f} interval_loss={int_avg:.4f} "
+                f"lr={cur_lr:.2e}",
+                flush=True,
+            )
+            interval_loss = 0.0
+            interval_batches = 0
+
+    avg = total_loss / max(num_batches, 1)
+    print(f"\n[train] Epoch {epoch+1} complete — avg_loss={avg:.4f} steps={num_batches}", flush=True)
+    return {"loss": avg}
 
 
 @torch.no_grad()
@@ -564,12 +600,33 @@ def evaluate(model, dataloader, device, args, tokenizer, max_samples=None):
 def main():
     args = parse_args()
 
+    # Smoke test overrides
+    if args.smoke_test:
+        print("=" * 60)
+        print("SMOKE TEST MODE — quick validation run")
+        print("=" * 60)
+        args.num_epochs = 1
+        args.max_eval_samples = 10
+        args._smoke_max_steps = 10
+        args.log_every = 2
+        args.wandb = False
+    else:
+        args._smoke_max_steps = None
+
     print("=" * 60)
     print("ScanQA Composition Training")
     print("=" * 60)
-    print(f"Modality: {args.modality}")
-    print(f"Data path: {args.data_path}")
-    print(f"Output dir: {args.output_dir}")
+    print(f"Modality:        {args.modality}")
+    print(f"Data path:       {args.data_path}")
+    print(f"Output dir:      {args.output_dir}")
+    print(f"Batch size:      {args.batch_size}")
+    print(f"Epochs:          {args.num_epochs}")
+    print(f"LR:              {args.safe_lr}")
+    print(f"Grad accum:      {args.gradient_accumulation_steps}")
+    print(f"Log every:       {args.log_every}")
+    print(f"Eval every:      {args.eval_every} epoch(s)")
+    print(f"Max eval samp:   {args.max_eval_samples}")
+    print(f"Smoke test:      {args.smoke_test}")
     print("=" * 60)
 
     # Create output dir
@@ -647,6 +704,20 @@ def main():
 
     # Optimizer
     trainable_params = model.get_trainable_params()
+    total_params = sum(p.numel() for p in model.parameters())
+    train_params = sum(p.numel() for p in trainable_params)
+    print(f"\n[params] Total: {total_params:,} | Trainable: {train_params:,} ({100*train_params/total_params:.2f}%)")
+    if hasattr(model, "safe_model"):
+        for name, mod in [
+            ("projector", getattr(model.safe_model, "pointcloud_projector", None)),
+            ("fusion_adapter", getattr(model.safe_model, "fusion_adapter", None)),
+            ("pc_encoder", getattr(model.safe_model, "pointcloud_encoder", None)),
+        ]:
+            if mod is not None:
+                t = sum(p.numel() for p in mod.parameters() if p.requires_grad)
+                a = sum(p.numel() for p in mod.parameters())
+                print(f"  {name}: {t:,} trainable / {a:,} total")
+    print()
     optimizer = AdamW(trainable_params, lr=args.safe_lr, weight_decay=0.01)
 
     # Scheduler
