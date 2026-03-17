@@ -39,9 +39,12 @@ from torch.utils.data import DataLoader, Dataset
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+LORA_BASELINE_DIR = Path(__file__).resolve().parent
+if str(LORA_BASELINE_DIR) not in sys.path:
+    sys.path.insert(0, str(LORA_BASELINE_DIR))
 
 from configs.model_configs import get_config
-from experiments.lora_baseline._audio_embedding_proxy import AudioTokenEmbeddingProxy
+from _audio_embedding_proxy import AudioTokenEmbeddingProxy
 from safe.models.audio_encoders import CLAPAudioEncoder
 from safe.models.base_vl import BaseVLModel
 from safe.models.projectors import AudioProjector, TokenSetProjector
