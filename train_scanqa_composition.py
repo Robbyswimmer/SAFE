@@ -410,6 +410,14 @@ class ScanQACompositionModel(nn.Module):
 
     def _process_images(self, images: List, device) -> torch.Tensor:
         """Process PIL images to pixel_values tensor."""
+        debug_image_processor = not hasattr(self, "_image_processor_debug_logged")
+        if debug_image_processor:
+            self._image_processor_debug_logged = True
+            try:
+                first_sizes = [getattr(img, "size", None) for img in images[:4]]
+                print(f"[ImageDebug] Input image sizes: {first_sizes}", flush=True)
+            except Exception:
+                pass
         processed = self.processor(images=images, return_tensors="pt")
         # Match model dtype (InternVL uses bfloat16, not float16)
         model_dtype = torch.bfloat16
@@ -418,6 +426,8 @@ class ScanQACompositionModel(nn.Module):
         elif hasattr(self, "llava"):
             model_dtype = next(self.llava.parameters()).dtype
         pixel_values = processed["pixel_values"].to(device=device, dtype=model_dtype)
+        if debug_image_processor:
+            print(f"[ImageDebug] pixel_values shape={tuple(pixel_values.shape)} dtype={pixel_values.dtype}", flush=True)
         return pixel_values
 
     @staticmethod

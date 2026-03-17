@@ -262,16 +262,8 @@ class ScanQADataset(Dataset):
         return pc
 
     def _load_image(self, image_path: Path) -> Image.Image:
-        """Load and preprocess image."""
-        img = Image.open(str(image_path)).convert("RGB")
-
-        # Resize if needed
-        if img.size != (self.image_size, self.image_size):
-            # Use Resampling.BILINEAR for PIL >= 9.1.0 compatibility
-            resample = getattr(Image, 'Resampling', Image).BILINEAR
-            img = img.resize((self.image_size, self.image_size), resample)
-
-        return img
+        """Load image and preserve native resolution for the model processor."""
+        return Image.open(str(image_path)).convert("RGB")
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """Get a sample."""
