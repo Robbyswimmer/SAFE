@@ -973,12 +973,17 @@ def evaluate(model, dataloader, device, args, tokenizer, max_samples=None, eval_
         # Generate
         output_ids = model.generate_for_eval(eval_modality=modality_key, **kwargs)
         extra_prefix_len = int(model.eval_prompt_prefix_length(modality_key))
+        prompt_width = int(prompt_encodings["input_ids"].size(1))
 
         # Decode predictions
         for i, ids in enumerate(output_ids):
-            # Get only the generated part
-            prompt_len = int(prompt_encodings["attention_mask"][i].sum().item()) + extra_prefix_len
-            generated_ids = ids[prompt_len:]
+            # Some generation paths return full sequence (prompt + generation),
+            # while others return only the newly generated tokens.
+            full_prompt_width = prompt_width + extra_prefix_len
+            if ids.size(0) > full_prompt_width:
+                generated_ids = ids[full_prompt_width:]
+            else:
+                generated_ids = ids
             pred = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
             all_predictions.append(pred)

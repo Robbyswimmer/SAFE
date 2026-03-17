@@ -422,8 +422,9 @@ def evaluate(
         prompt_width = int(prompt_encodings["input_ids"].size(1))
 
         for i, seq in enumerate(output_ids):
-            if seq.size(0) > prompt_width + extra_prefix_len:
-                gen = seq[prompt_width + extra_prefix_len:]
+            full_prompt_width = prompt_width + extra_prefix_len
+            if seq.size(0) > full_prompt_width:
+                gen = seq[full_prompt_width:]
             else:
                 gen = seq
             predictions.append(tokenizer.decode(gen, skip_special_tokens=True).strip())
