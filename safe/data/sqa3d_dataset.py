@@ -77,6 +77,7 @@ class SQA3DDataset(Dataset):
             preferred = "multiview" if prefer_multiview_images else "single-view"
             print(f"[SQA3D] Image source: {preferred} when available")
             self._log_image_source_stats()
+            self._log_posed_image_stats()
 
     def _load_samples(self) -> List[Dict]:
         """Load QA pairs from SQA3D JSON files (questions + annotations)."""
@@ -242,6 +243,13 @@ class SQA3DDataset(Dataset):
         self.samples = valid_samples
         return scene_data
 
+    def _resolve_sample_image_path(self, sample: Dict[str, Any], scene: Dict[str, Any]) -> Optional[Path]:
+        scannet_dir = self.data_path / "scannet"
+        posed_img_path = scannet_dir / "posed_images" / f"{sample['question_id']}.jpg"
+        if posed_img_path.exists():
+            return posed_img_path
+        return scene.get("image_path")
+
     def _log_image_source_stats(self) -> None:
         multiview = 0
         single = 0
@@ -264,6 +272,14 @@ class SQA3DDataset(Dataset):
                 "[SQA3D] Warning: no multiview images found; falling back to single scene images",
                 flush=True,
             )
+
+    def _log_posed_image_stats(self) -> None:
+        posed_dir = self.data_path / "scannet" / "posed_images"
+        if not posed_dir.exists():
+            print("[SQA3D] Posed image retrieval: none found", flush=True)
+            return
+        posed = sum(1 for sample in self.samples if (posed_dir / f"{sample['question_id']}.jpg").exists())
+        print(f"[SQA3D] Posed image retrieval: {posed}/{len(self.samples)} samples", flush=True)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -343,8 +359,9 @@ class SQA3DDataset(Dataset):
         else:
             result["pointcloud"] = None
 
-        if self.modality in ["image", "both"] and scene["image_path"]:
-            img = self._load_image(scene["image_path"])
+        image_path = self._resolve_sample_image_path(sample, scene)
+        if self.modality in ["image", "both"] and image_path:
+            img = self._load_image(image_path)
             if self.transform:
                 img = self.transform(img)
             result["image"] = img
