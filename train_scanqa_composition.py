@@ -237,6 +237,19 @@ class ScanQACompositionModel(nn.Module):
         pixel_values = processed["pixel_values"].to(device=device, dtype=model_dtype)
         return pixel_values
 
+    @staticmethod
+    def _extract_loss_logits(outputs):
+        """Extract loss/logits from either a dict or HF model output."""
+        if isinstance(outputs, dict):
+            return {
+                "loss": outputs.get("loss"),
+                "logits": outputs.get("logits"),
+            }
+        return {
+            "loss": getattr(outputs, "loss", None),
+            "logits": getattr(outputs, "logits", None),
+        }
+
     def forward(
         self,
         pointclouds: Optional[torch.Tensor] = None,
@@ -269,8 +282,7 @@ class ScanQACompositionModel(nn.Module):
                 pointcloud=pointclouds,
                 labels=labels,
             )
-            return {"loss": outputs.loss if hasattr(outputs, 'loss') else None,
-                    "logits": outputs.logits if hasattr(outputs, 'logits') else None}
+            return self._extract_loss_logits(outputs)
 
         else:  # "both" - TRUE COMPOSITION
             # Process images if needed
@@ -278,7 +290,7 @@ class ScanQACompositionModel(nn.Module):
                 pixel_values = self._process_images(images, input_ids.device)
 
             # TRUE COMPOSITION:
-            # 1. LLaVA processes image + text natively (vision tokens + text tokens)
+            # 1. VLM processes image + text natively (vision tokens + text tokens)
             # 2. SAFE injects PC tokens as residuals at fusion layers
             # Both modalities contribute to the same forward pass
             outputs = self.safe_model(
@@ -288,8 +300,7 @@ class ScanQACompositionModel(nn.Module):
                 pixel_values=pixel_values,
                 labels=labels,
             )
-            return {"loss": outputs.loss if hasattr(outputs, 'loss') else None,
-                    "logits": outputs.logits if hasattr(outputs, 'logits') else None}
+            return self._extract_loss_logits(outputs)
 
     @torch.no_grad()
     def generate(
