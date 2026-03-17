@@ -258,6 +258,7 @@ class ScanQACompositionModel(nn.Module):
         input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
+        gate: float = 1.0,
     ) -> Dict[str, torch.Tensor]:
         """Forward pass for training (with labels) or inference."""
 
@@ -281,6 +282,7 @@ class ScanQACompositionModel(nn.Module):
                 attention_mask=attention_mask,
                 pointcloud=pointclouds,
                 labels=labels,
+                gate=gate,
             )
             return self._extract_loss_logits(outputs)
 
@@ -289,16 +291,13 @@ class ScanQACompositionModel(nn.Module):
             if pixel_values is None and images is not None:
                 pixel_values = self._process_images(images, input_ids.device)
 
-            # TRUE COMPOSITION:
-            # 1. VLM processes image + text natively (vision tokens + text tokens)
-            # 2. SAFE injects PC tokens as residuals at fusion layers
-            # Both modalities contribute to the same forward pass
             outputs = self.safe_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 pointcloud=pointclouds,
                 pixel_values=pixel_values,
                 labels=labels,
+                gate=gate,
             )
             return self._extract_loss_logits(outputs)
 
@@ -389,6 +388,10 @@ def parse_args():
     # Generation
     parser.add_argument("--max-answer-tokens", type=int, default=32)
 
+    # Gate warmup (matches AVQA setup)
+    parser.add_argument("--gate-warmup-epochs", type=int, default=2,
+                        help="Gradually ramp fusion gate from 0→1 over N epochs")
+
     # Eval
     parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--max-eval-samples", type=int, default=500)
@@ -467,6 +470,15 @@ def prepare_qa_inputs(batch, tokenizer, device, max_length=256):
     }
 
 
+def _compute_gate_value(epoch, batch_idx, total_batches, gate_warmup_epochs=2):
+    """Gradually ramp fusion gate from 0→1 over warmup epochs (matches AVQA gate warmup)."""
+    total_warmup_steps = gate_warmup_epochs * total_batches
+    global_step = epoch * total_batches + batch_idx
+    if global_step >= total_warmup_steps:
+        return 1.0
+    return global_step / max(1, total_warmup_steps)
+
+
 def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, tokenizer):
     """Train one epoch."""
     model.train()
@@ -477,6 +489,9 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
     interval_batches = 0
     log_every = getattr(args, "log_every", 50)
     max_steps = getattr(args, "_smoke_max_steps", None)
+    use_amp = device != "cpu"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    gate_warmup_epochs = getattr(args, "gate_warmup_epochs", 2)
 
     total_steps = len(dataloader)
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
@@ -491,6 +506,9 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
         if not batch:
             continue
 
+        # Gate warmup: gradually enable fusion (matches AVQA)
+        gate = _compute_gate_value(epoch, batch_idx, total_steps, gate_warmup_epochs)
+
         # Prepare inputs
         qa_inputs = prepare_qa_inputs(batch, tokenizer, device)
 
@@ -504,20 +522,36 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
             kwargs["pointclouds"] = batch["pointclouds"].to(device)
         if args.modality in ["image", "both"] and batch.get("images") is not None:
             kwargs["images"] = batch["images"]
+        kwargs["gate"] = gate
 
-        # Forward
-        outputs = model(**kwargs)
-        loss = outputs["loss"]
+        # Forward with AMP autocast (matches AVQA)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            outputs = model(**kwargs)
+            loss = outputs["loss"]
 
         if loss is None:
             continue
 
+        # Recover loss if it doesn't require grad (matches AVQA fallback)
+        if not loss.requires_grad:
+            logits = outputs.get("logits")
+            if logits is not None:
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = kwargs["labels"][..., 1:].contiguous()
+                loss = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                )
+
         loss = loss / args.gradient_accumulation_steps
-        loss.backward()
+        scaler.scale(loss).backward()
 
         if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), args.max_grad_norm)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
             optimizer.zero_grad()
 
@@ -528,7 +562,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
         interval_batches += 1
 
         avg_loss = total_loss / num_batches
-        pbar.set_postfix({"loss": f"{avg_loss:.4f}"})
+        pbar.set_postfix({"loss": f"{avg_loss:.4f}", "gate": f"{gate:.2f}"})
 
         # Detailed interval logging
         if num_batches % log_every == 0:
@@ -537,7 +571,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
             print(
                 f"\n[train] epoch={epoch+1} step={batch_idx+1}/{total_steps} "
                 f"loss={avg_loss:.4f} interval_loss={int_avg:.4f} "
-                f"lr={cur_lr:.2e}",
+                f"lr={cur_lr:.2e} gate={gate:.3f}",
                 flush=True,
             )
             interval_loss = 0.0
@@ -639,6 +673,9 @@ def main():
     print(f"Log every:       {args.log_every}")
     print(f"Eval every:      {args.eval_every} epoch(s)")
     print(f"Max eval samp:   {args.max_eval_samples}")
+    print(f"Gate warmup:     {args.gate_warmup_epochs} epoch(s)")
+    print(f"Optimizer:       AdamW (grouped, betas=0.9/0.95)")
+    print(f"AMP:             enabled")
     print(f"Smoke test:      {args.smoke_test}")
     print("=" * 60)
 
@@ -715,7 +752,7 @@ def main():
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # Optimizer
+    # Optimizer — parameter-grouped (match AVQA setup)
     trainable_params = model.get_trainable_params()
     total_params = sum(p.numel() for p in model.parameters())
     train_params = sum(p.numel() for p in trainable_params)
@@ -731,7 +768,23 @@ def main():
                 a = sum(p.numel() for p in mod.parameters())
                 print(f"  {name}: {t:,} trainable / {a:,} total")
     print()
-    optimizer = AdamW(trainable_params, lr=args.safe_lr, weight_decay=0.01)
+
+    # Separate bias/norm (no weight_decay) from other params (matches AVQA)
+    decay_params = []
+    no_decay_params = []
+    for p in trainable_params:
+        if p.dim() <= 1:  # bias, norm, embedding
+            no_decay_params.append(p)
+        else:
+            decay_params.append(p)
+    optimizer = AdamW(
+        [
+            {"params": decay_params, "weight_decay": 0.01},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ],
+        lr=args.safe_lr,
+        betas=(0.9, 0.95),
+    )
 
     # Scheduler
     total_steps = len(train_loader) * args.num_epochs // args.gradient_accumulation_steps

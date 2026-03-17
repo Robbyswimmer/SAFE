@@ -346,6 +346,7 @@ class SAFEPointCloudModel(nn.Module):
         pointcloud: Optional[Union[torch.Tensor, List]] = None,
         pointcloud_tokens: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
+        gate: float = 1.0,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -417,7 +418,7 @@ class SAFEPointCloudModel(nn.Module):
             hook_manager.register_hooks(
                 modality_tokens=modality_tokens,
                 modality_masks=None,
-                gate={"pointcloud": 1.0},
+                gate={"pointcloud": gate},
                 debug_fusion=self.debug_fusion_stats,
                 debug_fusion_log_every=self.debug_fusion_log_every,
             )
@@ -681,7 +682,7 @@ class SAFEPointCloudModel(nn.Module):
             hook_manager.register_hooks(
                 modality_tokens=modality_tokens,
                 modality_masks=None,
-                gate={"pointcloud": 1.0},
+                gate={"pointcloud": gate},
                 debug_fusion=self.debug_fusion_stats,
                 debug_fusion_log_every=self.debug_fusion_log_every,
             )
