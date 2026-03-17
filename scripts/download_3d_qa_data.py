@@ -131,9 +131,9 @@ class ThreeDQADownloader:
         skip_scannet: bool = False,
         validate_only: bool = False,
     ):
-        self.data_dir = Path(data_dir)
-        self.scannet_root = Path(scannet_root) if scannet_root else None
-        self.frames_dir = Path(frames_dir) if frames_dir else None
+        self.data_dir = Path(data_dir).resolve()
+        self.scannet_root = Path(scannet_root).resolve() if scannet_root else None
+        self.frames_dir = Path(frames_dir).resolve() if frames_dir else None
         self.sqa3d_only = sqa3d_only
         self.skip_scannet = skip_scannet
         self.validate_only = validate_only
