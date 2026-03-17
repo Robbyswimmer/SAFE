@@ -489,7 +489,10 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
     interval_batches = 0
     log_every = getattr(args, "log_every", 50)
     max_steps = getattr(args, "_smoke_max_steps", None)
-    use_amp = device != "cpu"
+    # InternVL runs in bf16 natively — AMP autocast causes dtype conflicts
+    # between vit_embeds (float32 under autocast) and input_embeds (bf16).
+    # Disable AMP; the model handles its own mixed precision.
+    use_amp = False
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     gate_warmup_epochs = getattr(args, "gate_warmup_epochs", 2)
 
