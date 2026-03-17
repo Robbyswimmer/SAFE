@@ -190,8 +190,61 @@ def extract_frame_image(sens_path: Path, frame_idx: int) -> Image.Image | None:
         return None
 
 
-def load_scene_frames(scene_dir: Path, sens_file: Path, num_views: int) -> list[Image.Image]:
+def candidate_frame_roots(scannet_root: Path, frames_root: Path | None = None) -> list[Path]:
+    """Possible locations for extracted ScanNet frame directories."""
+    roots: list[Path] = []
+    if frames_root is not None:
+        roots.extend([
+            frames_root,
+            frames_root / "scannet_frames_25k",
+            frames_root / "frames_25k",
+        ])
+    roots.extend([
+        scannet_root.parent / "frames_25k",
+        scannet_root.parent / "frames_25k" / "scannet_frames_25k",
+        scannet_root.parent / "tasks" / "scannet_frames_25k",
+        scannet_root.parent / "scannet_frames_25k",
+    ])
+    deduped: list[Path] = []
+    seen = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(root)
+    return deduped
+
+
+def load_scene_frames_from_roots(scene_id: str, frame_roots: list[Path], num_views: int) -> list[Image.Image]:
+    """Load scene frames from extracted ScanNet frame directories."""
+    for froot in frame_roots:
+        scene_frame_dir = froot / scene_id / "color"
+        if not scene_frame_dir.exists():
+            scene_frame_dir = froot / scene_id
+        if not scene_frame_dir.exists():
+            continue
+        frames = sorted(scene_frame_dir.glob("*.jpg")) + sorted(scene_frame_dir.glob("*.png"))
+        if not frames:
+            continue
+        selected = sample_evenly_spaced_indices(len(frames), num_views)
+        images: list[Image.Image] = []
+        for idx in selected:
+            try:
+                images.append(Image.open(frames[idx]).convert("RGB"))
+            except Exception:
+                continue
+        if images:
+            return images
+    return []
+
+
+def load_scene_frames(scene_id: str, scene_dir: Path, sens_file: Path, frame_roots: list[Path], num_views: int) -> list[Image.Image]:
     """Load multiple representative RGB frames for a scene."""
+    images = load_scene_frames_from_roots(scene_id, frame_roots, num_views)
+    if images:
+        return images
+
     color_dir = scene_dir / "color"
     if color_dir.exists():
         frames = sorted(color_dir.glob("*.jpg"))
@@ -247,6 +300,7 @@ def preprocess_scene(
     output_dir: Path,
     num_points: int = 8192,
     num_views: int = 4,
+    frame_roots: list[Path] | None = None,
 ) -> dict:
     """Preprocess a single scene."""
     scene_id = scene_dir.name
@@ -279,7 +333,9 @@ def preprocess_scene(
         np.save(str(pc_output), points)
         num_saved_points = int(len(points))
 
-    # Extract RGB frame from .sens file
+    frame_roots = frame_roots or []
+
+    # Extract RGB frame from .sens file / frame directories
     sens_file = scene_dir / f"{scene_id}.sens"
     if sens_file.exists():
         img_output.parent.mkdir(parents=True, exist_ok=True)
@@ -291,8 +347,19 @@ def preprocess_scene(
                 if frames:
                     mid_frame = frames[len(frames) // 2]
                     Image.open(mid_frame).save(str(img_output))
+    elif frame_roots:
+        single_frames = load_scene_frames_from_roots(scene_id, frame_roots, num_views=1)
+        if single_frames:
+            img_output.parent.mkdir(parents=True, exist_ok=True)
+            single_frames[0].save(str(img_output))
 
-    scene_frames = load_scene_frames(scene_dir, sens_file, num_views=max(1, int(num_views)))
+    scene_frames = load_scene_frames(
+        scene_id,
+        scene_dir,
+        sens_file,
+        frame_roots=frame_roots,
+        num_views=max(1, int(num_views)),
+    )
     if scene_frames:
         save_image_montage(scene_frames, mv_img_output)
 
@@ -317,11 +384,15 @@ def main():
     parser.add_argument("--output-dir", type=str, default="experiments/full_training/data", help="Output directory")
     parser.add_argument("--num-points", type=int, default=8192, help="Points per scene")
     parser.add_argument("--num-views", type=int, default=4, help="Number of RGB views to tile into a montage")
+    parser.add_argument("--frames-root", type=str, default=None, help="Optional extracted scannet_frames_25k root")
     args = parser.parse_args()
 
     scannet_root = Path(args.scannet_root)
     output_dir = Path(args.output_dir) / "scannet"
     output_dir.mkdir(parents=True, exist_ok=True)
+    frame_roots = candidate_frame_roots(scannet_root, Path(args.frames_root) if args.frames_root else None)
+    existing_frame_roots = [root for root in frame_roots if root.exists()]
+    print(f"Frame roots: {[str(root) for root in existing_frame_roots]}")
 
     # Process train and val splits
     for split, folder in [("train", "scans"), ("val", "scans")]:
@@ -348,7 +419,13 @@ def main():
             if not scene_dir.exists():
                 continue
 
-            sample = preprocess_scene(scene_dir, output_dir, args.num_points, args.num_views)
+            sample = preprocess_scene(
+                scene_dir,
+                output_dir,
+                args.num_points,
+                args.num_views,
+                frame_roots=existing_frame_roots,
+            )
             if sample:
                 samples.append(sample)
 
