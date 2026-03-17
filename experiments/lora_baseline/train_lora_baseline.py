@@ -545,31 +545,54 @@ class LoRABaselineModel(nn.Module):
                     dtype=attention_mask.dtype, device=device,
                 )
                 attention_mask = torch.cat([mod_mask, attention_mask], dim=1)
+            # InternVL custom generate() expects input_ids and does not reliably
+            # support the inputs_embeds + prefixed-audio-token path used here.
+            # Run a simple greedy decode loop through BaseVL.forward(), which
+            # already handles inputs_embeds + pixel_values correctly.
+            batch_size = text_embeds.size(0)
+            cur_embeds = text_embeds
+            cur_attention = attention_mask
+            finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            generated: List[List[int]] = [[] for _ in range(batch_size)]
+            eos_token_id = self.tokenizer.eos_token_id
+            pad_token_id = self.tokenizer.pad_token_id
 
-            generate_kwargs = {
-                "inputs_embeds": text_embeds,
-                "attention_mask": attention_mask,
-                "max_new_tokens": max_new_tokens,
-                "do_sample": False,
-                "num_beams": 1,
-            }
-            if pixel_values is not None:
-                generate_kwargs["pixel_values"] = pixel_values
-                generate_kwargs["image_flags"] = torch.ones(
-                    (pixel_values.size(0), 1),
-                    dtype=torch.long,
-                    device=pixel_values.device,
+            for _ in range(max_new_tokens):
+                outputs = self.base_vl.forward(
+                    inputs_embeds=cur_embeds,
+                    attention_mask=cur_attention,
+                    pixel_values=pixel_values,
                 )
+                next_token_ids = outputs["logits"][:, -1, :].argmax(dim=-1)
 
-            output_ids = self.llm.generate(**generate_kwargs)
-            prompt_width = int(attention_mask.size(1))
-            preds = []
-            for i in range(output_ids.size(0)):
-                seq = output_ids[i]
-                gen = seq[prompt_width:] if seq.size(0) > prompt_width else seq
-                pred_text = self.tokenizer.decode(gen, skip_special_tokens=True)
-                preds.append(pred_text)
-            return preds
+                for i in range(batch_size):
+                    if finished[i]:
+                        continue
+                    token_id = int(next_token_ids[i].item())
+                    if eos_token_id is not None and token_id == eos_token_id:
+                        finished[i] = True
+                        continue
+                    if pad_token_id is not None and token_id == pad_token_id:
+                        finished[i] = True
+                        continue
+                    generated[i].append(token_id)
+
+                if bool(finished.all()):
+                    break
+
+                next_embeds = self.llm.get_input_embeddings()(next_token_ids.unsqueeze(1))
+                cur_embeds = torch.cat([cur_embeds, next_embeds], dim=1)
+                next_mask = torch.ones(
+                    (batch_size, 1),
+                    dtype=cur_attention.dtype,
+                    device=device,
+                )
+                cur_attention = torch.cat([cur_attention, next_mask], dim=1)
+
+            return [
+                self.tokenizer.decode(token_ids, skip_special_tokens=True).strip()
+                for token_ids in generated
+            ]
 
         enc = self._tokenize_batch(questions, device=device)
         input_ids = enc["input_ids"]
