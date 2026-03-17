@@ -25,7 +25,7 @@ import time
 import numpy as np
 import torch
 from contextlib import nullcontext
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Subset
@@ -343,6 +343,13 @@ def model_gradient_checkpointing_status(model: ScanQACompositionModel) -> str:
     return ", ".join(values) if values else "unavailable"
 
 
+def modality_has_trainable_path(model: ScanQACompositionModel, modality: str) -> bool:
+    modality = str(modality).lower()
+    if modality == "image":
+        return False
+    return any(p.requires_grad for p in model.parameters())
+
+
 def train_epoch(
     model: ScanQACompositionModel,
     dataloader: DataLoader,
@@ -372,6 +379,7 @@ def train_epoch(
     trainable_for_clip = model.get_trainable_params()
     num_batches = len(dataloader)
     log_every = max(1, int(args.log_every))
+    warned_no_grad = False
 
     for step, batch in enumerate(dataloader):
         if not batch:
@@ -414,6 +422,18 @@ def train_epoch(
                 continue
 
             loss = loss / int(args.gradient_accumulation_steps)
+        if not torch.is_tensor(loss) or not loss.requires_grad:
+            if not warned_no_grad:
+                warned_no_grad = True
+                logits_req = bool(torch.is_tensor(logits) and logits.requires_grad)
+                n_valid = int((kwargs["labels"] != -100).sum().item()) if torch.is_tensor(kwargs["labels"]) else -1
+                print(
+                    f"  [warn:{train_modality}] loss has no grad; skipping batch "
+                    f"(logits_requires_grad={logits_req} valid_label_tokens={n_valid})",
+                    flush=True,
+                )
+            continue
+
         scaler.scale(loss).backward()
         pending_accum_steps += 1
 
@@ -665,14 +685,20 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    passes_per_epoch = 2 if args.train_modality in {"interleaved", "interleaved_vision_first"} else 1
+    if args.train_modality in {"interleaved", "interleaved_vision_first"}:
+        planned_order = ["image", "pointcloud"] if args.train_modality == "interleaved_vision_first" else ["pointcloud", "image"]
+        passes_per_epoch = sum(1 for phase_modality in planned_order if modality_has_trainable_path(model, phase_modality))
+        passes_per_epoch = max(1, passes_per_epoch)
+    else:
+        passes_per_epoch = 1 if modality_has_trainable_path(model, args.train_modality) else 0
+        passes_per_epoch = max(1, passes_per_epoch)
     total_optimizer_steps = math.ceil(len(train_loader) * int(args.num_epochs) * passes_per_epoch / max(1, int(args.gradient_accumulation_steps)))
     optimizer = build_optimizer(model, args)
     scheduler = build_scheduler(optimizer, total_optimizer_steps, args)
     # Keep the GradScaler object for the existing training flow, but disable it.
     # InternVL handles its own mixed precision; external AMP/scaling caused
     # checkpoint tensor-count mismatches in backward recomputation.
-    scaler = GradScaler(enabled=False)
+    scaler = GradScaler("cuda", enabled=False)
 
     print(f"Train samples:     {len(train_ds)}")
     print(f"Val samples:       {len(val_ds)}")
@@ -689,6 +715,11 @@ def main() -> None:
     print(f"SAFE LR:           {args.safe_lr}")
     print(f"Fusion gate:       {args.fusion_gate}")
     print(f"Include situation: {args.include_situation}")
+
+    if args.train_modality == "image":
+        print("Trainable image path: disabled (frozen VLM; image branch is eval-only)", flush=True)
+    elif args.train_modality in {"interleaved", "interleaved_vision_first"}:
+        print("Interleaved image phase: will be skipped (no trainable image-only branch)", flush=True)
 
     wandb_run = None
     if args.wandb and wandb is not None:
@@ -749,6 +780,10 @@ def main() -> None:
         if args.train_modality in {"interleaved", "interleaved_vision_first"}:
             order = ["image", "pointcloud"] if args.train_modality == "interleaved_vision_first" else ["pointcloud", "image"]
             for phase_modality in order:
+                if not modality_has_trainable_path(model, phase_modality):
+                    print(f"  [phase:{phase_modality}] skipped (no trainable path)", flush=True)
+                    epoch_train[f"{phase_modality}_train_loss"] = 0.0
+                    continue
                 print(f"  [phase:{phase_modality}]")
                 loss, global_step = train_epoch(
                     model,
@@ -766,21 +801,25 @@ def main() -> None:
                 epoch_train[f"{phase_modality}_train_loss"] = float(loss)
                 print(f"  [phase:{phase_modality}] loss={loss:.4f}", flush=True)
         else:
-            loss, global_step = train_epoch(
-                model,
-                train_loader,
-                optimizer,
-                scheduler,
-                scaler,
-                device,
-                args,
-                tokenizer,
-                train_modality=args.train_modality,
-                global_step=global_step,
-                wandb_run=wandb_run,
-            )
-            epoch_train[f"{args.train_modality}_train_loss"] = float(loss)
-            print(f"  [phase:{args.train_modality}] loss={loss:.4f}", flush=True)
+            if not modality_has_trainable_path(model, args.train_modality):
+                print(f"\n[eval-only] {args.train_modality} training skipped (no trainable path in frozen-VLM setup)")
+                epoch_train[f"{args.train_modality}_train_loss"] = 0.0
+            else:
+                loss, global_step = train_epoch(
+                    model,
+                    train_loader,
+                    optimizer,
+                    scheduler,
+                    scaler,
+                    device,
+                    args,
+                    tokenizer,
+                    train_modality=args.train_modality,
+                    global_step=global_step,
+                    wandb_run=wandb_run,
+                )
+                epoch_train[f"{args.train_modality}_train_loss"] = float(loss)
+                print(f"  [phase:{args.train_modality}] loss={loss:.4f}", flush=True)
 
         epoch_result = {"epoch": epoch + 1, **epoch_train, "eval": {}}
         if (epoch + 1) % int(args.eval_every) == 0:
