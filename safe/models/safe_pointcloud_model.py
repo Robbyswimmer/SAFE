@@ -521,25 +521,17 @@ class SAFEPointCloudModel(nn.Module):
                     outputs = self.base_vl.llm(**fwd_kwargs)
                 else:
                     # PC-ONLY MODE: text only (no image), hooks inject PC residuals.
-                    # InternVL's custom forward() does not accept inputs_embeds,
-                    # so pass input_ids and let it embed internally.
-                    if self.base_vl.model_type == "internvl":
-                        outputs = self.base_vl.llm(
-                            input_ids=input_ids,
-                            attention_mask=attention_mask,
-                            labels=labels,
-                            use_cache=False,
-                            **kwargs,
-                        )
-                    else:
-                        inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
-                        outputs = self.base_vl.llm(
-                            inputs_embeds=inputs_embeds,
-                            attention_mask=attention_mask,
-                            labels=labels,
-                            use_cache=False,
-                            **kwargs,
-                        )
+                    # InternVL's forward() requires pixel_values as a positional arg,
+                    # so bypass it and call the inner language_model directly.
+                    inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                    lm = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
+                    outputs = lm(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                        use_cache=False,
+                        **kwargs,
+                    )
             finally:
                 hook_manager.remove_hooks()
 
@@ -580,23 +572,17 @@ class SAFEPointCloudModel(nn.Module):
                 outputs = self.base_vl.llm(**fwd_kwargs)
             else:
                 # PC-only with KV augmentation, no image.
-                if self.base_vl.model_type == "internvl":
-                    outputs = self.base_vl.llm(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        labels=labels,
-                        use_cache=False,
-                        **kwargs,
-                    )
-                else:
-                    inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
-                    outputs = self.base_vl.llm(
-                        inputs_embeds=inputs_embeds,
-                        attention_mask=attention_mask,
-                        labels=labels,
-                        use_cache=False,
-                        **kwargs,
-                    )
+                # Bypass InternVL wrapper (requires pixel_values) and call
+                # the inner language_model directly.
+                inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                lm = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
+                outputs = lm(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    use_cache=False,
+                    **kwargs,
+                )
         else:
             # No PC fusion - just process image+text or text-only
             if use_composition:
@@ -619,24 +605,17 @@ class SAFEPointCloudModel(nn.Module):
                     )
                 outputs = self.base_vl.llm(**fwd_kwargs)
             else:
-                # Text-only (no PC, no image)
-                if self.base_vl.model_type == "internvl":
-                    outputs = self.base_vl.llm(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        labels=labels,
-                        use_cache=False,
-                        **kwargs,
-                    )
-                else:
-                    inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
-                    outputs = self.base_vl.llm(
-                        inputs_embeds=inputs_embeds,
-                        attention_mask=attention_mask,
-                        labels=labels,
-                        use_cache=False,
-                        **kwargs,
-                    )
+                # Text-only (no PC, no image).
+                # Bypass InternVL wrapper and call inner language_model.
+                inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                lm = getattr(self.base_vl.llm, "language_model", self.base_vl.llm)
+                outputs = lm(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    use_cache=False,
+                    **kwargs,
+                )
 
         # Debug: check outputs
         if not hasattr(self, '_output_debug_logged'):
