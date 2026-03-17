@@ -226,6 +226,28 @@ class LoRABaselineModel(nn.Module):
         tokens = self.vision_projector(patch_tokens, out_dtype=out_dtype)  # (B, T, D)
         return tokens
 
+    def make_null_audio_tokens(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        """Return zero audio tokens to control for extra token slots without evidence."""
+        out_dtype = next(self.llm.parameters()).dtype
+        return torch.zeros(
+            batch_size,
+            int(self.cfg.get("num_audio_tokens", 8)),
+            self.llm_hidden_size,
+            device=device,
+            dtype=out_dtype,
+        )
+
+    def make_null_vision_tokens(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        """Return zero vision tokens to control for extra token slots without evidence."""
+        out_dtype = next(self.llm.parameters()).dtype
+        return torch.zeros(
+            batch_size,
+            int(self.cfg.get("num_vision_tokens", 8)),
+            self.llm_hidden_size,
+            device=device,
+            dtype=out_dtype,
+        )
+
     # ------------------------------------------------------------------
     # Prompt formatting (Qwen3 chat template, thinking disabled)
     # ------------------------------------------------------------------
@@ -272,6 +294,8 @@ class LoRABaselineModel(nn.Module):
         answers: List[str],
         audio_list: Optional[List[Any]] = None,
         image_list: Optional[List[Any]] = None,
+        use_null_audio: bool = False,
+        use_null_image: bool = False,
     ) -> Dict[str, torch.Tensor]:
         device = next(self.llm.parameters()).device
 
@@ -295,11 +319,15 @@ class LoRABaselineModel(nn.Module):
 
         # Encode modality tokens
         modality_tokens_list = []
-        if audio_list is not None:
+        if use_null_audio:
+            modality_tokens_list.append(self.make_null_audio_tokens(len(questions), device))
+        elif audio_list is not None:
             audio_tokens = self.encode_audio(audio_list)
             if audio_tokens is not None:
                 modality_tokens_list.append(audio_tokens)
-        if image_list is not None:
+        if use_null_image:
+            modality_tokens_list.append(self.make_null_vision_tokens(len(questions), device))
+        elif image_list is not None:
             vision_tokens = self.encode_vision(image_list)
             if vision_tokens is not None:
                 modality_tokens_list.append(vision_tokens)
@@ -352,6 +380,8 @@ class LoRABaselineModel(nn.Module):
         audio_list: Optional[List[Any]] = None,
         image_list: Optional[List[Any]] = None,
         max_new_tokens: int = 16,
+        use_null_audio: bool = False,
+        use_null_image: bool = False,
     ) -> List[str]:
         device = next(self.llm.parameters()).device
 
@@ -363,11 +393,15 @@ class LoRABaselineModel(nn.Module):
 
         # Encode modality tokens
         modality_tokens_list = []
-        if audio_list is not None:
+        if use_null_audio:
+            modality_tokens_list.append(self.make_null_audio_tokens(len(questions), device))
+        elif audio_list is not None:
             audio_tokens = self.encode_audio(audio_list)
             if audio_tokens is not None:
                 modality_tokens_list.append(audio_tokens)
-        if image_list is not None:
+        if use_null_image:
+            modality_tokens_list.append(self.make_null_vision_tokens(len(questions), device))
+        elif image_list is not None:
             vision_tokens = self.encode_vision(image_list)
             if vision_tokens is not None:
                 modality_tokens_list.append(vision_tokens)
@@ -538,12 +572,18 @@ def evaluate(
 
     for step, batch in enumerate(dataloader, start=1):
         # Resolve modality
+        use_null_audio = False
+        use_null_image = False
         if modality == "text":
             audio, images = None, None
         elif modality == "audio":
             audio, images = batch["audio"], None
         elif modality == "image":
             audio, images = None, batch["images"]
+        elif modality == "both_null":
+            audio, images = None, None
+            use_null_audio = True
+            use_null_image = True
         else:  # both
             audio, images = batch["audio"], batch["images"]
 
@@ -552,6 +592,8 @@ def evaluate(
             audio_list=audio,
             image_list=images,
             max_new_tokens=args.max_answer_tokens,
+            use_null_audio=use_null_audio,
+            use_null_image=use_null_image,
         )
 
         for i, (pred, ref) in enumerate(zip(preds, batch["answers"])):
@@ -698,6 +740,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--train-modality", choices=["audio", "image", "both"], default="audio")
     p.add_argument("--eval-modalities", type=str, default="text,audio",
                     help="Comma-separated modalities to evaluate")
+    p.add_argument("--stage0-results-path", type=Path, default=None,
+                    help="Optional path to stage0_results.json for retention summaries")
+    p.add_argument("--stage1-results-path", type=Path, default=None,
+                    help="Optional path to stage1_final_results.json for stage-2 retention summaries")
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--num-epochs", type=int, default=10)
     p.add_argument("--learning-rate", type=float, default=5e-5)
@@ -723,6 +769,74 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _load_json_if_exists(path: Optional[Path]) -> Optional[Dict[str, Any]]:
+    if path is None:
+        return None
+    if not path.exists():
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _compute_summary_metrics(
+    stage: int,
+    final_results: Dict[str, Any],
+    stage0_results: Optional[Dict[str, Any]] = None,
+    stage1_results: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {"stage": stage}
+
+    text_score = final_results.get("text", {}).get("extracted_match")
+    audio_score = final_results.get("audio", {}).get("extracted_match")
+    image_score = final_results.get("image", {}).get("extracted_match")
+    both_score = final_results.get("both", {}).get("extracted_match")
+    both_null_score = final_results.get("both_null", {}).get("extracted_match")
+
+    if text_score is not None:
+        summary["text_extracted_match"] = text_score
+    if audio_score is not None:
+        summary["audio_extracted_match"] = audio_score
+    if image_score is not None:
+        summary["image_extracted_match"] = image_score
+    if both_score is not None:
+        summary["both_extracted_match"] = both_score
+    if both_null_score is not None:
+        summary["both_null_extracted_match"] = both_null_score
+
+    if both_score is not None and audio_score is not None and image_score is not None:
+        summary["best_single_extracted_match"] = max(audio_score, image_score)
+        summary["composition_gain_vs_best_single"] = both_score - max(audio_score, image_score)
+    if (
+        both_score is not None
+        and audio_score is not None
+        and image_score is not None
+        and text_score is not None
+    ):
+        summary["synergy_extracted_match"] = both_score - audio_score - image_score + text_score
+    if both_score is not None and both_null_score is not None:
+        summary["composition_gain_vs_both_null"] = both_score - both_null_score
+
+    if stage0_results is not None and text_score is not None:
+        stage0_text = stage0_results.get("text", {}).get("extracted_match", stage0_results.get("extracted_match"))
+        if stage0_text is not None:
+            summary["text_retention_drop_vs_stage0"] = text_score - stage0_text
+
+    if stage == 1 and stage0_results is not None and audio_score is not None:
+        stage0_text = stage0_results.get("text", {}).get("extracted_match", stage0_results.get("extracted_match"))
+        if stage0_text is not None:
+            summary["audio_gain_vs_stage0_text"] = audio_score - stage0_text
+
+    if stage == 2 and stage1_results is not None:
+        stage1_audio = stage1_results.get("audio", {}).get("extracted_match")
+        stage1_text = stage1_results.get("text", {}).get("extracted_match")
+        if stage1_audio is not None and audio_score is not None:
+            summary["audio_retention_drop_vs_stage1"] = audio_score - stage1_audio
+        if stage1_text is not None and text_score is not None:
+            summary["text_retention_drop_vs_stage1"] = text_score - stage1_text
+
+    return summary
+
+
 # ===================================================================
 # Main
 # ===================================================================
@@ -732,6 +846,8 @@ def main() -> None:
     set_seed(args.seed)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    stage0_results = _load_json_if_exists(args.stage0_results_path)
+    stage1_results = _load_json_if_exists(args.stage1_results_path)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[LoRA] Device: {device}", flush=True)
@@ -936,7 +1052,7 @@ def main() -> None:
         )
 
     # --- Training loop ---
-    eval_modalities = [m.strip() for m in args.eval_modalities.split(",")]
+    eval_modalities = [m.strip() for m in args.eval_modalities.split(",") if m.strip()]
     best_score = -1.0
     global_step = 0
     history: List[Dict[str, Any]] = []
@@ -999,7 +1115,7 @@ def main() -> None:
     final_results = {"stage": args.stage}
     all_modalities = ["text", "audio"]
     if args.stage >= 2:
-        all_modalities.extend(["image", "both"])
+        all_modalities.extend(["image", "both_null", "both"])
     for modality in all_modalities:
         metrics = evaluate(model, val_loader, device, modality, args)
         final_results[modality] = metrics
@@ -1007,8 +1123,20 @@ def main() -> None:
               f"extracted={metrics['extracted_match']:.1f}% "
               f"cat_f1={metrics['categorical_f1']:.1f}%", flush=True)
 
+    summary_metrics = _compute_summary_metrics(
+        stage=args.stage,
+        final_results=final_results,
+        stage0_results=stage0_results,
+        stage1_results=stage1_results,
+    )
+    final_results["summary"] = summary_metrics
+
     with open(args.output_dir / f"stage{args.stage}_final_results.json", "w") as f:
         json.dump(final_results, f, indent=2)
+    with open(args.output_dir / f"stage{args.stage}_summary.json", "w") as f:
+        json.dump(summary_metrics, f, indent=2)
+
+    print(f"\n[Summary] {json.dumps(summary_metrics, indent=2)}", flush=True)
 
     if wandb_run is not None:
         wandb_run.finish()

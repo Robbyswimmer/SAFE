@@ -170,6 +170,7 @@ python3 "${TRAIN_SCRIPT}" \
     --output-dir "${OUTPUT_BASE}/stage1" \
     --train-modality audio \
     --eval-modalities text,audio \
+    --stage0-results-path "${OUTPUT_BASE}/stage0/stage0_results.json" \
     "${COMMON_ARGS[@]}"
 
 # ---- Merge: audio LoRA -> base weights ----
@@ -192,9 +193,11 @@ python3 "${TRAIN_SCRIPT}" \
     --stage 2 \
     --output-dir "${OUTPUT_BASE}/stage2" \
     --train-modality image \
-    --eval-modalities text,audio,image,both \
+    --eval-modalities text,audio,image,both,both_null \
     --merged-model-path "${OUTPUT_BASE}/stage1_merged" \
     --audio-projector-path "${OUTPUT_BASE}/stage1/best_audio_projector.pt" \
+    --stage0-results-path "${OUTPUT_BASE}/stage0/stage0_results.json" \
+    --stage1-results-path "${OUTPUT_BASE}/stage1/stage1_final_results.json" \
     "${COMMON_ARGS[@]}"
 
 # ---- Summary ----

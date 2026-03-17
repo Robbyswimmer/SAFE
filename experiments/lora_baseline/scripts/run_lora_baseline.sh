@@ -61,6 +61,8 @@ AUDIO_PROJECTOR_PATH="${AUDIO_PROJECTOR_PATH:-}"
 
 # Output
 OUTPUT_BASE="${OUTPUT_BASE:-${SAFE_ROOT}/checkpoints/lora_baseline}"
+STAGE0_RESULTS_PATH="${STAGE0_RESULTS_PATH:-${OUTPUT_BASE}/stage0/stage0_results.json}"
+STAGE1_RESULTS_PATH="${STAGE1_RESULTS_PATH:-${OUTPUT_BASE}/stage1/stage1_final_results.json}"
 
 # Qwen-specific environment
 export SAFE_QWEN_QUANT=none
@@ -162,11 +164,14 @@ case "${STAGE}" in
         echo "[Stage 1] Audio LoRA training"
         TRAIN_MODALITY="audio"
         EXTRA_ARGS+=(--eval-modalities text,audio)
+        EXTRA_ARGS+=(--stage0-results-path "${STAGE0_RESULTS_PATH}")
         ;;
     2)
         echo "[Stage 2] Vision LoRA training (on merged model)"
         TRAIN_MODALITY="image"
-        EXTRA_ARGS+=(--eval-modalities text,audio,image,both)
+        EXTRA_ARGS+=(--eval-modalities text,audio,image,both,both_null)
+        EXTRA_ARGS+=(--stage0-results-path "${STAGE0_RESULTS_PATH}")
+        EXTRA_ARGS+=(--stage1-results-path "${STAGE1_RESULTS_PATH}")
 
         if [ -z "${MERGED_MODEL_PATH}" ]; then
             echo "ERROR: MERGED_MODEL_PATH is required for stage 2"
