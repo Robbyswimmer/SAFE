@@ -18,17 +18,40 @@ if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
   conda activate "$CONDA_ENV"
 fi
 
-DATA_PATH=${DATA_PATH:-./data}
-OUTPUT_DIR=${OUTPUT_DIR:-checkpoints/sqa3d_composition}
 MODEL_CONFIG=${MODEL_CONFIG:-sqa3d_internvl_1b}
-BATCH_SIZE=${BATCH_SIZE:-2}
+
+# Cluster-friendly defaults so a plain sbatch command works out of the box.
+DATA_PATH="${DATA_PATH:-/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/data}"
+OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/checkpoints}"
+
+case "$MODEL_CONFIG" in
+  *1b*)
+    MODEL_TAG="sqa3d_1b"
+    DEFAULT_BATCH_SIZE=4
+    ;;
+  *4b*)
+    MODEL_TAG="sqa3d_4b"
+    DEFAULT_BATCH_SIZE=2
+    ;;
+  *8b*|*internvl)
+    MODEL_TAG="sqa3d_8b"
+    DEFAULT_BATCH_SIZE=1
+    ;;
+  *)
+    MODEL_TAG="sqa3d_run"
+    DEFAULT_BATCH_SIZE=2
+    ;;
+esac
+
+OUTPUT_DIR="${OUTPUT_DIR:-$OUTPUT_BASE_DIR/$MODEL_TAG}"
+BATCH_SIZE=${BATCH_SIZE:-$DEFAULT_BATCH_SIZE}
 EPOCHS=${EPOCHS:-20}
 TRAIN_MODALITY=${TRAIN_MODALITY:-interleaved}
 EVAL_MODALITIES=${EVAL_MODALITIES:-both,pointcloud,image,text}
-FUSION_GATE=${FUSION_GATE:-0.2}
+FUSION_GATE=${FUSION_GATE:-1.0}
 WANDB=${WANDB:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-SAFE-SQA3D-Composition}
-WANDB_RUN_NAME=${WANDB_RUN_NAME:-sqa3d_composition_${SLURM_JOB_ID:-local}}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-${MODEL_TAG}_${SLURM_JOB_ID:-local}}
 WANDB_TAGS=${WANDB_TAGS:-sqa3d,composition}
 
 mkdir -p logs "$OUTPUT_DIR"
