@@ -25,7 +25,7 @@ if [[ ! -d "$SAFE_ROOT" ]]; then
 fi
 
 # ---- Conda activation ----
-CONDA_ENV=${CONDA_ENV:-safe-env}
+CONDA_ENV=${CONDA_ENV:-safe-internvl}
 if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
   source "$HOME/miniconda3/etc/profile.d/conda.sh"
   conda activate "$CONDA_ENV"
@@ -101,6 +101,9 @@ mkdir -p "$SAFE_OFFLOAD_FOLDER"
 cd "$SAFE_ROOT"
 
 # ---- CUDA check ----
+echo "[env] CONDA_ENV=${CONDA_ENV}"
+echo "[env] python=$(command -v python3)"
+python3 -V
 python3 -c "import torch,sys; ok=torch.cuda.is_available() and torch.cuda.device_count()>0; print(f'[cuda_check] available={torch.cuda.is_available()} count={torch.cuda.device_count()}'); sys.exit(0 if ok else 2)"
 
 # ---- Script paths ----

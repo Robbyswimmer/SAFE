@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import json
+from contextlib import contextmanager
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -322,7 +323,8 @@ class BaseVLModel(nn.Module):
                     kwargs["attn_implementation"] = attn_implementation
 
                 try:
-                    return AutoModel.from_pretrained(llm_model_name, **kwargs)
+                    with self._internvl_safe_linspace():
+                        return AutoModel.from_pretrained(llm_model_name, **kwargs)
                 except RuntimeError as e:
                     if "meta" not in str(e).lower():
                         raise
@@ -336,7 +338,8 @@ class BaseVLModel(nn.Module):
                     )
                     kwargs["device_map"] = {"": "cpu"}
                     kwargs["low_cpu_mem_usage"] = True
-                    return AutoModel.from_pretrained(llm_model_name, **kwargs)
+                    with self._internvl_safe_linspace():
+                        return AutoModel.from_pretrained(llm_model_name, **kwargs)
 
             quant_mode = (qwen_quantization or "auto").lower()
             tried = []
@@ -536,6 +539,48 @@ class BaseVLModel(nn.Module):
         except Exception:
             pass
         return s
+
+    @staticmethod
+    @contextmanager
+    def _internvl_safe_linspace():
+        """
+        Guard InternVL custom-code initialization against meta-tensor failures.
+
+        Some InternVL versions call `.item()` on values returned by
+        `torch.linspace(...)` while accelerate/init_empty_weights has put torch
+        into a meta-device context. In that case `.item()` crashes. Mirror the
+        raw InternVL eval workaround by falling back to pure Python scalars.
+        """
+        orig_linspace = torch.linspace
+
+        class _Scalar:
+            __slots__ = ("_v",)
+
+            def __init__(self, value):
+                self._v = value
+
+            def item(self):
+                return self._v
+
+            def __float__(self):
+                return self._v
+
+        def _safe_linspace(start, end, steps, **kwargs):
+            result = orig_linspace(start, end, steps, **kwargs)
+            if getattr(result, "is_meta", False):
+                s, e, n = float(start), float(end), int(steps)
+                if n <= 0:
+                    return []
+                if n == 1:
+                    return [_Scalar(s)]
+                return [_Scalar(s + (e - s) * i / (n - 1)) for i in range(n)]
+            return result
+
+        torch.linspace = _safe_linspace
+        try:
+            yield
+        finally:
+            torch.linspace = orig_linspace
 
     def _enable_input_require_grads(self, model_label: str) -> None:
         """
