@@ -76,6 +76,7 @@ class SQA3DDataset(Dataset):
         if modality in {"image", "both"}:
             preferred = "multiview" if prefer_multiview_images else "single-view"
             print(f"[SQA3D] Image source: {preferred} when available")
+            self._log_image_source_stats()
 
     def _load_samples(self) -> List[Dict]:
         """Load QA pairs from SQA3D JSON files (questions + annotations)."""
@@ -240,6 +241,29 @@ class SQA3DDataset(Dataset):
 
         self.samples = valid_samples
         return scene_data
+
+    def _log_image_source_stats(self) -> None:
+        multiview = 0
+        single = 0
+        missing = 0
+        for scene in self.scene_data.values():
+            image_path = scene.get("image_path")
+            if image_path is None:
+                missing += 1
+                continue
+            if scene.get("multiview_image_path") is not None and image_path == scene.get("multiview_image_path"):
+                multiview += 1
+            elif scene.get("single_image_path") is not None and image_path == scene.get("single_image_path"):
+                single += 1
+        print(
+            f"[SQA3D] Image resolution: multiview={multiview} single={single} missing={missing}",
+            flush=True,
+        )
+        if self.prefer_multiview_images and multiview == 0:
+            print(
+                "[SQA3D] Warning: no multiview images found; falling back to single scene images",
+                flush=True,
+            )
 
     def __len__(self) -> int:
         return len(self.samples)

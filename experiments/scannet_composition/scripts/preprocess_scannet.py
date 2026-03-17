@@ -306,6 +306,8 @@ def preprocess_scene(
         "image_path": f"images/{scene_id}.jpg",
         "multiview_image_path": f"multiview_images/{scene_id}.jpg",
         "num_points": num_saved_points,
+        "has_single_image": img_output.exists(),
+        "has_multiview_image": mv_img_output.exists(),
     }
 
 
@@ -356,6 +358,15 @@ def main():
             json.dump(samples, f, indent=2)
 
         print(f"Saved {len(samples)} samples to {metadata_file}")
+        n_single = sum(1 for s in samples if s.get("has_single_image"))
+        n_multiview = sum(1 for s in samples if s.get("has_multiview_image"))
+        print(f"RGB assets ({split}): single={n_single} multiview={n_multiview}")
+        if n_multiview == 0:
+            print(
+                f"Warning: no multiview images were created for {split}. "
+                "The provided ScanNet root likely lacks raw RGB frames or .sens streams.",
+                flush=True,
+            )
 
         # Print scene type distribution
         scene_types = {}
