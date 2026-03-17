@@ -575,7 +575,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--train-modality",
         type=str,
-        default="interleaved",
+        default="both",
         choices=["pointcloud", "image", "both", "interleaved", "interleaved_vision_first"],
     )
     p.add_argument("--eval-modalities", type=str, default="both,pointcloud,image,text")
@@ -718,6 +718,10 @@ def main() -> None:
 
     if args.train_modality == "image":
         print("Trainable image path: disabled (frozen VLM; image branch is eval-only)", flush=True)
+    elif args.train_modality == "pointcloud":
+        print("Composition training: disabled (training on pointcloud + text only)", flush=True)
+    elif args.train_modality == "both":
+        print("Composition training: enabled (training on image + text + pointcloud)", flush=True)
     elif args.train_modality in {"interleaved", "interleaved_vision_first"}:
         print("Interleaved image phase: will be skipped (no trainable image-only branch)", flush=True)
 
