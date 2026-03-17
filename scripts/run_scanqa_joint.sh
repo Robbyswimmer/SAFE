@@ -2,7 +2,7 @@
 #SBATCH --job-name=scanqa_joint
 #SBATCH --output=logs/scanqa_joint_%j.out
 #SBATCH --error=logs/scanqa_joint_%j.err
-#SBATCH --time=168:00:00
+#SBATCH --time=48:00:00
 #SBATCH --mem=96G
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
