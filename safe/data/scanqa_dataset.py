@@ -77,13 +77,23 @@ class ScanQADataset(Dataset):
 
     def _load_samples(self) -> List[Dict]:
         """Load QA pairs from JSON."""
-        # Try different file naming conventions
-        qa_file = self.data_path / "scanqa" / f"ScanQA_v1.0_{self.split}.json"
-        if not qa_file.exists():
-            qa_file = self.data_path / "scanqa" / f"scanqa_{self.split}.json"
-        if not qa_file.exists():
+        # Try different file naming conventions and subdirectory layouts
+        scanqa_dir = self.data_path / "scanqa"
+        candidates = [
+            scanqa_dir / f"ScanQA_v1.0_{self.split}.json",
+            scanqa_dir / "ScanQA_v1.0" / f"ScanQA_v1.0_{self.split}.json",
+            scanqa_dir / "qa" / f"ScanQA_v1.0_{self.split}.json",
+            scanqa_dir / f"scanqa_{self.split}.json",
+        ]
+        qa_file = None
+        for candidate in candidates:
+            if candidate.exists():
+                qa_file = candidate
+                break
+        if qa_file is None:
+            searched = "\n  ".join(str(c) for c in candidates)
             raise FileNotFoundError(
-                f"QA file not found: {qa_file}\n"
+                f"QA file not found. Searched:\n  {searched}\n"
                 f"Download ScanQA from: https://github.com/ATR-DBI/ScanQA"
             )
 
