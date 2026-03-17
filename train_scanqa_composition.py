@@ -536,6 +536,13 @@ class ScanQACompositionModel(nn.Module):
             return ["text", "image", "pointcloud", "both"]
         return ["text", "image"]
 
+    def eval_prompt_prefix_length(self, eval_modality: str) -> int:
+        """Extra prompt tokens prepended internally before generation."""
+        eval_modality = str(eval_modality).lower()
+        if eval_modality in {"image", "both"} and hasattr(self, "safe_model"):
+            return self.safe_model.get_image_prompt_prefix_length()
+        return 0
+
     @torch.no_grad()
     def generate_for_eval(
         self,
@@ -820,6 +827,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
 
     total_steps = len(dataloader)
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
+    accum_steps = 0
 
     optimizer.zero_grad()
 
@@ -871,8 +879,9 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
 
         loss = loss / args.gradient_accumulation_steps
         scaler.scale(loss).backward()
+        accum_steps += 1
 
-        if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+        if accum_steps % args.gradient_accumulation_steps == 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), args.max_grad_norm)
             scaler.step(optimizer)
@@ -901,6 +910,14 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, args, epoch, to
             )
             interval_loss = 0.0
             interval_batches = 0
+
+    if accum_steps % args.gradient_accumulation_steps != 0:
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), args.max_grad_norm)
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
+        optimizer.zero_grad()
 
     avg = total_loss / max(num_batches, 1)
     print(f"\n[train] Epoch {epoch+1} complete — avg_loss={avg:.4f} steps={num_batches}", flush=True)
@@ -955,11 +972,12 @@ def evaluate(model, dataloader, device, args, tokenizer, max_samples=None, eval_
 
         # Generate
         output_ids = model.generate_for_eval(eval_modality=modality_key, **kwargs)
+        extra_prefix_len = int(model.eval_prompt_prefix_length(modality_key))
 
         # Decode predictions
         for i, ids in enumerate(output_ids):
             # Get only the generated part
-            prompt_len = prompt_encodings["attention_mask"][i].sum()
+            prompt_len = int(prompt_encodings["attention_mask"][i].sum().item()) + extra_prefix_len
             generated_ids = ids[prompt_len:]
             pred = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 

@@ -338,6 +338,69 @@ class SAFEPointCloudModel(nn.Module):
 
         return pc_tokens.to(dtype=target_dtype)
 
+    def get_image_prompt_prefix_length(self) -> int:
+        """Number of synthetic image placeholder tokens prepended for InternVL."""
+        if self.base_vl.model_type != "internvl":
+            return 0
+        return int(getattr(self.base_vl.llm.config, "image_seq_length", 256))
+
+    def _prepare_internvl_image_inputs(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Align InternVL image inputs by prepending <IMG_CONTEXT> placeholders."""
+        if self.base_vl.model_type != "internvl" or pixel_values is None:
+            return input_ids, attention_mask, labels, pixel_values
+
+        model_dtype = next(self.base_vl.llm.parameters()).dtype
+        if pixel_values.dtype != model_dtype:
+            pixel_values = pixel_values.to(dtype=model_dtype)
+
+        img_token_id = getattr(self.base_vl.llm, "img_context_token_id", None)
+        if img_token_id is None:
+            img_token_id = getattr(self.base_vl.llm.config, "image_token_id", 151671)
+        num_img_tokens = self.get_image_prompt_prefix_length()
+
+        bsz = input_ids.size(0)
+        device = input_ids.device
+        img_ids = torch.full(
+            (bsz, num_img_tokens),
+            img_token_id,
+            dtype=input_ids.dtype,
+            device=device,
+        )
+        input_ids = torch.cat([img_ids, input_ids], dim=1)
+
+        if attention_mask is not None:
+            img_mask = torch.ones(
+                (bsz, num_img_tokens),
+                dtype=attention_mask.dtype,
+                device=device,
+            )
+            attention_mask = torch.cat([img_mask, attention_mask], dim=1)
+
+        if labels is not None:
+            img_labels = torch.full(
+                (bsz, num_img_tokens),
+                -100,
+                dtype=labels.dtype,
+                device=device,
+            )
+            labels = torch.cat([img_labels, labels], dim=1)
+
+        if not hasattr(self, "_internvl_img_prefix_logged"):
+            self._internvl_img_prefix_logged = True
+            print(
+                f"[SAFE-PC] Prepending {num_img_tokens} <IMG_CONTEXT> tokens "
+                f"(id={img_token_id}) to input_ids for InternVL vision",
+                flush=True,
+            )
+
+        return input_ids, attention_mask, labels, pixel_values
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -434,59 +497,14 @@ class SAFEPointCloudModel(nn.Module):
                 if use_composition:
                     # COMPOSITION MODE: Let VLM process image+text natively,
                     # while SAFE hooks inject PC tokens as residuals
-                    comp_input_ids = input_ids
-                    comp_attn_mask = attention_mask
-                    comp_labels = labels
-                    comp_pixel_values = pixel_values
-
-                    if self.base_vl.model_type == "internvl" and pixel_values is not None:
-                        # Ensure pixel_values match model dtype (bf16 vs fp16)
-                        model_dtype = next(self.base_vl.llm.parameters()).dtype
-                        if pixel_values.dtype != model_dtype:
-                            comp_pixel_values = pixel_values.to(dtype=model_dtype)
-
-                        # InternVL needs <IMG_CONTEXT> placeholder tokens in input_ids
-                        # so it knows where to inject vision embeddings.
-                        img_token_id = getattr(self.base_vl.llm, "img_context_token_id", None)
-                        if img_token_id is None:
-                            img_token_id = getattr(self.base_vl.llm.config, "image_token_id", 151671)
-
-                        # Number of vision tokens InternVL's ViT produces per image
-                        num_img_tokens = getattr(self.base_vl.llm.config, "image_seq_length", 256)
-
-                        bsz = input_ids.size(0)
-                        device = input_ids.device
-
-                        # Prepend <IMG_CONTEXT> * num_img_tokens to input_ids
-                        img_ids = torch.full(
-                            (bsz, num_img_tokens), img_token_id,
-                            dtype=input_ids.dtype, device=device,
+                    comp_input_ids, comp_attn_mask, comp_labels, comp_pixel_values = (
+                        self._prepare_internvl_image_inputs(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=labels,
+                            pixel_values=pixel_values,
                         )
-                        comp_input_ids = torch.cat([img_ids, input_ids], dim=1)
-
-                        # Extend attention mask
-                        if attention_mask is not None:
-                            img_mask = torch.ones(
-                                (bsz, num_img_tokens),
-                                dtype=attention_mask.dtype, device=device,
-                            )
-                            comp_attn_mask = torch.cat([img_mask, attention_mask], dim=1)
-
-                        # Extend labels (ignore image token positions)
-                        if labels is not None:
-                            img_labels = torch.full(
-                                (bsz, num_img_tokens), -100,
-                                dtype=labels.dtype, device=device,
-                            )
-                            comp_labels = torch.cat([img_labels, labels], dim=1)
-
-                        if not hasattr(self, "_internvl_img_prefix_logged"):
-                            self._internvl_img_prefix_logged = True
-                            print(
-                                f"[SAFE-PC] Prepending {num_img_tokens} <IMG_CONTEXT> tokens "
-                                f"(id={img_token_id}) to input_ids for InternVL vision",
-                                flush=True,
-                            )
+                    )
 
                     fwd_kwargs = dict(
                         input_ids=comp_input_ids,
@@ -532,9 +550,15 @@ class SAFEPointCloudModel(nn.Module):
 
             # KV augmentation wrapper does not support caching in forward.
             if use_composition:
+                fwd_input_ids, fwd_attn_mask, fwd_labels, fwd_pixel_values = self._prepare_internvl_image_inputs(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    pixel_values=pixel_values,
+                )
                 fwd_kwargs = dict(
-                    input_ids=input_ids, attention_mask=attention_mask,
-                    pixel_values=pixel_values, labels=labels,
+                    input_ids=fwd_input_ids, attention_mask=fwd_attn_mask,
+                    pixel_values=fwd_pixel_values, labels=fwd_labels,
                     use_cache=False, **kwargs,
                 )
                 if self.base_vl.model_type == "internvl" and pixel_values is not None:
@@ -556,9 +580,15 @@ class SAFEPointCloudModel(nn.Module):
             # No PC fusion - just process image+text or text-only
             if use_composition:
                 # Image + text through LLaVA (no PC)
+                fwd_input_ids, fwd_attn_mask, fwd_labels, fwd_pixel_values = self._prepare_internvl_image_inputs(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    pixel_values=pixel_values,
+                )
                 fwd_kwargs = dict(
-                    input_ids=input_ids, attention_mask=attention_mask,
-                    pixel_values=pixel_values, labels=labels,
+                    input_ids=fwd_input_ids, attention_mask=fwd_attn_mask,
+                    pixel_values=fwd_pixel_values, labels=fwd_labels,
                     use_cache=False, **kwargs,
                 )
                 if self.base_vl.model_type == "internvl" and pixel_values is not None:
@@ -691,35 +721,11 @@ class SAFEPointCloudModel(nn.Module):
             try:
                 if use_composition:
                     # COMPOSITION: VLM processes image+text, SAFE adds PC residuals
-                    gen_input_ids = input_ids
-                    gen_attn_mask = attention_mask
-                    gen_pixel_values = pixel_values
-
-                    if self.base_vl.model_type == "internvl" and pixel_values is not None:
-                        # Dtype alignment
-                        model_dtype = next(self.base_vl.llm.parameters()).dtype
-                        if pixel_values.dtype != model_dtype:
-                            gen_pixel_values = pixel_values.to(dtype=model_dtype)
-
-                        # Prepend <IMG_CONTEXT> placeholders for InternVL
-                        img_token_id = getattr(self.base_vl.llm, "img_context_token_id", None)
-                        if img_token_id is None:
-                            img_token_id = getattr(self.base_vl.llm.config, "image_token_id", 151671)
-                        num_img_tokens = getattr(self.base_vl.llm.config, "image_seq_length", 256)
-
-                        bsz = input_ids.size(0)
-                        device = input_ids.device
-                        img_ids = torch.full(
-                            (bsz, num_img_tokens), img_token_id,
-                            dtype=input_ids.dtype, device=device,
-                        )
-                        gen_input_ids = torch.cat([img_ids, input_ids], dim=1)
-                        if attention_mask is not None:
-                            img_mask = torch.ones(
-                                (bsz, num_img_tokens),
-                                dtype=attention_mask.dtype, device=device,
-                            )
-                            gen_attn_mask = torch.cat([img_mask, attention_mask], dim=1)
+                    gen_input_ids, gen_attn_mask, _, gen_pixel_values = self._prepare_internvl_image_inputs(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        pixel_values=pixel_values,
+                    )
 
                     gen_kwargs = dict(
                         input_ids=gen_input_ids, attention_mask=gen_attn_mask,
@@ -731,10 +737,10 @@ class SAFEPointCloudModel(nn.Module):
                     # kwargs to language_model.generate() which rejects unknowns.
                     outputs = self.base_vl.llm.generate(**gen_kwargs)
                 else:
-                    # PC-only: use text embeddings directly
-                    inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                    # PC-only: generate from token IDs; custom InternVL generate()
+                    # expects input_ids and may ignore inputs_embeds.
                     outputs = self.base_vl.llm.generate(
-                        inputs_embeds=inputs_embeds,
+                        input_ids=input_ids,
                         attention_mask=attention_mask,
                         max_new_tokens=max_new_tokens,
                         num_beams=num_beams,
@@ -761,9 +767,14 @@ class SAFEPointCloudModel(nn.Module):
                 generate_kwargs["use_cache"] = False
 
             if use_composition:
+                gen_input_ids, gen_attn_mask, _, gen_pixel_values = self._prepare_internvl_image_inputs(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                )
                 gen_kwargs = dict(
-                    input_ids=input_ids, attention_mask=attention_mask,
-                    pixel_values=pixel_values, max_new_tokens=max_new_tokens,
+                    input_ids=gen_input_ids, attention_mask=gen_attn_mask,
+                    pixel_values=gen_pixel_values, max_new_tokens=max_new_tokens,
                     num_beams=num_beams, **generate_kwargs,
                 )
                 if self.base_vl.model_type == "internvl" and pixel_values is not None:
@@ -773,9 +784,9 @@ class SAFEPointCloudModel(nn.Module):
                     )
                 outputs = self.base_vl.llm.generate(**gen_kwargs)
             else:
-                inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                # Custom InternVL generate() expects input_ids rather than inputs_embeds.
                 outputs = self.base_vl.llm.generate(
-                    inputs_embeds=inputs_embeds,
+                    input_ids=input_ids,
                     attention_mask=attention_mask,
                     max_new_tokens=max_new_tokens,
                     num_beams=num_beams,
@@ -785,9 +796,14 @@ class SAFEPointCloudModel(nn.Module):
             # No PC fusion
             if use_composition:
                 # Image + text through LLaVA (no PC)
+                gen_input_ids, gen_attn_mask, _, gen_pixel_values = self._prepare_internvl_image_inputs(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                )
                 gen_kwargs = dict(
-                    input_ids=input_ids, attention_mask=attention_mask,
-                    pixel_values=pixel_values, max_new_tokens=max_new_tokens,
+                    input_ids=gen_input_ids, attention_mask=gen_attn_mask,
+                    pixel_values=gen_pixel_values, max_new_tokens=max_new_tokens,
                     num_beams=num_beams, **generate_kwargs,
                 )
                 if self.base_vl.model_type == "internvl" and pixel_values is not None:
@@ -798,9 +814,9 @@ class SAFEPointCloudModel(nn.Module):
                 outputs = self.base_vl.llm.generate(**gen_kwargs)
             else:
                 # Text only
-                inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                # Custom InternVL generate() expects input_ids rather than inputs_embeds.
                 outputs = self.base_vl.llm.generate(
-                    inputs_embeds=inputs_embeds,
+                    input_ids=input_ids,
                     attention_mask=attention_mask,
                     max_new_tokens=max_new_tokens,
                     num_beams=num_beams,

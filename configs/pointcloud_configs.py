@@ -353,6 +353,162 @@ SCANQA_INTERNVL_1B_CONFIG: Dict[str, Any] = {
 }
 
 
+# SQA3D Joint Config — InternVL 8B with PointBERT + multi-layer fusion
+SQA3D_INTERNVL_8B_CONFIG: Dict[str, Any] = {
+    "name": "sqa3d_internvl",
+    "description": "SQA3D joint: PointBERT on InternVL 8B with native vision active",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/OpenGVLab_InternVL3_5-8B"),
+    "vision_model_name": "built-in",
+
+    "pointcloud_encoder_type": "pointbert",
+    "pointcloud_encoder_config": {
+        "model_name": "pointbert-base",
+        "num_points": 8192,
+        "embed_dim": 768,
+        "use_pretrained": True,
+        "checkpoint_path": None,
+        "return_group_tokens": False,
+    },
+
+    "llm_hidden_size": 4096,        # Qwen3-8B
+    "pointcloud_embed_dim": 768,    # PointBERT output
+
+    "projector_type": "standard",
+    "num_tokens": 8,
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [1, 5, 9, 13, 17, 21],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "num_attention_heads": 32,
+        "dropout": 0.1,
+    },
+
+    "freeze_base_vl": True,
+    "freeze_pointcloud_encoder": True,
+    "label_smoothing": 0.1,
+    "safe_lr": 1e-5,
+    "dataset": "sqa3d",
+    "num_points": 8192,
+    "expected_vram_gb": 42,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+}
+
+
+# SQA3D Joint Config — InternVL 4B with PointBERT + multi-layer fusion
+SQA3D_INTERNVL_4B_CONFIG: Dict[str, Any] = {
+    "name": "sqa3d_internvl_4b",
+    "description": "SQA3D joint: PointBERT on InternVL 4B with native vision active",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/OpenGVLab_InternVL3_5-4B"),
+    "vision_model_name": "built-in",
+
+    "pointcloud_encoder_type": "pointbert",
+    "pointcloud_encoder_config": {
+        "model_name": "pointbert-base",
+        "num_points": 8192,
+        "embed_dim": 768,
+        "use_pretrained": True,
+        "checkpoint_path": None,
+        "return_group_tokens": True,
+    },
+
+    "llm_hidden_size": 2560,        # Qwen3-4B
+    "pointcloud_embed_dim": 768,    # PointBERT output
+
+    "projector_type": "standard",
+    "num_tokens": 64,               # Preserve more scene structure from point groups
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 768,       # Slightly wider projector for the larger backbone
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [5, 11, 17, 23, 29, 35],  # Shift later to better match semantics
+    "lora_rank": 16,
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "num_attention_heads": 20,   # Qwen3-4B heads
+        "dropout": 0.1,
+    },
+
+    "freeze_base_vl": True,
+    "freeze_pointcloud_encoder": True,
+    "label_smoothing": 0.1,
+    "safe_lr": 2e-5,
+    "dataset": "sqa3d",
+    "num_points": 8192,
+    "expected_vram_gb": 20,
+    "recommended_batch_size": 2,
+    "gradient_accumulation_steps": 4,
+}
+
+
+# SQA3D Joint Config — InternVL 1B with PointBERT + multi-layer fusion
+SQA3D_INTERNVL_1B_CONFIG: Dict[str, Any] = {
+    "name": "sqa3d_internvl_1b",
+    "description": "SQA3D joint: PointBERT on InternVL 1B with native vision active",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/OpenGVLab_InternVL3_5-1B"),
+    "vision_model_name": "built-in",
+
+    "pointcloud_encoder_type": "pointbert",
+    "pointcloud_encoder_config": {
+        "model_name": "pointbert-base",
+        "num_points": 8192,
+        "embed_dim": 768,
+        "use_pretrained": True,
+        "checkpoint_path": None,
+        "return_group_tokens": True,
+    },
+
+    "llm_hidden_size": 1024,        # Qwen3-0.6B
+    "pointcloud_embed_dim": 768,    # PointBERT output
+
+    "projector_type": "standard",
+    "num_tokens": 32,
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 256,       # Smaller projector for 1B
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [1, 5, 10, 15, 20, 24],  # Spread across 28 layers
+    "lora_rank": 4,                  # Smaller LoRA for 1B
+    "fusion_config": {
+        "fusion_mode": "residual",
+        "injection_point": "pre_ffn",
+        "num_attention_heads": 16,   # Qwen3-0.6B heads
+        "dropout": 0.1,
+    },
+
+    "freeze_base_vl": True,
+    "freeze_pointcloud_encoder": True,
+    "label_smoothing": 0.1,
+    "safe_lr": 5e-5,
+    "dataset": "sqa3d",
+    "num_points": 8192,
+    "expected_vram_gb": 8,
+    "recommended_batch_size": 4,
+    "gradient_accumulation_steps": 2,
+}
+
+
 # Config registry
 POINTCLOUD_CONFIGS: Dict[str, Dict[str, Any]] = {
     "modelnet40": MODELNET40_CONFIG,
@@ -365,6 +521,10 @@ POINTCLOUD_CONFIGS: Dict[str, Dict[str, Any]] = {
     "scanqa_internvl_8b": SCANQA_INTERNVL_CONFIG,
     "scanqa_internvl_4b": SCANQA_INTERNVL_4B_CONFIG,
     "scanqa_internvl_1b": SCANQA_INTERNVL_1B_CONFIG,
+    "sqa3d_internvl": SQA3D_INTERNVL_8B_CONFIG,
+    "sqa3d_internvl_8b": SQA3D_INTERNVL_8B_CONFIG,
+    "sqa3d_internvl_4b": SQA3D_INTERNVL_4B_CONFIG,
+    "sqa3d_internvl_1b": SQA3D_INTERNVL_1B_CONFIG,
 }
 
 
