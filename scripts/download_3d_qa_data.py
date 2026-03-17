@@ -42,6 +42,10 @@ from tqdm import tqdm
 # URLs
 # ---------------------------------------------------------------------------
 SQA3D_URLS = [
+    # Zenodo API endpoint (current format)
+    "https://zenodo.org/api/records/7792397/files/sqa_task.zip/content",
+    "https://zenodo.org/api/records/7544818/files/sqa_task.zip/content",
+    # Legacy format (kept as fallback)
     "https://zenodo.org/records/7792397/files/sqa_task.zip?download=1",
     "https://zenodo.org/records/7544818/files/sqa_task.zip?download=1",
 ]
@@ -108,7 +112,8 @@ def _download_file(url: str, dest: Path, desc: str = "Downloading") -> bool:
                     size = f.write(chunk)
                     pbar.update(size)
         return True
-    except Exception:
+    except Exception as e:
+        logging.getLogger("download_3d_qa").warning(f"  Download error: {e}")
         if dest.exists():
             dest.unlink()
         return False
