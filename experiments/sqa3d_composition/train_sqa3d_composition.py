@@ -270,7 +270,7 @@ def train_epoch(
 
     def _amp_context():
         if args.fp16 and torch.cuda.is_available():
-            return autocast(enabled=True, dtype=torch.float16)
+            return torch.amp.autocast("cuda", enabled=True, dtype=torch.float16)
         return nullcontext()
 
     total_loss = 0.0

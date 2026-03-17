@@ -520,15 +520,26 @@ class SAFEPointCloudModel(nn.Module):
                         )
                     outputs = self.base_vl.llm(**fwd_kwargs)
                 else:
-                    # PC-ONLY MODE: Use text embeddings directly (no image)
-                    inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
-                    outputs = self.base_vl.llm(
-                        inputs_embeds=inputs_embeds,
-                        attention_mask=attention_mask,
-                        labels=labels,
-                        use_cache=False,
-                        **kwargs,
-                    )
+                    # PC-ONLY MODE: text only (no image), hooks inject PC residuals.
+                    # InternVL's custom forward() does not accept inputs_embeds,
+                    # so pass input_ids and let it embed internally.
+                    if self.base_vl.model_type == "internvl":
+                        outputs = self.base_vl.llm(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=labels,
+                            use_cache=False,
+                            **kwargs,
+                        )
+                    else:
+                        inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                        outputs = self.base_vl.llm(
+                            inputs_embeds=inputs_embeds,
+                            attention_mask=attention_mask,
+                            labels=labels,
+                            use_cache=False,
+                            **kwargs,
+                        )
             finally:
                 hook_manager.remove_hooks()
 
@@ -568,14 +579,24 @@ class SAFEPointCloudModel(nn.Module):
                     )
                 outputs = self.base_vl.llm(**fwd_kwargs)
             else:
-                inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
-                outputs = self.base_vl.llm(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                    use_cache=False,
-                    **kwargs,
-                )
+                # PC-only with KV augmentation, no image.
+                if self.base_vl.model_type == "internvl":
+                    outputs = self.base_vl.llm(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                        use_cache=False,
+                        **kwargs,
+                    )
+                else:
+                    inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                    outputs = self.base_vl.llm(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                        use_cache=False,
+                        **kwargs,
+                    )
         else:
             # No PC fusion - just process image+text or text-only
             if use_composition:
@@ -598,15 +619,24 @@ class SAFEPointCloudModel(nn.Module):
                     )
                 outputs = self.base_vl.llm(**fwd_kwargs)
             else:
-                # Text-only
-                inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
-                outputs = self.base_vl.llm(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                    use_cache=False,
-                    **kwargs,
-                )
+                # Text-only (no PC, no image)
+                if self.base_vl.model_type == "internvl":
+                    outputs = self.base_vl.llm(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                        use_cache=False,
+                        **kwargs,
+                    )
+                else:
+                    inputs_embeds = self.base_vl.llm.get_input_embeddings()(input_ids)
+                    outputs = self.base_vl.llm(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                        use_cache=False,
+                        **kwargs,
+                    )
 
         # Debug: check outputs
         if not hasattr(self, '_output_debug_logged'):
