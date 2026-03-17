@@ -42,6 +42,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from configs.model_configs import get_config
 from safe.models.audio_encoders import CLAPAudioEncoder
+from safe.models.base_vl import BaseVLModel
 from safe.models.projectors import AudioProjector, TokenSetProjector
 
 try:
@@ -95,45 +96,67 @@ class LoRABaselineModel(nn.Module):
                 => [modality_tokens | text_tokens] -> Qwen3-8B + LoRA -> answer
     """
 
-    def __init__(self, cfg: Dict[str, Any], stage: int = 1):
+    def __init__(self, cfg: Dict[str, Any], stage: int = 1, apply_lora: bool = True):
         super().__init__()
         self.cfg = cfg
         self.stage = stage
+        self.apply_lora = apply_lora
         self.llm_hidden_size = cfg["llm_hidden_size"]
+        self.use_native_vision = "internvl" in str(cfg["llm_model_name"]).lower()
+        self.base_vl: Optional[BaseVLModel] = None
 
         # --- Load LLM + tokenizer ---
         llm_path = cfg["llm_model_name"]
         print(f"[LoRA] Loading LLM: {llm_path}", flush=True)
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            llm_path, trust_remote_code=True,
-        )
+        if self.use_native_vision:
+            self.base_vl = BaseVLModel(
+                llm_model_name=llm_path,
+                vision_model_name="built-in",
+                llm_hidden_size=self.llm_hidden_size,
+                freeze_vision=True,
+                freeze_llm=False,
+                prefer_flash_attention_2=False,
+            )
+            self.llm = self.base_vl.llm
+            self.tokenizer = self.base_vl.tokenizer
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                llm_path, trust_remote_code=True,
+            )
+            if self.tokenizer.pad_token_id is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            # Match Qwen composition scripts (causal generation with batched prompts).
+            self.tokenizer.padding_side = "left"
+
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                llm_path,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+            )
+
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        # Match Qwen composition scripts (causal generation with batched prompts).
         self.tokenizer.padding_side = "left"
-
-        self.llm = AutoModelForCausalLM.from_pretrained(
-            llm_path,
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
-        )
         # Freeze base LLM before applying LoRA
         for p in self.llm.parameters():
             p.requires_grad = False
 
         # --- Apply PEFT LoRA ---
-        lora_cfg = LoraConfig(
-            r=cfg.get("lora_rank", 8),
-            lora_alpha=cfg.get("lora_alpha", 16),
-            target_modules=cfg.get("lora_target_modules", ["q_proj", "v_proj"]),
-            lora_dropout=cfg.get("lora_dropout", 0.05),
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
-        print(f"[LoRA] Applying LoRA: r={lora_cfg.r}, alpha={lora_cfg.lora_alpha}, "
-              f"targets={lora_cfg.target_modules}", flush=True)
-        self.llm = get_peft_model(self.llm, lora_cfg)
-        self.llm.print_trainable_parameters()
+        if self.apply_lora:
+            lora_cfg = LoraConfig(
+                r=cfg.get("lora_rank", 8),
+                lora_alpha=cfg.get("lora_alpha", 16),
+                target_modules=cfg.get("lora_target_modules", ["q_proj", "v_proj"]),
+                lora_dropout=cfg.get("lora_dropout", 0.05),
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+            print(f"[LoRA] Applying LoRA: r={lora_cfg.r}, alpha={lora_cfg.lora_alpha}, "
+                  f"targets={lora_cfg.target_modules}", flush=True)
+            self.llm = get_peft_model(self.llm, lora_cfg)
+            self.llm.print_trainable_parameters()
+        else:
+            print("[LoRA] Stage 0 baseline: no LoRA adapters attached", flush=True)
 
         # --- Audio encoder + projector (always created, loaded in stage 2) ---
         audio_cfg = cfg.get("audio_encoder_config", {})
@@ -158,7 +181,7 @@ class LoRABaselineModel(nn.Module):
         self.vision_encoder = None
         self.vision_processor = None
         self.vision_projector = None
-        if stage >= 2:
+        if stage >= 2 and not self.use_native_vision:
             self._init_vision(cfg)
 
         self.label_smoothing = cfg.get("label_smoothing", 0.1)
@@ -204,6 +227,8 @@ class LoRABaselineModel(nn.Module):
 
     def encode_vision(self, image_list: List[Any]) -> Optional[torch.Tensor]:
         """CLIP -> projector -> (B, num_vision_tokens, llm_hidden_size)."""
+        if self.use_native_vision:
+            return None
         if self.vision_encoder is None or self.vision_projector is None:
             return None
         if image_list is None:
@@ -253,6 +278,12 @@ class LoRABaselineModel(nn.Module):
     # ------------------------------------------------------------------
 
     def format_prompt(self, question: str) -> str:
+        if self.use_native_vision:
+            return (
+                "Answer with exactly one short answer token (single word or number).\n"
+                f"Question: {question}\n"
+                "Answer:"
+            )
         return (
             "<|im_start|>user\n"
             "Answer with exactly one short answer token (single word or number).\n"
@@ -284,6 +315,62 @@ class LoRABaselineModel(nn.Module):
             enc = {k: v.to(device) for k, v in enc.items()}
         return enc
 
+    def _prepare_native_vision_inputs(
+        self,
+        questions: List[str],
+        answers: Optional[List[str]] = None,
+        image_list: Optional[List[Any]] = None,
+        device: Optional[torch.device] = None,
+    ) -> Dict[str, torch.Tensor]:
+        if self.base_vl is None:
+            raise RuntimeError("Native-vision path requires base_vl to be initialized.")
+        if device is None:
+            device = next(self.llm.parameters()).device
+
+        prompt_texts = [self.format_prompt(q) for q in questions]
+        if answers is None:
+            full_texts = prompt_texts
+        else:
+            full_texts = [f"{self.format_prompt(q)} {a}" for q, a in zip(questions, answers)]
+
+        images_arg = image_list if image_list is not None and any(img is not None for img in image_list) else None
+        full_inputs = self.base_vl.prepare_inputs_for_training(
+            full_texts,
+            images=images_arg,
+            device=str(device),
+        )
+
+        input_ids = full_inputs["input_ids"]
+        attention_mask = full_inputs["attention_mask"]
+        pixel_values = full_inputs.get("pixel_values")
+
+        labels = input_ids.clone()
+        labels[attention_mask == 0] = -100
+
+        if answers is not None:
+            prompt_inputs = self.base_vl.prepare_inputs_for_training(
+                prompt_texts,
+                images=images_arg,
+                device=str(device),
+            )
+            prompt_attention = prompt_inputs["attention_mask"]
+            for i in range(labels.size(0)):
+                full_nonpad = int(attention_mask[i].sum().item())
+                prompt_nonpad = int(prompt_attention[i].sum().item())
+                seq_len = int(labels.size(1))
+                start = seq_len - full_nonpad
+                prompt_end = min(seq_len, start + prompt_nonpad)
+                labels[i, start:prompt_end] = -100
+
+        result: Dict[str, torch.Tensor] = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+        }
+        if pixel_values is not None:
+            result["pixel_values"] = pixel_values
+        return result
+
     # ------------------------------------------------------------------
     # Forward (training)
     # ------------------------------------------------------------------
@@ -298,6 +385,50 @@ class LoRABaselineModel(nn.Module):
         use_null_image: bool = False,
     ) -> Dict[str, torch.Tensor]:
         device = next(self.llm.parameters()).device
+
+        if self.use_native_vision:
+            native_inputs = self._prepare_native_vision_inputs(
+                questions=questions,
+                answers=answers,
+                image_list=image_list,
+                device=device,
+            )
+            input_ids = native_inputs["input_ids"]
+            attention_mask = native_inputs["attention_mask"]
+            labels = native_inputs["labels"]
+            pixel_values = native_inputs.get("pixel_values")
+            text_embeds = self.llm.get_input_embeddings()(input_ids)
+
+            modality_tokens_list = []
+            if use_null_audio:
+                modality_tokens_list.append(self.make_null_audio_tokens(len(questions), device))
+            elif audio_list is not None:
+                audio_tokens = self.encode_audio(audio_list)
+                if audio_tokens is not None:
+                    modality_tokens_list.append(audio_tokens)
+
+            if modality_tokens_list:
+                mod_tokens = torch.cat(modality_tokens_list, dim=1)
+                num_mod = mod_tokens.size(1)
+                text_embeds = torch.cat([mod_tokens, text_embeds], dim=1)
+                mod_mask = torch.ones(
+                    input_ids.size(0), num_mod,
+                    dtype=attention_mask.dtype, device=device,
+                )
+                attention_mask = torch.cat([mod_mask, attention_mask], dim=1)
+                mod_labels = torch.full(
+                    (input_ids.size(0), num_mod),
+                    -100, dtype=labels.dtype, device=device,
+                )
+                labels = torch.cat([mod_labels, labels], dim=1)
+
+            outputs = self.base_vl.forward(
+                inputs_embeds=text_embeds,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                labels=labels,
+            )
+            return {"loss": outputs["loss"], "logits": outputs["logits"]}
 
         # Tokenize text
         enc = self._tokenize_batch(questions, answers=answers, device=device)
@@ -384,6 +515,61 @@ class LoRABaselineModel(nn.Module):
         use_null_image: bool = False,
     ) -> List[str]:
         device = next(self.llm.parameters()).device
+
+        if self.use_native_vision:
+            native_inputs = self._prepare_native_vision_inputs(
+                questions=questions,
+                answers=None,
+                image_list=image_list,
+                device=device,
+            )
+            input_ids = native_inputs["input_ids"]
+            attention_mask = native_inputs["attention_mask"]
+            pixel_values = native_inputs.get("pixel_values")
+            text_embeds = self.llm.get_input_embeddings()(input_ids)
+
+            modality_tokens_list = []
+            if use_null_audio:
+                modality_tokens_list.append(self.make_null_audio_tokens(len(questions), device))
+            elif audio_list is not None:
+                audio_tokens = self.encode_audio(audio_list)
+                if audio_tokens is not None:
+                    modality_tokens_list.append(audio_tokens)
+
+            if modality_tokens_list:
+                mod_tokens = torch.cat(modality_tokens_list, dim=1)
+                num_mod = mod_tokens.size(1)
+                text_embeds = torch.cat([mod_tokens, text_embeds], dim=1)
+                mod_mask = torch.ones(
+                    input_ids.size(0), num_mod,
+                    dtype=attention_mask.dtype, device=device,
+                )
+                attention_mask = torch.cat([mod_mask, attention_mask], dim=1)
+
+            generate_kwargs = {
+                "inputs_embeds": text_embeds,
+                "attention_mask": attention_mask,
+                "max_new_tokens": max_new_tokens,
+                "do_sample": False,
+                "num_beams": 1,
+            }
+            if pixel_values is not None:
+                generate_kwargs["pixel_values"] = pixel_values
+                generate_kwargs["image_flags"] = torch.ones(
+                    (pixel_values.size(0), 1),
+                    dtype=torch.long,
+                    device=pixel_values.device,
+                )
+
+            output_ids = self.llm.generate(**generate_kwargs)
+            prompt_width = int(attention_mask.size(1))
+            preds = []
+            for i in range(output_ids.size(0)):
+                seq = output_ids[i]
+                gen = seq[prompt_width:] if seq.size(0) > prompt_width else seq
+                pred_text = self.tokenizer.decode(gen, skip_special_tokens=True)
+                preds.append(pred_text)
+            return preds
 
         enc = self._tokenize_batch(questions, device=device)
         input_ids = enc["input_ids"]
@@ -581,9 +767,8 @@ def evaluate(
         elif modality == "image":
             audio, images = None, batch["images"]
         elif modality == "both_null":
-            audio, images = None, None
+            audio, images = None, batch["images"]
             use_null_audio = True
-            use_null_image = True
         else:  # both
             audio, images = batch["audio"], batch["images"]
 
@@ -715,7 +900,7 @@ def parse_args() -> argparse.Namespace:
 
     # Stage
     p.add_argument("--stage", type=int, required=True, choices=[0, 1, 2],
-                    help="0=text-only eval, 1=audio LoRA, 2=vision LoRA on merged model")
+                    help="0=baseline eval, 1=audio LoRA, 2=legacy vision LoRA on merged Qwen model")
 
     # Model
     p.add_argument("--llm-model", type=str, default=None,
@@ -859,8 +1044,8 @@ def main() -> None:
     except ValueError:
         # Fallback: build config inline if lora_baseline not yet registered
         cfg = {
-            "llm_model_name": "models/Qwen_Qwen3-8B",
-            "vision_model_name": "openai/clip-vit-large-patch14",
+            "llm_model_name": "models/OpenGVLab_InternVL3_5-8B",
+            "vision_model_name": "built-in",
             "audio_encoder_type": "clap",
             "audio_encoder_config": {
                 "model_name": "laion/larger_clap_music_and_speech",
@@ -871,9 +1056,7 @@ def main() -> None:
             "audio_embed_dim": 512,
             "vision_embed_dim": 1024,
             "num_audio_tokens": 8,
-            "num_vision_tokens": 8,
             "freeze_audio_encoder": True,
-            "freeze_vision_encoder": True,
             "label_smoothing": 0.1,
         }
 
@@ -889,109 +1072,33 @@ def main() -> None:
     cfg["lora_dropout"] = args.lora_dropout
     cfg["label_smoothing"] = args.label_smoothing
 
-    # --- Stage 0: text-only baseline evaluation ---
+    native_vision_mode = "internvl" in str(cfg["llm_model_name"]).lower()
+
+    # --- Stage 0: baseline evaluation ---
     if args.stage == 0:
         print("=" * 60, flush=True)
-        print("[Stage 0] Text-only baseline evaluation", flush=True)
+        print("[Stage 0] Baseline evaluation", flush=True)
         print("=" * 60, flush=True)
-
-        # Load base model without LoRA for text-only eval
-        llm_path = cfg["llm_model_name"]
-        print(f"[Stage 0] Loading base LLM: {llm_path}", flush=True)
-        tokenizer = AutoTokenizer.from_pretrained(llm_path, trust_remote_code=True)
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.padding_side = "left"
-        base_llm = AutoModelForCausalLM.from_pretrained(
-            llm_path, torch_dtype=torch.bfloat16, trust_remote_code=True,
-        )
-        base_llm.to(device).eval()
-
+        model = LoRABaselineModel(cfg, stage=0, apply_lora=False)
+        model.to(device)
         val_ds = ManifestAVQADataset(args.val_manifest, args.media_root)
         val_loader = DataLoader(
             val_ds, batch_size=args.batch_size, shuffle=False,
             num_workers=args.num_workers, collate_fn=collate_avqa,
         )
 
-        # Evaluate text-only
-        exact_total = 0.0
-        extracted_total = 0.0
-        f1_total = 0.0
-        cat_f1_total = 0.0
-        count = 0
-        stage0_start = time.time()
-        total_batches = max(1, len(val_loader))
-        log_every = max(1, min(200, total_batches // 5))
-        instruction = "Answer with exactly one short answer token (single word or number)."
-        has_chat_template = bool(getattr(tokenizer, "chat_template", None)) and hasattr(tokenizer, "apply_chat_template")
-
-        for step, batch in enumerate(val_loader, start=1):
-            prompts = []
-            for q in batch["questions"]:
-                user_text = f"{instruction}\nQuestion: {q}\nAnswer:"
-                if has_chat_template:
-                    try:
-                        prompt = tokenizer.apply_chat_template(
-                            [{"role": "user", "content": user_text}],
-                            tokenize=False,
-                            add_generation_prompt=True,
-                            enable_thinking=False,
-                        )
-                    except TypeError:
-                        prompt = tokenizer.apply_chat_template(
-                            [{"role": "user", "content": user_text}],
-                            tokenize=False,
-                            add_generation_prompt=True,
-                        )
-                    except Exception:
-                        prompt = f"USER: /no_think\n{user_text}\nASSISTANT:"
-                else:
-                    prompt = f"USER: /no_think\n{user_text}\nASSISTANT:"
-                prompts.append(prompt)
-            enc = tokenizer(
-                prompts, return_tensors="pt", padding=True, truncation=True, max_length=512,
-            )
-            enc = {k: v.to(device) for k, v in enc.items()}
-
-            with torch.no_grad():
-                out_ids = base_llm.generate(
-                    **enc, max_new_tokens=args.max_answer_tokens,
-                    do_sample=False, num_beams=1,
-                )
-
-            prompt_width = int(enc["input_ids"].size(1))
-            for i in range(out_ids.size(0)):
-                seq = out_ids[i]
-                gen = seq[prompt_width:] if seq.size(0) > prompt_width else seq
-                pred = tokenizer.decode(gen, skip_special_tokens=True)
-                ref = batch["answers"][i]
-                exact_total += float(normalize_answer(pred) == normalize_answer(ref))
-                extracted_total += float(extract_answer(pred) == extract_answer(ref))
-                f1_total += token_f1(pred, ref)
-                cat_f1_total += categorical_f1(pred, ref)
-                count += 1
-
-            if step % log_every == 0 or step == total_batches:
-                elapsed = time.time() - stage0_start
-                eta = (elapsed / step) * max(0, total_batches - step)
-                running_extracted = 100.0 * extracted_total / max(1, count)
-                print(
-                    f"  [Stage0:text] step {step}/{total_batches} "
-                    f"extracted_em={running_extracted:.2f}% "
-                    f"elapsed={elapsed/60.0:.1f}m eta={eta/60.0:.1f}m",
-                    flush=True,
-                )
-
-        n = max(1, count)
-        results = {
-            "stage": 0,
-            "modality": "text",
-            "exact_match": 100.0 * exact_total / n,
-            "extracted_match": 100.0 * extracted_total / n,
-            "token_f1": 100.0 * f1_total / n,
-            "categorical_f1": 100.0 * cat_f1_total / n,
-            "num_samples": count,
-        }
+        baseline_modalities = ["text"]
+        if native_vision_mode:
+            baseline_modalities.append("image")
+        results = {"stage": 0}
+        for modality in baseline_modalities:
+            metrics = evaluate(model, val_loader, device, modality, args)
+            results[modality] = metrics
+            print(f"  [Stage0:{modality}] exact={metrics['exact_match']:.1f}% "
+                  f"extracted={metrics['extracted_match']:.1f}% "
+                  f"cat_f1={metrics['categorical_f1']:.1f}%", flush=True)
+        if "text" in results:
+            results["extracted_match"] = results["text"]["extracted_match"]
         print(f"\n[Stage 0] Results: {json.dumps(results, indent=2)}", flush=True)
         with open(args.output_dir / "stage0_results.json", "w") as f:
             json.dump(results, f, indent=2)
@@ -1005,6 +1112,9 @@ def main() -> None:
     model = LoRABaselineModel(cfg, stage=args.stage)
 
     # Stage 2: load trained audio projector from stage 1
+    if args.stage == 2 and native_vision_mode:
+        raise ValueError("Stage 2 legacy vision-LoRA path is not needed for InternVL native-vision mode.")
+
     if args.stage == 2 and args.audio_projector_path:
         print(f"[Stage 2] Loading audio projector from {args.audio_projector_path}", flush=True)
         state = torch.load(args.audio_projector_path, map_location="cpu")
@@ -1114,7 +1224,7 @@ def main() -> None:
     print(f"{'='*60}", flush=True)
     final_results = {"stage": args.stage}
     all_modalities = ["text", "audio"]
-    if args.stage >= 2:
+    if native_vision_mode or args.stage >= 2:
         all_modalities.extend(["image", "both_null", "both"])
     for modality in all_modalities:
         metrics = evaluate(model, val_loader, device, modality, args)

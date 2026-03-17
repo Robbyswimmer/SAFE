@@ -8,11 +8,9 @@
 #SBATCH --gres=gpu:1
 #SBATCH -p gpu
 #
-# Run all LoRA baseline stages sequentially in a single job:
-#   Stage 0: text-only eval
-#   Stage 1: audio LoRA training
-#   Merge:   merge audio LoRA into base weights
-#   Stage 2: vision LoRA training on merged model
+# Run the InternVL-native LoRA baseline sequentially in a single job:
+#   Stage 0: InternVL baseline eval (text,image)
+#   Stage 1: audio LoRA training/eval (text,audio,image,both,both_null)
 #
 # Usage:
 #   sbatch --gres=gpu:1 experiments/lora_baseline/scripts/run_all_stages.sh
@@ -53,7 +51,7 @@ VAL_MANIFEST="${VAL_MANIFEST:-${DATA_ROOT}/manifests/validation.jsonl}"
 MEDIA_ROOT="${MEDIA_ROOT:-/}"
 
 # ---- Model paths ----
-LLM_MODEL="${LLM_MODEL:-models/Qwen_Qwen3-8B}"
+LLM_MODEL="${LLM_MODEL:-models/OpenGVLab_InternVL3_5-8B}"
 OUTPUT_BASE="${OUTPUT_BASE:-${SAFE_ROOT}/checkpoints/lora_baseline}"
 
 # ---- Qwen-specific env vars ----
@@ -151,53 +149,26 @@ echo "============================================"
 # ---- Stage 0: text-only baseline ----
 echo ""
 echo "============================================"
-echo " Stage 0: Text-only baseline evaluation"
+echo " Stage 0: InternVL baseline evaluation"
 echo "============================================"
 python3 "${TRAIN_SCRIPT}" \
     --stage 0 \
     --output-dir "${OUTPUT_BASE}/stage0" \
     --train-modality audio \
-    --eval-modalities text \
+    --eval-modalities text,image \
     "${COMMON_ARGS[@]}"
 
 # ---- Stage 1: audio LoRA ----
 echo ""
 echo "============================================"
-echo " Stage 1: Audio LoRA training"
+echo " Stage 1: Audio LoRA training on InternVL"
 echo "============================================"
 python3 "${TRAIN_SCRIPT}" \
     --stage 1 \
     --output-dir "${OUTPUT_BASE}/stage1" \
     --train-modality audio \
-    --eval-modalities text,audio \
-    --stage0-results-path "${OUTPUT_BASE}/stage0/stage0_results.json" \
-    "${COMMON_ARGS[@]}"
-
-# ---- Merge: audio LoRA -> base weights ----
-echo ""
-echo "============================================"
-echo " Merge: audio LoRA into base weights"
-echo "============================================"
-python3 "${MERGE_SCRIPT}" \
-    --base-model "${LLM_MODEL}" \
-    --lora-checkpoint "${OUTPUT_BASE}/stage1/best_lora" \
-    --output-dir "${OUTPUT_BASE}/stage1_merged" \
-    --verify
-
-# ---- Stage 2: vision LoRA on merged model ----
-echo ""
-echo "============================================"
-echo " Stage 2: Vision LoRA on merged model"
-echo "============================================"
-python3 "${TRAIN_SCRIPT}" \
-    --stage 2 \
-    --output-dir "${OUTPUT_BASE}/stage2" \
-    --train-modality image \
     --eval-modalities text,audio,image,both,both_null \
-    --merged-model-path "${OUTPUT_BASE}/stage1_merged" \
-    --audio-projector-path "${OUTPUT_BASE}/stage1/best_audio_projector.pt" \
     --stage0-results-path "${OUTPUT_BASE}/stage0/stage0_results.json" \
-    --stage1-results-path "${OUTPUT_BASE}/stage1/stage1_final_results.json" \
     "${COMMON_ARGS[@]}"
 
 # ---- Summary ----

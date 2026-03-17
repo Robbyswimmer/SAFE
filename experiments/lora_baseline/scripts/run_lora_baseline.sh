@@ -8,11 +8,12 @@
 #SBATCH --gres=gpu:1
 #SBATCH -p gpu
 #
-# LoRA baseline experiment: single stage or merge
+# LoRA baseline experiment: InternVL-native audio addition baseline
 #
 # Usage:
 #   Stage 0:  STAGE=0 sbatch --gres=gpu:1 experiments/lora_baseline/scripts/run_lora_baseline.sh
 #   Stage 1:  STAGE=1 sbatch --gres=gpu:1 experiments/lora_baseline/scripts/run_lora_baseline.sh
+# Legacy Qwen+vision path only:
 #   Merge:    sbatch --gres=gpu:1 experiments/lora_baseline/scripts/run_lora_baseline.sh merge
 #   Stage 2:  STAGE=2 MERGED_MODEL_PATH=... AUDIO_PROJECTOR_PATH=... \
 #               sbatch --gres=gpu:1 experiments/lora_baseline/scripts/run_lora_baseline.sh
@@ -55,7 +56,7 @@ VAL_MANIFEST="${VAL_MANIFEST:-${DATA_ROOT}/manifests/validation.jsonl}"
 MEDIA_ROOT="${MEDIA_ROOT:-/}"
 
 # Model paths
-LLM_MODEL="${LLM_MODEL:-models/Qwen_Qwen3-8B}"
+LLM_MODEL="${LLM_MODEL:-models/OpenGVLab_InternVL3_5-8B}"
 MERGED_MODEL_PATH="${MERGED_MODEL_PATH:-}"
 AUDIO_PROJECTOR_PATH="${AUDIO_PROJECTOR_PATH:-}"
 
@@ -156,18 +157,22 @@ EXTRA_ARGS=()
 
 case "${STAGE}" in
     0)
-        echo "[Stage 0] Text-only baseline evaluation"
+        echo "[Stage 0] InternVL baseline evaluation"
         TRAIN_MODALITY="audio"
-        EXTRA_ARGS+=(--eval-modalities text)
+        EXTRA_ARGS+=(--eval-modalities text,image)
         ;;
     1)
-        echo "[Stage 1] Audio LoRA training"
+        echo "[Stage 1] Audio LoRA training on InternVL"
         TRAIN_MODALITY="audio"
-        EXTRA_ARGS+=(--eval-modalities text,audio)
+        EXTRA_ARGS+=(--eval-modalities text,audio,image,both,both_null)
         EXTRA_ARGS+=(--stage0-results-path "${STAGE0_RESULTS_PATH}")
         ;;
     2)
-        echo "[Stage 2] Vision LoRA training (on merged model)"
+        if [[ "${LLM_MODEL,,}" == *internvl* ]]; then
+            echo "ERROR: Stage 2 legacy vision-LoRA path is not used for InternVL native vision." >&2
+            exit 1
+        fi
+        echo "[Stage 2] Vision LoRA training (legacy merged-Qwen path)"
         TRAIN_MODALITY="image"
         EXTRA_ARGS+=(--eval-modalities text,audio,image,both,both_null)
         EXTRA_ARGS+=(--stage0-results-path "${STAGE0_RESULTS_PATH}")
