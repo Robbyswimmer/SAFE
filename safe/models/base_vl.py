@@ -161,7 +161,7 @@ class BaseVLModel(nn.Module):
             sys.stdout.flush()
             self.llm = LlavaForConditionalGeneration.from_pretrained(
                 llm_model_name,
-                torch_dtype=device_dtype,
+                dtype=device_dtype,
                 low_cpu_mem_usage=True,
                 use_safetensors=True,
                 **load_device_kwargs,
@@ -176,7 +176,7 @@ class BaseVLModel(nn.Module):
             sys.stdout.flush()
             self.llm = Blip2ForConditionalGeneration.from_pretrained(
                 llm_model_name,
-                torch_dtype=device_dtype,
+                dtype=device_dtype,
                 low_cpu_mem_usage=True,
                 use_safetensors=True,
                 **load_device_kwargs,
@@ -218,7 +218,7 @@ class BaseVLModel(nn.Module):
                 if quant_cfg is not None:
                     kwargs["quantization_config"] = quant_cfg
                 if torch_dtype is not None:
-                    kwargs["torch_dtype"] = torch_dtype
+                    kwargs["dtype"] = torch_dtype
                 if attn_implementation is not None:
                     kwargs["attn_implementation"] = attn_implementation
                 return AutoModelForCausalLM.from_pretrained(llm_model_name, **kwargs)
@@ -278,7 +278,12 @@ class BaseVLModel(nn.Module):
             # Enable gradient checkpointing if requested
             if enable_gradient_checkpointing:
                 try:
-                    self.llm.gradient_checkpointing_enable()
+                    try:
+                        self.llm.gradient_checkpointing_enable(
+                            gradient_checkpointing_kwargs={"use_reentrant": False}
+                        )
+                    except TypeError:
+                        self.llm.gradient_checkpointing_enable()
                     try:
                         self.llm.config.use_cache = False
                     except Exception:
@@ -291,7 +296,7 @@ class BaseVLModel(nn.Module):
             print(f"[BaseVL] ✓ LLM model loaded", flush=True)
             sys.stdout.flush()
 
-            self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name, trust_remote_code=True)
+            self.tokenizer = self._load_tokenizer(llm_model_name, trust_remote_code=True)
             print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
             sys.stdout.flush()
             self.model_type = "qwen"
@@ -331,7 +336,7 @@ class BaseVLModel(nn.Module):
                 if quant_cfg is not None:
                     kwargs["quantization_config"] = quant_cfg
                 if torch_dtype is not None:
-                    kwargs["torch_dtype"] = torch_dtype
+                    kwargs["dtype"] = torch_dtype
                 if attn_implementation is not None:
                     kwargs["attn_implementation"] = attn_implementation
                 return AutoModelForImageTextToText.from_pretrained(llm_model_name, **kwargs)
@@ -345,7 +350,7 @@ class BaseVLModel(nn.Module):
                 if quant_cfg is not None:
                     kwargs["quantization_config"] = quant_cfg
                 if torch_dtype is not None:
-                    kwargs["torch_dtype"] = torch_dtype
+                    kwargs["dtype"] = torch_dtype
                 if attn_implementation is not None:
                     kwargs["attn_implementation"] = attn_implementation
 
@@ -433,7 +438,12 @@ class BaseVLModel(nn.Module):
             # Enable gradient checkpointing if requested
             if enable_gradient_checkpointing:
                 try:
-                    self.llm.gradient_checkpointing_enable()
+                    try:
+                        self.llm.gradient_checkpointing_enable(
+                            gradient_checkpointing_kwargs={"use_reentrant": False}
+                        )
+                    except TypeError:
+                        self.llm.gradient_checkpointing_enable()
                     try:
                         self.llm.config.use_cache = False
                     except Exception:
@@ -446,7 +456,7 @@ class BaseVLModel(nn.Module):
             print(f"[BaseVL] ✓ LLM model loaded", flush=True)
             sys.stdout.flush()
 
-            self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name, trust_remote_code=True)
+            self.tokenizer = self._load_tokenizer(llm_model_name, trust_remote_code=True)
             print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
             sys.stdout.flush()
 
@@ -500,7 +510,7 @@ class BaseVLModel(nn.Module):
             )
             print(f"[BaseVL] ✓ LLM model loaded", flush=True)
             sys.stdout.flush()
-            self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
+            self.tokenizer = self._load_tokenizer(llm_model_name)
             print(f"[BaseVL] ✓ Tokenizer loaded", flush=True)
             sys.stdout.flush()
             self.model_type = "custom"
@@ -544,6 +554,18 @@ class BaseVLModel(nn.Module):
             # (Qwen uses audio fusion via SAFE, not vision tokens)
             self.vision_start_token = None
             self.vision_end_token = None
+
+    @staticmethod
+    def _load_tokenizer(model_name: str, **kwargs):
+        """Load tokenizer with optional Mistral regex fix when supported."""
+        try:
+            return AutoTokenizer.from_pretrained(
+                model_name,
+                fix_mistral_regex=True,
+                **kwargs,
+            )
+        except TypeError:
+            return AutoTokenizer.from_pretrained(model_name, **kwargs)
 
     @staticmethod
     def _resolve_device_map_spec(spec: str):

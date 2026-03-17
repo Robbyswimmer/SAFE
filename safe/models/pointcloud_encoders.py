@@ -462,18 +462,24 @@ class PointTransformerEncoder(nn.Module):
         # Get group centers via FPS
         centers = farthest_point_sample(xyz, self.num_groups)  # (B, num_groups, 3)
 
-        # For each center, find nearest neighbors
-        # Simplified: just reshape if N = num_groups * group_size
-        if N == self.num_groups * self.group_size:
-            groups = xyz.reshape(B, self.num_groups, self.group_size, C)
-        else:
-            # Use random grouping as fallback
-            indices = torch.randint(0, N, (B, self.num_groups, self.group_size), device=xyz.device)
-            groups = torch.gather(
-                xyz.unsqueeze(1).expand(-1, self.num_groups, -1, -1),
-                2,
-                indices.unsqueeze(-1).expand(-1, -1, -1, C)
-            )
+        # Real neighborhood grouping: for each FPS center, gather K nearest points.
+        # torch.cdist is manageable here: (B, G, N) with G=64 and typical N<=8192.
+        distances = torch.cdist(centers.float(), xyz.float(), p=2)  # (B, G, N)
+        knn_indices = torch.topk(
+            distances,
+            k=min(self.group_size, N),
+            dim=-1,
+            largest=False,
+            sorted=True,
+        ).indices  # (B, G, K)
+
+        if knn_indices.size(-1) < self.group_size:
+            pad_count = self.group_size - knn_indices.size(-1)
+            pad_idx = knn_indices[..., -1:].expand(-1, -1, pad_count)
+            knn_indices = torch.cat([knn_indices, pad_idx], dim=-1)
+
+        batch_indices = torch.arange(B, device=xyz.device).view(B, 1, 1).expand_as(knn_indices)
+        groups = xyz[batch_indices, knn_indices]  # (B, G, group_size, C)
 
         # Flatten group features
         groups = groups.reshape(B, self.num_groups, -1)  # (B, num_groups, group_size * 3)

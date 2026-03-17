@@ -329,7 +329,7 @@ class ScanQACompositionModel(nn.Module):
             print("Loading LLaVA model for image-only mode...")
             self.llava = LlavaForConditionalGeneration.from_pretrained(
                 self.llm_model_name,
-                torch_dtype=torch.float16,
+                dtype=torch.float16,
                 low_cpu_mem_usage=True,
             )
             self.processor = AutoProcessor.from_pretrained(self.llm_model_name)
@@ -760,6 +760,21 @@ def compute_answer_ce_loss(
     """Compute causal LM loss over answer tokens only."""
     if logits is None:
         return None
+
+    if logits.dim() < 3 or labels.dim() < 2:
+        return None
+
+    seq_diff = int(logits.size(1) - labels.size(1))
+    if seq_diff > 0:
+        pad = torch.full(
+            (labels.size(0), seq_diff),
+            -100,
+            dtype=labels.dtype,
+            device=labels.device,
+        )
+        labels = torch.cat([pad, labels], dim=1)
+    elif seq_diff < 0:
+        labels = labels[:, -logits.size(1):]
 
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = labels[..., 1:].contiguous()
