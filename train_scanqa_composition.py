@@ -335,19 +335,8 @@ class ScanQACompositionModel(nn.Module):
             return outputs
 
     def get_trainable_params(self):
-        """Get trainable parameters (only SAFE adapter, LLaVA is frozen)."""
-        params = []
-
-        if self.modality == "image":
-            # Image-only: LLaVA is frozen, no trainable params
-            # (unless we add a small adapter later)
-            pass
-        else:
-            # PC-only or Both: Train SAFE adapter
-            if hasattr(self, 'safe_model') and hasattr(self.safe_model, "get_trainable_params"):
-                params.extend(self.safe_model.get_trainable_params())
-
-        return params
+        """Get trainable parameters (only SAFE adapter components, LLM is frozen)."""
+        return [p for p in self.parameters() if p.requires_grad]
 
 
 def parse_args():
