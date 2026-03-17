@@ -42,7 +42,15 @@ else
 fi
 conda activate "$CONDA_ENV"
 
-PYTHON_BIN=${PYTHON_BIN:-$(command -v python)}
+unset PYTHONHOME
+unset PYTHONPATH
+
+PYTHON_BIN_DEFAULT="$HOME/.conda/envs/${CONDA_ENV}/bin/python"
+if [[ -x "${PYTHON_BIN_DEFAULT}" ]]; then
+  PYTHON_BIN=${PYTHON_BIN:-${PYTHON_BIN_DEFAULT}}
+else
+  PYTHON_BIN=${PYTHON_BIN:-$(command -v python)}
+fi
 if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
   echo "[env] Failed to resolve python after activating ${CONDA_ENV}" >&2
   exit 2
