@@ -623,6 +623,7 @@ class SAFEPointCloudModel(nn.Module):
         pixel_values: Optional[torch.Tensor] = None,
         max_new_tokens: int = 50,
         num_beams: int = 5,
+        gate: float = 1.0,
         **generate_kwargs,
     ) -> torch.Tensor:
         """
