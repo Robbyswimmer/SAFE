@@ -20,6 +20,33 @@ from transformers import (
 from typing import Optional, Dict, Any, Tuple
 import os
 
+# ---------------------------------------------------------------------------
+# Transformers compat shim: newer transformers (>=4.47) expects
+# `all_tied_weights_keys` on PreTrainedModel, but InternVL's custom code
+# may not set it.  Patch `mark_tied_weights_as_initialized` to lazily
+# populate the attribute so loading doesn't crash.
+# ---------------------------------------------------------------------------
+try:
+    from transformers import PreTrainedModel as _PTM
+
+    _orig_mark_tied = getattr(_PTM, "mark_tied_weights_as_initialized", None)
+    if _orig_mark_tied is not None:
+        def _safe_mark_tied(self, loading_info):
+            if not hasattr(self, "all_tied_weights_keys"):
+                try:
+                    self.all_tied_weights_keys = self.get_expanded_tied_weights_keys(
+                        all_submodels=False
+                    )
+                except Exception:
+                    self.all_tied_weights_keys = {
+                        k: k for k in (getattr(self, "_tied_weights_keys", None) or [])
+                    }
+            return _orig_mark_tied(self, loading_info)
+
+        _PTM.mark_tied_weights_as_initialized = _safe_mark_tied
+except Exception:
+    pass
+
 
 class BaseVLModel(nn.Module):
     """
