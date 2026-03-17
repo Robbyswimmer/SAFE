@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import sys
 from collections import defaultdict
@@ -32,6 +33,11 @@ from torch.utils.data import DataLoader, Subset
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+# SQA3D is currently more valuable as a stable benchmark path than as a
+# max-memory path. Disable gradient checkpointing by default here unless the
+# caller explicitly overrides the environment.
+os.environ.setdefault("SAFE_ENABLE_GRADIENT_CHECKPOINTING", "0")
 
 from configs.pointcloud_configs import get_pointcloud_config
 from safe.data.sqa3d_dataset import SQA3DDataset, collate_sqa3d_batch

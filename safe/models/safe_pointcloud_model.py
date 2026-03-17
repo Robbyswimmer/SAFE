@@ -279,7 +279,7 @@ class SAFEPointCloudModel(nn.Module):
         pc_features = self.pointcloud_encoder(pointcloud)
 
         # Debug: check for inf/nan in encoder features once
-        if not hasattr(self, "_pc_feat_debug_logged"):
+        if (not self.training) and not hasattr(self, "_pc_feat_debug_logged"):
             self._pc_feat_debug_logged = True
             feat_finite = torch.isfinite(pc_features).all()
             feat_min = pc_features.min().item()
@@ -316,7 +316,7 @@ class SAFEPointCloudModel(nn.Module):
             pc_tokens = self.pointcloud_projector(pc_features)
 
         # Debug: check projector output once
-        if not hasattr(self, "_pc_proj_debug_logged"):
+        if (not self.training) and not hasattr(self, "_pc_proj_debug_logged"):
             self._pc_proj_debug_logged = True
             proj_finite = torch.isfinite(pc_tokens).all()
             proj_min = pc_tokens.min().item()
@@ -437,7 +437,7 @@ class SAFEPointCloudModel(nn.Module):
             pointcloud_tokens = self.encode_pointcloud(pointcloud)
 
         # Debug: check for inf/nan in pointcloud tokens
-        if pointcloud_tokens is not None and not hasattr(self, '_pc_debug_logged'):
+        if pointcloud_tokens is not None and (not self.training) and not hasattr(self, '_pc_debug_logged'):
             self._pc_debug_logged = True
             pc_finite = torch.isfinite(pointcloud_tokens).all()
             pc_min = pointcloud_tokens.min().item()
@@ -487,7 +487,7 @@ class SAFEPointCloudModel(nn.Module):
             )
 
             # Debug: log hook info once
-            if not hasattr(self, '_hook_debug_logged'):
+            if (not self.training) and not hasattr(self, '_hook_debug_logged'):
                 self._hook_debug_logged = True
                 mode = "composition (image+PC)" if use_composition else "PC-only"
                 print(f"[DEBUG] Hooks registered ({mode}): num_hooks={hook_manager.num_hooks}, "
@@ -618,7 +618,7 @@ class SAFEPointCloudModel(nn.Module):
                 )
 
         # Debug: check outputs
-        if not hasattr(self, '_output_debug_logged'):
+        if (not self.training) and not hasattr(self, '_output_debug_logged'):
             self._output_debug_logged = True
             logits_finite = torch.isfinite(outputs.logits).all()
             logits_min = outputs.logits.min().item()

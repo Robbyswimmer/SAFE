@@ -197,11 +197,7 @@ class CrossAttentionBlock(nn.Module):
 
         # Add attention diagnostics (sample to avoid spam)
         with torch.no_grad():
-            if (
-                getattr(self, "debug_logging", False)
-                and self.training
-                and torch.rand(1).item() < 0.01
-            ):  # 1% sample rate
+            if getattr(self, "debug_logging", False) and (not self.training):
                 # How much total attention flows INTO audio per head
                 attn_to_audio = attention_probs.sum(dim=-1).mean().item()  # average over audio dim, then global mean
                 # Entropy of attention over audio tokens (high = diffuse; low = peaky)
