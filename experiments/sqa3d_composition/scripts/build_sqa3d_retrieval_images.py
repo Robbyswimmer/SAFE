@@ -112,13 +112,31 @@ def load_clip(device: torch.device):
     return model, processor
 
 
+def unwrap_feature_tensor(value: torch.Tensor | object, preferred_attr: str) -> torch.Tensor:
+    if torch.is_tensor(value):
+        return value
+
+    candidate = getattr(value, preferred_attr, None)
+    if torch.is_tensor(candidate):
+        return candidate
+
+    pooler = getattr(value, "pooler_output", None)
+    if torch.is_tensor(pooler):
+        return pooler
+
+    if isinstance(value, (list, tuple)) and value and torch.is_tensor(value[0]):
+        return value[0]
+
+    raise TypeError(f"Could not unwrap feature tensor from value of type {type(value).__name__}")
+
+
 @torch.no_grad()
 def select_best_frame(query: str, frame_paths: List[Path], model, processor, device: torch.device, batch_size: int) -> Path | None:
     if not frame_paths:
         return None
 
     text_inputs = processor(text=[query], return_tensors="pt", padding=True, truncation=True).to(device)
-    text_features = model.get_text_features(**text_inputs)
+    text_features = unwrap_feature_tensor(model.get_text_features(**text_inputs), "text_embeds")
     text_features = F.normalize(text_features, dim=-1)
 
     best_score = -math.inf
@@ -128,7 +146,7 @@ def select_best_frame(query: str, frame_paths: List[Path], model, processor, dev
         chunk = frame_paths[start:start + batch_size]
         images = [Image.open(path).convert("RGB") for path in chunk]
         image_inputs = processor(images=images, return_tensors="pt").to(device)
-        image_features = model.get_image_features(**image_inputs)
+        image_features = unwrap_feature_tensor(model.get_image_features(**image_inputs), "image_embeds")
         image_features = F.normalize(image_features, dim=-1)
         scores = torch.matmul(image_features, text_features.T).squeeze(-1)
         max_idx = int(torch.argmax(scores).item())
