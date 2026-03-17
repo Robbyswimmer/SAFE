@@ -205,7 +205,13 @@ class ScanQACompositionModel(nn.Module):
             self.safe_model.enable_pointcloud_training()
 
             # For "both" mode, we'll use SAFE's processor for images too
-            self.processor = self.safe_model.base_vl.processor
+            base_vl = self.safe_model.base_vl
+            if hasattr(base_vl, "processor"):
+                self.processor = base_vl.processor
+            elif hasattr(base_vl, "internvl_image_processor") and base_vl.internvl_image_processor is not None:
+                self.processor = base_vl.internvl_image_processor
+            else:
+                self.processor = None
 
             self.llm_hidden_size = self.safe_model.base_vl.llm.config.hidden_size
 
