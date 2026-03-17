@@ -24,6 +24,11 @@ if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
   conda activate "$CONDA_ENV"
 fi
 
+# SQA3D defaults to checkpointing-off for stability. Override only if you
+# explicitly want to debug/re-enable it.
+SAFE_ENABLE_GRADIENT_CHECKPOINTING=0
+export SAFE_ENABLE_GRADIENT_CHECKPOINTING
+
 MODEL_CONFIG=${MODEL_CONFIG:-sqa3d_internvl_1b}
 
 # Cluster-friendly defaults so a plain sbatch command works out of the box.

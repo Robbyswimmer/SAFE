@@ -35,9 +35,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # SQA3D is currently more valuable as a stable benchmark path than as a
-# max-memory path. Disable gradient checkpointing by default here unless the
-# caller explicitly overrides the environment.
-os.environ.setdefault("SAFE_ENABLE_GRADIENT_CHECKPOINTING", "0")
+# max-memory path. Force gradient checkpointing off here unless the caller
+# explicitly opts back in with SAFE_SQA3D_ALLOW_GRADIENT_CHECKPOINTING=1.
+if str(os.environ.get("SAFE_SQA3D_ALLOW_GRADIENT_CHECKPOINTING", "0")).strip().lower() not in {
+    "1", "true", "yes", "on"
+}:
+    os.environ["SAFE_ENABLE_GRADIENT_CHECKPOINTING"] = "0"
 
 from configs.pointcloud_configs import get_pointcloud_config
 from safe.data.sqa3d_dataset import SQA3DDataset, collate_sqa3d_batch
@@ -93,6 +96,37 @@ def token_f1(pred: str, ref: str) -> float:
     return 2.0 * precision * recall / max(precision + recall, 1e-8)
 
 
+def _contains_token_subsequence(pred_tokens: Sequence[str], ref_tokens: Sequence[str]) -> bool:
+    if not ref_tokens:
+        return False
+    if len(ref_tokens) > len(pred_tokens):
+        return False
+    width = len(ref_tokens)
+    for start in range(len(pred_tokens) - width + 1):
+        if list(pred_tokens[start:start + width]) == list(ref_tokens):
+            return True
+    return False
+
+
+def extracted_reference_match(pred: str, refs: Sequence[str]) -> bool:
+    """Verbosity-tolerant short-answer match.
+
+    Accept exact normalized matches, or cases where a reference answer appears
+    as a contiguous token span inside a longer generated sentence.
+    """
+    pred_norm = normalize_answer(pred)
+    pred_tokens = pred_norm.split()
+    for ref in refs:
+        ref_norm = normalize_answer(ref)
+        if not ref_norm:
+            continue
+        if pred_norm == ref_norm:
+            return True
+        if _contains_token_subsequence(pred_tokens, ref_norm.split()):
+            return True
+    return False
+
+
 def compute_sqa3d_metrics(
     predictions: Sequence[str],
     references: Sequence[Sequence[str]],
@@ -100,9 +134,10 @@ def compute_sqa3d_metrics(
 ) -> Dict[str, Any]:
     exact_total = 0.0
     norm_total = 0.0
+    extracted_total = 0.0
     f1_total = 0.0
     by_type: Dict[str, Dict[str, float]] = defaultdict(
-        lambda: {"exact_match": 0.0, "accuracy": 0.0, "token_f1": 0.0, "n": 0.0}
+        lambda: {"exact_match": 0.0, "accuracy": 0.0, "extracted_match": 0.0, "token_f1": 0.0, "n": 0.0}
     )
 
     for idx, (pred, refs) in enumerate(zip(predictions, references)):
@@ -112,16 +147,19 @@ def compute_sqa3d_metrics(
 
         exact = any(pred_raw == ref for ref in refs)
         accuracy = any(pred_norm == normalize_answer(ref) for ref in refs)
+        extracted = extracted_reference_match(pred_raw, refs)
         best_f1 = max((token_f1(pred_raw, ref) for ref in refs), default=0.0)
 
         exact_total += float(exact)
         norm_total += float(accuracy)
+        extracted_total += float(extracted)
         f1_total += best_f1
 
         qtype = str(question_types[idx]) if question_types is not None and idx < len(question_types) else "unknown"
         row = by_type[qtype]
         row["exact_match"] += float(exact)
         row["accuracy"] += float(accuracy)
+        row["extracted_match"] += float(extracted)
         row["token_f1"] += best_f1
         row["n"] += 1.0
 
@@ -132,6 +170,7 @@ def compute_sqa3d_metrics(
         by_type_out[qtype] = {
             "exact_match": 100.0 * row["exact_match"] / denom,
             "accuracy": 100.0 * row["accuracy"] / denom,
+            "extracted_match": 100.0 * row["extracted_match"] / denom,
             "token_f1": 100.0 * row["token_f1"] / denom,
             "n": int(row["n"]),
         }
@@ -139,6 +178,7 @@ def compute_sqa3d_metrics(
     return {
         "exact_match": 100.0 * exact_total / n,
         "accuracy": 100.0 * norm_total / n,
+        "extracted_match": 100.0 * extracted_total / n,
         "token_f1": 100.0 * f1_total / n,
         "num_samples": len(predictions),
         "by_type": by_type_out,
@@ -622,15 +662,16 @@ def main() -> None:
             epoch_result["eval"][modality] = metrics
             print(
                 f"  [eval:{modality}] accuracy={metrics['accuracy']:.2f} "
+                f"extracted={metrics['extracted_match']:.2f} "
                 f"exact={metrics['exact_match']:.2f} f1={metrics['token_f1']:.2f} "
                 f"n={metrics['num_samples']}",
                 flush=True,
             )
         if {"pointcloud", "image", "both"}.issubset(set(epoch_result["eval"].keys())):
-            pc_acc = epoch_result["eval"]["pointcloud"]["accuracy"]
-            img_acc = epoch_result["eval"]["image"]["accuracy"]
-            both_acc = epoch_result["eval"]["both"]["accuracy"]
-            text_acc = epoch_result["eval"].get("text", {}).get("accuracy", 0.0)
+            pc_acc = epoch_result["eval"]["pointcloud"]["extracted_match"]
+            img_acc = epoch_result["eval"]["image"]["extracted_match"]
+            both_acc = epoch_result["eval"]["both"]["extracted_match"]
+            text_acc = epoch_result["eval"].get("text", {}).get("extracted_match", 0.0)
             print(
                 f"  [composition] text={text_acc:.2f} pointcloud={pc_acc:.2f} "
                 f"image={img_acc:.2f} both={both_acc:.2f} "
@@ -647,6 +688,7 @@ def main() -> None:
         payload = {"epoch": 0}
         for modality, metrics in baseline["eval"].items():
             payload[f"val/{modality}/accuracy"] = metrics["accuracy"]
+            payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
             payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
             payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
         wandb_run.log(payload, step=0)
@@ -698,7 +740,7 @@ def main() -> None:
         history.append(epoch_result)
 
         score_modality = "both" if "both" in epoch_result["eval"] else eval_modalities[0]
-        score = float(epoch_result["eval"].get(score_modality, {}).get("accuracy", -1.0))
+        score = float(epoch_result["eval"].get(score_modality, {}).get("extracted_match", -1.0))
         if score > best_accuracy:
             best_accuracy = score
             ckpt = {
@@ -711,7 +753,7 @@ def main() -> None:
                 "best_accuracy": best_accuracy,
             }
             torch.save(ckpt, args.output_dir / "best.pt")
-            print(f"  [checkpoint] saved best.pt ({score_modality} accuracy={best_accuracy:.2f})", flush=True)
+            print(f"  [checkpoint] saved best.pt ({score_modality} extracted={best_accuracy:.2f})", flush=True)
 
         torch.save(
             {
@@ -734,12 +776,16 @@ def main() -> None:
                 payload[f"train/{key}"] = value
             for modality, metrics in epoch_result["eval"].items():
                 payload[f"val/{modality}/accuracy"] = metrics["accuracy"]
+                payload[f"val/{modality}/extracted_match"] = metrics["extracted_match"]
                 payload[f"val/{modality}/exact_match"] = metrics["exact_match"]
                 payload[f"val/{modality}/token_f1"] = metrics["token_f1"]
             if {"pointcloud", "image", "both"}.issubset(set(epoch_result["eval"].keys())):
-                payload["val/composition_gain_accuracy"] = (
-                    epoch_result["eval"]["both"]["accuracy"]
-                    - max(epoch_result["eval"]["pointcloud"]["accuracy"], epoch_result["eval"]["image"]["accuracy"])
+                payload["val/composition_gain_extracted"] = (
+                    epoch_result["eval"]["both"]["extracted_match"]
+                    - max(
+                        epoch_result["eval"]["pointcloud"]["extracted_match"],
+                        epoch_result["eval"]["image"]["extracted_match"],
+                    )
                 )
             wandb_run.log(payload, step=global_step)
 
