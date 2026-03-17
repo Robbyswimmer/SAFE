@@ -362,13 +362,19 @@ class ThreeDQADownloader:
         for split in SCANQA_SPLITS:
             filename = f"ScanQA_v1.0_{split}.json"
             dest = self.scanqa_dir / filename
+
+            # Remove broken symlinks so exists() and copy work correctly
+            if dest.is_symlink() and not dest.exists():
+                self.logger.info(f"  Removing broken symlink: {dest}")
+                dest.unlink()
+
             if dest.exists():
                 continue
 
             # Search common subdirectory patterns
             candidates = [
                 p for p in self.scanqa_dir.rglob(filename)
-                if p.resolve() != dest.resolve()
+                if p != dest and p.resolve() != dest.resolve()
             ]
             if candidates:
                 src = candidates[0]
