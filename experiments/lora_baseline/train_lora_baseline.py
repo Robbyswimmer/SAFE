@@ -41,6 +41,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from configs.model_configs import get_config
+from experiments.lora_baseline._audio_embedding_proxy import AudioTokenEmbeddingProxy
 from safe.models.audio_encoders import CLAPAudioEncoder
 from safe.models.base_vl import BaseVLModel
 from safe.models.projectors import AudioProjector, TokenSetProjector
@@ -104,6 +105,9 @@ class LoRABaselineModel(nn.Module):
         self.llm_hidden_size = cfg["llm_hidden_size"]
         self.use_native_vision = "internvl" in str(cfg["llm_model_name"]).lower()
         self.base_vl: Optional[BaseVLModel] = None
+        self.audio_context_token = "<AUDIO_CONTEXT>"
+        self.audio_context_token_id: Optional[int] = None
+        self._pending_audio_token_embeddings: Optional[torch.Tensor] = None
 
         # --- Load LLM + tokenizer ---
         llm_path = cfg["llm_model_name"]
@@ -137,6 +141,10 @@ class LoRABaselineModel(nn.Module):
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "left"
+
+        if self.use_native_vision:
+            self._init_native_audio_placeholders()
+
         # Freeze base LLM before applying LoRA
         for p in self.llm.parameters():
             p.requires_grad = False
@@ -185,6 +193,43 @@ class LoRABaselineModel(nn.Module):
             self._init_vision(cfg)
 
         self.label_smoothing = cfg.get("label_smoothing", 0.1)
+
+    def _init_native_audio_placeholders(self) -> None:
+        added = self.tokenizer.add_tokens([self.audio_context_token])
+        if added > 0:
+            self.llm.resize_token_embeddings(len(self.tokenizer))
+        token_id = self.tokenizer.convert_tokens_to_ids(self.audio_context_token)
+        if token_id == self.tokenizer.unk_token_id:
+            raise RuntimeError("Failed to register native audio placeholder token.")
+        self.audio_context_token_id = int(token_id)
+
+        host = getattr(self.llm, "language_model", self.llm)
+        base_embedding = host.get_input_embeddings()
+        proxy = AudioTokenEmbeddingProxy(base_embedding, self)
+        host.set_input_embeddings(proxy)
+
+    def _apply_pending_audio_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        embeddings: torch.Tensor,
+    ) -> torch.Tensor:
+        pending = self._pending_audio_token_embeddings
+        token_id = self.audio_context_token_id
+        if pending is None or token_id is None:
+            return embeddings
+
+        output = embeddings.clone()
+        batch_size = min(output.size(0), pending.size(0))
+        for batch_idx in range(batch_size):
+            positions = (input_ids[batch_idx] == token_id).nonzero(as_tuple=False).flatten()
+            if positions.numel() == 0:
+                continue
+            replace_count = min(int(positions.numel()), int(pending.size(1)))
+            output[batch_idx, positions[:replace_count], :] = pending[batch_idx, :replace_count, :].to(
+                device=output.device,
+                dtype=output.dtype,
+            )
+        return output
 
     def _init_vision(self, cfg: Dict[str, Any]) -> None:
         vision_name = cfg.get("vision_model_name", "openai/clip-vit-large-patch14")
@@ -321,17 +366,22 @@ class LoRABaselineModel(nn.Module):
         answers: Optional[List[str]] = None,
         image_list: Optional[List[Any]] = None,
         device: Optional[torch.device] = None,
+        audio_placeholder_count: int = 0,
     ) -> Dict[str, torch.Tensor]:
         if self.base_vl is None:
             raise RuntimeError("Native-vision path requires base_vl to be initialized.")
         if device is None:
             device = next(self.llm.parameters()).device
 
-        prompt_texts = [self.format_prompt(q) for q in questions]
+        audio_prefix = ""
+        if audio_placeholder_count > 0:
+            audio_prefix = (" ".join([self.audio_context_token] * audio_placeholder_count)).strip() + "\n"
+
+        prompt_texts = [audio_prefix + self.format_prompt(q) for q in questions]
         if answers is None:
             full_texts = prompt_texts
         else:
-            full_texts = [f"{self.format_prompt(q)} {a}" for q, a in zip(questions, answers)]
+            full_texts = [f"{prompt_text} {a}" for prompt_text, a in zip(prompt_texts, answers)]
 
         images_arg = image_list if image_list is not None and any(img is not None for img in image_list) else None
         full_inputs = self.base_vl.prepare_inputs_for_training(
@@ -362,6 +412,9 @@ class LoRABaselineModel(nn.Module):
                 prompt_end = min(seq_len, start + prompt_nonpad)
                 labels[i, start:prompt_end] = -100
 
+        if self.audio_context_token_id is not None:
+            labels[input_ids == self.audio_context_token_id] = -100
+
         result: Dict[str, torch.Tensor] = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
@@ -387,47 +440,33 @@ class LoRABaselineModel(nn.Module):
         device = next(self.llm.parameters()).device
 
         if self.use_native_vision:
+            pending_audio_tokens = None
+            if use_null_audio:
+                pending_audio_tokens = self.make_null_audio_tokens(len(questions), device)
+            elif audio_list is not None:
+                pending_audio_tokens = self.encode_audio(audio_list)
+
             native_inputs = self._prepare_native_vision_inputs(
                 questions=questions,
                 answers=answers,
                 image_list=image_list,
                 device=device,
+                audio_placeholder_count=0 if pending_audio_tokens is None else pending_audio_tokens.size(1),
             )
             input_ids = native_inputs["input_ids"]
             attention_mask = native_inputs["attention_mask"]
             labels = native_inputs["labels"]
             pixel_values = native_inputs.get("pixel_values")
-            text_embeds = self.llm.get_input_embeddings()(input_ids)
-
-            modality_tokens_list = []
-            if use_null_audio:
-                modality_tokens_list.append(self.make_null_audio_tokens(len(questions), device))
-            elif audio_list is not None:
-                audio_tokens = self.encode_audio(audio_list)
-                if audio_tokens is not None:
-                    modality_tokens_list.append(audio_tokens)
-
-            if modality_tokens_list:
-                mod_tokens = torch.cat(modality_tokens_list, dim=1)
-                num_mod = mod_tokens.size(1)
-                text_embeds = torch.cat([mod_tokens, text_embeds], dim=1)
-                mod_mask = torch.ones(
-                    input_ids.size(0), num_mod,
-                    dtype=attention_mask.dtype, device=device,
+            self._pending_audio_token_embeddings = pending_audio_tokens
+            try:
+                outputs = self.base_vl.forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    labels=labels,
                 )
-                attention_mask = torch.cat([mod_mask, attention_mask], dim=1)
-                mod_labels = torch.full(
-                    (input_ids.size(0), num_mod),
-                    -100, dtype=labels.dtype, device=device,
-                )
-                labels = torch.cat([mod_labels, labels], dim=1)
-
-            outputs = self.base_vl.forward(
-                inputs_embeds=text_embeds,
-                attention_mask=attention_mask,
-                pixel_values=pixel_values,
-                labels=labels,
-            )
+            finally:
+                self._pending_audio_token_embeddings = None
             return {"loss": outputs["loss"], "logits": outputs["logits"]}
 
         # Tokenize text
@@ -517,82 +556,50 @@ class LoRABaselineModel(nn.Module):
         device = next(self.llm.parameters()).device
 
         if self.use_native_vision:
+            pending_audio_tokens = None
+            if use_null_audio:
+                pending_audio_tokens = self.make_null_audio_tokens(len(questions), device)
+            elif audio_list is not None:
+                pending_audio_tokens = self.encode_audio(audio_list)
+
             native_inputs = self._prepare_native_vision_inputs(
                 questions=questions,
                 answers=None,
                 image_list=image_list,
                 device=device,
+                audio_placeholder_count=0 if pending_audio_tokens is None else pending_audio_tokens.size(1),
             )
             input_ids = native_inputs["input_ids"]
             attention_mask = native_inputs["attention_mask"]
             pixel_values = native_inputs.get("pixel_values")
-            text_embeds = self.llm.get_input_embeddings()(input_ids)
-
-            modality_tokens_list = []
-            if use_null_audio:
-                modality_tokens_list.append(self.make_null_audio_tokens(len(questions), device))
-            elif audio_list is not None:
-                audio_tokens = self.encode_audio(audio_list)
-                if audio_tokens is not None:
-                    modality_tokens_list.append(audio_tokens)
-
-            if modality_tokens_list:
-                mod_tokens = torch.cat(modality_tokens_list, dim=1)
-                num_mod = mod_tokens.size(1)
-                text_embeds = torch.cat([mod_tokens, text_embeds], dim=1)
-                mod_mask = torch.ones(
-                    input_ids.size(0), num_mod,
-                    dtype=attention_mask.dtype, device=device,
+            generate_kwargs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "max_new_tokens": max_new_tokens,
+                "do_sample": False,
+                "num_beams": 1,
+            }
+            if pixel_values is not None:
+                generate_kwargs["pixel_values"] = pixel_values
+                generate_kwargs["image_flags"] = torch.ones(
+                    (pixel_values.size(0), 1),
+                    dtype=torch.long,
+                    device=pixel_values.device,
                 )
-                attention_mask = torch.cat([mod_mask, attention_mask], dim=1)
-            # InternVL custom generate() expects input_ids and does not reliably
-            # support the inputs_embeds + prefixed-audio-token path used here.
-            # Run a simple greedy decode loop through BaseVL.forward(), which
-            # already handles inputs_embeds + pixel_values correctly.
-            batch_size = text_embeds.size(0)
-            cur_embeds = text_embeds
-            cur_attention = attention_mask
-            finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
-            generated: List[List[int]] = [[] for _ in range(batch_size)]
-            eos_token_id = self.tokenizer.eos_token_id
-            pad_token_id = self.tokenizer.pad_token_id
 
-            for _ in range(max_new_tokens):
-                outputs = self.base_vl.forward(
-                    inputs_embeds=cur_embeds,
-                    attention_mask=cur_attention,
-                    pixel_values=pixel_values,
-                )
-                next_token_ids = outputs["logits"][:, -1, :].argmax(dim=-1)
-
-                for i in range(batch_size):
-                    if finished[i]:
-                        continue
-                    token_id = int(next_token_ids[i].item())
-                    if eos_token_id is not None and token_id == eos_token_id:
-                        finished[i] = True
-                        continue
-                    if pad_token_id is not None and token_id == pad_token_id:
-                        finished[i] = True
-                        continue
-                    generated[i].append(token_id)
-
-                if bool(finished.all()):
-                    break
-
-                next_embeds = self.llm.get_input_embeddings()(next_token_ids.unsqueeze(1))
-                cur_embeds = torch.cat([cur_embeds, next_embeds], dim=1)
-                next_mask = torch.ones(
-                    (batch_size, 1),
-                    dtype=cur_attention.dtype,
-                    device=device,
-                )
-                cur_attention = torch.cat([cur_attention, next_mask], dim=1)
-
-            return [
-                self.tokenizer.decode(token_ids, skip_special_tokens=True).strip()
-                for token_ids in generated
-            ]
+            self._pending_audio_token_embeddings = pending_audio_tokens
+            try:
+                output_ids = self.llm.generate(**generate_kwargs)
+            finally:
+                self._pending_audio_token_embeddings = None
+            prompt_width = int(attention_mask.size(1))
+            preds = []
+            for i in range(output_ids.size(0)):
+                seq = output_ids[i]
+                gen = seq[prompt_width:] if seq.size(0) > prompt_width else seq
+                pred_text = self.tokenizer.decode(gen, skip_special_tokens=True).strip()
+                preds.append(pred_text)
+            return preds
 
         enc = self._tokenize_batch(questions, device=device)
         input_ids = enc["input_ids"]
