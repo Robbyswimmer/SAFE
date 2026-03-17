@@ -263,14 +263,14 @@ SCANQA_INTERNVL_4B_CONFIG: Dict[str, Any] = {
         "embed_dim": 768,
         "use_pretrained": True,
         "checkpoint_path": None,
-        "return_group_tokens": False,
+        "return_group_tokens": True,
     },
 
     "llm_hidden_size": 2560,        # Qwen3-4B
     "pointcloud_embed_dim": 768,    # PointBERT output
 
     "projector_type": "standard",
-    "num_tokens": 16,               # Stronger multimodal signal for larger frozen backbone
+    "num_tokens": 64,               # Preserve more scene structure from point groups
     "projector_config": {
         "dropout": 0.1,
         "bottleneck_dim": 768,       # Slightly wider projector for the larger backbone
@@ -316,14 +316,14 @@ SCANQA_INTERNVL_1B_CONFIG: Dict[str, Any] = {
         "embed_dim": 768,
         "use_pretrained": True,
         "checkpoint_path": None,
-        "return_group_tokens": False,
+        "return_group_tokens": True,
     },
 
     "llm_hidden_size": 1024,        # Qwen3-0.6B
     "pointcloud_embed_dim": 768,    # PointBERT output
 
     "projector_type": "standard",
-    "num_tokens": 8,
+    "num_tokens": 32,
     "projector_config": {
         "dropout": 0.1,
         "bottleneck_dim": 256,       # Smaller projector for 1B
