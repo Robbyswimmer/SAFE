@@ -366,11 +366,20 @@ class ThreeDQADownloader:
                 continue
 
             # Search common subdirectory patterns
-            candidates = list(self.scanqa_dir.rglob(filename))
+            candidates = [
+                p for p in self.scanqa_dir.rglob(filename)
+                if p.resolve() != dest.resolve()
+            ]
             if candidates:
                 src = candidates[0]
-                shutil.copy2(str(src), str(dest))
-                self.logger.info(f"  Found local {filename} at {src.relative_to(self.scanqa_dir)}")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(str(src.resolve()), str(dest))
+                    self.logger.info(
+                        f"  Found local {filename} at {src.relative_to(self.scanqa_dir)}"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"  Could not copy {src} -> {dest}: {e}")
 
     def _log_scanqa_stats(self):
         """Log ScanQA statistics."""
