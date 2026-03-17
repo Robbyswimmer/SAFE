@@ -60,6 +60,7 @@ class SAFEPointCloudModel(nn.Module):
         freeze_base_vl: bool = True,
         freeze_pointcloud_encoder: bool = True,
         label_smoothing: float = 0.0,
+        enable_gradient_checkpointing: Optional[bool] = None,
 
         # Model dimensions
         llm_hidden_size: int = 5120,
@@ -91,6 +92,7 @@ class SAFEPointCloudModel(nn.Module):
             llm_hidden_size=llm_hidden_size,
             freeze_vision=freeze_base_vl,
             freeze_llm=freeze_base_vl,
+            enable_gradient_checkpointing=enable_gradient_checkpointing,
         )
         print(f"[SAFE-PC] ✓ BaseVLModel initialized", flush=True)
 

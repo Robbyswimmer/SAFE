@@ -40,6 +40,7 @@ if str(REPO_ROOT) not in sys.path:
 if str(os.environ.get("SAFE_SQA3D_ALLOW_GRADIENT_CHECKPOINTING", "0")).strip().lower() not in {
     "1", "true", "yes", "on"
 }:
+    os.environ["SAFE_GRAD_CKPT"] = "0"
     os.environ["SAFE_ENABLE_GRADIENT_CHECKPOINTING"] = "0"
 
 from configs.pointcloud_configs import get_pointcloud_config
@@ -187,6 +188,7 @@ def compute_sqa3d_metrics(
 
 def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
     config = get_pointcloud_config(args.model_config)
+    config["enable_gradient_checkpointing"] = False
     if args.llm_model:
         config["llm_model_name"] = args.llm_model
     if args.num_points is not None:
@@ -296,6 +298,49 @@ def trim_dataset(dataset, max_samples: int):
     if max_samples <= 0 or len(dataset) <= max_samples:
         return dataset
     return Subset(dataset, list(range(max_samples)))
+
+
+def disable_model_gradient_checkpointing(model: ScanQACompositionModel) -> None:
+    if not hasattr(model, "safe_model"):
+        return
+    llm = getattr(model.safe_model.base_vl, "llm", None)
+    if llm is None:
+        return
+    try:
+        if hasattr(llm, "gradient_checkpointing_disable"):
+            llm.gradient_checkpointing_disable()
+    except Exception:
+        pass
+    for attr in ("is_gradient_checkpointing", "gradient_checkpointing"):
+        try:
+            value = getattr(llm, attr)
+        except Exception:
+            continue
+        if isinstance(value, bool):
+            try:
+                setattr(llm, attr, False)
+            except Exception:
+                pass
+    try:
+        if hasattr(llm, "config"):
+            llm.config.use_cache = False
+    except Exception:
+        pass
+
+
+def model_gradient_checkpointing_status(model: ScanQACompositionModel) -> str:
+    if not hasattr(model, "safe_model"):
+        return "n/a"
+    llm = getattr(model.safe_model.base_vl, "llm", None)
+    if llm is None:
+        return "unknown"
+    values = []
+    for attr in ("is_gradient_checkpointing", "gradient_checkpointing"):
+        try:
+            values.append(f"{attr}={getattr(llm, attr)!r}")
+        except Exception:
+            continue
+    return ", ".join(values) if values else "unavailable"
 
 
 def train_epoch(
@@ -585,6 +630,7 @@ def main() -> None:
         unfreeze_encoder_last_n=int(args.unfreeze_encoder_last_n),
         config=config,
     ).to(device)
+    disable_model_gradient_checkpointing(model)
 
     eval_modalities = resolve_eval_modalities(args, model)
     train_dataset_modality = "both" if args.train_modality in {"both", "interleaved", "interleaved_vision_first"} else args.train_modality
@@ -637,6 +683,9 @@ def main() -> None:
     print(f"Effective batch:   {args.batch_size * args.gradient_accumulation_steps}")
     print(f"FP16 flag:         {args.fp16}")
     print(f"AMP:               disabled (model-native mixed precision)")
+    print(f"Grad ckpt env:     SAFE_GRAD_CKPT={os.environ.get('SAFE_GRAD_CKPT', '')}")
+    print(f"Grad ckpt config:  {config.get('enable_gradient_checkpointing')}")
+    print(f"Grad ckpt model:   {model_gradient_checkpointing_status(model)}")
     print(f"SAFE LR:           {args.safe_lr}")
     print(f"Fusion gate:       {args.fusion_gate}")
     print(f"Include situation: {args.include_situation}")

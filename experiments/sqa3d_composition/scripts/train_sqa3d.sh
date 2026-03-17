@@ -24,9 +24,11 @@ if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
   conda activate "$CONDA_ENV"
 fi
 
-# SQA3D defaults to checkpointing-off for stability. Override only if you
-# explicitly want to debug/re-enable it.
-SAFE_ENABLE_GRADIENT_CHECKPOINTING=0
+# SQA3D defaults to checkpointing-off for stability. Export both env names
+# because the codebase historically used both.
+SAFE_GRAD_CKPT="${SAFE_GRAD_CKPT:-0}"
+SAFE_ENABLE_GRADIENT_CHECKPOINTING="${SAFE_ENABLE_GRADIENT_CHECKPOINTING:-0}"
+export SAFE_GRAD_CKPT
 export SAFE_ENABLE_GRADIENT_CHECKPOINTING
 
 MODEL_CONFIG=${MODEL_CONFIG:-sqa3d_internvl_1b}

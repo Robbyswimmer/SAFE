@@ -361,6 +361,12 @@ class ScanQACompositionModel(nn.Module):
                     "llm_hidden_size": config.get("llm_hidden_size", 5120),
                     "pointcloud_embed_dim": config.get("pointcloud_embed_dim", 768),
                     "label_smoothing": config.get("label_smoothing", 0.0),
+                    "enable_gradient_checkpointing": bool(
+                        config.get(
+                            "enable_gradient_checkpointing",
+                            str(os.environ.get("SAFE_GRAD_CKPT", "0")).strip().lower() in {"1", "true", "yes", "on"},
+                        )
+                    ),
                 }
             else:
                 safe_config = {
@@ -375,6 +381,9 @@ class ScanQACompositionModel(nn.Module):
                     "fusion_layer_indices": fusion_layer_indices,
                     "freeze_base_vl": freeze_llm,
                     "freeze_pointcloud_encoder": freeze_encoder,
+                    "enable_gradient_checkpointing": str(os.environ.get("SAFE_GRAD_CKPT", "0")).strip().lower() in {
+                        "1", "true", "yes", "on"
+                    },
                 }
 
             self.safe_model = SAFEPointCloudModel(**safe_config)
