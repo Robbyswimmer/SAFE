@@ -453,20 +453,42 @@ class KVAugmentedAttention(nn.Module):
         # ============================================================
         # 1. TEXT ATTENTION (frozen, identical to original LlamaAttention)
         # ============================================================
+        hidden_shape = (bsz, q_len, -1, self.head_dim)
+
         query_states = orig_attn.q_proj(hidden_states)
         key_states = orig_attn.k_proj(hidden_states)
         value_states = orig_attn.v_proj(hidden_states)
 
-        # Reshape for multi-head attention
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        # Apply QK norms if present (Qwen3 uses RMSNorm on Q,K heads)
+        if hasattr(orig_attn, 'q_norm'):
+            query_states = orig_attn.q_norm(query_states.view(hidden_shape)).transpose(1, 2)
+        else:
+            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        if hasattr(orig_attn, 'k_norm'):
+            key_states = orig_attn.k_norm(key_states.view(hidden_shape)).transpose(1, 2)
+        else:
+            key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         # Apply RoPE to text Q, K (standard LLaMA)
+        cos, sin = None, None
         if hasattr(orig_attn, 'rotary_emb'):
             cos, sin = orig_attn.rotary_emb(value_states, position_ids)
             query_states, key_states = self._apply_rotary_pos_emb(
                 query_states, key_states, cos, sin
+            )
+
+        # Update KV cache for generation (concatenates past K,V with current)
+        if past_key_value is not None:
+            cache_kwargs = {}
+            if sin is not None:
+                cache_kwargs["sin"] = sin
+                cache_kwargs["cos"] = cos
+            if cache_position is not None:
+                cache_kwargs["cache_position"] = cache_position
+            layer_idx = getattr(orig_attn, 'layer_idx', getattr(self, 'layer_idx', 0))
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, layer_idx, cache_kwargs
             )
 
         # GQA expansion for text K, V
@@ -494,7 +516,7 @@ class KVAugmentedAttention(nn.Module):
 
         # Apply RoPE to delta_q (same rotation as query_states)
         # This ensures ΔQ is in the same coordinate space as post-RoPE queries
-        if hasattr(orig_attn, 'rotary_emb'):
+        if cos is not None and sin is not None:
             # Use the same cos, sin that was applied to query_states
             delta_q = self._apply_rotary_pos_emb_single(delta_q, cos, sin)
 
@@ -1362,12 +1384,21 @@ class MultiModalKVAugmentedAttention(nn.Module):
         # ============================================================
         # 1. TEXT ATTENTION (frozen)
         # ============================================================
+        hidden_shape = (bsz, q_len, -1, self.head_dim)
+
         query_states = orig_attn.q_proj(hidden_states)
         key_states = orig_attn.k_proj(hidden_states)
         value_states = orig_attn.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        # Apply QK norms if present (Qwen3 uses RMSNorm on Q,K heads)
+        if hasattr(orig_attn, 'q_norm'):
+            query_states = orig_attn.q_norm(query_states.view(hidden_shape)).transpose(1, 2)
+        else:
+            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        if hasattr(orig_attn, 'k_norm'):
+            key_states = orig_attn.k_norm(key_states.view(hidden_shape)).transpose(1, 2)
+        else:
+            key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         # Apply RoPE
@@ -1375,6 +1406,19 @@ class MultiModalKVAugmentedAttention(nn.Module):
         if hasattr(orig_attn, 'rotary_emb'):
             cos, sin = orig_attn.rotary_emb(value_states, position_ids)
             query_states, key_states = self._apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        # Update KV cache for generation (concatenates past K,V with current)
+        if past_key_value is not None:
+            cache_kwargs = {}
+            if sin is not None:
+                cache_kwargs["sin"] = sin
+                cache_kwargs["cos"] = cos
+            if cache_position is not None:
+                cache_kwargs["cache_position"] = cache_position
+            layer_idx = getattr(orig_attn, 'layer_idx', self.layer_idx)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, layer_idx, cache_kwargs
+            )
 
         # GQA expansion
         key_states_expanded = key_states
