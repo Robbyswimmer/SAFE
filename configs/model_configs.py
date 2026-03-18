@@ -745,6 +745,76 @@ COMPOSITION_INDEPENDENT_CONFIG = {
     "gradient_accumulation_steps": 16,
 }
 
+# Qwen3 KV-augmentation composition configuration.
+# Uses explicit audio/vision KV memory instead of residual addition so
+# modality interaction happens through attention rather than hidden-state sums.
+COMPOSITION_KV_QWEN_CONFIG = {
+    "name": "composition_kv_qwen",
+    "description": "Qwen3-8B composition with audio+vision KV augmentation on MUSIC-AVQA",
+    "eval_prompt": "Answer with a single word or number.",
+
+    "llm_model_name": os.environ.get("LLM_MODEL_PATH", "models/Qwen_Qwen3-8B"),
+    "vision_model_name": "openai/clip-vit-large-patch14",
+
+    "audio_encoder_type": "clap",
+    "audio_encoder_config": {
+        "model_name": "laion/larger_clap_music_and_speech",
+        "sample_rate": 48000,
+        "max_length": 10.0,
+    },
+
+    "llm_hidden_size": 4096,
+    "audio_embed_dim": 512,
+    "vision_embed_dim": 1024,
+
+    "projector_type": "standard",
+    "num_audio_tokens": 8,
+    "projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_swiglu": True,
+        "use_positional_embedding": True,
+    },
+
+    "num_vision_tokens": 8,
+    "vision_projector_config": {
+        "dropout": 0.1,
+        "bottleneck_dim": 1024,
+        "use_positional_embedding": True,
+    },
+
+    "fusion_type": "multilayer",
+    "fusion_layer_indices": [8, 14, 20, 26],
+    "lora_rank": 8,
+    "fusion_config": {
+        "fusion_mode": "kv_augment",
+        "num_attention_heads": 32,
+        "head_dim": 128,
+        "bottleneck_dim": 64,
+        "use_bottleneck": True,
+        "dropout": 0.1,
+        "query_adapter_rank": 16,
+        "modalities": {
+            "audio": {
+                "layer_indices": [8, 14, 20, 26],
+                "num_tokens": 8,
+            },
+            "vision": {
+                "layer_indices": [8, 14, 20, 26],
+                "num_tokens": 8,
+            },
+        },
+    },
+
+    "freeze_base_vl": True,
+    "freeze_audio_encoder": True,
+    "label_smoothing": 0.1,
+
+    "expected_vram_gb": 40,
+    "recommended_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+}
+
 # TTC-focused independent composition.
 # Same staggered modality layout as composition_independent, but named explicitly
 # for the unimodal-train -> compose -> test-time-compute pipeline.
@@ -1480,6 +1550,7 @@ CONFIGS = {
     "composition": COMPOSITION_CONFIG,
     "composition_study": COMPOSITION_STUDY_CONFIG,
     "composition_independent": COMPOSITION_INDEPENDENT_CONFIG,
+    "composition_kv_qwen": COMPOSITION_KV_QWEN_CONFIG,
     "composition_ttc": COMPOSITION_TTC_CONFIG,
     "composition_affine": COMPOSITION_AFFINE_CONFIG,
     "composition_fixed_point": COMPOSITION_FIXED_POINT_CONFIG,

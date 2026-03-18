@@ -1,6 +1,6 @@
 # NeurIPS Working Plan
 
-Last updated: 2026-03-17
+Last updated: 2026-03-18
 
 ## Paper Direction
 
@@ -19,13 +19,22 @@ Current best framing:
 - Main analysis story: interference/composition diagnostics explain why independent adapters fail and why staggered/joint training may help.
 - Point cloud/SQA3D is supporting evidence, not the headline claim.
 
-## Main Claims To Support
+## Current Supported Claims
 
-1. A frozen text LLM can acquire new modalities with a uniform adapter recipe.
-2. Unimodal performance scales with data for each added modality.
-3. Independently trained adapters do not automatically compose well.
-4. Joint paired-data training and/or better layer placement improves composition.
-5. Gated-off adapters preserve the base text pathway functionally in the no-modality setting.
+These are the claims the current evidence already supports well enough to build the paper around.
+
+1. A frozen text-only Qwen3 backbone can acquire strong unimodal modality adapters.
+2. Strong independently trained adapters do not compose automatically under naive residual addition.
+3. Joint paired-data training can recover positive task-level composition on the same frozen backbone.
+4. Recovering composition via joint training comes with a measurable unimodal-specialization penalty.
+5. Sequential later-modality training can enter a stability-versus-strength bottleneck, with the new adapter pushed toward a near-silent solution.
+
+## Claims Still Being Tested
+
+1. Whether staggered layer placement materially improves composition under joint training.
+2. Whether the sequential collapse persists through later epochs or eventually recovers.
+3. Whether operator changes such as KV augmentation improve composition without paying the full joint-training penalty.
+4. Whether gated-off functional invariance should be elevated as a main claim or left as supporting architecture detail.
 
 ## Primary Experimental Track
 
@@ -89,25 +98,23 @@ Notes:
 
 ## Immediate Priority Order
 
-1. Launch and monitor staggered Qwen joint-data run.
-2. Launch shared-layer Qwen joint-data run.
-3. Record unimodal and composed curves over training.
+1. Finish the sequential audio-after-vision readout and determine whether collapse persists.
+2. Record the shared-layer joint result as the main recovered-composition baseline.
+3. Compare shared vs staggered joint-data composition directly.
 4. Run gated-off invariance checks on the frozen text path.
-5. Compare shared vs staggered composition directly.
-6. Only then decide whether to emphasize:
-   - incremental modality addition first, or
-   - interference diagnosis first.
+5. If the above is clean, try one operator-level intervention, with KV augmentation as the preferred next test.
 
 ## Decision Gates
 
 Strong paper outcome:
 - joint `both` clearly exceeds best single modality on MUSIC-AVQA
-- staggered or paired-data training reduces the composition gap
+- independent and sequential settings fail in distinct, diagnosable ways
+- one operator-level change shows whether residual addition itself is the main bottleneck
 
 Acceptable paper outcome:
 - unimodal acquisition works strongly
 - independent composition fails
-- joint training or staggered placement partially recovers composition
+- joint training recovers composition and sequential addition shows collapse
 
 Fallback story:
 - modular modality addition works unimodally

@@ -550,11 +550,13 @@ def configure_trainable_modalities(
             "audio_token_embeddings.",
             "fusion_adapter.fusion_adapters.audio:",
             "fusion_adapter.layer_gates.audio:",
+            "kv_adapters.audio:",
         ),
         "vision": (
             "vision_projector.",
             "fusion_adapter.fusion_adapters.vision:",
             "fusion_adapter.layer_gates.vision:",
+            "kv_adapters.vision:",
         ),
     }
     if mode not in prefix_map:

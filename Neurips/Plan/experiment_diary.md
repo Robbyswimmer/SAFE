@@ -1,6 +1,6 @@
 # Experiment Diary
 
-Last updated: 2026-03-17
+Last updated: 2026-03-18
 
 Use this file as the chronological log for NeurIPS-relevant runs. Add one entry per run or milestone.
 
@@ -121,3 +121,70 @@ Earlier pilot same-layer snapshot:
 Higher archived staggered-layer figure-script values:
 - vision `73.95`
 - both `71.12`
+
+---
+
+## 2026-03-18
+
+### Qwen3 joint paired-training converged result
+
+Status:
+- validated
+- primary MUSIC-AVQA composition result on Qwen3
+
+Source:
+- user-provided converged training log
+
+Setup:
+- backbone: Qwen3-8B
+- training modality: `both`
+- training data: paired `audio + image + text`
+- training style: from scratch, joint optimization of both adapters
+
+Recorded snapshot:
+```text
+[eval:text] raw_em=19.06 extracted_em=22.96 cat_f1=22.96 f1=19.06 n=4595
+[eval:audio] raw_em=41.55 extracted_em=41.74 cat_f1=41.74 f1=41.56 n=4595
+[eval:image] raw_em=55.50 extracted_em=55.63 cat_f1=55.63 f1=55.52 n=4595
+[eval:both] raw_em=67.53 extracted_em=67.53 cat_f1=67.53 f1=67.53 n=4595
+```
+
+Interpretation:
+- this run establishes that a frozen text-only Qwen backbone can support positive audio+vision composition under joint paired-data training
+- the composed result is strong: `both=67.53`, which is `+11.90` over the best single modality
+- however, unimodal performance is substantially below the stronger independently trained adapters
+- this creates the central tradeoff for the paper:
+  - independent unimodal training gives strong single-modality performance but poor composition
+  - joint training gives much better composition but weaker single-modality specialization
+- this result rules out the strongest version of the claim that "Qwen cannot compose"; the more precise claim is that composition requires changing the learned injected directions, and joint training is one way to do that
+
+---
+
+### Qwen3 incremental audio-after-vision early stage-2 snapshot
+
+Status:
+- running
+- informative early-stage result
+
+Source:
+- [qwen_audio_after_vision_245979.out](/Users/robbymoseley/CascadeProjects/SAFE/logs/qwen_audio_after_vision_245979.out)
+
+Setup:
+- stage 1: vision adapter trained first
+- stage 2: vision frozen, audio trainable
+- active inputs in stage 2: `audio + image + text`
+
+Recorded snapshot:
+```text
+[grad_attribution] step=8000 audio:14=9.580e-01 | audio:20=8.925e-01 | audio:26=4.532e-01 | audio:8=9.034e-01 | projector=9.797e-01 | vision:10=0.000e+00 | vision:16=0.000e+00 | vision:22=0.000e+00 | vision:28=0.000e+00
+[eval:text] raw_em=19.06 extracted_em=22.96 cat_f1=22.96 f1=19.06 n=4595
+[eval:audio] raw_em=19.24 extracted_em=22.98 cat_f1=22.98 f1=19.73 n=4595
+```
+
+Interpretation:
+- audio-side parameters are receiving strong gradients while vision remains frozen
+- despite active optimization, the audio path is still effectively at text-baseline performance in this snapshot
+- this is consistent with the Jacobian-transport view from the theory note: the later adapter is learning on top of the transported perturbation created by the earlier vision adapter, so the easiest early solution is to keep the new residual small enough not to damage the already-good vision pathway
+- this run should be tracked as a key test of the incremental-addition hypothesis:
+  - if audio later rises while vision is preserved, incremental addition is viable
+  - if audio remains weak, that supports a stability-versus-strength bottleneck for later residual adapters

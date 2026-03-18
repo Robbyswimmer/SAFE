@@ -12,6 +12,7 @@ from .layer_hooks import LayerHookManager
 from .kv_augmentation import (
     KVAugmentationAdapter,
     KVAugmentationHookManager,
+    MultiModalKVAugmentationHookManager,
     MinAudioAttentionLoss,
 )
 
@@ -366,24 +367,62 @@ class SAFEModel(nn.Module):
 
             print(f"[SAFE] LLM attention config: num_heads={num_attention_heads}, num_kv_heads={num_key_value_heads}, head_dim={head_dim}", flush=True)
 
-            # Create per-layer KV adapters
-            # input_dim=audio_embed_dim because projector outputs in audio space (not llm_hidden_size)
-            # This significantly reduces adapter params while KV projection expands to LLM space
-            self.kv_adapters = nn.ModuleDict({
-                str(idx): KVAugmentationAdapter(
-                    hidden_size=llm_hidden_size,
-                    num_heads=num_attention_heads,
-                    head_dim=head_dim,
-                    num_key_value_heads=num_key_value_heads,  # For GQA models
-                    bottleneck_dim=fusion_config.get("bottleneck_dim", 64),
-                    dropout=fusion_config.get("dropout", 0.1),
-                    use_bottleneck=fusion_config.get("use_bottleneck", True),
-                    query_adapter_rank=fusion_config.get("query_adapter_rank", 16),
-                    input_dim=audio_embed_dim,  # Audio tokens are in audio_embed_dim space
-                )
-                for idx in kv_fusion_layers
-            })
-            self._kv_fusion_layers = kv_fusion_layers
+            modalities_cfg = fusion_config.get("modalities", {}) if isinstance(fusion_config, dict) else {}
+            vision_layers = modalities_cfg.get("vision", {}).get("layer_indices", kv_fusion_layers)
+            audio_layers = modalities_cfg.get("audio", {}).get("layer_indices", kv_fusion_layers)
+            use_multimodal_kv = bool(self.composition_mode and "vision" in modalities_cfg)
+
+            if use_multimodal_kv:
+                vision_input_dim = actual_output_dim
+                all_layers = sorted(set(audio_layers + vision_layers))
+                self.kv_adapters = nn.ModuleDict()
+                for idx in all_layers:
+                    if idx in audio_layers:
+                        self.kv_adapters[f"audio:{idx}"] = KVAugmentationAdapter(
+                            hidden_size=llm_hidden_size,
+                            num_heads=num_attention_heads,
+                            head_dim=head_dim,
+                            num_key_value_heads=num_key_value_heads,
+                            bottleneck_dim=fusion_config.get("bottleneck_dim", 64),
+                            dropout=fusion_config.get("dropout", 0.1),
+                            use_bottleneck=fusion_config.get("use_bottleneck", True),
+                            query_adapter_rank=fusion_config.get("query_adapter_rank", 16),
+                            input_dim=audio_embed_dim,
+                        )
+                    if idx in vision_layers:
+                        self.kv_adapters[f"vision:{idx}"] = KVAugmentationAdapter(
+                            hidden_size=llm_hidden_size,
+                            num_heads=num_attention_heads,
+                            head_dim=head_dim,
+                            num_key_value_heads=num_key_value_heads,
+                            bottleneck_dim=fusion_config.get("bottleneck_dim", 64),
+                            dropout=fusion_config.get("dropout", 0.1),
+                            use_bottleneck=fusion_config.get("use_bottleneck", True),
+                            query_adapter_rank=fusion_config.get("query_adapter_rank", 16),
+                            input_dim=vision_input_dim,
+                        )
+                self._kv_fusion_layers = all_layers
+                self._audio_kv_layers = list(audio_layers)
+                self._vision_kv_layers = list(vision_layers)
+            else:
+                # Create per-layer KV adapters.
+                # input_dim=audio_embed_dim because projector outputs in audio space (not llm_hidden_size)
+                # This significantly reduces adapter params while KV projection expands to LLM space.
+                self.kv_adapters = nn.ModuleDict({
+                    str(idx): KVAugmentationAdapter(
+                        hidden_size=llm_hidden_size,
+                        num_heads=num_attention_heads,
+                        head_dim=head_dim,
+                        num_key_value_heads=num_key_value_heads,  # For GQA models
+                        bottleneck_dim=fusion_config.get("bottleneck_dim", 64),
+                        dropout=fusion_config.get("dropout", 0.1),
+                        use_bottleneck=fusion_config.get("use_bottleneck", True),
+                        query_adapter_rank=fusion_config.get("query_adapter_rank", 16),
+                        input_dim=audio_embed_dim,  # Audio tokens are in audio_embed_dim space
+                    )
+                    for idx in kv_fusion_layers
+                })
+                self._kv_fusion_layers = kv_fusion_layers
 
             # Minimum attention regularization
             min_audio_attn = fusion_config.get("min_audio_attention", 0.0)
@@ -411,11 +450,17 @@ class SAFEModel(nn.Module):
             print(f"[SAFE] ✓ KV Augmentation adapters initialized at layers {kv_fusion_layers}", flush=True)
 
             # Eagerly initialize hook manager (needed for audio_attn pooling checks)
-            self.kv_hook_manager = KVAugmentationHookManager(
-                model=self.base_vl.llm,
-                kv_adapters=self.kv_adapters,
-                fusion_layer_indices=self._kv_fusion_layers,
-            )
+            if use_multimodal_kv:
+                self.kv_hook_manager = MultiModalKVAugmentationHookManager(
+                    model=self.base_vl.llm,
+                    kv_adapters=self.kv_adapters,
+                )
+            else:
+                self.kv_hook_manager = KVAugmentationHookManager(
+                    model=self.base_vl.llm,
+                    kv_adapters=self.kv_adapters,
+                    fusion_layer_indices=self._kv_fusion_layers,
+                )
             self.kv_hook_manager.configure_alerts(
                 enabled=bool(fusion_config.get("kv_alerts_enabled", True)),
                 log_every=int(fusion_config.get("kv_alert_log_every", 100) or 100),
@@ -776,6 +821,24 @@ class SAFEModel(nn.Module):
         self.base_vl.eval()
         return self
 
+    def _kv_is_multimodal(self) -> bool:
+        return bool(self.kv_adapters) and any(":" in key for key in self.kv_adapters.keys())
+
+    def _ensure_kv_hook_manager(self) -> None:
+        if self.kv_hook_manager is not None:
+            return
+        if self._kv_is_multimodal():
+            self.kv_hook_manager = MultiModalKVAugmentationHookManager(
+                model=self.base_vl.llm,
+                kv_adapters=self.kv_adapters,
+            )
+        else:
+            self.kv_hook_manager = KVAugmentationHookManager(
+                model=self.base_vl.llm,
+                kv_adapters=self.kv_adapters,
+                fusion_layer_indices=self._kv_fusion_layers,
+            )
+
     def load_modality_adapters(self, checkpoint_path: str, modality: str) -> int:
         """Load only the specified modality's adapter weights from a checkpoint.
 
@@ -805,13 +868,16 @@ class SAFEModel(nn.Module):
         prefix_map = {
             "audio": [
                 "audio_projector.",
+                "audio_token_embeddings.",
                 "fusion_adapter.fusion_adapters.audio:",
                 "fusion_adapter.layer_gates.audio:",
+                "kv_adapters.audio:",
             ],
             "vision": [
                 "vision_projector.",
                 "fusion_adapter.fusion_adapters.vision:",
                 "fusion_adapter.layer_gates.vision:",
+                "kv_adapters.vision:",
             ],
         }
         prefixes = prefix_map.get(modality, [])
@@ -2776,31 +2842,44 @@ class SAFEModel(nn.Module):
                 """
                 Run forward pass with KV augmentation.
 
-                Audio tokens are injected as additional K,V in self-attention
+                Modality tokens are injected as additional K,V memory in self-attention
                 at the specified fusion layers.
                 """
-                # Create hook manager if not exists
-                if self.kv_hook_manager is None:
-                    self.kv_hook_manager = KVAugmentationHookManager(
-                        model=self.base_vl.llm,
-                        kv_adapters=self.kv_adapters,
-                        fusion_layer_indices=self._kv_fusion_layers,
-                    )
+                self._ensure_kv_hook_manager()
 
                 # Wrap attention modules
                 self.kv_hook_manager.wrap_attention_modules()
 
-                # Inject audio tokens
-                self.kv_hook_manager.inject_audio(
-                    audio_tokens=audio_tokens,
-                    audio_mask=audio_attention_mask,
-                    gate=float(effective_gate) if not torch.is_tensor(effective_gate) else effective_gate.mean().item(),
-                )
+                gate_value = float(effective_gate) if not torch.is_tensor(effective_gate) else effective_gate.mean().item()
+                if self._kv_is_multimodal():
+                    modality_tokens = {}
+                    modality_masks = {}
+                    modality_gates = {}
+                    if audio_tokens is not None:
+                        modality_tokens["audio"] = audio_tokens
+                        if audio_attention_mask is not None:
+                            modality_masks["audio"] = audio_attention_mask
+                        modality_gates["audio"] = gate_value
+                    if vision_tokens is not None:
+                        modality_tokens["vision"] = vision_tokens
+                        modality_gates["vision"] = gate_value
+                    self.kv_hook_manager.inject_modality_tokens(
+                        modality_tokens=modality_tokens,
+                        modality_masks=modality_masks if modality_masks else None,
+                        modality_gates=modality_gates,
+                    )
+                else:
+                    self.kv_hook_manager.inject_audio(
+                        audio_tokens=audio_tokens,
+                        audio_mask=audio_attention_mask,
+                        gate=gate_value,
+                    )
 
                 # Enable attention weight capture if regularization is active
                 compute_attn_loss = (
                     self.training
                     and self.min_audio_attention_loss is not None
+                    and not self._kv_is_multimodal()
                 )
                 # Always enable attention weight capture for external access (e.g., audio_attn pooling)
                 # The flag may have been set by external code before this forward call
@@ -2842,7 +2921,7 @@ class SAFEModel(nn.Module):
             # Determine which fusion mode to use
             use_kv_augmentation = (
                 self.enable_kv_augmentation
-                and audio_tokens is not None
+                and (audio_tokens is not None or vision_tokens is not None)
                 and gate_scalar > 0.0
             )
 
@@ -3558,7 +3637,7 @@ class SAFEModel(nn.Module):
             # Check for KV augmentation mode in generate
             use_kv_augmentation_gen = (
                 self.enable_kv_augmentation
-                and audio_tokens is not None
+                and (audio_tokens is not None or vision_tokens is not None)
                 and gate_scalar > 0.0
             )
 
@@ -3611,17 +3690,7 @@ class SAFEModel(nn.Module):
 
             # KV Augmentation path for generate
             if use_kv_augmentation_gen:
-                # Create hook manager if not exists
-                if self.kv_hook_manager is None:
-                    self.kv_hook_manager = KVAugmentationHookManager(
-                        model=self.base_vl.llm,
-                        kv_adapters=self.kv_adapters,
-                        fusion_layer_indices=self._kv_fusion_layers,
-                    )
-
-                # Ensure audio tokens are on correct device
-                audio_tokens = audio_tokens.to(device=_gen_device, dtype=base_dtype)
-                audio_attn = audio_attention_mask.to(_gen_device) if audio_attention_mask is not None else None
+                self._ensure_kv_hook_manager()
 
                 # CRITICAL FIX: For KV augmentation, DON'T use inputs_embeds!
                 # Using inputs_embeds causes HF generate to return ONLY new tokens,
@@ -3643,15 +3712,41 @@ class SAFEModel(nn.Module):
 
                 # Wrap attention modules
                 self.kv_hook_manager.wrap_attention_modules()
-                self.kv_hook_manager.inject_audio(
-                    audio_tokens=audio_tokens,
-                    audio_mask=audio_attn,
-                    gate=float(effective_gate) if not torch.is_tensor(effective_gate) else effective_gate.mean().item(),
-                )
+                gate_value = float(effective_gate) if not torch.is_tensor(effective_gate) else effective_gate.mean().item()
+                if self._kv_is_multimodal():
+                    modality_tokens = {}
+                    modality_masks = {}
+                    modality_gates = {}
+                    if audio_tokens is not None:
+                        audio_tokens = audio_tokens.to(device=_gen_device, dtype=base_dtype)
+                        modality_tokens["audio"] = audio_tokens
+                        if audio_attention_mask is not None:
+                            modality_masks["audio"] = audio_attention_mask.to(_gen_device)
+                        modality_gates["audio"] = gate_value
+                    if vision_tokens is not None:
+                        vision_tokens = vision_tokens.to(device=_gen_device, dtype=base_dtype)
+                        modality_tokens["vision"] = vision_tokens
+                        modality_gates["vision"] = gate_value
+                    self.kv_hook_manager.inject_modality_tokens(
+                        modality_tokens=modality_tokens,
+                        modality_masks=modality_masks if modality_masks else None,
+                        modality_gates=modality_gates,
+                    )
+                else:
+                    audio_tokens = audio_tokens.to(device=_gen_device, dtype=base_dtype)
+                    audio_attn = audio_attention_mask.to(_gen_device) if audio_attention_mask is not None else None
+                    self.kv_hook_manager.inject_audio(
+                        audio_tokens=audio_tokens,
+                        audio_mask=audio_attn,
+                        gate=gate_value,
+                    )
                 try:
                     return self.base_vl.llm.generate(**kv_gen_inputs)
                 finally:
-                    self.kv_hook_manager.clear_audio()
+                    if self._kv_is_multimodal():
+                        self.kv_hook_manager.clear_modality_tokens()
+                    else:
+                        self.kv_hook_manager.clear_audio()
                     self.kv_hook_manager.unwrap_attention_modules()
 
             # Build per-modality gate dict for generate
