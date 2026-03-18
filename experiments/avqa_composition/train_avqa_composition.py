@@ -382,15 +382,16 @@ def build_model_config(args: argparse.Namespace) -> Dict[str, Any]:
 
     if cfg.get("fusion_type") != "concat":
         fusion_mode = str(fusion_cfg.get("fusion_mode", "residual")).strip().lower()
-        if fusion_mode not in {"residual", "film", "affine", "fixed_point"}:
+        if fusion_mode not in {"residual", "film", "affine", "fixed_point", "kv_augment"}:
             fusion_mode = "residual"
         fusion_cfg["fusion_mode"] = fusion_mode
-        fusion_cfg["injection_point"] = "pre_ffn"
-        fusion_cfg.setdefault("use_bottleneck", True)
-        if getattr(args, "bottleneck_dim", None) is not None:
-            fusion_cfg["bottleneck_dim"] = args.bottleneck_dim
-        else:
-            fusion_cfg.setdefault("bottleneck_dim", 256)
+        if fusion_mode != "kv_augment":
+            fusion_cfg["injection_point"] = "pre_ffn"
+            fusion_cfg.setdefault("use_bottleneck", True)
+            if getattr(args, "bottleneck_dim", None) is not None:
+                fusion_cfg["bottleneck_dim"] = args.bottleneck_dim
+            else:
+                fusion_cfg.setdefault("bottleneck_dim", 256)
         # Per-layer learned gating
         if getattr(args, "learned_gate", False):
             fusion_cfg["use_learned_gate"] = True
