@@ -655,13 +655,32 @@ def log_gradient_attribution(
         if hasattr(adapter, "get_learned_gate_values"):
             gate_values = adapter.get_learned_gate_values()
 
-    # Collect projector gradient norm
+    # Collect KV augmentation adapter gradient norms (per modality:layer)
+    if hasattr(model, "kv_adapters") and model.kv_adapters is not None:
+        for key, adapter in model.kv_adapters.items():
+            total_grad_norm = 0.0
+            total_param_norm = 0.0
+            for param in adapter.parameters():
+                if param.grad is not None:
+                    total_grad_norm += param.grad.data.norm(2).item() ** 2
+                total_param_norm += param.data.norm(2).item() ** 2
+            grad_norms[f"kv:{key}"] = total_grad_norm ** 0.5
+            param_norms[f"kv:{key}"] = total_param_norm ** 0.5
+
+    # Collect projector gradient norms
     if hasattr(model, "audio_projector"):
         proj_grad = 0.0
         for param in model.audio_projector.parameters():
             if param.grad is not None:
                 proj_grad += param.grad.data.norm(2).item() ** 2
-        grad_norms["projector"] = proj_grad ** 0.5
+        grad_norms["audio_projector"] = proj_grad ** 0.5
+
+    if hasattr(model, "vision_projector") and model.vision_projector is not None:
+        proj_grad = 0.0
+        for param in model.vision_projector.parameters():
+            if param.grad is not None:
+                proj_grad += param.grad.data.norm(2).item() ** 2
+        grad_norms["vision_projector"] = proj_grad ** 0.5
 
     # Log to stdout
     if grad_norms:
