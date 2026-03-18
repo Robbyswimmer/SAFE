@@ -1554,12 +1554,36 @@ class MultiModalKVAugmentationHookManager:
         self.original_attentions: Dict[int, nn.Module] = {}
         self.wrapped_attentions: Dict[int, MultiModalKVAugmentedAttention] = {}
         self._is_wrapped = False
+        self._alerts_enabled: bool = True
+        self._alert_log_every: int = 100
+        self._rms_ratio_low: float = 0.01
+        self._rms_ratio_high: float = 0.40
+        self._entropy_low: float = 0.15
+        self._entropy_high: float = 0.98
 
         # Log configuration
         print(f"[MultiModalKVAug] Initialized with {len(self.fusion_layers)} layers", flush=True)
         for layer_idx in self.fusion_layers:
             mods = self.layer_modalities[layer_idx]
             print(f"[MultiModalKVAug]   Layer {layer_idx}: {mods}", flush=True)
+
+    def configure_alerts(
+        self,
+        *,
+        enabled: bool = True,
+        log_every: int = 100,
+        rms_ratio_low: float = 0.01,
+        rms_ratio_high: float = 0.40,
+        entropy_low: float = 0.15,
+        entropy_high: float = 0.98,
+    ) -> None:
+        """Maintain API parity with the single-modality KV hook manager."""
+        self._alerts_enabled = bool(enabled)
+        self._alert_log_every = max(1, int(log_every))
+        self._rms_ratio_low = float(rms_ratio_low)
+        self._rms_ratio_high = float(rms_ratio_high)
+        self._entropy_low = float(entropy_low)
+        self._entropy_high = float(entropy_high)
 
     def _discover_layer_modules(self, model: nn.Module) -> Dict[int, nn.Module]:
         """Locate decoder layer ModuleList."""
