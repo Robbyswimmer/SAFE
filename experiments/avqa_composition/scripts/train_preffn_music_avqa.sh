@@ -40,6 +40,8 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-music_avqa_preffn_${SLURM_JOB_ID:-local}}
 WANDB_TAGS=${WANDB_TAGS:-music_avqa,preffn}
 MAX_SAMPLES=${MAX_SAMPLES:-0}
 BOTTLENECK_DIM=${BOTTLENECK_DIM:-}
+INIT_AUDIO_CKPT=${INIT_AUDIO_CKPT:-}
+INIT_VISION_CKPT=${INIT_VISION_CKPT:-}
 
 # InternVL defaults: gradient checkpointing currently breaks hook-based adapter grads.
 # Keep override-friendly behavior (user can still set these explicitly via --export).
@@ -83,6 +85,14 @@ if [[ -n "$BOTTLENECK_DIM" ]]; then
   BOTTLENECK_ARGS+=(--bottleneck-dim "$BOTTLENECK_DIM")
 fi
 
+INIT_ARGS=()
+if [[ -n "$INIT_AUDIO_CKPT" ]]; then
+  INIT_ARGS+=(--init-audio-ckpt "$INIT_AUDIO_CKPT")
+fi
+if [[ -n "$INIT_VISION_CKPT" ]]; then
+  INIT_ARGS+=(--init-vision-ckpt "$INIT_VISION_CKPT")
+fi
+
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --model-config "$MODEL_CONFIG" \
@@ -105,4 +115,5 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   "${FUSION_ARGS[@]}" \
   "${MAX_SAMPLES_ARGS[@]}" \
   "${BOTTLENECK_ARGS[@]}" \
+  "${INIT_ARGS[@]}" \
   "${WANDB_ARGS[@]}"
