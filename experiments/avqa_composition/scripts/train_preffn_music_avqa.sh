@@ -31,6 +31,7 @@ MIN_LR_RATIO=${MIN_LR_RATIO:-0.1}
 FUSION_LAYERS=${FUSION_LAYERS:-}
 NUM_AUDIO_TOKENS=${NUM_AUDIO_TOKENS:-8}
 TRAIN_MODALITY=${TRAIN_MODALITY:-both}
+TRAINABLE_MODALITIES=${TRAINABLE_MODALITIES:-all}
 EVAL_MODALITIES=${EVAL_MODALITIES:-both,audio,image}
 FUSION_GATE=${FUSION_GATE:-0.2}
 USE_FP16=${USE_FP16:-1}
@@ -108,6 +109,7 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --min-lr-ratio "$MIN_LR_RATIO" \
   --num-audio-tokens "$NUM_AUDIO_TOKENS" \
   --train-modality "$TRAIN_MODALITY" \
+  --trainable-modalities "$TRAINABLE_MODALITIES" \
   --eval-modalities "$EVAL_MODALITIES" \
   --fusion-gate "$FUSION_GATE" \
   --freeze-audio-encoder \

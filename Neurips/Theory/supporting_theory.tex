@@ -1,0 +1,441 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.95in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue}
+\setlist[itemize]{leftmargin=1.5em,itemsep=2pt}
+\setlist[enumerate]{leftmargin=1.7em,itemsep=2pt}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\inner}[2]{\left\langle #1, #2 \right\rangle}
+\newcommand{\bigO}{\mathcal{O}}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\newtheorem{definition}{Definition}
+\newtheorem{remark}{Remark}
+
+\title{Supporting Theory for Incremental Modality Acquisition\\
+\large Frozen-LM Residual Adapters, Interference, and Layer Placement}
+\date{March 17, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note collects only the theory needed to support the NeurIPS paper on
+incremental modality addition to a frozen language model. The central points
+are: (i) gated residual adapters preserve the base model exactly when the added
+modalities are inactive, (ii) composition error arises from second-order
+cross-terms between modality perturbations, (iii) the empirical synergy metric
+is a score-level proxy for this interaction, and (iv) staggered layer placement
+removes direct same-layer coupling and replaces it with an attenuated
+Jacobian-mediated interaction. We deliberately omit sidecar mixing, unrelated
+training objectives, and other speculative extensions.
+\end{abstract}
+
+\section{Setup}
+
+Let a frozen decoder-only transformer have layers
+\[
+h_{\ell+1} = f_\ell(h_\ell), \qquad \ell = 0, \dots, L-1,
+\]
+with text-conditioned initial state $h_0 = \mathrm{Embed}(x_{\text{text}})$.
+
+For each added modality $m$:
+\begin{itemize}
+\item a frozen encoder $E_m$,
+\item a trainable projector $P_m$,
+\item trainable fusion blocks $\Phi_{m,\ell}$ at selected layers $\ell \in S_m$,
+\item a gate $g_{m,\ell}$ controlling injection strength.
+\end{itemize}
+
+The projected modality representation is
+\[
+z_m = P_m(E_m(x_m)).
+\]
+
+At a fusion layer $\ell$, the model applies pre-activation residual fusion
+\begin{equation}
+\tilde h_\ell
+=
+h_\ell
+ \sum_{m \in \mathcal{M}_\ell(x)}
+ g_{m,\ell}(x)\,\Delta_{m,\ell}(h_\ell, z_m),
+\qquad
+h_{\ell+1} = f_\ell(\tilde h_\ell),
+\label{eq:fusion}
+\end{equation}
+where $\Delta_{m,\ell} := \Phi_{m,\ell}(h_\ell, z_m)$ and
+$\mathcal{M}_\ell(x)$ is the set of active modalities on example $x$.
+
+\paragraph{Scope.}
+All claims below concern the frozen-backbone residual-adapter setting in
+Eq.~\eqref{eq:fusion}. They do \emph{not} claim that arbitrary fine-tuning
+methods preserve the base model, nor that any observed metric always admits an
+exact second-order explanation globally.
+
+\section{Exact Gated-Off Invariance}
+
+\begin{definition}[Inactive modality]
+A modality $m$ is inactive on input $x$ if its fusion contribution is exactly
+zero at every fusion layer:
+\[
+g_{m,\ell}(x)\,\Delta_{m,\ell}(h_\ell, z_m) = 0
+\qquad \forall \ell \in S_m.
+\]
+This covers the cases ``modality absent'', ``gate forced to zero'', or any
+implementation that produces the zero residual when the modality is disabled.
+\end{definition}
+
+\begin{proposition}[Exact invariance of the frozen hub]
+\label{prop:invariance}
+If every added modality is inactive on input $x$, then the model with adapters
+produces exactly the same hidden states and outputs as the original frozen
+text-only backbone on $x$.
+\end{proposition}
+
+\begin{proof}
+Under inactivity, the sum in Eq.~\eqref{eq:fusion} is identically zero, so
+\[
+\tilde h_\ell = h_\ell
+\qquad \forall \ell.
+\]
+Therefore the recurrence reduces to
+\[
+h_{\ell+1} = f_\ell(h_\ell),
+\]
+which is exactly the original backbone update at every layer. By induction on
+$\ell$, all hidden states coincide with the frozen text-only model. Since the
+output head is unchanged, the final logits and predictions also coincide.
+\end{proof}
+
+\begin{remark}
+Proposition~\ref{prop:invariance} is an exact functional statement, not a
+statistical one. It does not say that the model is robust to arbitrary
+nonzero gates; it says that when the added modality path is truly zero, the
+base model is preserved exactly.
+\end{remark}
+
+\section{Second-Order Interaction of Two Modalities}
+
+To analyze composition locally, fix a hidden state $u \in \R^d$ at some fusion
+site and let $\delta_a, \delta_v \in \R^d$ be the net residual perturbations
+induced by audio and vision at that site. Let $q:\R^d \to \R$ be any smooth
+scalar surrogate quantity of interest, for example a negative log-likelihood,
+logit margin, or task score proxy.
+
+\begin{proposition}[Second-order decomposition]
+\label{prop:taylor}
+Assume $q$ is three times continuously differentiable near $u$. Then
+\begin{align}
+q(u + \delta_a + \delta_v)
+&=
+q(u)
++ \inner{\nabla q(u)}{\delta_a + \delta_v}
++ \frac{1}{2}(\delta_a + \delta_v)^\top H_q(u)(\delta_a + \delta_v)
++ \bigO\!\left((\norm{\delta_a}+\norm{\delta_v})^3\right)
+\nonumber\\
+&=
+\underbrace{q(u) + \inner{\nabla q(u)}{\delta_a}
++ \frac{1}{2}\delta_a^\top H_q(u)\delta_a}_{\text{audio-only terms}}
+\underbrace{\inner{\nabla q(u)}{\delta_v}
++ \frac{1}{2}\delta_v^\top H_q(u)\delta_v}_{\text{vision-only terms}}
+\nonumber\\
+&\quad
++ \underbrace{\delta_a^\top H_q(u)\delta_v}_{\text{cross-term}}
++ \bigO\!\left((\norm{\delta_a}+\norm{\delta_v})^3\right).
+\label{eq:taylor}
+\end{align}
+\end{proposition}
+
+\begin{proof}
+Apply the multivariate second-order Taylor expansion of $q$ at $u$ with
+increment $\delta_a + \delta_v$:
+\[
+q(u+\eta)
+=
+q(u)
++ \inner{\nabla q(u)}{\eta}
++ \frac{1}{2}\eta^\top H_q(u)\eta
++ \bigO(\norm{\eta}^3),
+\qquad
+\eta := \delta_a + \delta_v.
+\]
+Expanding the quadratic term gives
+\[
+\frac{1}{2}(\delta_a+\delta_v)^\top H_q(u)(\delta_a+\delta_v)
+=
+\frac{1}{2}\delta_a^\top H_q(u)\delta_a
++ \frac{1}{2}\delta_v^\top H_q(u)\delta_v
++ \delta_a^\top H_q(u)\delta_v,
+\]
+since $H_q(u)$ is symmetric. Substituting this identity yields
+Eq.~\eqref{eq:taylor}.
+\end{proof}
+
+\begin{remark}[Interpretation]
+The cross-term $\delta_a^\top H_q(u)\delta_v$ is the leading source of local
+non-additivity. If it is large and negative for a score-like $q$, joint
+composition is worse than additive expectation; if it is positive, the two
+modalities reinforce each other.
+\end{remark}
+
+\subsection{Gate scaling}
+
+Write each perturbation as $\delta_m = g_m \hat \delta_m$, where $\hat \delta_m$
+is the direction produced by the modality path and $g_m \ge 0$ is the gate.
+
+\begin{corollary}[Quadratic scaling of cross-modal interference]
+\label{cor:gate}
+Under the notation above, the leading interaction term scales as
+\[
+\delta_a^\top H_q(u)\delta_v
+=
+g_a g_v \, \hat \delta_a^\top H_q(u)\hat \delta_v.
+\]
+Thus the cross-modal interaction is second-order in gate magnitude, while each
+unimodal first-order term scales only linearly in its own gate.
+\end{corollary}
+
+\begin{proof}
+Substitute $\delta_a = g_a \hat\delta_a$ and $\delta_v = g_v \hat\delta_v$
+into the bilinear cross-term:
+\[
+\delta_a^\top H_q(u)\delta_v
+=
+(g_a \hat\delta_a)^\top H_q(u) (g_v \hat\delta_v)
+=
+g_a g_v \, \hat\delta_a^\top H_q(u)\hat\delta_v.
+\]
+\end{proof}
+
+\begin{remark}
+Corollary~\ref{cor:gate} explains why small initial gates can stabilize early
+training: they suppress the interaction term faster than they suppress the
+individual linear signals.
+\end{remark}
+
+\section{Synergy as an Empirical Proxy}
+
+In experiments we do not usually optimize or report $q$ directly. Instead we
+observe four task metrics:
+\[
+y_0 \quad \text{(text-only)}, \qquad
+y_a \quad \text{(audio-only)}, \qquad
+y_v \quad \text{(vision-only)}, \qquad
+y_{av} \quad \text{(both)}.
+\]
+
+\begin{definition}[Synergy]
+The synergy of the two-modality system is
+\begin{equation}
+\mathrm{syn}(y)
+:=
+y_{av} - (y_a + y_v - y_0).
+\label{eq:synergy}
+\end{equation}
+\end{definition}
+
+\begin{definition}[Gain vs best single]
+The operational composition gain is
+\begin{equation}
+\Delta^{\mathrm{best}}
+:=
+y_{av} - \max(y_a, y_v).
+\label{eq:gainbest}
+\end{equation}
+\end{definition}
+
+\paragraph{Meaning.}
+Equation~\eqref{eq:synergy} compares the observed composed score to the score
+predicted by exact additivity. Equation~\eqref{eq:gainbest} answers the
+practical question of whether composition beats the strongest unimodal system.
+
+\begin{proposition}[Surrogate-level synergy identity]
+\label{prop:synergy}
+Let $q_0, q_a, q_v, q_{av}$ be the values of a smooth scalar surrogate under
+text-only, audio-only, vision-only, and composed conditions, all linearized at
+the same base hidden state $u$. Then
+\begin{equation}
+q_{av} - (q_a + q_v - q_0)
+=
+\delta_a^\top H_q(u)\delta_v
++ \bigO\!\left((\norm{\delta_a}+\norm{\delta_v})^3\right).
+\label{eq:surrogate-synergy}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Apply Proposition~\ref{prop:taylor} to $q_{av} = q(u+\delta_a+\delta_v)$ and
+the corresponding second-order expansions for $q_a = q(u+\delta_a)$ and
+$q_v = q(u+\delta_v)$. Subtracting $q_a + q_v - q_0$ cancels all constant,
+gradient, and unimodal quadratic terms, leaving only the mixed quadratic term
+plus third-order remainder.
+\end{proof}
+
+\begin{remark}
+For discrete metrics such as exact-match accuracy, Eq.~\eqref{eq:surrogate-synergy}
+is not an exact theorem. The experimental synergy in Eq.~\eqref{eq:synergy}
+should be read as an empirical proxy for the same interference phenomenon, not
+as the Hessian cross-term itself.
+\end{remark}
+
+\section{Why Same-Layer Fusion is More Fragile}
+
+\subsection{Same-layer coupling}
+
+Suppose both modalities inject at the same layer $\ell$:
+\[
+\tilde h_\ell = h_\ell + \delta_{a,\ell} + \delta_{v,\ell}.
+\]
+Then the next frozen block $f_\ell$ receives the \emph{sum} of both
+perturbations simultaneously. By Proposition~\ref{prop:taylor}, the local
+interaction at this layer is governed by the direct mixed term
+\[
+\delta_{a,\ell}^\top H_{f_\ell}(h_\ell)\delta_{v,\ell},
+\]
+where $H_{f_\ell}(h_\ell)$ denotes the appropriate second derivative of the
+frozen layer map or of a scalar surrogate composed with that map.
+
+\subsection{Disjoint-layer fusion}
+
+Now suppose audio injects at layer $\ell_a$ and vision injects later at
+$\ell_v > \ell_a$, with no shared injection at intermediate layers. Then
+\[
+\tilde h_{\ell_a} = h_{\ell_a} + \delta_{a,\ell_a},
+\qquad
+h_{\ell_v}
+=
+F_{\ell_a \to \ell_v}\!\left(h_{\ell_a} + \delta_{a,\ell_a}\right),
+\]
+where
+\[
+F_{\ell_a \to \ell_v}
+:=
+f_{\ell_v-1}\circ \cdots \circ f_{\ell_a}.
+\]
+Linearizing at $h_{\ell_a}$ gives
+\[
+h_{\ell_v}
+\approx
+F_{\ell_a \to \ell_v}(h_{\ell_a})
++ J_{\ell_a \to \ell_v}\,\delta_{a,\ell_a},
+\]
+where $J_{\ell_a \to \ell_v}$ is the Jacobian of the frozen backbone between
+the two injection sites. Vision then injects
+\[
+\tilde h_{\ell_v}
+=
+h_{\ell_v} + \delta_{v,\ell_v}.
+\]
+
+\begin{proposition}[Direct cross-term elimination under disjoint layers]
+\label{prop:disjoint}
+If two modalities use disjoint layer sets, then there is no direct same-layer
+mixed quadratic term of the form
+$\delta_{a,\ell}^\top H_{f_\ell}(h_\ell)\delta_{v,\ell}$ at any fusion layer.
+The leading interaction is instead Jacobian-mediated:
+\begin{equation}
+\delta_{v,\ell_v}^\top
+H_{f_{\ell_v}}(h_{\ell_v})
+\left(J_{\ell_a \to \ell_v}\,\delta_{a,\ell_a}\right),
+\label{eq:indirect}
+\end{equation}
+or the symmetric analogue when vision precedes audio.
+\end{proposition}
+
+\begin{proof}
+At any audio-only layer $\ell \in S_a \setminus S_v$, the perturbation entering
+the frozen block is $h_\ell + \delta_{a,\ell}$, so no term involving
+$\delta_{v,\ell}$ exists. Similarly, at any vision-only layer
+$\ell \in S_v \setminus S_a$, the perturbation entering the frozen block is
+$h_\ell + \delta_{v,\ell}$, so no direct same-layer mixed term exists there
+either. The first point at which audio can influence the vision interaction is
+through the transformed hidden state that arrives at a later vision layer,
+which is given to first order by $J_{\ell_a \to \ell_v}\delta_{a,\ell_a}$.
+Substituting this transformed perturbation into the mixed term at the later
+vision layer yields Eq.~\eqref{eq:indirect}.
+\end{proof}
+
+\begin{corollary}[Interaction count]
+With $M$ modalities sharing the same layer, the number of direct mixed pairs at
+that layer is $\binom{M}{2}$. With disjoint layer sets, the number of direct
+same-layer mixed pairs is zero.
+\end{corollary}
+
+\begin{proof}
+In the shared-layer case, every unordered pair of active modality
+perturbations contributes one mixed quadratic term. The number of unordered
+pairs among $M$ modalities is $\binom{M}{2}$. Under disjoint layer sets, no
+layer contains more than one modality perturbation, so no such same-layer pair
+exists.
+\end{proof}
+
+\begin{remark}
+Disjoint placement does \emph{not} eliminate all interaction. It only removes
+the most direct one. The remaining interaction is mediated by the frozen
+backbone Jacobian, which is typically weaker and easier to manage with gates
+and training.
+\end{remark}
+
+\section{Diagnostics Used in Practice}
+
+For a layer-level probe at layer $\ell$, define:
+\[
+y_{0,\ell}, \quad y_{a,\ell}, \quad y_{v,\ell}, \quad y_{av,\ell}.
+\]
+
+\begin{definition}[Layer additivity error]
+The layer additivity error is
+\begin{equation}
+\epsilon_\ell
+:=
+\frac{\left|y_{0,\ell} - y_{a,\ell} - y_{v,\ell} + y_{av,\ell}\right|}
+{\left|y_{a,\ell}-y_{0,\ell}\right| + \left|y_{v,\ell}-y_{0,\ell}\right| + \varepsilon},
+\label{eq:additivity}
+\end{equation}
+with $\varepsilon > 0$ for numerical stability.
+\end{definition}
+
+\paragraph{Interpretation.}
+Small $\epsilon_\ell$ means the layer behaves close to additive composition;
+large $\epsilon_\ell$ indicates a high degree of non-additive interaction.
+
+\paragraph{Why use both $\epsilon_\ell$ and $\Delta^{\mathrm{best}}_\ell$.}
+The normalized error in Eq.~\eqref{eq:additivity} measures stability of
+composition. The gain in Eq.~\eqref{eq:gainbest} measures usefulness of
+composition. A strong fusion layer should ideally have both low
+$\epsilon_\ell$ and high $\Delta^{\mathrm{best}}_\ell$.
+
+\section{What These Results Support in the Paper}
+
+The results above support four concrete claims:
+\begin{enumerate}
+\item \textbf{Functional invariance.} Added modalities do not alter the frozen
+text hub when their residual paths are inactive
+(Proposition~\ref{prop:invariance}).
+\item \textbf{Interference has a specific local source.} The leading error of
+joint composition is the mixed second-order term
+(Proposition~\ref{prop:taylor}).
+\item \textbf{Synergy is the right empirical summary.} The experimental synergy
+metric is the observable proxy for this mixed interaction
+(Proposition~\ref{prop:synergy}).
+\item \textbf{Layer placement matters structurally.} Shared layers create direct
+coupling; disjoint layers remove it and replace it with a weaker transformed
+interaction (Proposition~\ref{prop:disjoint}).
+\end{enumerate}
+
+\paragraph{What these results do not claim.}
+They do not prove that joint performance must exceed the best unimodal result,
+that staggered layers always outperform shared layers on every backbone, or
+that a global discrete metric is exactly equal to a local Hessian quantity.
+Those are empirical questions.
+
+\end{document}

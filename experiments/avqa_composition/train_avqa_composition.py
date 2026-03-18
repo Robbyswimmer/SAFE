@@ -535,6 +535,53 @@ def configure_composition_calibration_trainables(
     return counts
 
 
+def configure_trainable_modalities(
+    model: SAFEModel,
+    mode: str,
+) -> Dict[str, int]:
+    """Restrict training to a single modality's adapter parameters."""
+    mode = str(mode).strip().lower()
+    if mode == "all":
+        return {"audio": 0, "vision": 0, "other": 0}
+
+    prefix_map = {
+        "audio": (
+            "audio_projector.",
+            "audio_token_embeddings.",
+            "fusion_adapter.fusion_adapters.audio:",
+            "fusion_adapter.layer_gates.audio:",
+        ),
+        "vision": (
+            "vision_projector.",
+            "fusion_adapter.fusion_adapters.vision:",
+            "fusion_adapter.layer_gates.vision:",
+        ),
+    }
+    if mode not in prefix_map:
+        raise ValueError(
+            f"Unsupported trainable modality mode: {mode}. "
+            "Expected one of: all, audio, vision"
+        )
+
+    allowed_prefixes = prefix_map[mode]
+    for name, param in model.named_parameters():
+        if param.requires_grad and not name.startswith(allowed_prefixes):
+            param.requires_grad = False
+
+    counts: Dict[str, int] = {"audio": 0, "vision": 0, "other": 0}
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if name.startswith(prefix_map["audio"]):
+            counts["audio"] += int(param.numel())
+        elif name.startswith(prefix_map["vision"]):
+            counts["vision"] += int(param.numel())
+        else:
+            counts["other"] += int(param.numel())
+
+    return counts
+
+
 def build_lr_scheduler(
     optimizer: AdamW,
     total_update_steps: int,
@@ -3855,6 +3902,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-audio-tokens", type=int, default=8)
 
     p.add_argument("--train-modality", type=str, default="both", choices=["audio", "image", "both", "interleaved", "interleaved_vision_first"])
+    p.add_argument("--trainable-modalities", type=str, default="all", choices=["all", "audio", "vision"],
+                   help="Restrict trainable adapter params to a subset while keeping the selected input modality active")
     p.add_argument("--eval-modalities", type=str, default="both,audio,image")
     p.add_argument("--fusion-gate", type=float, default=0.2)
     p.add_argument("--modality-aware-prompts", action="store_true",
@@ -4218,6 +4267,7 @@ def main() -> None:
                     "dataset": args.dataset,
                     "architecture": "pre_ffn",
                     "train_modality": args.train_modality,
+                    "trainable_modalities": args.trainable_modalities,
                     "eval_modalities": args.eval_modalities,
                     "fusion_layers": args.fusion_layers,
                     "audio_fusion_layers": args.audio_fusion_layers,
@@ -4467,6 +4517,17 @@ def main() -> None:
                 "Enable --learned-gate (or config fusion_config.use_learned_gate=True)."
             )
         print(f"[calib] train_gates_only=True gate_params={gate_param_count}", flush=True)
+
+    if args.trainable_modalities != "all":
+        modality_counts = configure_trainable_modalities(model, args.trainable_modalities)
+        print(
+            "[trainable-modalities] "
+            f"mode={args.trainable_modalities} "
+            f"audio={modality_counts['audio']:,} "
+            f"vision={modality_counts['vision']:,} "
+            f"other={modality_counts['other']:,}",
+            flush=True,
+        )
 
     trainable_params = list(model.get_trainable_parameters())
     print(f"[info] trainable_parameters={sum(p.numel() for p in trainable_params if p.requires_grad):,}")
