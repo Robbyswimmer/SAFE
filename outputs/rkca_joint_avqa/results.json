@@ -1,0 +1,14 @@
+{
+  "dataset": "music_avqa",
+  "architecture": "pre_ffn",
+  "train_modality": "both",
+  "eval_modalities": [
+    "text",
+    "audio",
+    "image",
+    "both"
+  ],
+  "best_exact_match": 78.15016322089227,
+  "best_modality": "both",
+  "history_path": "outputs/rkca_joint_avqa/history.json"
+}

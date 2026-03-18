@@ -1,0 +1,21 @@
+{
+  "checkpoint": "checkpoints/ablation_6layer/checkpoint_best.pt",
+  "split": "train",
+  "config": "phase1",
+  "metrics": {
+    "loss": 1.798191447377205,
+    "cider": 3.1050914273970016,
+    "spice": 10.892979178615295,
+    "spider": 6.999035303006148,
+    "bleu1": 0.13250704936660637,
+    "bleu2": 0.06424612522296588,
+    "bleu3": 0.03225988134744808,
+    "bleu4": 0.016424347897899462,
+    "meteor": 0.13701961361666704,
+    "rouge_l": 0.15751577824534027,
+    "bertscore_f1": 0.0,
+    "num_samples": 2000.0,
+    "eval_time": 866.1682271957397,
+    "token_accuracy": 0.0
+  }
+}

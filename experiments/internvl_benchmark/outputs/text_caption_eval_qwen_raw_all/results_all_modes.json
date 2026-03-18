@@ -1,0 +1,56 @@
+{
+  "checkpoint": "",
+  "model_config": "rkca_joint",
+  "manifest": "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_validation_qwen8bit.jsonl",
+  "caption_field": "teacher_caption_raw",
+  "modes": {
+    "image": {
+      "caption_field": "teacher_caption_raw",
+      "input_mode": "image",
+      "n": 483,
+      "raw_em": 24.43064182194617,
+      "extracted_em": 67.49482401656314,
+      "f1": 24.43064182194617,
+      "cat_f1": 67.49482401656314,
+      "checkpoint": "",
+      "model_config": "rkca_joint",
+      "manifest": "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_validation_qwen8bit.jsonl"
+    },
+    "caption": {
+      "caption_field": "teacher_caption_raw",
+      "input_mode": "caption",
+      "n": 483,
+      "raw_em": 24.84472049689441,
+      "extracted_em": 51.5527950310559,
+      "f1": 24.84472049689441,
+      "cat_f1": 51.5527950310559,
+      "checkpoint": "",
+      "model_config": "rkca_joint",
+      "manifest": "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_validation_qwen8bit.jsonl"
+    },
+    "both_null": {
+      "caption_field": "teacher_caption_raw",
+      "input_mode": "both_null",
+      "n": 483,
+      "raw_em": 22.15320910973085,
+      "extracted_em": 64.38923395445134,
+      "f1": 22.236024844720497,
+      "cat_f1": 64.38923395445134,
+      "checkpoint": "",
+      "model_config": "rkca_joint",
+      "manifest": "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_validation_qwen8bit.jsonl"
+    },
+    "both": {
+      "caption_field": "teacher_caption_raw",
+      "input_mode": "both",
+      "n": 483,
+      "raw_em": 25.05175983436853,
+      "extracted_em": 61.904761904761905,
+      "f1": 25.05175983436853,
+      "cat_f1": 61.904761904761905,
+      "checkpoint": "",
+      "model_config": "rkca_joint",
+      "manifest": "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_validation_qwen8bit.jsonl"
+    }
+  }
+}

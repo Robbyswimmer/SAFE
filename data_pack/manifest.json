@@ -1,0 +1,2815 @@
+{
+  "subset_name": "audiocaps_overfit_v1",
+  "description": "AudioCaps train subset (400 samples) for SAFE overfitting ablation",
+  "seed": 42,
+  "source_dataset": "AudioCaps train split",
+  "audio_rel_root": "audio/train",
+  "metadata_columns": [
+    "audiocap_id",
+    "youtube_id",
+    "start_time",
+    "caption"
+  ],
+  "entries": [
+    {
+      "audiocap_id": "276",
+      "youtube_id": "-668dhzzDQE",
+      "start_time": 30.0,
+      "caption": "Car engine sound in car race",
+      "audio_relpath": "audio/train/-668dhzzDQE.wav"
+    },
+    {
+      "audiocap_id": "278",
+      "youtube_id": "-68677bCJWM",
+      "start_time": 16.0,
+      "caption": "Distressed cat growling and hissing violently while woman laughs and talks",
+      "audio_relpath": "audio/train/-68677bCJWM.wav"
+    },
+    {
+      "audiocap_id": "391",
+      "youtube_id": "-8tskHwTfcQ",
+      "start_time": 30.0,
+      "caption": "The sound of dried leaves rubbing against one another in response to being moved by the wind or another cause",
+      "audio_relpath": "audio/train/-8tskHwTfcQ.wav"
+    },
+    {
+      "audiocap_id": "393",
+      "youtube_id": "-8v6KSVvQrc",
+      "start_time": 30.0,
+      "caption": "The man is speaking and the backside spray sound",
+      "audio_relpath": "audio/train/-8v6KSVvQrc.wav"
+    },
+    {
+      "audiocap_id": "394",
+      "youtube_id": "-8xXKLBLOnc",
+      "start_time": 70.0,
+      "caption": "A drill motor is running",
+      "audio_relpath": "audio/train/-8xXKLBLOnc.wav"
+    },
+    {
+      "audiocap_id": "395",
+      "youtube_id": "-8yCp5GagJA",
+      "start_time": 500.0,
+      "caption": "The water tap was running water out of the faucet",
+      "audio_relpath": "audio/train/-8yCp5GagJA.wav"
+    },
+    {
+      "audiocap_id": "397",
+      "youtube_id": "-8ysWJSrITc",
+      "start_time": 30.0,
+      "caption": "She is talking",
+      "audio_relpath": "audio/train/-8ysWJSrITc.wav"
+    },
+    {
+      "audiocap_id": "398",
+      "youtube_id": "-8z7eJDWf9U",
+      "start_time": 30.0,
+      "caption": "A vehicle engine idles roughly",
+      "audio_relpath": "audio/train/-8z7eJDWf9U.wav"
+    },
+    {
+      "audiocap_id": "399",
+      "youtube_id": "-8zyGG5y3io",
+      "start_time": 30.0,
+      "caption": "A woman speaks to a crowd, some camera clicks",
+      "audio_relpath": "audio/train/-8zyGG5y3io.wav"
+    },
+    {
+      "audiocap_id": "790",
+      "youtube_id": "-HyUH30KfyE",
+      "start_time": 20.0,
+      "caption": "Someone makes fart spit noises at a baby that is laughing back",
+      "audio_relpath": "audio/train/-HyUH30KfyE.wav"
+    },
+    {
+      "audiocap_id": "793",
+      "youtube_id": "-I1upuU0HXs",
+      "start_time": 16.0,
+      "caption": "A cat is making noise and then a vehicle drives by",
+      "audio_relpath": "audio/train/-I1upuU0HXs.wav"
+    },
+    {
+      "audiocap_id": "798",
+      "youtube_id": "-I777qzddsc",
+      "start_time": 30.0,
+      "caption": "A rumble and then a hiss",
+      "audio_relpath": "audio/train/-I777qzddsc.wav"
+    },
+    {
+      "audiocap_id": "1170",
+      "youtube_id": "-RFRH50Qobg",
+      "start_time": 0.0,
+      "caption": "Train horn tooting multiple times",
+      "audio_relpath": "audio/train/-RFRH50Qobg.wav"
+    },
+    {
+      "audiocap_id": "1171",
+      "youtube_id": "-RH8_ZSbHhc",
+      "start_time": 30.0,
+      "caption": "Chatter and then a car horn beeping",
+      "audio_relpath": "audio/train/-RH8_ZSbHhc.wav"
+    },
+    {
+      "audiocap_id": "1172",
+      "youtube_id": "-RIXNh-i88E",
+      "start_time": 30.0,
+      "caption": "Woman speaking while a pan sizzles",
+      "audio_relpath": "audio/train/-RIXNh-i88E.wav"
+    },
+    {
+      "audiocap_id": "1175",
+      "youtube_id": "-RLhcWjOd1E",
+      "start_time": 30.0,
+      "caption": "Animal noises and whimpering",
+      "audio_relpath": "audio/train/-RLhcWjOd1E.wav"
+    },
+    {
+      "audiocap_id": "5053",
+      "youtube_id": "10OItSnDWd0",
+      "start_time": 20.0,
+      "caption": "A man is talking and a whoosh is heard",
+      "audio_relpath": "audio/train/10OItSnDWd0.wav"
+    },
+    {
+      "audiocap_id": "5056",
+      "youtube_id": "10SZFHfWSz4",
+      "start_time": 10.0,
+      "caption": "Roaring is present, an emergency vehicle siren sounds, and then machine gun fire and more roaring",
+      "audio_relpath": "audio/train/10SZFHfWSz4.wav"
+    },
+    {
+      "audiocap_id": "5058",
+      "youtube_id": "10Wz3WLOowg",
+      "start_time": 80.0,
+      "caption": "A woman sneezing and sniffling and complaining",
+      "audio_relpath": "audio/train/10Wz3WLOowg.wav"
+    },
+    {
+      "audiocap_id": "5860",
+      "youtube_id": "1LQBKRQtQHg",
+      "start_time": 6.0,
+      "caption": "A baby starts with a faint cry and its get louder",
+      "audio_relpath": "audio/train/1LQBKRQtQHg.wav"
+    },
+    {
+      "audiocap_id": "5861",
+      "youtube_id": "1LQQS5NIPFI",
+      "start_time": 25.0,
+      "caption": "Door sound with woman chuckling",
+      "audio_relpath": "audio/train/1LQQS5NIPFI.wav"
+    },
+    {
+      "audiocap_id": "5863",
+      "youtube_id": "1LSmPtw0dZE",
+      "start_time": 20.0,
+      "caption": "A sheep lets out two deep bleats",
+      "audio_relpath": "audio/train/1LSmPtw0dZE.wav"
+    },
+    {
+      "audiocap_id": "5864",
+      "youtube_id": "1LU--8_VFeA",
+      "start_time": 27.0,
+      "caption": "A car speeds up, wind rushes by",
+      "audio_relpath": "audio/train/1LU--8_VFeA.wav"
+    },
+    {
+      "audiocap_id": "5868",
+      "youtube_id": "1LY5-RLywME",
+      "start_time": 30.0,
+      "caption": "Bird chirping in quiet background",
+      "audio_relpath": "audio/train/1LY5-RLywME.wav"
+    },
+    {
+      "audiocap_id": "5934",
+      "youtube_id": "1MuCTwE2Eqs",
+      "start_time": 30.0,
+      "caption": "A crowd chatters, dogs bark",
+      "audio_relpath": "audio/train/1MuCTwE2Eqs.wav"
+    },
+    {
+      "audiocap_id": "5935",
+      "youtube_id": "1MuDD4JVnQc",
+      "start_time": 25.0,
+      "caption": "A child is crying then a woman speaks",
+      "audio_relpath": "audio/train/1MuDD4JVnQc.wav"
+    },
+    {
+      "audiocap_id": "5937",
+      "youtube_id": "1MxLu5GVvq4",
+      "start_time": 14.0,
+      "caption": "Car motor revving",
+      "audio_relpath": "audio/train/1MxLu5GVvq4.wav"
+    },
+    {
+      "audiocap_id": "5981",
+      "youtube_id": "1O5u-mBU2JI",
+      "start_time": 30.0,
+      "caption": "A man speaking in a foreign language, can hear doves in the background",
+      "audio_relpath": "audio/train/1O5u-mBU2JI.wav"
+    },
+    {
+      "audiocap_id": "5983",
+      "youtube_id": "1O7-QuhweZE",
+      "start_time": 19.0,
+      "caption": "Children screaming in the background as the sound of water flowing by",
+      "audio_relpath": "audio/train/1O7-QuhweZE.wav"
+    },
+    {
+      "audiocap_id": "5985",
+      "youtube_id": "1OCv1wCGK-s",
+      "start_time": 30.0,
+      "caption": "A child screams, an adult male is talking and vehicles are revving",
+      "audio_relpath": "audio/train/1OCv1wCGK-s.wav"
+    },
+    {
+      "audiocap_id": "5989",
+      "youtube_id": "1OIm8vLHCwo",
+      "start_time": 19.0,
+      "caption": "An adult female speaks and a cat meows",
+      "audio_relpath": "audio/train/1OIm8vLHCwo.wav"
+    },
+    {
+      "audiocap_id": "6774",
+      "youtube_id": "1hclg1BK7Sg",
+      "start_time": 10.0,
+      "caption": "A truck engine idling with music in the background",
+      "audio_relpath": "audio/train/1hclg1BK7Sg.wav"
+    },
+    {
+      "audiocap_id": "6810",
+      "youtube_id": "1iXLWRFE000",
+      "start_time": 30.0,
+      "caption": "An engine is idling",
+      "audio_relpath": "audio/train/1iXLWRFE000.wav"
+    },
+    {
+      "audiocap_id": "6816",
+      "youtube_id": "1ih1mXowz1U",
+      "start_time": 0.0,
+      "caption": "An animal is stomping its feet",
+      "audio_relpath": "audio/train/1ih1mXowz1U.wav"
+    },
+    {
+      "audiocap_id": "6819",
+      "youtube_id": "1ijeSI4LOrU",
+      "start_time": 30.0,
+      "caption": "Birds are flapping their wings",
+      "audio_relpath": "audio/train/1ijeSI4LOrU.wav"
+    },
+    {
+      "audiocap_id": "7943",
+      "youtube_id": "2BhBBDdh-lo",
+      "start_time": 390.0,
+      "caption": "Male is speaking while banging and rattling on a car goes on in the background",
+      "audio_relpath": "audio/train/2BhBBDdh-lo.wav"
+    },
+    {
+      "audiocap_id": "7944",
+      "youtube_id": "2BjB6zejUyE",
+      "start_time": 17.0,
+      "caption": "A gurgling stream",
+      "audio_relpath": "audio/train/2BjB6zejUyE.wav"
+    },
+    {
+      "audiocap_id": "7948",
+      "youtube_id": "2BqBOBpWRY4",
+      "start_time": 30.0,
+      "caption": "A man giving a speech",
+      "audio_relpath": "audio/train/2BqBOBpWRY4.wav"
+    },
+    {
+      "audiocap_id": "8031",
+      "youtube_id": "2Df2DRLYFgA",
+      "start_time": 30.0,
+      "caption": "An adult female is speaking",
+      "audio_relpath": "audio/train/2Df2DRLYFgA.wav"
+    },
+    {
+      "audiocap_id": "8032",
+      "youtube_id": "2DfZ21h3rM4",
+      "start_time": 3.0,
+      "caption": "A cat is meowing",
+      "audio_relpath": "audio/train/2DfZ21h3rM4.wav"
+    },
+    {
+      "audiocap_id": "8035",
+      "youtube_id": "2DmtgJv97-U",
+      "start_time": 30.0,
+      "caption": "A dog barks and whimpers",
+      "audio_relpath": "audio/train/2DmtgJv97-U.wav"
+    },
+    {
+      "audiocap_id": "8038",
+      "youtube_id": "2DvhMDU3m-8",
+      "start_time": 110.0,
+      "caption": "A man talking about and demonstrating the use of power tool",
+      "audio_relpath": "audio/train/2DvhMDU3m-8.wav"
+    },
+    {
+      "audiocap_id": "8039",
+      "youtube_id": "2DwotmImTsI",
+      "start_time": 30.0,
+      "caption": "Waves crash against the shore",
+      "audio_relpath": "audio/train/2DwotmImTsI.wav"
+    },
+    {
+      "audiocap_id": "8295",
+      "youtube_id": "2KLSmeAXUHU",
+      "start_time": 15.0,
+      "caption": "An engine is revving up",
+      "audio_relpath": "audio/train/2KLSmeAXUHU.wav"
+    },
+    {
+      "audiocap_id": "8545",
+      "youtube_id": "2QZSUAQMHqk",
+      "start_time": 30.0,
+      "caption": "Motor running followed by faint murmuring and gunshot",
+      "audio_relpath": "audio/train/2QZSUAQMHqk.wav"
+    },
+    {
+      "audiocap_id": "8860",
+      "youtube_id": "2Z4bIBKxirc",
+      "start_time": 420.0,
+      "caption": "People are talking as dishes clank together",
+      "audio_relpath": "audio/train/2Z4bIBKxirc.wav"
+    },
+    {
+      "audiocap_id": "8862",
+      "youtube_id": "2Z6_CLwMxY4",
+      "start_time": 30.0,
+      "caption": "Musical chimes are sounding",
+      "audio_relpath": "audio/train/2Z6_CLwMxY4.wav"
+    },
+    {
+      "audiocap_id": "8865",
+      "youtube_id": "2ZDNB3TiF7k",
+      "start_time": 30.0,
+      "caption": "Two men are speaking to each other as cars pass by",
+      "audio_relpath": "audio/train/2ZDNB3TiF7k.wav"
+    },
+    {
+      "audiocap_id": "8867",
+      "youtube_id": "2ZI8enKej88",
+      "start_time": 30.0,
+      "caption": "Vehicle running quietly",
+      "audio_relpath": "audio/train/2ZI8enKej88.wav"
+    },
+    {
+      "audiocap_id": "8869",
+      "youtube_id": "2ZOkYTE_3Ic",
+      "start_time": 23.0,
+      "caption": "Men talking and a car driving off",
+      "audio_relpath": "audio/train/2ZOkYTE_3Ic.wav"
+    },
+    {
+      "audiocap_id": "9190",
+      "youtube_id": "2gTqxrutLBw",
+      "start_time": 30.0,
+      "caption": "Liquid is pouring with a meta ling sound in the background",
+      "audio_relpath": "audio/train/2gTqxrutLBw.wav"
+    },
+    {
+      "audiocap_id": "9192",
+      "youtube_id": "2gXN76J-Xa4",
+      "start_time": 80.0,
+      "caption": "A person is snoring deeply",
+      "audio_relpath": "audio/train/2gXN76J-Xa4.wav"
+    },
+    {
+      "audiocap_id": "9199",
+      "youtube_id": "2ggJBDbgH-o",
+      "start_time": 240.0,
+      "caption": "A woman speaks, a man screams and they both laugh",
+      "audio_relpath": "audio/train/2ggJBDbgH-o.wav"
+    },
+    {
+      "audiocap_id": "9250",
+      "youtube_id": "2hxTX4mb0bY",
+      "start_time": 30.0,
+      "caption": "An adult male is speaking, a motor is running, rhythmic vibration, and water is gurgling",
+      "audio_relpath": "audio/train/2hxTX4mb0bY.wav"
+    },
+    {
+      "audiocap_id": "9252",
+      "youtube_id": "2hyT23nJm_4",
+      "start_time": 150.0,
+      "caption": "A female speaking, then a baby babbling, then a female cheering and clapping, followed by another female laughing and speaking",
+      "audio_relpath": "audio/train/2hyT23nJm_4.wav"
+    },
+    {
+      "audiocap_id": "9254",
+      "youtube_id": "2i0vfBErDUo",
+      "start_time": 30.0,
+      "caption": "A dog barks as another one whimpers, someone places an item down",
+      "audio_relpath": "audio/train/2i0vfBErDUo.wav"
+    },
+    {
+      "audiocap_id": "9258",
+      "youtube_id": "2i8L8v2NTsY",
+      "start_time": 30.0,
+      "caption": "A man gives a speech",
+      "audio_relpath": "audio/train/2i8L8v2NTsY.wav"
+    },
+    {
+      "audiocap_id": "9259",
+      "youtube_id": "2i8w_CZEprk",
+      "start_time": 0.0,
+      "caption": "Water flowing, wind blowing, a dog whimpers",
+      "audio_relpath": "audio/train/2i8w_CZEprk.wav"
+    },
+    {
+      "audiocap_id": "9751",
+      "youtube_id": "2vIXsl6gICw",
+      "start_time": 30.0,
+      "caption": "Loud engine attempting to get started",
+      "audio_relpath": "audio/train/2vIXsl6gICw.wav"
+    },
+    {
+      "audiocap_id": "9752",
+      "youtube_id": "2vJVctVYbMo",
+      "start_time": 30.0,
+      "caption": "An older man is giving a speech",
+      "audio_relpath": "audio/train/2vJVctVYbMo.wav"
+    },
+    {
+      "audiocap_id": "9753",
+      "youtube_id": "2vKxkciAFaM",
+      "start_time": 9.0,
+      "caption": "A dog pants, shuffles and barks",
+      "audio_relpath": "audio/train/2vKxkciAFaM.wav"
+    },
+    {
+      "audiocap_id": "9944",
+      "youtube_id": "3-gngAAblb0",
+      "start_time": 0.0,
+      "caption": "Traffic hums in the distance a loud vibration followed by an explosion, two boys speak",
+      "audio_relpath": "audio/train/3-gngAAblb0.wav"
+    },
+    {
+      "audiocap_id": "9945",
+      "youtube_id": "3-h-5BTp3t8",
+      "start_time": 30.0,
+      "caption": "Multiple loud booms followed by some explosions",
+      "audio_relpath": "audio/train/3-h-5BTp3t8.wav"
+    },
+    {
+      "audiocap_id": "9946",
+      "youtube_id": "3-hTZdJ3ZC4",
+      "start_time": 230.0,
+      "caption": "A saw is cutting through wood",
+      "audio_relpath": "audio/train/3-hTZdJ3ZC4.wav"
+    },
+    {
+      "audiocap_id": "9948",
+      "youtube_id": "3-klPRTnm-k",
+      "start_time": 230.0,
+      "caption": "A man speaking then a beeping noise",
+      "audio_relpath": "audio/train/3-klPRTnm-k.wav"
+    },
+    {
+      "audiocap_id": "9949",
+      "youtube_id": "3-p8O4-KtRg",
+      "start_time": 370.0,
+      "caption": "A woman is talking and using a sewing machine",
+      "audio_relpath": "audio/train/3-p8O4-KtRg.wav"
+    },
+    {
+      "audiocap_id": "10511",
+      "youtube_id": "3DgK0TcqnU4",
+      "start_time": 17.0,
+      "caption": "A loud car passes by",
+      "audio_relpath": "audio/train/3DgK0TcqnU4.wav"
+    },
+    {
+      "audiocap_id": "10513",
+      "youtube_id": "3DhQmxwJ5f0",
+      "start_time": 530.0,
+      "caption": "Waves are splashing and wind is blowing",
+      "audio_relpath": "audio/train/3DhQmxwJ5f0.wav"
+    },
+    {
+      "audiocap_id": "10514",
+      "youtube_id": "3DiaKBcq8eo",
+      "start_time": 18.0,
+      "caption": "Wind blows, people speak and vibrations rattle",
+      "audio_relpath": "audio/train/3DiaKBcq8eo.wav"
+    },
+    {
+      "audiocap_id": "10515",
+      "youtube_id": "3Dj9T10SMHM",
+      "start_time": 60.0,
+      "caption": "Loud typing on a keyboard",
+      "audio_relpath": "audio/train/3Dj9T10SMHM.wav"
+    },
+    {
+      "audiocap_id": "10703",
+      "youtube_id": "3JAjNVImec4",
+      "start_time": 340.0,
+      "caption": "People cheering and race cars racing by",
+      "audio_relpath": "audio/train/3JAjNVImec4.wav"
+    },
+    {
+      "audiocap_id": "10705",
+      "youtube_id": "3JELvtiMAZM",
+      "start_time": 110.0,
+      "caption": "Vehicle running loudly with a clanking sound",
+      "audio_relpath": "audio/train/3JELvtiMAZM.wav"
+    },
+    {
+      "audiocap_id": "10707",
+      "youtube_id": "3JIEw_2vKiQ",
+      "start_time": 21.0,
+      "caption": "Loud vibrations of a car idling and revving, it stops",
+      "audio_relpath": "audio/train/3JIEw_2vKiQ.wav"
+    },
+    {
+      "audiocap_id": "10708",
+      "youtube_id": "3JLBP8VnukU",
+      "start_time": 12.0,
+      "caption": "A dog whimpers repeatedly",
+      "audio_relpath": "audio/train/3JLBP8VnukU.wav"
+    },
+    {
+      "audiocap_id": "11542",
+      "youtube_id": "3eJ9RynJzP8",
+      "start_time": 80.0,
+      "caption": "The wind is blowing, insects are singing, and rustling occurs",
+      "audio_relpath": "audio/train/3eJ9RynJzP8.wav"
+    },
+    {
+      "audiocap_id": "11543",
+      "youtube_id": "3eK62q7SnVU",
+      "start_time": 390.0,
+      "caption": "The wind is blowing and rustling occurs",
+      "audio_relpath": "audio/train/3eK62q7SnVU.wav"
+    },
+    {
+      "audiocap_id": "11544",
+      "youtube_id": "3eL37ZUN5S4",
+      "start_time": 21.0,
+      "caption": "Aircraft engine hum with man and woman speaking",
+      "audio_relpath": "audio/train/3eL37ZUN5S4.wav"
+    },
+    {
+      "audiocap_id": "11545",
+      "youtube_id": "3eN7ujFJzXQ",
+      "start_time": 170.0,
+      "caption": "Hissing followed by clanking dishes and speech",
+      "audio_relpath": "audio/train/3eN7ujFJzXQ.wav"
+    },
+    {
+      "audiocap_id": "11546",
+      "youtube_id": "3eNWJ4Hle6Y",
+      "start_time": 210.0,
+      "caption": "The sizzling of food while a dish is clanking",
+      "audio_relpath": "audio/train/3eNWJ4Hle6Y.wav"
+    },
+    {
+      "audiocap_id": "11547",
+      "youtube_id": "3eQYsDrfsTc",
+      "start_time": 20.0,
+      "caption": "Someone has a hiccup while typing",
+      "audio_relpath": "audio/train/3eQYsDrfsTc.wav"
+    },
+    {
+      "audiocap_id": "11768",
+      "youtube_id": "3ju9A5iJbo8",
+      "start_time": 30.0,
+      "caption": "An adult female sneezes and sniffs, and an electronic device is playing in the background",
+      "audio_relpath": "audio/train/3ju9A5iJbo8.wav"
+    },
+    {
+      "audiocap_id": "12011",
+      "youtube_id": "3qA8qMYz3Xw",
+      "start_time": 30.0,
+      "caption": "A crowd is cheering and shouting, thumping occurs, an adult female speaks, and an adult male speaks",
+      "audio_relpath": "audio/train/3qA8qMYz3Xw.wav"
+    },
+    {
+      "audiocap_id": "12013",
+      "youtube_id": "3qKKDuwStA8",
+      "start_time": 40.0,
+      "caption": "A person is speaking and crumpling paper",
+      "audio_relpath": "audio/train/3qKKDuwStA8.wav"
+    },
+    {
+      "audiocap_id": "12014",
+      "youtube_id": "3qKmsP6BPXM",
+      "start_time": 30.0,
+      "caption": "A car engine revving",
+      "audio_relpath": "audio/train/3qKmsP6BPXM.wav"
+    },
+    {
+      "audiocap_id": "12015",
+      "youtube_id": "3qNSaQnzWUs",
+      "start_time": 30.0,
+      "caption": "The wind is blowing, a horse is trotting, and an adult male speaks",
+      "audio_relpath": "audio/train/3qNSaQnzWUs.wav"
+    },
+    {
+      "audiocap_id": "12016",
+      "youtube_id": "3qOK68-L2cU",
+      "start_time": 140.0,
+      "caption": "An aircraft begins its takeoff, buzzing of small engines",
+      "audio_relpath": "audio/train/3qOK68-L2cU.wav"
+    },
+    {
+      "audiocap_id": "12019",
+      "youtube_id": "3qPzSfovVmk",
+      "start_time": 70.0,
+      "caption": "Truck engine running then a dragging noise",
+      "audio_relpath": "audio/train/3qPzSfovVmk.wav"
+    },
+    {
+      "audiocap_id": "12202",
+      "youtube_id": "3uy7uenEb1Q",
+      "start_time": 20.0,
+      "caption": "Water runs and a frog gurgles then a man starts singing",
+      "audio_relpath": "audio/train/3uy7uenEb1Q.wav"
+    },
+    {
+      "audiocap_id": "12208",
+      "youtube_id": "3vCRry3mHjk",
+      "start_time": 20.0,
+      "caption": "A machine that is running, tapping and making winding noises",
+      "audio_relpath": "audio/train/3vCRry3mHjk.wav"
+    },
+    {
+      "audiocap_id": "12585",
+      "youtube_id": "45ALOD20Dh0",
+      "start_time": 30.0,
+      "caption": "Cheering and screaming intensifies, followed by a man speaking",
+      "audio_relpath": "audio/train/45ALOD20Dh0.wav"
+    },
+    {
+      "audiocap_id": "12588",
+      "youtube_id": "45CwJDMcXCo",
+      "start_time": 30.0,
+      "caption": "Low rumblings of an engine, people speak",
+      "audio_relpath": "audio/train/45CwJDMcXCo.wav"
+    },
+    {
+      "audiocap_id": "12589",
+      "youtube_id": "45FElpwPRnc",
+      "start_time": 460.0,
+      "caption": "A person speaking with some rubbing",
+      "audio_relpath": "audio/train/45FElpwPRnc.wav"
+    },
+    {
+      "audiocap_id": "12832",
+      "youtube_id": "4C-Abooz-OA",
+      "start_time": 30.0,
+      "caption": "The engine of a small machine pulling chains",
+      "audio_relpath": "audio/train/4C-Abooz-OA.wav"
+    },
+    {
+      "audiocap_id": "12835",
+      "youtube_id": "4C5_pfsrp3Q",
+      "start_time": 190.0,
+      "caption": "Birds are flapping their wings and some bird call",
+      "audio_relpath": "audio/train/4C5_pfsrp3Q.wav"
+    },
+    {
+      "audiocap_id": "13051",
+      "youtube_id": "4Hs1yZu1GAU",
+      "start_time": 520.0,
+      "caption": "Food is sizzling dishes are clanging together and a woman is speaking",
+      "audio_relpath": "audio/train/4Hs1yZu1GAU.wav"
+    },
+    {
+      "audiocap_id": "13052",
+      "youtube_id": "4HtkTDr342c",
+      "start_time": 30.0,
+      "caption": "A man is speaking and water is gurgling in the background",
+      "audio_relpath": "audio/train/4HtkTDr342c.wav"
+    },
+    {
+      "audiocap_id": "13055",
+      "youtube_id": "4Hz53AafH7s",
+      "start_time": 480.0,
+      "caption": "Motor slowing down",
+      "audio_relpath": "audio/train/4Hz53AafH7s.wav"
+    },
+    {
+      "audiocap_id": "13056",
+      "youtube_id": "4HzAuSA8Syk",
+      "start_time": 60.0,
+      "caption": "People talking in foreign language, train horn",
+      "audio_relpath": "audio/train/4HzAuSA8Syk.wav"
+    },
+    {
+      "audiocap_id": "13672",
+      "youtube_id": "4Zcfo6EtDww",
+      "start_time": 30.0,
+      "caption": "Cat meowing and people are talking",
+      "audio_relpath": "audio/train/4Zcfo6EtDww.wav"
+    },
+    {
+      "audiocap_id": "13673",
+      "youtube_id": "4ZcrAHlSOks",
+      "start_time": 490.0,
+      "caption": "A car accelerates and then decelerates and accelerates again",
+      "audio_relpath": "audio/train/4ZcrAHlSOks.wav"
+    },
+    {
+      "audiocap_id": "13676",
+      "youtube_id": "4ZibpJMpAGk",
+      "start_time": 30.0,
+      "caption": "Thunder rumbling, rain drops, a beeping noise, and then a piano",
+      "audio_relpath": "audio/train/4ZibpJMpAGk.wav"
+    },
+    {
+      "audiocap_id": "13677",
+      "youtube_id": "4ZlRt0UHWb8",
+      "start_time": 60.0,
+      "caption": "Low static and loud snoring followed by man speaking lightly",
+      "audio_relpath": "audio/train/4ZlRt0UHWb8.wav"
+    },
+    {
+      "audiocap_id": "13679",
+      "youtube_id": "4ZojMNkAmnE",
+      "start_time": 40.0,
+      "caption": "Birds are chirping, water is splashing, animals are bleating, and tapping occurs",
+      "audio_relpath": "audio/train/4ZojMNkAmnE.wav"
+    },
+    {
+      "audiocap_id": "13980",
+      "youtube_id": "4gkalNm_rFY",
+      "start_time": 30.0,
+      "caption": "A man is speaking and a small motor is humming",
+      "audio_relpath": "audio/train/4gkalNm_rFY.wav"
+    },
+    {
+      "audiocap_id": "13982",
+      "youtube_id": "4gpH3oMHTJA",
+      "start_time": 510.0,
+      "caption": "A tool motor is running, people are speaking, with an adult female in the foreground, and rhythmic clacking occurs",
+      "audio_relpath": "audio/train/4gpH3oMHTJA.wav"
+    },
+    {
+      "audiocap_id": "13984",
+      "youtube_id": "4gr2Se5WKP4",
+      "start_time": 30.0,
+      "caption": "A woman gives a speech",
+      "audio_relpath": "audio/train/4gr2Se5WKP4.wav"
+    },
+    {
+      "audiocap_id": "13985",
+      "youtube_id": "4gs_o5Zb2oM",
+      "start_time": 160.0,
+      "caption": "A crashing roar occurs, the wind is blowing, then motor vehicle engines are running",
+      "audio_relpath": "audio/train/4gs_o5Zb2oM.wav"
+    },
+    {
+      "audiocap_id": "13987",
+      "youtube_id": "4gwCtiZKejk",
+      "start_time": 290.0,
+      "caption": "Steam hissing from a machine",
+      "audio_relpath": "audio/train/4gwCtiZKejk.wav"
+    },
+    {
+      "audiocap_id": "13988",
+      "youtube_id": "4gwTPpO4WK8",
+      "start_time": 130.0,
+      "caption": "Water splashes followed by a man speaking then tapping",
+      "audio_relpath": "audio/train/4gwTPpO4WK8.wav"
+    },
+    {
+      "audiocap_id": "13989",
+      "youtube_id": "4gyuJnj9iWw",
+      "start_time": 110.0,
+      "caption": "Water is running and splashing, and an adult male speaks",
+      "audio_relpath": "audio/train/4gyuJnj9iWw.wav"
+    },
+    {
+      "audiocap_id": "14669",
+      "youtube_id": "4zCGF-4R-Ws",
+      "start_time": 10.0,
+      "caption": "The wind is blowing, a railroad crossing alarm clangs in the distance, and a train horn blows",
+      "audio_relpath": "audio/train/4zCGF-4R-Ws.wav"
+    },
+    {
+      "audiocap_id": "15130",
+      "youtube_id": "5BLQ53e9BJo",
+      "start_time": 70.0,
+      "caption": "People speak and wind blows as a car engine revs",
+      "audio_relpath": "audio/train/5BLQ53e9BJo.wav"
+    },
+    {
+      "audiocap_id": "15133",
+      "youtube_id": "5BPn_JSMNg0",
+      "start_time": 8.0,
+      "caption": "Rhythmic thumping occurs, then a tap and a click",
+      "audio_relpath": "audio/train/5BPn_JSMNg0.wav"
+    },
+    {
+      "audiocap_id": "15136",
+      "youtube_id": "5BUN4_MyOPc",
+      "start_time": 30.0,
+      "caption": "A motor boat is being driven in water and also paddling sound",
+      "audio_relpath": "audio/train/5BUN4_MyOPc.wav"
+    },
+    {
+      "audiocap_id": "15138",
+      "youtube_id": "5BYjO-ydBg0",
+      "start_time": 30.0,
+      "caption": "Several ducks quack, people talk",
+      "audio_relpath": "audio/train/5BYjO-ydBg0.wav"
+    },
+    {
+      "audiocap_id": "15552",
+      "youtube_id": "5MQaessPo-0",
+      "start_time": 560.0,
+      "caption": "Multiple car engines run",
+      "audio_relpath": "audio/train/5MQaessPo-0.wav"
+    },
+    {
+      "audiocap_id": "15554",
+      "youtube_id": "5MSE1-YlVfc",
+      "start_time": 30.0,
+      "caption": "A woman speaks followed by laughter and a cat crying",
+      "audio_relpath": "audio/train/5MSE1-YlVfc.wav"
+    },
+    {
+      "audiocap_id": "16004",
+      "youtube_id": "5ZRTs1ADSB0",
+      "start_time": 60.0,
+      "caption": "A powerful engine idles",
+      "audio_relpath": "audio/train/5ZRTs1ADSB0.wav"
+    },
+    {
+      "audiocap_id": "16112",
+      "youtube_id": "5bNgM-jQXhQ",
+      "start_time": 210.0,
+      "caption": "A windy day and a man speaking in the distance",
+      "audio_relpath": "audio/train/5bNgM-jQXhQ.wav"
+    },
+    {
+      "audiocap_id": "16700",
+      "youtube_id": "5sTt2AMCjSA",
+      "start_time": 30.0,
+      "caption": "A car is racing away very fast and its tires squeal a little",
+      "audio_relpath": "audio/train/5sTt2AMCjSA.wav"
+    },
+    {
+      "audiocap_id": "16707",
+      "youtube_id": "5sfQQb6HpSc",
+      "start_time": 210.0,
+      "caption": "A whistle and another man speaks and the whistling stops.",
+      "audio_relpath": "audio/train/5sfQQb6HpSc.wav"
+    },
+    {
+      "audiocap_id": "16708",
+      "youtube_id": "5siKASaXYTU",
+      "start_time": 0.0,
+      "caption": "Numerous background noise of people and animals that end with an animal bellowing",
+      "audio_relpath": "audio/train/5siKASaXYTU.wav"
+    },
+    {
+      "audiocap_id": "16709",
+      "youtube_id": "5siQ3K31KeI",
+      "start_time": 10.0,
+      "caption": "Sewing machine going, then stopping and starting up again",
+      "audio_relpath": "audio/train/5siQ3K31KeI.wav"
+    },
+    {
+      "audiocap_id": "16884",
+      "youtube_id": "5yAnVjPDShU",
+      "start_time": 29.0,
+      "caption": "Sirens ring out and cars speed by in the background",
+      "audio_relpath": "audio/train/5yAnVjPDShU.wav"
+    },
+    {
+      "audiocap_id": "16887",
+      "youtube_id": "5yFBvLbq1XA",
+      "start_time": 30.0,
+      "caption": "Water running from a faucet",
+      "audio_relpath": "audio/train/5yFBvLbq1XA.wav"
+    },
+    {
+      "audiocap_id": "16911",
+      "youtube_id": "5zI3BKP6h14",
+      "start_time": 10.0,
+      "caption": "A bell being rung",
+      "audio_relpath": "audio/train/5zI3BKP6h14.wav"
+    },
+    {
+      "audiocap_id": "16912",
+      "youtube_id": "5zLYxr2BM4Y",
+      "start_time": 30.0,
+      "caption": "Kick starting an engine",
+      "audio_relpath": "audio/train/5zLYxr2BM4Y.wav"
+    },
+    {
+      "audiocap_id": "16913",
+      "youtube_id": "5zNWv74vr_M",
+      "start_time": 140.0,
+      "caption": "Trickle of a stream and bird chirping",
+      "audio_relpath": "audio/train/5zNWv74vr_M.wav"
+    },
+    {
+      "audiocap_id": "16917",
+      "youtube_id": "5zUkaGz_150",
+      "start_time": 23.0,
+      "caption": "Small dogs howling and barking with car alarm",
+      "audio_relpath": "audio/train/5zUkaGz_150.wav"
+    },
+    {
+      "audiocap_id": "16918",
+      "youtube_id": "5zVdtNyCa28",
+      "start_time": 110.0,
+      "caption": "Siren sounds, along with wind blowing",
+      "audio_relpath": "audio/train/5zVdtNyCa28.wav"
+    },
+    {
+      "audiocap_id": "16919",
+      "youtube_id": "5zX3cmlLxwI",
+      "start_time": 570.0,
+      "caption": "A man talking while the wind blows on the microphone and bees buzz",
+      "audio_relpath": "audio/train/5zX3cmlLxwI.wav"
+    },
+    {
+      "audiocap_id": "17250",
+      "youtube_id": "67qTV1MDXhc",
+      "start_time": 100.0,
+      "caption": "A bell chiming",
+      "audio_relpath": "audio/train/67qTV1MDXhc.wav"
+    },
+    {
+      "audiocap_id": "17251",
+      "youtube_id": "67r_mSftdjk",
+      "start_time": 30.0,
+      "caption": "A woman giving a speech",
+      "audio_relpath": "audio/train/67r_mSftdjk.wav"
+    },
+    {
+      "audiocap_id": "17252",
+      "youtube_id": "67rvn9HIZsM",
+      "start_time": 10.0,
+      "caption": "The chirping of multiple birds accompanies gurgling water and crunching footsteps",
+      "audio_relpath": "audio/train/67rvn9HIZsM.wav"
+    },
+    {
+      "audiocap_id": "17254",
+      "youtube_id": "67yhKQpwvjo",
+      "start_time": 30.0,
+      "caption": "People speak followed by spraying, then a phone rings",
+      "audio_relpath": "audio/train/67yhKQpwvjo.wav"
+    },
+    {
+      "audiocap_id": "17255",
+      "youtube_id": "67zyxZb-wQM",
+      "start_time": 340.0,
+      "caption": "A round of applause followed by a woman speaking",
+      "audio_relpath": "audio/train/67zyxZb-wQM.wav"
+    },
+    {
+      "audiocap_id": "17257",
+      "youtube_id": "6850oZZoeb8",
+      "start_time": 60.0,
+      "caption": "Traffic sounds are present and ongoing, an adult male is speaking, and metal clicking occurs",
+      "audio_relpath": "audio/train/6850oZZoeb8.wav"
+    },
+    {
+      "audiocap_id": "17259",
+      "youtube_id": "68AJ_1alYNg",
+      "start_time": 310.0,
+      "caption": "Man speaks while bees buzz",
+      "audio_relpath": "audio/train/68AJ_1alYNg.wav"
+    },
+    {
+      "audiocap_id": "17350",
+      "youtube_id": "6AMsLkMRNGY",
+      "start_time": 190.0,
+      "caption": "A woman sneezing loudly",
+      "audio_relpath": "audio/train/6AMsLkMRNGY.wav"
+    },
+    {
+      "audiocap_id": "17353",
+      "youtube_id": "6AQLfSO8L5Q",
+      "start_time": 0.0,
+      "caption": "A man speaks then a horse neighs then a slap, a crash, and a car alarm",
+      "audio_relpath": "audio/train/6AQLfSO8L5Q.wav"
+    },
+    {
+      "audiocap_id": "17354",
+      "youtube_id": "6AT29qrNRdA",
+      "start_time": 12.0,
+      "caption": "A small motor is humming",
+      "audio_relpath": "audio/train/6AT29qrNRdA.wav"
+    },
+    {
+      "audiocap_id": "17355",
+      "youtube_id": "6ATurT-AdAc",
+      "start_time": 26.0,
+      "caption": "Baby is crying loudly while a woman is laughing and verbalizing something",
+      "audio_relpath": "audio/train/6ATurT-AdAc.wav"
+    },
+    {
+      "audiocap_id": "17358",
+      "youtube_id": "6AgA_HoFiEU",
+      "start_time": 230.0,
+      "caption": "A man speaks as scraping is heard",
+      "audio_relpath": "audio/train/6AgA_HoFiEU.wav"
+    },
+    {
+      "audiocap_id": "17359",
+      "youtube_id": "6AhDat_-Zdw",
+      "start_time": 3.0,
+      "caption": "A high frequency vibration suddenly becomes lower frequency as it fade away in the distance",
+      "audio_relpath": "audio/train/6AhDat_-Zdw.wav"
+    },
+    {
+      "audiocap_id": "17884",
+      "youtube_id": "6QJTjLvzCXg",
+      "start_time": 40.0,
+      "caption": "A small insect buzzing around outside",
+      "audio_relpath": "audio/train/6QJTjLvzCXg.wav"
+    },
+    {
+      "audiocap_id": "18566",
+      "youtube_id": "6jwQjR9xCMM",
+      "start_time": 30.0,
+      "caption": "Ticking from a coo clock which then alarms",
+      "audio_relpath": "audio/train/6jwQjR9xCMM.wav"
+    },
+    {
+      "audiocap_id": "18760",
+      "youtube_id": "6pTTmdHTaTg",
+      "start_time": 80.0,
+      "caption": "A distant humming with rustling",
+      "audio_relpath": "audio/train/6pTTmdHTaTg.wav"
+    },
+    {
+      "audiocap_id": "18764",
+      "youtube_id": "6pfN49qA3NM",
+      "start_time": 30.0,
+      "caption": "A man speaks echoing in a microphone",
+      "audio_relpath": "audio/train/6pfN49qA3NM.wav"
+    },
+    {
+      "audiocap_id": "18768",
+      "youtube_id": "6pmMNLLcU9Q",
+      "start_time": 470.0,
+      "caption": "A large motor idles with some hydraulic hissing",
+      "audio_relpath": "audio/train/6pmMNLLcU9Q.wav"
+    },
+    {
+      "audiocap_id": "18891",
+      "youtube_id": "6uDv3CFjq2A",
+      "start_time": 40.0,
+      "caption": "Ongoing stream running with faint children noises",
+      "audio_relpath": "audio/train/6uDv3CFjq2A.wav"
+    },
+    {
+      "audiocap_id": "18895",
+      "youtube_id": "6uOmaZT3PRQ",
+      "start_time": 20.0,
+      "caption": "Clicking on a computer keyboard",
+      "audio_relpath": "audio/train/6uOmaZT3PRQ.wav"
+    },
+    {
+      "audiocap_id": "18897",
+      "youtube_id": "6uRL_wlWIxI",
+      "start_time": 90.0,
+      "caption": "Birds chirping with a light banging in the background",
+      "audio_relpath": "audio/train/6uRL_wlWIxI.wav"
+    },
+    {
+      "audiocap_id": "18898",
+      "youtube_id": "6uSoEE2rS9o",
+      "start_time": 110.0,
+      "caption": "Hissing loudly and a man speaking",
+      "audio_relpath": "audio/train/6uSoEE2rS9o.wav"
+    },
+    {
+      "audiocap_id": "19390",
+      "youtube_id": "77VHwpyq6xo",
+      "start_time": 30.0,
+      "caption": "A dog barks while people speak",
+      "audio_relpath": "audio/train/77VHwpyq6xo.wav"
+    },
+    {
+      "audiocap_id": "19391",
+      "youtube_id": "77W8716C44A",
+      "start_time": 30.0,
+      "caption": "A frog croaking",
+      "audio_relpath": "audio/train/77W8716C44A.wav"
+    },
+    {
+      "audiocap_id": "19392",
+      "youtube_id": "77YX1V-mPcY",
+      "start_time": 70.0,
+      "caption": "Water is flowing making bubbly sounds and splashing around",
+      "audio_relpath": "audio/train/77YX1V-mPcY.wav"
+    },
+    {
+      "audiocap_id": "19393",
+      "youtube_id": "77ZFT8HuVq0",
+      "start_time": 30.0,
+      "caption": "A boat motor is running and then accelerates, and water is splashing",
+      "audio_relpath": "audio/train/77ZFT8HuVq0.wav"
+    },
+    {
+      "audiocap_id": "19397",
+      "youtube_id": "77fe_-5zCmM",
+      "start_time": 20.0,
+      "caption": "An adult male speaks, a meow occurs, then a boom, the male speaks again, and mechanical clicking occurs",
+      "audio_relpath": "audio/train/77fe_-5zCmM.wav"
+    },
+    {
+      "audiocap_id": "19510",
+      "youtube_id": "7B4rDyFBT_U",
+      "start_time": 30.0,
+      "caption": "Multiple young puppies were crying and whimpering",
+      "audio_relpath": "audio/train/7B4rDyFBT_U.wav"
+    },
+    {
+      "audiocap_id": "19511",
+      "youtube_id": "7B6DTfdu03c",
+      "start_time": 0.0,
+      "caption": "Rustling, hissing and rattling are present, and insects are buzzing",
+      "audio_relpath": "audio/train/7B6DTfdu03c.wav"
+    },
+    {
+      "audiocap_id": "19581",
+      "youtube_id": "7CyP_SLbBTE",
+      "start_time": 29.0,
+      "caption": "A clock is chiming in a high pitch and then an older man speaks",
+      "audio_relpath": "audio/train/7CyP_SLbBTE.wav"
+    },
+    {
+      "audiocap_id": "19582",
+      "youtube_id": "7CyugpFwWr4",
+      "start_time": 18.0,
+      "caption": "An engine idles and revs with people talking in the distance",
+      "audio_relpath": "audio/train/7CyugpFwWr4.wav"
+    },
+    {
+      "audiocap_id": "19584",
+      "youtube_id": "7D28hhaU9RU",
+      "start_time": 30.0,
+      "caption": "A woman and man are having a conversation then a dog starts barking loudly",
+      "audio_relpath": "audio/train/7D28hhaU9RU.wav"
+    },
+    {
+      "audiocap_id": "19972",
+      "youtube_id": "7PFt6ML7enY",
+      "start_time": 50.0,
+      "caption": "A child cries and yells and an adult speaks in response",
+      "audio_relpath": "audio/train/7PFt6ML7enY.wav"
+    },
+    {
+      "audiocap_id": "20860",
+      "youtube_id": "7pSb9zMzS4k",
+      "start_time": 30.0,
+      "caption": "A cat meows then a man speaks",
+      "audio_relpath": "audio/train/7pSb9zMzS4k.wav"
+    },
+    {
+      "audiocap_id": "20864",
+      "youtube_id": "7pUe_uJ4zlI",
+      "start_time": 30.0,
+      "caption": "Large engine sound with several gunshots",
+      "audio_relpath": "audio/train/7pUe_uJ4zlI.wav"
+    },
+    {
+      "audiocap_id": "21401",
+      "youtube_id": "85swzkKdSeI",
+      "start_time": 340.0,
+      "caption": "Dishes are clanking and banging against one another followed by a man vocalizing something out loud",
+      "audio_relpath": "audio/train/85swzkKdSeI.wav"
+    },
+    {
+      "audiocap_id": "21612",
+      "youtube_id": "8Cex_va7-8U",
+      "start_time": 17.0,
+      "caption": "A horse walks, some wood creaks, and a man talks",
+      "audio_relpath": "audio/train/8Cex_va7-8U.wav"
+    },
+    {
+      "audiocap_id": "21613",
+      "youtube_id": "8Cl-_ONJOes",
+      "start_time": 30.0,
+      "caption": "A man is talking",
+      "audio_relpath": "audio/train/8Cl-_ONJOes.wav"
+    },
+    {
+      "audiocap_id": "21614",
+      "youtube_id": "8ClpqdlMMTE",
+      "start_time": 50.0,
+      "caption": "A small dog whimpering and howling",
+      "audio_relpath": "audio/train/8ClpqdlMMTE.wav"
+    },
+    {
+      "audiocap_id": "21616",
+      "youtube_id": "8CpkuIJ1aQg",
+      "start_time": 30.0,
+      "caption": "An adult male is speaking informatively",
+      "audio_relpath": "audio/train/8CpkuIJ1aQg.wav"
+    },
+    {
+      "audiocap_id": "21617",
+      "youtube_id": "8Cpu6HuZppw",
+      "start_time": 50.0,
+      "caption": "Someone suddenly sneezes out loud",
+      "audio_relpath": "audio/train/8Cpu6HuZppw.wav"
+    },
+    {
+      "audiocap_id": "21618",
+      "youtube_id": "8Cpw8deghns",
+      "start_time": 150.0,
+      "caption": "Crinkling noise followed by a man talking",
+      "audio_relpath": "audio/train/8Cpw8deghns.wav"
+    },
+    {
+      "audiocap_id": "21872",
+      "youtube_id": "8L-uL3aIZnQ",
+      "start_time": 0.0,
+      "caption": "People murmur an explosion occurs and the people laugh loudly",
+      "audio_relpath": "audio/train/8L-uL3aIZnQ.wav"
+    },
+    {
+      "audiocap_id": "21873",
+      "youtube_id": "8L05L2DQj3E",
+      "start_time": 0.0,
+      "caption": "A door opening and then closing",
+      "audio_relpath": "audio/train/8L05L2DQj3E.wav"
+    },
+    {
+      "audiocap_id": "21874",
+      "youtube_id": "8L2M5UkB19Q",
+      "start_time": 0.0,
+      "caption": "A man laughing at a vehicle passing by honking",
+      "audio_relpath": "audio/train/8L2M5UkB19Q.wav"
+    },
+    {
+      "audiocap_id": "21931",
+      "youtube_id": "8MxxgRV8o7U",
+      "start_time": 420.0,
+      "caption": "An adult male speaks, water runs, splashes and gurgles, and a thump occurs",
+      "audio_relpath": "audio/train/8MxxgRV8o7U.wav"
+    },
+    {
+      "audiocap_id": "21932",
+      "youtube_id": "8MzdJUn9n8U",
+      "start_time": 6.0,
+      "caption": "A car starts up and is revved",
+      "audio_relpath": "audio/train/8MzdJUn9n8U.wav"
+    },
+    {
+      "audiocap_id": "21939",
+      "youtube_id": "8NAMpUl01ug",
+      "start_time": 200.0,
+      "caption": "Wind blowing hard followed by two men talking in distant ending with a frog croaking",
+      "audio_relpath": "audio/train/8NAMpUl01ug.wav"
+    },
+    {
+      "audiocap_id": "22670",
+      "youtube_id": "8itRcDYjTiw",
+      "start_time": 30.0,
+      "caption": "A man talking and traffic driving",
+      "audio_relpath": "audio/train/8itRcDYjTiw.wav"
+    },
+    {
+      "audiocap_id": "22672",
+      "youtube_id": "8ixP67tAOXs",
+      "start_time": 0.0,
+      "caption": "Vehicles are racing by at a fast speed",
+      "audio_relpath": "audio/train/8ixP67tAOXs.wav"
+    },
+    {
+      "audiocap_id": "22676",
+      "youtube_id": "8j6uc8DEzWA",
+      "start_time": 0.0,
+      "caption": "A man is speaking and loud bangs happen",
+      "audio_relpath": "audio/train/8j6uc8DEzWA.wav"
+    },
+    {
+      "audiocap_id": "22678",
+      "youtube_id": "8j7q3t8ie10",
+      "start_time": 30.0,
+      "caption": "Moving of objects followed by a beep",
+      "audio_relpath": "audio/train/8j7q3t8ie10.wav"
+    },
+    {
+      "audiocap_id": "22679",
+      "youtube_id": "8jF5KAS1LkI",
+      "start_time": 170.0,
+      "caption": "Females speech followed by a sewing machine in operation",
+      "audio_relpath": "audio/train/8jF5KAS1LkI.wav"
+    },
+    {
+      "audiocap_id": "23260",
+      "youtube_id": "90lCkXCD-zo",
+      "start_time": 70.0,
+      "caption": "Adult females are laughing, and thumping occurs",
+      "audio_relpath": "audio/train/90lCkXCD-zo.wav"
+    },
+    {
+      "audiocap_id": "23266",
+      "youtube_id": "90ysqz1zb0Q",
+      "start_time": 30.0,
+      "caption": "A vehicle is accelerating",
+      "audio_relpath": "audio/train/90ysqz1zb0Q.wav"
+    },
+    {
+      "audiocap_id": "23504",
+      "youtube_id": "994l_hUXlCM",
+      "start_time": 30.0,
+      "caption": "A group of birds cheep, a man speaks",
+      "audio_relpath": "audio/train/994l_hUXlCM.wav"
+    },
+    {
+      "audiocap_id": "23506",
+      "youtube_id": "995vcjHHtZc",
+      "start_time": 26.0,
+      "caption": "People are being pushed back on her own",
+      "audio_relpath": "audio/train/995vcjHHtZc.wav"
+    },
+    {
+      "audiocap_id": "23507",
+      "youtube_id": "998RhGRlp1c",
+      "start_time": 30.0,
+      "caption": "Rain hitting the roof",
+      "audio_relpath": "audio/train/998RhGRlp1c.wav"
+    },
+    {
+      "audiocap_id": "23710",
+      "youtube_id": "9Esmg7iWyBA",
+      "start_time": 30.0,
+      "caption": "A woman delivering a speech over a microphone",
+      "audio_relpath": "audio/train/9Esmg7iWyBA.wav"
+    },
+    {
+      "audiocap_id": "23719",
+      "youtube_id": "9F5bSydqGn0",
+      "start_time": 40.0,
+      "caption": "A man snoring",
+      "audio_relpath": "audio/train/9F5bSydqGn0.wav"
+    },
+    {
+      "audiocap_id": "23757",
+      "youtube_id": "9GNe9_gjj6g",
+      "start_time": 10.0,
+      "caption": "A buzzing followed by a bee flying",
+      "audio_relpath": "audio/train/9GNe9_gjj6g.wav"
+    },
+    {
+      "audiocap_id": "24144",
+      "youtube_id": "9SvCis6IdgU",
+      "start_time": 26.0,
+      "caption": "Man laughing and talking, whistle and engine revving",
+      "audio_relpath": "audio/train/9SvCis6IdgU.wav"
+    },
+    {
+      "audiocap_id": "24145",
+      "youtube_id": "9SwGzhspGIs",
+      "start_time": 30.0,
+      "caption": "A woman speaking followed by a baby cooing",
+      "audio_relpath": "audio/train/9SwGzhspGIs.wav"
+    },
+    {
+      "audiocap_id": "24570",
+      "youtube_id": "9gCfNKhR3-g",
+      "start_time": 30.0,
+      "caption": "A loud siren is sounding continuously",
+      "audio_relpath": "audio/train/9gCfNKhR3-g.wav"
+    },
+    {
+      "audiocap_id": "24576",
+      "youtube_id": "9gYCk8sJmro",
+      "start_time": 140.0,
+      "caption": "A man tells a joke and a group of people laugh",
+      "audio_relpath": "audio/train/9gYCk8sJmro.wav"
+    },
+    {
+      "audiocap_id": "24577",
+      "youtube_id": "9gZszubMN_k",
+      "start_time": 0.0,
+      "caption": "Intermittent beeping and silence",
+      "audio_relpath": "audio/train/9gZszubMN_k.wav"
+    },
+    {
+      "audiocap_id": "26831",
+      "youtube_id": "AkcW4_2TG_g",
+      "start_time": 90.0,
+      "caption": "Water noisily going down a street drain while voices of children are in the background",
+      "audio_relpath": "audio/train/AkcW4_2TG_g.wav"
+    },
+    {
+      "audiocap_id": "26835",
+      "youtube_id": "AkfcsAlzzR4",
+      "start_time": 30.0,
+      "caption": "High pitched screeching and spraying with people speaking",
+      "audio_relpath": "audio/train/AkfcsAlzzR4.wav"
+    },
+    {
+      "audiocap_id": "27005",
+      "youtube_id": "ApO6Xssud_Q",
+      "start_time": 120.0,
+      "caption": "High pitched drilling followed by rustling",
+      "audio_relpath": "audio/train/ApO6Xssud_Q.wav"
+    },
+    {
+      "audiocap_id": "27007",
+      "youtube_id": "ApPOUsJ11Xg",
+      "start_time": 60.0,
+      "caption": "Wind and a female voice before a speed boat goes past",
+      "audio_relpath": "audio/train/ApPOUsJ11Xg.wav"
+    },
+    {
+      "audiocap_id": "27008",
+      "youtube_id": "ApPgkhgBkq0",
+      "start_time": 30.0,
+      "caption": "A dog crying as a phone rings",
+      "audio_relpath": "audio/train/ApPgkhgBkq0.wav"
+    },
+    {
+      "audiocap_id": "27611",
+      "youtube_id": "B8xK_lJFsRw",
+      "start_time": 30.0,
+      "caption": "People speaking on a moving bus",
+      "audio_relpath": "audio/train/B8xK_lJFsRw.wav"
+    },
+    {
+      "audiocap_id": "27618",
+      "youtube_id": "B9J303z3ICM",
+      "start_time": 270.0,
+      "caption": "A flushing of water and people talking",
+      "audio_relpath": "audio/train/B9J303z3ICM.wav"
+    },
+    {
+      "audiocap_id": "27820",
+      "youtube_id": "BF1KkbstHUA",
+      "start_time": 90.0,
+      "caption": "Man speaking and vehicle noise",
+      "audio_relpath": "audio/train/BF1KkbstHUA.wav"
+    },
+    {
+      "audiocap_id": "27822",
+      "youtube_id": "BF5-cXvdNSI",
+      "start_time": 30.0,
+      "caption": "A man speaking",
+      "audio_relpath": "audio/train/BF5-cXvdNSI.wav"
+    },
+    {
+      "audiocap_id": "27824",
+      "youtube_id": "BF6-iTkCyxc",
+      "start_time": 30.0,
+      "caption": "A mid-size motor is idling, vibrating and knocking",
+      "audio_relpath": "audio/train/BF6-iTkCyxc.wav"
+    },
+    {
+      "audiocap_id": "27825",
+      "youtube_id": "BFAa5nh2O_c",
+      "start_time": 30.0,
+      "caption": "Clanking and clinking",
+      "audio_relpath": "audio/train/BFAa5nh2O_c.wav"
+    },
+    {
+      "audiocap_id": "27826",
+      "youtube_id": "BFBfTeNZTkg",
+      "start_time": 30.0,
+      "caption": "A large sprayer is stopping and starting in short bursts",
+      "audio_relpath": "audio/train/BFBfTeNZTkg.wav"
+    },
+    {
+      "audiocap_id": "27929",
+      "youtube_id": "BInkqoDuaQk",
+      "start_time": 30.0,
+      "caption": "Man speaking and noises in background",
+      "audio_relpath": "audio/train/BInkqoDuaQk.wav"
+    },
+    {
+      "audiocap_id": "28400",
+      "youtube_id": "BX6ZQlcYiG8",
+      "start_time": 30.0,
+      "caption": "Wind sounds, followed by a man talking nearby",
+      "audio_relpath": "audio/train/BX6ZQlcYiG8.wav"
+    },
+    {
+      "audiocap_id": "28408",
+      "youtube_id": "BXLBYcnutbM",
+      "start_time": 30.0,
+      "caption": "Music plays followed by a door opening and a woman sneezing",
+      "audio_relpath": "audio/train/BXLBYcnutbM.wav"
+    },
+    {
+      "audiocap_id": "29359",
+      "youtube_id": "C0s3qWFhItU",
+      "start_time": 15.0,
+      "caption": "A vehicle motor is revved repeatedly",
+      "audio_relpath": "audio/train/C0s3qWFhItU.wav"
+    },
+    {
+      "audiocap_id": "29670",
+      "youtube_id": "CB_L70p00mE",
+      "start_time": 30.0,
+      "caption": "A sustained and continuous spraying sound",
+      "audio_relpath": "audio/train/CB_L70p00mE.wav"
+    },
+    {
+      "audiocap_id": "29760",
+      "youtube_id": "CEggxDcgEHc",
+      "start_time": 70.0,
+      "caption": "Metal clashes and a man speaks",
+      "audio_relpath": "audio/train/CEggxDcgEHc.wav"
+    },
+    {
+      "audiocap_id": "30221",
+      "youtube_id": "CUiajtjBXHM",
+      "start_time": 30.0,
+      "caption": "Air rushing followed by a couple of sneezes",
+      "audio_relpath": "audio/train/CUiajtjBXHM.wav"
+    },
+    {
+      "audiocap_id": "30229",
+      "youtube_id": "CUvDaVFQ0sg",
+      "start_time": 450.0,
+      "caption": "A woman speaking and dishes clanking",
+      "audio_relpath": "audio/train/CUvDaVFQ0sg.wav"
+    },
+    {
+      "audiocap_id": "31736",
+      "youtube_id": "DJVEiFFUB6g",
+      "start_time": 250.0,
+      "caption": "A woman talks while frying something",
+      "audio_relpath": "audio/train/DJVEiFFUB6g.wav"
+    },
+    {
+      "audiocap_id": "33529",
+      "youtube_id": "EGhjsAOjfzU",
+      "start_time": 10.0,
+      "caption": "A man talks followed by a machine working",
+      "audio_relpath": "audio/train/EGhjsAOjfzU.wav"
+    },
+    {
+      "audiocap_id": "33729",
+      "youtube_id": "EONfjVbpIuM",
+      "start_time": 140.0,
+      "caption": "Wind noise sounds and a train goes by with horn sounds",
+      "audio_relpath": "audio/train/EONfjVbpIuM.wav"
+    },
+    {
+      "audiocap_id": "33754",
+      "youtube_id": "EPNr68hknvw",
+      "start_time": 30.0,
+      "caption": "In a quiet environment, an adult male is speaking",
+      "audio_relpath": "audio/train/EPNr68hknvw.wav"
+    },
+    {
+      "audiocap_id": "33755",
+      "youtube_id": "EPSPjAR8ztY",
+      "start_time": 30.0,
+      "caption": "A crowd applause loudly nearby as a person talks in the distance",
+      "audio_relpath": "audio/train/EPSPjAR8ztY.wav"
+    },
+    {
+      "audiocap_id": "34323",
+      "youtube_id": "EiXfXZBruBc",
+      "start_time": 110.0,
+      "caption": "A slight thud is followed by a long hiss of steam",
+      "audio_relpath": "audio/train/EiXfXZBruBc.wav"
+    },
+    {
+      "audiocap_id": "34327",
+      "youtube_id": "EiclIi8sIcc",
+      "start_time": 0.0,
+      "caption": "A man speaks and an engine starts",
+      "audio_relpath": "audio/train/EiclIi8sIcc.wav"
+    },
+    {
+      "audiocap_id": "35218",
+      "youtube_id": "FGc9Zt1MXng",
+      "start_time": 0.0,
+      "caption": "A child laughs loudly and a man shouts",
+      "audio_relpath": "audio/train/FGc9Zt1MXng.wav"
+    },
+    {
+      "audiocap_id": "35589",
+      "youtube_id": "FVNtJvdYJsk",
+      "start_time": 30.0,
+      "caption": "A man speaks into a microphone, a guitar plays, the audience laughs, and then a woman speaks",
+      "audio_relpath": "audio/train/FVNtJvdYJsk.wav"
+    },
+    {
+      "audiocap_id": "36179",
+      "youtube_id": "FsPM3qqt0yQ",
+      "start_time": 30.0,
+      "caption": "An engine accelerating followed by brief silence",
+      "audio_relpath": "audio/train/FsPM3qqt0yQ.wav"
+    },
+    {
+      "audiocap_id": "37435",
+      "youtube_id": "Gbw2xMGR8ww",
+      "start_time": 330.0,
+      "caption": "A railroad train, chain clanking and, steam whistle blowing",
+      "audio_relpath": "audio/train/Gbw2xMGR8ww.wav"
+    },
+    {
+      "audiocap_id": "37437",
+      "youtube_id": "GbyK-4HCwUE",
+      "start_time": 240.0,
+      "caption": "A siren on a police car on a street",
+      "audio_relpath": "audio/train/GbyK-4HCwUE.wav"
+    },
+    {
+      "audiocap_id": "38604",
+      "youtube_id": "HLzYhQ8Gbmk",
+      "start_time": 10.0,
+      "caption": "An adult male speaks, music begins during which a helicopter operates, and an adult female speaks",
+      "audio_relpath": "audio/train/HLzYhQ8Gbmk.wav"
+    },
+    {
+      "audiocap_id": "38605",
+      "youtube_id": "HM1M_c2o06k",
+      "start_time": 60.0,
+      "caption": "A kid cries as a man is talking in the distance followed by a man laughing",
+      "audio_relpath": "audio/train/HM1M_c2o06k.wav"
+    },
+    {
+      "audiocap_id": "38607",
+      "youtube_id": "HM2cskmdTj8",
+      "start_time": 16.0,
+      "caption": "As vehicles go by on the road a musical horn sound off a tune",
+      "audio_relpath": "audio/train/HM2cskmdTj8.wav"
+    },
+    {
+      "audiocap_id": "39554",
+      "youtube_id": "Hy8lBFgMmJE",
+      "start_time": 10.0,
+      "caption": "Light static followed by loud static",
+      "audio_relpath": "audio/train/Hy8lBFgMmJE.wav"
+    },
+    {
+      "audiocap_id": "40960",
+      "youtube_id": "IryLRJ2P_qQ",
+      "start_time": 0.0,
+      "caption": "An insect buzzing intermittently",
+      "audio_relpath": "audio/train/IryLRJ2P_qQ.wav"
+    },
+    {
+      "audiocap_id": "40961",
+      "youtube_id": "Is0jFNep7kY",
+      "start_time": 240.0,
+      "caption": "Fast rubbing followed by speech",
+      "audio_relpath": "audio/train/Is0jFNep7kY.wav"
+    },
+    {
+      "audiocap_id": "40968",
+      "youtube_id": "IsHsdLjEu_k",
+      "start_time": 550.0,
+      "caption": "Motor vehicle changing gears and driving over something",
+      "audio_relpath": "audio/train/IsHsdLjEu_k.wav"
+    },
+    {
+      "audiocap_id": "41545",
+      "youtube_id": "JEXQ3c1Oze8",
+      "start_time": 30.0,
+      "caption": "A man talks followed by several people cheering",
+      "audio_relpath": "audio/train/JEXQ3c1Oze8.wav"
+    },
+    {
+      "audiocap_id": "41546",
+      "youtube_id": "JEZWQ17TXhU",
+      "start_time": 160.0,
+      "caption": "Water trickles gently and slowly stops",
+      "audio_relpath": "audio/train/JEZWQ17TXhU.wav"
+    },
+    {
+      "audiocap_id": "42089",
+      "youtube_id": "JaFx0FqcMRo",
+      "start_time": 0.0,
+      "caption": "Humming of an engine followed by a woman speaking and a burp",
+      "audio_relpath": "audio/train/JaFx0FqcMRo.wav"
+    },
+    {
+      "audiocap_id": "42548",
+      "youtube_id": "Jt3hxwZrXzE",
+      "start_time": 0.0,
+      "caption": "A man speaks then banging of metal followed by animal grunts",
+      "audio_relpath": "audio/train/Jt3hxwZrXzE.wav"
+    },
+    {
+      "audiocap_id": "42815",
+      "youtube_id": "K2aCJSsrT9k",
+      "start_time": 9.0,
+      "caption": "Static crackles, a person speaks in a distorted way, and water flows",
+      "audio_relpath": "audio/train/K2aCJSsrT9k.wav"
+    },
+    {
+      "audiocap_id": "43263",
+      "youtube_id": "KLGJt-Q65RA",
+      "start_time": 40.0,
+      "caption": "Small birds chirping with people speaking",
+      "audio_relpath": "audio/train/KLGJt-Q65RA.wav"
+    },
+    {
+      "audiocap_id": "43850",
+      "youtube_id": "KiHNFmpU5ZY",
+      "start_time": 30.0,
+      "caption": "A dog barking and growling",
+      "audio_relpath": "audio/train/KiHNFmpU5ZY.wav"
+    },
+    {
+      "audiocap_id": "44222",
+      "youtube_id": "KxZ-Uqn39Uw",
+      "start_time": 470.0,
+      "caption": "Sink running and water dripping with male voice",
+      "audio_relpath": "audio/train/KxZ-Uqn39Uw.wav"
+    },
+    {
+      "audiocap_id": "44423",
+      "youtube_id": "L5fq5D1Uces",
+      "start_time": 12.0,
+      "caption": "As the wind blows steadily a bird sings and an engine goes by",
+      "audio_relpath": "audio/train/L5fq5D1Uces.wav"
+    },
+    {
+      "audiocap_id": "45442",
+      "youtube_id": "LkPH8_fJ7Ls",
+      "start_time": 120.0,
+      "caption": "A male child speaks and plastic crumples and crinkles",
+      "audio_relpath": "audio/train/LkPH8_fJ7Ls.wav"
+    },
+    {
+      "audiocap_id": "45448",
+      "youtube_id": "LkXhkR4lTS4",
+      "start_time": 30.0,
+      "caption": "A person talking the entire clip",
+      "audio_relpath": "audio/train/LkXhkR4lTS4.wav"
+    },
+    {
+      "audiocap_id": "45636",
+      "youtube_id": "Lsv7HQizztA",
+      "start_time": 0.0,
+      "caption": "A car engine revs as it passes by",
+      "audio_relpath": "audio/train/Lsv7HQizztA.wav"
+    },
+    {
+      "audiocap_id": "46132",
+      "youtube_id": "MDW5VlmaGjA",
+      "start_time": 0.0,
+      "caption": "A vehicle engine revving and accelerating while driving by",
+      "audio_relpath": "audio/train/MDW5VlmaGjA.wav"
+    },
+    {
+      "audiocap_id": "46139",
+      "youtube_id": "MDoHzN4CYYg",
+      "start_time": 11.0,
+      "caption": "Humming and vibrating of a motor",
+      "audio_relpath": "audio/train/MDoHzN4CYYg.wav"
+    },
+    {
+      "audiocap_id": "46234",
+      "youtube_id": "MIQoPiyOI8k",
+      "start_time": 30.0,
+      "caption": "Something pops and then kids laugh and gasp followed by a man speaking",
+      "audio_relpath": "audio/train/MIQoPiyOI8k.wav"
+    },
+    {
+      "audiocap_id": "46239",
+      "youtube_id": "MIYymubn6VA",
+      "start_time": 30.0,
+      "caption": "Music plays and waves crash against a shoreline",
+      "audio_relpath": "audio/train/MIYymubn6VA.wav"
+    },
+    {
+      "audiocap_id": "48123",
+      "youtube_id": "NUqsl-em2FQ",
+      "start_time": 0.0,
+      "caption": "Children speak in the distance, followed by water gurgling nearby",
+      "audio_relpath": "audio/train/NUqsl-em2FQ.wav"
+    },
+    {
+      "audiocap_id": "49163",
+      "youtube_id": "O9tPTmjH_hY",
+      "start_time": 40.0,
+      "caption": "Ambient water noises, followed by electronic motorboat engine",
+      "audio_relpath": "audio/train/O9tPTmjH_hY.wav"
+    },
+    {
+      "audiocap_id": "49567",
+      "youtube_id": "ORg-1Jn7dY4",
+      "start_time": 90.0,
+      "caption": "Bells ringing loudly",
+      "audio_relpath": "audio/train/ORg-1Jn7dY4.wav"
+    },
+    {
+      "audiocap_id": "49569",
+      "youtube_id": "ORl0KaeGVzk",
+      "start_time": 26.0,
+      "caption": "A young child cries, and adult female speaks, and the child continues to sob and speak",
+      "audio_relpath": "audio/train/ORl0KaeGVzk.wav"
+    },
+    {
+      "audiocap_id": "49688",
+      "youtube_id": "OWhT0Gs-_q8",
+      "start_time": 30.0,
+      "caption": "Several explosions burst nearby as people grunt loudly",
+      "audio_relpath": "audio/train/OWhT0Gs-_q8.wav"
+    },
+    {
+      "audiocap_id": "49822",
+      "youtube_id": "ObnqwJxrbcI",
+      "start_time": 30.0,
+      "caption": "Some laughs lightly",
+      "audio_relpath": "audio/train/ObnqwJxrbcI.wav"
+    },
+    {
+      "audiocap_id": "50273",
+      "youtube_id": "OtA_FyCE9Pc",
+      "start_time": 30.0,
+      "caption": "An animal snores mildly",
+      "audio_relpath": "audio/train/OtA_FyCE9Pc.wav"
+    },
+    {
+      "audiocap_id": "50333",
+      "youtube_id": "OvYqIS_MrR8",
+      "start_time": 10.0,
+      "caption": "Laughter followed by a burp, speech, and more laughter",
+      "audio_relpath": "audio/train/OvYqIS_MrR8.wav"
+    },
+    {
+      "audiocap_id": "50335",
+      "youtube_id": "OvcGn_ScG5w",
+      "start_time": 430.0,
+      "caption": "Typing on a keyboard is occurring, and an adult male speaks briefly",
+      "audio_relpath": "audio/train/OvcGn_ScG5w.wav"
+    },
+    {
+      "audiocap_id": "50415",
+      "youtube_id": "OzvXPl848dw",
+      "start_time": 100.0,
+      "caption": "A man speaks with some dry scraping and sanding",
+      "audio_relpath": "audio/train/OzvXPl848dw.wav"
+    },
+    {
+      "audiocap_id": "51358",
+      "youtube_id": "Pa3UjNwIQe0",
+      "start_time": 290.0,
+      "caption": "A person whistles nearby several times",
+      "audio_relpath": "audio/train/Pa3UjNwIQe0.wav"
+    },
+    {
+      "audiocap_id": "52101",
+      "youtube_id": "Q4ph8Eyq2Pw",
+      "start_time": 200.0,
+      "caption": "A person talks nearby as an engine idles nearby and wind blows",
+      "audio_relpath": "audio/train/Q4ph8Eyq2Pw.wav"
+    },
+    {
+      "audiocap_id": "52541",
+      "youtube_id": "QP56gfCjktM",
+      "start_time": 220.0,
+      "caption": "An adult male speaks while a bird chirps and music plays, followed by a motor running with metal grinding vibration",
+      "audio_relpath": "audio/train/QP56gfCjktM.wav"
+    },
+    {
+      "audiocap_id": "52626",
+      "youtube_id": "QS8t1QDrxfo",
+      "start_time": 130.0,
+      "caption": "A rooster crows and birds chirp followed by spraying and people speaking as music plays",
+      "audio_relpath": "audio/train/QS8t1QDrxfo.wav"
+    },
+    {
+      "audiocap_id": "54179",
+      "youtube_id": "RXPij7peR3I",
+      "start_time": 4.0,
+      "caption": "Singing followed by a man speaking then a bang",
+      "audio_relpath": "audio/train/RXPij7peR3I.wav"
+    },
+    {
+      "audiocap_id": "54304",
+      "youtube_id": "RbrSbC-bGY0",
+      "start_time": 20.0,
+      "caption": "Wind blows and birds tweet",
+      "audio_relpath": "audio/train/RbrSbC-bGY0.wav"
+    },
+    {
+      "audiocap_id": "54540",
+      "youtube_id": "RmAsVtD8qzw",
+      "start_time": 30.0,
+      "caption": "A train hiss loudly",
+      "audio_relpath": "audio/train/RmAsVtD8qzw.wav"
+    },
+    {
+      "audiocap_id": "55621",
+      "youtube_id": "SUF1l9xmZ-A",
+      "start_time": 30.0,
+      "caption": "An engine revs very close by and then idles rickety",
+      "audio_relpath": "audio/train/SUF1l9xmZ-A.wav"
+    },
+    {
+      "audiocap_id": "55627",
+      "youtube_id": "SUTOf4oOJRE",
+      "start_time": 50.0,
+      "caption": "A loud engine idling",
+      "audio_relpath": "audio/train/SUTOf4oOJRE.wav"
+    },
+    {
+      "audiocap_id": "55785",
+      "youtube_id": "Sbb-Ssxiig4",
+      "start_time": 0.0,
+      "caption": "Humming and vibrating followed by a flushing toilet",
+      "audio_relpath": "audio/train/Sbb-Ssxiig4.wav"
+    },
+    {
+      "audiocap_id": "56474",
+      "youtube_id": "T4Y9zXfwFwM",
+      "start_time": 450.0,
+      "caption": "Sewing machine starting and stopping with female narration",
+      "audio_relpath": "audio/train/T4Y9zXfwFwM.wav"
+    },
+    {
+      "audiocap_id": "56475",
+      "youtube_id": "T4_a7bcS4cQ",
+      "start_time": 30.0,
+      "caption": "People talking in a boat with a lot of water noise",
+      "audio_relpath": "audio/train/T4_a7bcS4cQ.wav"
+    },
+    {
+      "audiocap_id": "56782",
+      "youtube_id": "THxDggBFCNc",
+      "start_time": 590.0,
+      "caption": "A train passes and sounds a horn",
+      "audio_relpath": "audio/train/THxDggBFCNc.wav"
+    },
+    {
+      "audiocap_id": "56783",
+      "youtube_id": "TI1TMz_zcQg",
+      "start_time": 160.0,
+      "caption": "And infant coping with speech and some laughter",
+      "audio_relpath": "audio/train/TI1TMz_zcQg.wav"
+    },
+    {
+      "audiocap_id": "57087",
+      "youtube_id": "TVdAI0xaU8s",
+      "start_time": 0.0,
+      "caption": "Crackling followed by an explosion",
+      "audio_relpath": "audio/train/TVdAI0xaU8s.wav"
+    },
+    {
+      "audiocap_id": "57439",
+      "youtube_id": "TkFolVOaRMI",
+      "start_time": 60.0,
+      "caption": "A cat meows and something shuffles on a hard surface",
+      "audio_relpath": "audio/train/TkFolVOaRMI.wav"
+    },
+    {
+      "audiocap_id": "57661",
+      "youtube_id": "Tu0-doXRwUk",
+      "start_time": 10.0,
+      "caption": "Rustling followed by a toilet flushing",
+      "audio_relpath": "audio/train/Tu0-doXRwUk.wav"
+    },
+    {
+      "audiocap_id": "57667",
+      "youtube_id": "TuIfnuhmDq4",
+      "start_time": 50.0,
+      "caption": "A couple of sequences where a computer-generated voice is followed by typing",
+      "audio_relpath": "audio/train/TuIfnuhmDq4.wav"
+    },
+    {
+      "audiocap_id": "57782",
+      "youtube_id": "Tz2Hi4MDWV8",
+      "start_time": 30.0,
+      "caption": "The entire time a loud static sound is joined with a constant clicking",
+      "audio_relpath": "audio/train/Tz2Hi4MDWV8.wav"
+    },
+    {
+      "audiocap_id": "58072",
+      "youtube_id": "U9ySkH80BU8",
+      "start_time": 20.0,
+      "caption": "Someone speaks as water runs into a sink",
+      "audio_relpath": "audio/train/U9ySkH80BU8.wav"
+    },
+    {
+      "audiocap_id": "58262",
+      "youtube_id": "UJ-2WuTunkE",
+      "start_time": 170.0,
+      "caption": "A man talks and types on a keyboard",
+      "audio_relpath": "audio/train/UJ-2WuTunkE.wav"
+    },
+    {
+      "audiocap_id": "58553",
+      "youtube_id": "UWXqWix7iYM",
+      "start_time": 8.0,
+      "caption": "Coo cooing of a clock with ticks",
+      "audio_relpath": "audio/train/UWXqWix7iYM.wav"
+    },
+    {
+      "audiocap_id": "58708",
+      "youtube_id": "UcYa-1k0Nvc",
+      "start_time": 0.0,
+      "caption": "Steam following by a slide whistle",
+      "audio_relpath": "audio/train/UcYa-1k0Nvc.wav"
+    },
+    {
+      "audiocap_id": "58938",
+      "youtube_id": "Umyx9TCiAS0",
+      "start_time": 10.0,
+      "caption": "Someone is snoring softly and there is a light static and a voice in the background",
+      "audio_relpath": "audio/train/Umyx9TCiAS0.wav"
+    },
+    {
+      "audiocap_id": "59201",
+      "youtube_id": "UyxGR1juCss",
+      "start_time": 0.0,
+      "caption": "Thunder explodes and gets softer",
+      "audio_relpath": "audio/train/UyxGR1juCss.wav"
+    },
+    {
+      "audiocap_id": "60017",
+      "youtube_id": "VWNo6X7aecQ",
+      "start_time": 540.0,
+      "caption": "A race car is driving as a man talks",
+      "audio_relpath": "audio/train/VWNo6X7aecQ.wav"
+    },
+    {
+      "audiocap_id": "60778",
+      "youtube_id": "W1QhUu3Jnp0",
+      "start_time": 30.0,
+      "caption": "A helicopter flying",
+      "audio_relpath": "audio/train/W1QhUu3Jnp0.wav"
+    },
+    {
+      "audiocap_id": "60908",
+      "youtube_id": "W8BDM_jth3Y",
+      "start_time": 540.0,
+      "caption": "A man speaks and a computer keyboard is clicked",
+      "audio_relpath": "audio/train/W8BDM_jth3Y.wav"
+    },
+    {
+      "audiocap_id": "62084",
+      "youtube_id": "WxuCynzEntQ",
+      "start_time": 590.0,
+      "caption": "Metal clangs together in an enclosed space",
+      "audio_relpath": "audio/train/WxuCynzEntQ.wav"
+    },
+    {
+      "audiocap_id": "62128",
+      "youtube_id": "X-FZzKUH4z8",
+      "start_time": 10.0,
+      "caption": "A series of snoring sound with faint giggling in the background",
+      "audio_relpath": "audio/train/X-FZzKUH4z8.wav"
+    },
+    {
+      "audiocap_id": "62368",
+      "youtube_id": "XB-lOd-HH1o",
+      "start_time": 30.0,
+      "caption": "A man talks while different birds tweet",
+      "audio_relpath": "audio/train/XB-lOd-HH1o.wav"
+    },
+    {
+      "audiocap_id": "62786",
+      "youtube_id": "XSS94mj8SJs",
+      "start_time": 340.0,
+      "caption": "Tapping noises are followed by a high-pitched machine starting",
+      "audio_relpath": "audio/train/XSS94mj8SJs.wav"
+    },
+    {
+      "audiocap_id": "63250",
+      "youtube_id": "XlAdsOVvFZA",
+      "start_time": 200.0,
+      "caption": "Loud shaking of loose objects against a plastic surface",
+      "audio_relpath": "audio/train/XlAdsOVvFZA.wav"
+    },
+    {
+      "audiocap_id": "63697",
+      "youtube_id": "Y4lMAdRSxOk",
+      "start_time": 17.0,
+      "caption": "Wind blowing with hissing and people speaking in the distance",
+      "audio_relpath": "audio/train/Y4lMAdRSxOk.wav"
+    },
+    {
+      "audiocap_id": "64007",
+      "youtube_id": "YIdwyX9GX80",
+      "start_time": 130.0,
+      "caption": "Typing on keyboard male speaking",
+      "audio_relpath": "audio/train/YIdwyX9GX80.wav"
+    },
+    {
+      "audiocap_id": "64371",
+      "youtube_id": "YX2DZ_iJdeM",
+      "start_time": 24.0,
+      "caption": "Someone breathes heavily while sleeping",
+      "audio_relpath": "audio/train/YX2DZ_iJdeM.wav"
+    },
+    {
+      "audiocap_id": "64377",
+      "youtube_id": "YXKJot--ROM",
+      "start_time": 50.0,
+      "caption": "A man and woman speak and water splashes",
+      "audio_relpath": "audio/train/YXKJot--ROM.wav"
+    },
+    {
+      "audiocap_id": "64671",
+      "youtube_id": "YkQ12wpHeUc",
+      "start_time": 0.0,
+      "caption": "Several birds tweet",
+      "audio_relpath": "audio/train/YkQ12wpHeUc.wav"
+    },
+    {
+      "audiocap_id": "64677",
+      "youtube_id": "YkWrXaJNpn4",
+      "start_time": 320.0,
+      "caption": "A power tool hums and vibrates",
+      "audio_relpath": "audio/train/YkWrXaJNpn4.wav"
+    },
+    {
+      "audiocap_id": "65062",
+      "youtube_id": "Z0VrnxmFr9Y",
+      "start_time": 30.0,
+      "caption": "An adult talks, and then children talk and laugh as a pig oinks nearby",
+      "audio_relpath": "audio/train/Z0VrnxmFr9Y.wav"
+    },
+    {
+      "audiocap_id": "65063",
+      "youtube_id": "Z0ZZrm77SMU",
+      "start_time": 27.0,
+      "caption": "A few people talking with vehicle noise in the background followed by cheering and laughing",
+      "audio_relpath": "audio/train/Z0ZZrm77SMU.wav"
+    },
+    {
+      "audiocap_id": "65262",
+      "youtube_id": "Z9aB-SFDnwk",
+      "start_time": 310.0,
+      "caption": "A man talks nearby, followed by a door closing, after which the man continues to talk",
+      "audio_relpath": "audio/train/Z9aB-SFDnwk.wav"
+    },
+    {
+      "audiocap_id": "65268",
+      "youtube_id": "Z9yyGhM_9qw",
+      "start_time": 200.0,
+      "caption": "Buzzing of nearby insects with distant quacking and faint speaking from a nearby man",
+      "audio_relpath": "audio/train/Z9yyGhM_9qw.wav"
+    },
+    {
+      "audiocap_id": "67574",
+      "youtube_id": "_ke4gaxL1RE",
+      "start_time": 140.0,
+      "caption": "Rapid humming sounds of a sewing machine, followed by the quiet voice of a woman",
+      "audio_relpath": "audio/train/_ke4gaxL1RE.wav"
+    },
+    {
+      "audiocap_id": "67575",
+      "youtube_id": "_kfA3KdDJkU",
+      "start_time": 30.0,
+      "caption": "A man speaking is followed by an irritated yawn and people talking",
+      "audio_relpath": "audio/train/_kfA3KdDJkU.wav"
+    },
+    {
+      "audiocap_id": "68147",
+      "youtube_id": "aAl9yiGxdfQ",
+      "start_time": 90.0,
+      "caption": "A man speaks, and then a toilet flushes, followed by the man continuing to speak",
+      "audio_relpath": "audio/train/aAl9yiGxdfQ.wav"
+    },
+    {
+      "audiocap_id": "69037",
+      "youtube_id": "amjvwKR4SFA",
+      "start_time": 30.0,
+      "caption": "A man laughs and a baby cries with sounds of other people talking in the background",
+      "audio_relpath": "audio/train/amjvwKR4SFA.wav"
+    },
+    {
+      "audiocap_id": "69641",
+      "youtube_id": "bDrPO37cp6M",
+      "start_time": 90.0,
+      "caption": "A machine works while wind blows strongly followed by a siren being triggered",
+      "audio_relpath": "audio/train/bDrPO37cp6M.wav"
+    },
+    {
+      "audiocap_id": "69691",
+      "youtube_id": "bGDm-DYuk2A",
+      "start_time": 180.0,
+      "caption": "A man talking followed by a child talking in the distance as footsteps walk on gravel and birds chirp in the background",
+      "audio_relpath": "audio/train/bGDm-DYuk2A.wav"
+    },
+    {
+      "audiocap_id": "69695",
+      "youtube_id": "bGNAE6mVoD8",
+      "start_time": 170.0,
+      "caption": "Grease sizzles as a condiment is shaken then put down",
+      "audio_relpath": "audio/train/bGNAE6mVoD8.wav"
+    },
+    {
+      "audiocap_id": "70131",
+      "youtube_id": "baWqKKc3RVU",
+      "start_time": 50.0,
+      "caption": "Uproarious laughter is coming from a few women",
+      "audio_relpath": "audio/train/baWqKKc3RVU.wav"
+    },
+    {
+      "audiocap_id": "71571",
+      "youtube_id": "ceEf5FNGD2g",
+      "start_time": 340.0,
+      "caption": "White noise followed by a loud horn honking twice",
+      "audio_relpath": "audio/train/ceEf5FNGD2g.wav"
+    },
+    {
+      "audiocap_id": "71577",
+      "youtube_id": "ceIFbXtedZw",
+      "start_time": 20.0,
+      "caption": "Multiple bells ringing male voice distant in background",
+      "audio_relpath": "audio/train/ceIFbXtedZw.wav"
+    },
+    {
+      "audiocap_id": "71778",
+      "youtube_id": "co-rErLcFzg",
+      "start_time": 0.0,
+      "caption": "A man speaks with some distant splashing and quacking ducks",
+      "audio_relpath": "audio/train/co-rErLcFzg.wav"
+    },
+    {
+      "audiocap_id": "73320",
+      "youtube_id": "dt2bD1WDfl0",
+      "start_time": 30.0,
+      "caption": "A woman speaks with several beeps",
+      "audio_relpath": "audio/train/dt2bD1WDfl0.wav"
+    },
+    {
+      "audiocap_id": "73322",
+      "youtube_id": "dtGpAmOnZR8",
+      "start_time": 30.0,
+      "caption": "A car drives consistently",
+      "audio_relpath": "audio/train/dtGpAmOnZR8.wav"
+    },
+    {
+      "audiocap_id": "73334",
+      "youtube_id": "dtkT2VYNgXA",
+      "start_time": 40.0,
+      "caption": "Birds chirping and a person whistling",
+      "audio_relpath": "audio/train/dtkT2VYNgXA.wav"
+    },
+    {
+      "audiocap_id": "73605",
+      "youtube_id": "e54LykS-Djk",
+      "start_time": 30.0,
+      "caption": "An adult male speaks and pauses, a crowd laughs, and the adult male continues to speak",
+      "audio_relpath": "audio/train/e54LykS-Djk.wav"
+    },
+    {
+      "audiocap_id": "74016",
+      "youtube_id": "ePDemSpE3Ho",
+      "start_time": 280.0,
+      "caption": "Continuous emergency sirens and horns",
+      "audio_relpath": "audio/train/ePDemSpE3Ho.wav"
+    },
+    {
+      "audiocap_id": "74053",
+      "youtube_id": "eRJsmIqXFgU",
+      "start_time": 340.0,
+      "caption": "A man is speaking while food is sizzling in the background followed by a low buzzing sound",
+      "audio_relpath": "audio/train/eRJsmIqXFgU.wav"
+    },
+    {
+      "audiocap_id": "75053",
+      "youtube_id": "fBBKtMojF7s",
+      "start_time": 180.0,
+      "caption": "A file rubs against an object nearby, followed by a man speaking",
+      "audio_relpath": "audio/train/fBBKtMojF7s.wav"
+    },
+    {
+      "audiocap_id": "75536",
+      "youtube_id": "fXUT4w2jCWs",
+      "start_time": 130.0,
+      "caption": "An engine sound is followed by the sound of helicopter blades",
+      "audio_relpath": "audio/train/fXUT4w2jCWs.wav"
+    },
+    {
+      "audiocap_id": "76089",
+      "youtube_id": "fwuIwzCaPjI",
+      "start_time": 170.0,
+      "caption": "Sizzling followed by a woman speaking",
+      "audio_relpath": "audio/train/fwuIwzCaPjI.wav"
+    },
+    {
+      "audiocap_id": "76160",
+      "youtube_id": "g-uqyDcbnA4",
+      "start_time": 20.0,
+      "caption": "Wind blowing followed by wood cracking",
+      "audio_relpath": "audio/train/g-uqyDcbnA4.wav"
+    },
+    {
+      "audiocap_id": "76161",
+      "youtube_id": "g-wlCCvMt_A",
+      "start_time": 50.0,
+      "caption": "Wind blows strongly while people talk far away",
+      "audio_relpath": "audio/train/g-wlCCvMt_A.wav"
+    },
+    {
+      "audiocap_id": "76164",
+      "youtube_id": "g0ACaijG5Rs",
+      "start_time": 110.0,
+      "caption": "A harsh motor sound",
+      "audio_relpath": "audio/train/g0ACaijG5Rs.wav"
+    },
+    {
+      "audiocap_id": "76623",
+      "youtube_id": "gLT4o6a46I0",
+      "start_time": 22.0,
+      "caption": "Loud siren gets closer and then gets further away with a faint city noise in the background",
+      "audio_relpath": "audio/train/gLT4o6a46I0.wav"
+    },
+    {
+      "audiocap_id": "76625",
+      "youtube_id": "gLY6XE90pGU",
+      "start_time": 20.0,
+      "caption": "Bird flying sounds, followed by a robotic voice, and then the bird chirping and then a popping sound",
+      "audio_relpath": "audio/train/gLY6XE90pGU.wav"
+    },
+    {
+      "audiocap_id": "76868",
+      "youtube_id": "gW4iTnEvqHA",
+      "start_time": 240.0,
+      "caption": "A car engine hums nearby, and then people talk quietly",
+      "audio_relpath": "audio/train/gW4iTnEvqHA.wav"
+    },
+    {
+      "audiocap_id": "77660",
+      "youtube_id": "h459JUkX3_k",
+      "start_time": 140.0,
+      "caption": "A race car squeals tires and accelerates",
+      "audio_relpath": "audio/train/h459JUkX3_k.wav"
+    },
+    {
+      "audiocap_id": "77934",
+      "youtube_id": "hFiHkCsoU7A",
+      "start_time": 30.0,
+      "caption": "Fan followed by a spraying",
+      "audio_relpath": "audio/train/hFiHkCsoU7A.wav"
+    },
+    {
+      "audiocap_id": "78118",
+      "youtube_id": "hO_9E1WZmao",
+      "start_time": 23.0,
+      "caption": "A tapping noise, a woman and man talks, and a baby cries",
+      "audio_relpath": "audio/train/hO_9E1WZmao.wav"
+    },
+    {
+      "audiocap_id": "78247",
+      "youtube_id": "hUViJ9zgHKw",
+      "start_time": 30.0,
+      "caption": "Something squeals in protest and then something is clanked",
+      "audio_relpath": "audio/train/hUViJ9zgHKw.wav"
+    },
+    {
+      "audiocap_id": "78926",
+      "youtube_id": "hzFf55XeWC4",
+      "start_time": 18.0,
+      "caption": "Traffic passes in the distance with goats bleating nearby",
+      "audio_relpath": "audio/train/hzFf55XeWC4.wav"
+    },
+    {
+      "audiocap_id": "79728",
+      "youtube_id": "iYxGFiaOD-M",
+      "start_time": 140.0,
+      "caption": "Rasping sound as plane rubs down wood",
+      "audio_relpath": "audio/train/iYxGFiaOD-M.wav"
+    },
+    {
+      "audiocap_id": "81405",
+      "youtube_id": "jnPD-M9kIm0",
+      "start_time": 290.0,
+      "caption": "A machine runs very loudly",
+      "audio_relpath": "audio/train/jnPD-M9kIm0.wav"
+    },
+    {
+      "audiocap_id": "82440",
+      "youtube_id": "kZ6h5EYl6fs",
+      "start_time": 150.0,
+      "caption": "A large engine roars and someone is shouts a loud short rout",
+      "audio_relpath": "audio/train/kZ6h5EYl6fs.wav"
+    },
+    {
+      "audiocap_id": "82966",
+      "youtube_id": "kw9DDeloVxU",
+      "start_time": 0.0,
+      "caption": "A person whistling",
+      "audio_relpath": "audio/train/kw9DDeloVxU.wav"
+    },
+    {
+      "audiocap_id": "82995",
+      "youtube_id": "kxY_Asbi1wI",
+      "start_time": 80.0,
+      "caption": "Water moves around and splashes loudly as a man grunts at the end",
+      "audio_relpath": "audio/train/kxY_Asbi1wI.wav"
+    },
+    {
+      "audiocap_id": "83383",
+      "youtube_id": "lEHJVvqWb-Q",
+      "start_time": 500.0,
+      "caption": "Some insects fly then a man sighs and birds tweets far away",
+      "audio_relpath": "audio/train/lEHJVvqWb-Q.wav"
+    },
+    {
+      "audiocap_id": "83387",
+      "youtube_id": "lEP8RP33r2A",
+      "start_time": 0.0,
+      "caption": "Scuffing and scraping are accompanied by random quiet clattering and clicking, and an adult male is speaking in the background",
+      "audio_relpath": "audio/train/lEP8RP33r2A.wav"
+    },
+    {
+      "audiocap_id": "84693",
+      "youtube_id": "mCnMHgAi1zI",
+      "start_time": 60.0,
+      "caption": "Ringing of bells with some rustling",
+      "audio_relpath": "audio/train/mCnMHgAi1zI.wav"
+    },
+    {
+      "audiocap_id": "85179",
+      "youtube_id": "mZRsCN0ygaM",
+      "start_time": 360.0,
+      "caption": "Water running followed by paper ripping",
+      "audio_relpath": "audio/train/mZRsCN0ygaM.wav"
+    },
+    {
+      "audiocap_id": "87292",
+      "youtube_id": "o7-MJ5pyWDs",
+      "start_time": 30.0,
+      "caption": "A flock of pigeons cooing as a bird chirps in the background followed by bird wings flapping",
+      "audio_relpath": "audio/train/o7-MJ5pyWDs.wav"
+    },
+    {
+      "audiocap_id": "87299",
+      "youtube_id": "o7Nra5Cw_jQ",
+      "start_time": 20.0,
+      "caption": "A telephone bell rings",
+      "audio_relpath": "audio/train/o7Nra5Cw_jQ.wav"
+    },
+    {
+      "audiocap_id": "87464",
+      "youtube_id": "oFsStsueMZc",
+      "start_time": 210.0,
+      "caption": "Multiple fire truck sirens going off continuously, then the engine of a car zooms past",
+      "audio_relpath": "audio/train/oFsStsueMZc.wav"
+    },
+    {
+      "audiocap_id": "88394",
+      "youtube_id": "oy-nvX8f8nY",
+      "start_time": 340.0,
+      "caption": "A drill runs continuously",
+      "audio_relpath": "audio/train/oy-nvX8f8nY.wav"
+    },
+    {
+      "audiocap_id": "88453",
+      "youtube_id": "p-mInDiyaKY",
+      "start_time": 0.0,
+      "caption": "Dogs barking as a group of women are talking followed by whistling",
+      "audio_relpath": "audio/train/p-mInDiyaKY.wav"
+    },
+    {
+      "audiocap_id": "88720",
+      "youtube_id": "pCfGoyPMW-k",
+      "start_time": 350.0,
+      "caption": "A man speaks, another man speaks with natural outside noise in the background",
+      "audio_relpath": "audio/train/pCfGoyPMW-k.wav"
+    },
+    {
+      "audiocap_id": "88725",
+      "youtube_id": "pCpWuhqlI6A",
+      "start_time": 0.0,
+      "caption": "A stream is flowing concurrently with nature noises",
+      "audio_relpath": "audio/train/pCpWuhqlI6A.wav"
+    },
+    {
+      "audiocap_id": "89379",
+      "youtube_id": "pgl_pG7j7d8",
+      "start_time": 170.0,
+      "caption": "A man talks nearby as water pours out of a faucet",
+      "audio_relpath": "audio/train/pgl_pG7j7d8.wav"
+    },
+    {
+      "audiocap_id": "89491",
+      "youtube_id": "plWKyfP7tXc",
+      "start_time": 50.0,
+      "caption": "Humming followed by a dog barking",
+      "audio_relpath": "audio/train/plWKyfP7tXc.wav"
+    },
+    {
+      "audiocap_id": "90129",
+      "youtube_id": "qF2inBDSzFU",
+      "start_time": 10.0,
+      "caption": "Dogs barking and squealing",
+      "audio_relpath": "audio/train/qF2inBDSzFU.wav"
+    },
+    {
+      "audiocap_id": "90197",
+      "youtube_id": "qI-bOZAnrxE",
+      "start_time": 30.0,
+      "caption": "A man is speaking with low clinking in the background",
+      "audio_relpath": "audio/train/qI-bOZAnrxE.wav"
+    },
+    {
+      "audiocap_id": "90293",
+      "youtube_id": "qMavLjuPPKE",
+      "start_time": 30.0,
+      "caption": "Oink followed by a squeal",
+      "audio_relpath": "audio/train/qMavLjuPPKE.wav"
+    },
+    {
+      "audiocap_id": "90299",
+      "youtube_id": "qN2WeWvBk8Q",
+      "start_time": 10.0,
+      "caption": "Fire truck sirens",
+      "audio_relpath": "audio/train/qN2WeWvBk8Q.wav"
+    },
+    {
+      "audiocap_id": "90313",
+      "youtube_id": "qNxytjnLbOE",
+      "start_time": 30.0,
+      "caption": "A train engine is running and rhythmically chugging",
+      "audio_relpath": "audio/train/qNxytjnLbOE.wav"
+    },
+    {
+      "audiocap_id": "90314",
+      "youtube_id": "qO0P57aZBiw",
+      "start_time": 30.0,
+      "caption": "A steam engine running on railroad tracks as steam heavily hisses",
+      "audio_relpath": "audio/train/qO0P57aZBiw.wav"
+    },
+    {
+      "audiocap_id": "90505",
+      "youtube_id": "qXIYl4x6Tlk",
+      "start_time": 20.0,
+      "caption": "A soft trumpet then a whir and a bubbling electric sound",
+      "audio_relpath": "audio/train/qXIYl4x6Tlk.wav"
+    },
+    {
+      "audiocap_id": "90873",
+      "youtube_id": "qpV8DLPsrxM",
+      "start_time": 19.0,
+      "caption": "Traffic and car horns are in the background while an emergency vehicle blasts a series of sirens followed by wind and travel noise",
+      "audio_relpath": "audio/train/qpV8DLPsrxM.wav"
+    },
+    {
+      "audiocap_id": "90922",
+      "youtube_id": "qrgKZEK7axA",
+      "start_time": 140.0,
+      "caption": "Heavy wind followed by a vehicle starting and revving intermittently",
+      "audio_relpath": "audio/train/qrgKZEK7axA.wav"
+    },
+    {
+      "audiocap_id": "90928",
+      "youtube_id": "qs3gjtxuHjk",
+      "start_time": 30.0,
+      "caption": "A constant buzzing with voices in the background",
+      "audio_relpath": "audio/train/qs3gjtxuHjk.wav"
+    },
+    {
+      "audiocap_id": "90929",
+      "youtube_id": "qs3mXlKfxLU",
+      "start_time": 28.0,
+      "caption": "Continuous train horn",
+      "audio_relpath": "audio/train/qs3mXlKfxLU.wav"
+    },
+    {
+      "audiocap_id": "91139",
+      "youtube_id": "r1nicOVtvkQ",
+      "start_time": 130.0,
+      "caption": "A woman talks nearby as water pours",
+      "audio_relpath": "audio/train/r1nicOVtvkQ.wav"
+    },
+    {
+      "audiocap_id": "91211",
+      "youtube_id": "r5WtQCGp1WI",
+      "start_time": 60.0,
+      "caption": "Electronic beeps occur, concurrent with an adult male speaking",
+      "audio_relpath": "audio/train/r5WtQCGp1WI.wav"
+    },
+    {
+      "audiocap_id": "92264",
+      "youtube_id": "rsrZOjkQ3rY",
+      "start_time": 140.0,
+      "caption": "Rubbing and scraping followed by a soft power tool drilling then a louder power tool drilling",
+      "audio_relpath": "audio/train/rsrZOjkQ3rY.wav"
+    },
+    {
+      "audiocap_id": "92603",
+      "youtube_id": "s8zWOWalXy4",
+      "start_time": 30.0,
+      "caption": "Rail car noises and horn start to fade into the distance",
+      "audio_relpath": "audio/train/s8zWOWalXy4.wav"
+    },
+    {
+      "audiocap_id": "92834",
+      "youtube_id": "sKdmY3NQl4I",
+      "start_time": 460.0,
+      "caption": "Rain falls and leaves rustle followed by the distant roar of thunder",
+      "audio_relpath": "audio/train/sKdmY3NQl4I.wav"
+    },
+    {
+      "audiocap_id": "93588",
+      "youtube_id": "stOs68tihzw",
+      "start_time": 30.0,
+      "caption": "A goat bleats nearby",
+      "audio_relpath": "audio/train/stOs68tihzw.wav"
+    },
+    {
+      "audiocap_id": "94331",
+      "youtube_id": "tTmvQdMfLuI",
+      "start_time": 30.0,
+      "caption": "A man speaks and then wind blows and a woman speaks",
+      "audio_relpath": "audio/train/tTmvQdMfLuI.wav"
+    },
+    {
+      "audiocap_id": "94540",
+      "youtube_id": "tdUv86s7PMw",
+      "start_time": 30.0,
+      "caption": "An engine works while some frogs croak",
+      "audio_relpath": "audio/train/tdUv86s7PMw.wav"
+    },
+    {
+      "audiocap_id": "94541",
+      "youtube_id": "tdWWY6SoqlY",
+      "start_time": 30.0,
+      "caption": "A bus slows down and its engine decelerates quietly",
+      "audio_relpath": "audio/train/tdWWY6SoqlY.wav"
+    },
+    {
+      "audiocap_id": "96981",
+      "youtube_id": "vYaQJCaMuTc",
+      "start_time": 420.0,
+      "caption": "A file rasps on wood, and a man talks in the foreground",
+      "audio_relpath": "audio/train/vYaQJCaMuTc.wav"
+    },
+    {
+      "audiocap_id": "97476",
+      "youtube_id": "vvPsGYayQBM",
+      "start_time": 0.0,
+      "caption": "Two men speaking with rusting in the background",
+      "audio_relpath": "audio/train/vvPsGYayQBM.wav"
+    },
+    {
+      "audiocap_id": "97930",
+      "youtube_id": "wEDditLGJwg",
+      "start_time": 60.0,
+      "caption": "Several small shuffles of hard objects knocking, followed by loud explosions interspersed by a grown man chuckling",
+      "audio_relpath": "audio/train/wEDditLGJwg.wav"
+    },
+    {
+      "audiocap_id": "98605",
+      "youtube_id": "wk1SUIhqRbw",
+      "start_time": 180.0,
+      "caption": "A woman speaks and pours out water",
+      "audio_relpath": "audio/train/wk1SUIhqRbw.wav"
+    },
+    {
+      "audiocap_id": "99524",
+      "youtube_id": "xRyfAQJOdns",
+      "start_time": 110.0,
+      "caption": "Two men talking and laughing followed by a person snorting",
+      "audio_relpath": "audio/train/xRyfAQJOdns.wav"
+    },
+    {
+      "audiocap_id": "99855",
+      "youtube_id": "xi5tZADVwcw",
+      "start_time": 90.0,
+      "caption": "A man speaks and bees buzz",
+      "audio_relpath": "audio/train/xi5tZADVwcw.wav"
+    },
+    {
+      "audiocap_id": "99950",
+      "youtube_id": "xmu69Km-SfA",
+      "start_time": 30.0,
+      "caption": "Birds chirp and pigeons vocalize as a man speaks",
+      "audio_relpath": "audio/train/xmu69Km-SfA.wav"
+    },
+    {
+      "audiocap_id": "99953",
+      "youtube_id": "xn-Y2HMiVQ0",
+      "start_time": 10.0,
+      "caption": "A train horn blares and warning bells ring as a loud motor passes",
+      "audio_relpath": "audio/train/xn-Y2HMiVQ0.wav"
+    },
+    {
+      "audiocap_id": "99956",
+      "youtube_id": "xn5mGhUVfSs",
+      "start_time": 30.0,
+      "caption": "Steam hisses once followed by a whistle blowing twice, and then another steam hisses.",
+      "audio_relpath": "audio/train/xn5mGhUVfSs.wav"
+    },
+    {
+      "audiocap_id": "99993",
+      "youtube_id": "xodr5wnFQvs",
+      "start_time": 100.0,
+      "caption": "Traffic revs up far in the distance",
+      "audio_relpath": "audio/train/xodr5wnFQvs.wav"
+    },
+    {
+      "audiocap_id": "100011",
+      "youtube_id": "xpE3LXuhJS8",
+      "start_time": 210.0,
+      "caption": "Vibrations and humming of a power drill",
+      "audio_relpath": "audio/train/xpE3LXuhJS8.wav"
+    },
+    {
+      "audiocap_id": "100017",
+      "youtube_id": "xpWWXLTXMaA",
+      "start_time": 320.0,
+      "caption": "Gunshots ring out and an explosion occurs",
+      "audio_relpath": "audio/train/xpWWXLTXMaA.wav"
+    },
+    {
+      "audiocap_id": "100130",
+      "youtube_id": "xvjCydZMfPg",
+      "start_time": 90.0,
+      "caption": "A sewing machine works while a man talks",
+      "audio_relpath": "audio/train/xvjCydZMfPg.wav"
+    },
+    {
+      "audiocap_id": "100136",
+      "youtube_id": "xw-B1OGab3g",
+      "start_time": 60.0,
+      "caption": "A man speaks with a bee buzzing and then a motorized vibration with some clicks.",
+      "audio_relpath": "audio/train/xw-B1OGab3g.wav"
+    },
+    {
+      "audiocap_id": "100190",
+      "youtube_id": "xzCbpSQgdpI",
+      "start_time": 60.0,
+      "caption": "A car engine accelerates followed by a beep",
+      "audio_relpath": "audio/train/xzCbpSQgdpI.wav"
+    },
+    {
+      "audiocap_id": "101075",
+      "youtube_id": "ygKEl01lp8s",
+      "start_time": 530.0,
+      "caption": "A man speeches and then the toilet is flushed",
+      "audio_relpath": "audio/train/ygKEl01lp8s.wav"
+    },
+    {
+      "audiocap_id": "101942",
+      "youtube_id": "zNkyJTy27vM",
+      "start_time": 30.0,
+      "caption": "A man speaks as the wind blows followed by a motorboat traveling and the engine accelerates",
+      "audio_relpath": "audio/train/zNkyJTy27vM.wav"
+    },
+    {
+      "audiocap_id": "101943",
+      "youtube_id": "zNrRMTf3qkU",
+      "start_time": 260.0,
+      "caption": "A man speaks followed by a tapping noise, and a man and child communicates followed by another man talking",
+      "audio_relpath": "audio/train/zNrRMTf3qkU.wav"
+    },
+    {
+      "audiocap_id": "101981",
+      "youtube_id": "zPVSeGOujoo",
+      "start_time": 16.0,
+      "caption": "Speedboat motors are roaring in the foreground, and speech is occurring in the background",
+      "audio_relpath": "audio/train/zPVSeGOujoo.wav"
+    },
+    {
+      "audiocap_id": "101984",
+      "youtube_id": "zPfEtFBcgxk",
+      "start_time": 30.0,
+      "caption": "Consistent repetitive ticking of a clock",
+      "audio_relpath": "audio/train/zPfEtFBcgxk.wav"
+    },
+    {
+      "audiocap_id": "101986",
+      "youtube_id": "zPfnakWAsIE",
+      "start_time": 30.0,
+      "caption": "Rustling and faint groaning with water splashing and a person cheering",
+      "audio_relpath": "audio/train/zPfnakWAsIE.wav"
+    },
+    {
+      "audiocap_id": "101988",
+      "youtube_id": "zPr4nfemZqI",
+      "start_time": 300.0,
+      "caption": "A man talking before shouting then whistling followed by rustling",
+      "audio_relpath": "audio/train/zPr4nfemZqI.wav"
+    },
+    {
+      "audiocap_id": "101989",
+      "youtube_id": "zPxkvJ_u10Y",
+      "start_time": 270.0,
+      "caption": "A man speaks with birds chirping in the distance",
+      "audio_relpath": "audio/train/zPxkvJ_u10Y.wav"
+    },
+    {
+      "audiocap_id": "102106",
+      "youtube_id": "zVy9pETn6oI",
+      "start_time": 30.0,
+      "caption": "Rustling with distant people speaking followed by a girl speaking",
+      "audio_relpath": "audio/train/zVy9pETn6oI.wav"
+    },
+    {
+      "audiocap_id": "102365",
+      "youtube_id": "ziUoP8L-zkA",
+      "start_time": 230.0,
+      "caption": "An aircraft engine running",
+      "audio_relpath": "audio/train/ziUoP8L-zkA.wav"
+    },
+    {
+      "audiocap_id": "102521",
+      "youtube_id": "zpfBw5eMfEs",
+      "start_time": 110.0,
+      "caption": "A boat motor runs smoothly, wind is blowing, and two adult males speak",
+      "audio_relpath": "audio/train/zpfBw5eMfEs.wav"
+    }
+  ]
+}

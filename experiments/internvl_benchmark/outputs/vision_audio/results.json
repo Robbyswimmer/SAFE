@@ -1,0 +1,13 @@
+{
+  "dataset": "music_avqa",
+  "architecture": "pre_ffn",
+  "train_modality": "both",
+  "eval_modalities": [
+    "both",
+    "audio",
+    "image"
+  ],
+  "best_exact_match": 79.45593035908597,
+  "best_modality": "both",
+  "history_path": "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/internvl_benchmark/outputs/vision_audio/history.json"
+}

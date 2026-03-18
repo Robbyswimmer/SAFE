@@ -1,0 +1,12 @@
+{
+  "caption_field": "teacher_caption_raw",
+  "input_mode": "caption",
+  "n": 2308,
+  "raw_em": 28.856152512998268,
+  "extracted_em": 32.842287694974004,
+  "f1": 28.91392258809936,
+  "cat_f1": 32.842287694974004,
+  "checkpoint": "",
+  "model_config": "rkca_joint",
+  "manifest": "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/internvl_benchmark/outputs/music_avqa_teacher_captions_validation_external.jsonl"
+}

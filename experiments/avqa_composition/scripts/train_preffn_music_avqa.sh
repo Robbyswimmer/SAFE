@@ -43,6 +43,7 @@ MAX_SAMPLES=${MAX_SAMPLES:-0}
 BOTTLENECK_DIM=${BOTTLENECK_DIM:-}
 INIT_AUDIO_CKPT=${INIT_AUDIO_CKPT:-}
 INIT_VISION_CKPT=${INIT_VISION_CKPT:-}
+GATE_WARMUP_STEPS=${GATE_WARMUP_STEPS:-0}
 
 # InternVL defaults: gradient checkpointing currently breaks hook-based adapter grads.
 # Keep override-friendly behavior (user can still set these explicitly via --export).
@@ -94,6 +95,11 @@ if [[ -n "$INIT_VISION_CKPT" ]]; then
   INIT_ARGS+=(--init-vision-ckpt "$INIT_VISION_CKPT")
 fi
 
+GATE_WARMUP_ARGS=()
+if [[ "$GATE_WARMUP_STEPS" != "0" ]]; then
+  GATE_WARMUP_ARGS+=(--gate-warmup-steps "$GATE_WARMUP_STEPS")
+fi
+
 python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   --dataset music_avqa \
   --model-config "$MODEL_CONFIG" \
@@ -118,4 +124,5 @@ python3 "$SAFE_ROOT/experiments/avqa_composition/train_avqa_composition.py" \
   "${MAX_SAMPLES_ARGS[@]}" \
   "${BOTTLENECK_ARGS[@]}" \
   "${INIT_ARGS[@]}" \
+  "${GATE_WARMUP_ARGS[@]}" \
   "${WANDB_ARGS[@]}"

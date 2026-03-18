@@ -385,6 +385,7 @@ class SAFEModel(nn.Module):
 
             if use_multimodal_kv:
                 vision_input_dim = actual_output_dim
+                audio_input_dim = actual_output_dim  # tokens are post-projector
                 all_layers = sorted(set(audio_layers + vision_layers))
                 self.kv_adapters = nn.ModuleDict()
                 for idx in all_layers:
@@ -398,7 +399,7 @@ class SAFEModel(nn.Module):
                             dropout=fusion_config.get("dropout", 0.1),
                             use_bottleneck=fusion_config.get("use_bottleneck", True),
                             query_adapter_rank=fusion_config.get("query_adapter_rank", 16),
-                            input_dim=audio_embed_dim,
+                            input_dim=audio_input_dim,
                         )
                     if idx in vision_layers:
                         self.kv_adapters[f"vision:{idx}"] = KVAugmentationAdapter(
@@ -850,6 +851,23 @@ class SAFEModel(nn.Module):
                 fusion_layer_indices=self._kv_fusion_layers,
             )
 
+    def _llm_gradient_checkpointing_enabled(self) -> bool:
+        try:
+            return bool(
+                getattr(self.base_vl.llm, "is_gradient_checkpointing", False)
+                or getattr(self.base_vl.llm, "gradient_checkpointing", False)
+            )
+        except Exception:
+            return False
+
+    def _clear_kv_runtime_state(self, preserve_attention_weights: bool = False) -> None:
+        if self.kv_hook_manager is None:
+            return
+        if self._kv_is_multimodal():
+            self.kv_hook_manager.clear_modality_tokens()
+        else:
+            self.kv_hook_manager.clear_audio(preserve_attention_weights=preserve_attention_weights)
+
     def load_modality_adapters(self, checkpoint_path: str, modality: str) -> int:
         """Load only the specified modality's adapter weights from a checkpoint.
 
@@ -1097,6 +1115,8 @@ class SAFEModel(nn.Module):
         inputs: Dict[str, torch.Tensor],
         answers: Optional[Union[str, Sequence[Any]]],
         device: torch.device,
+        answer_prefix: str = "",
+        supervise_eos: bool = True,
     ) -> None:
         if answers is None:
             return
@@ -1135,6 +1155,8 @@ class SAFEModel(nn.Module):
 
         for i, raw_answer in enumerate(answer_list):
             answer_text = self._select_training_answer(raw_answer)
+            if answer_text and answer_prefix:
+                answer_text = f"{answer_prefix}{answer_text}"
             # NOTE: BaseVLModel configures decoder-only tokenizers to use left padding.
             # Use attention_mask to select the true prompt tokens (works for both
             # left- and right-padded batches) instead of slicing from position 0.
@@ -1167,7 +1189,16 @@ class SAFEModel(nn.Module):
                 dtype=torch.long,
                 device=device,
             )
-            labels = torch.cat([labels_prefix, answer_tensor], dim=0)
+            answer_labels = answer_tensor.to(dtype=torch.long)
+            if (
+                not supervise_eos
+                and eos_id is not None
+                and answer_labels.numel() > 0
+                and int(answer_labels[-1].item()) == int(eos_id)
+            ):
+                answer_labels = answer_labels.clone()
+                answer_labels[-1] = -100
+            labels = torch.cat([labels_prefix, answer_labels], dim=0)
 
             attention = torch.cat(
                 [
@@ -1210,6 +1241,39 @@ class SAFEModel(nn.Module):
         inputs["input_ids"] = padded_ids
         inputs["attention_mask"] = padded_attention
         inputs["labels"] = padded_labels
+
+    @staticmethod
+    def _strip_reasoning_scaffold(prompt: str) -> str:
+        cleaned = str(prompt)
+        cleaned = cleaned.replace(
+            "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+            "<|im_start|>assistant\n",
+        )
+        cleaned = cleaned.replace(
+            "<|im_start|>assistant\n<think>\n</think>\n",
+            "<|im_start|>assistant\n",
+        )
+        cleaned = cleaned.replace("<think>\n\n</think>\n\n", "")
+        cleaned = cleaned.replace("<think>\n</think>\n", "")
+        return cleaned
+
+    def _render_chat_prompt(
+        self,
+        tokenizer: Any,
+        messages: Sequence[Dict[str, str]],
+        *,
+        add_generation_prompt: bool,
+    ) -> str:
+        prompt = tokenizer.apply_chat_template(
+            list(messages),
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+        )
+        if torch.is_tensor(prompt):
+            prompt = prompt.tolist()
+        if isinstance(prompt, list):
+            prompt = tokenizer.decode(prompt, skip_special_tokens=False)
+        return self._strip_reasoning_scaffold(str(prompt))
     
     def prepare_multimodal_inputs(
         self,
@@ -1244,6 +1308,8 @@ class SAFEModel(nn.Module):
             print("[SAFEModel] Re-applied left padding configuration before multimodal prep", flush=True)
 
         # Removed excessive PrepDebug logging
+        answer_prefix = ""
+        supervise_eos = True
 
         # For LLaVA/BLIP2/InternVL, use proper multimodal input preparation
         if self.base_vl.model_type == "llava":
@@ -1255,6 +1321,16 @@ class SAFEModel(nn.Module):
                 llava_audio_prompt_style=llava_audio_prompt_style,
             )
         elif self.base_vl.model_type == "internvl":
+            texts = [text] if isinstance(text, str) else list(text)
+            prompt_mode = self._resolve_prompt_mode(
+                texts=texts,
+                images=images,
+                answers=answers,
+                training_mode=training_mode,
+            )
+            if prompt_mode == "qa":
+                answer_prefix = " "
+                supervise_eos = False
             # InternVL: always use dedicated prep so prompt template/tokenization
             # is consistent across both image+audio and audio-only modes.
             # The helper gracefully handles images=None (no pixel_values).
@@ -1276,38 +1352,51 @@ class SAFEModel(nn.Module):
                 else:
                     texts = list(text)
 
-                instruction = (
+                prompt_mode = self._resolve_prompt_mode(
+                    texts=texts,
+                    images=images,
+                    answers=answers,
+                    training_mode=training_mode,
+                )
+                qa_instruction = (
                     "Answer with exactly one short answer token "
                     "(single word or number)."
                 )
+                caption_instruction = "Describe what you hear in one short sentence."
                 has_chat_template = bool(
                     getattr(self.base_vl.tokenizer, "chat_template", None)
                 ) and hasattr(self.base_vl.tokenizer, "apply_chat_template")
+                if prompt_mode == "qa":
+                    answer_prefix = " "
+                    supervise_eos = False
 
                 prompts = []
                 for question in texts:
-                    user_text = f"{instruction}\nQuestion: {question}\nAnswer:"
+                    question_text = str(question or "").strip()
+                    if prompt_mode == "caption":
+                        generic_questions = {
+                            "what is happening in the audio?",
+                            "describe the audio.",
+                            "what do you hear?",
+                        }
+                        if question_text.lower() in generic_questions or not question_text:
+                            user_text = f"/no_think\n{caption_instruction}"
+                        else:
+                            user_text = f"/no_think\n{caption_instruction}\nFocus: {question_text}"
+                    else:
+                        user_text = f"/no_think\n{qa_instruction}\nQuestion: {question_text}\nAnswer:"
                     if has_chat_template:
                         try:
                             message = [{"role": "user", "content": user_text}]
-                            # Qwen3 may default to reasoning mode; force no-think when supported.
-                            try:
-                                prompt = self.base_vl.tokenizer.apply_chat_template(
-                                    message,
-                                    tokenize=False,
-                                    add_generation_prompt=True,
-                                    enable_thinking=False,
-                                )
-                            except TypeError:
-                                prompt = self.base_vl.tokenizer.apply_chat_template(
-                                    message,
-                                    tokenize=False,
-                                    add_generation_prompt=True,
-                                )
+                            prompt = self._render_chat_prompt(
+                                self.base_vl.tokenizer,
+                                message,
+                                add_generation_prompt=True,
+                            )
                         except Exception:
-                            prompt = f"USER: /no_think\n{user_text}\nASSISTANT:"
+                            prompt = f"USER: {user_text}\nASSISTANT:"
                     else:
-                        prompt = f"USER: /no_think\n{user_text}\nASSISTANT:"
+                        prompt = f"USER: {user_text}\nASSISTANT:"
                     prompts.append(prompt)
                 text_with_modalities = prompts
             else:
@@ -1466,7 +1555,13 @@ class SAFEModel(nn.Module):
         # Apply ground truth answers ONLY during training mode to prevent gold answer leakage
         if training_mode and answers is not None and "input_ids" in result and "attention_mask" in result:
             dev = result["input_ids"].device if torch.is_tensor(result["input_ids"]) else torch.device(device)
-            self._apply_answers_to_inputs(result, answers, dev)
+            self._apply_answers_to_inputs(
+                result,
+                answers,
+                dev,
+                answer_prefix=answer_prefix,
+                supervise_eos=supervise_eos,
+            )
         elif "labels" not in result and "input_ids" in result:
             # Default labels mirror the input ids (for inference or when no answers provided)
             result["labels"] = result["input_ids"].clone()
@@ -1812,24 +1907,12 @@ class SAFEModel(nn.Module):
             if has_chat_template:
                 try:
                     message = [{"role": "user", "content": user_text}]
-                    # Qwen3 chat templates can emit <think> by default; disable if supported.
-                    try:
-                        prompt_ids = tokenizer.apply_chat_template(
-                            message,
-                            tokenize=True,
-                            add_generation_prompt=True,
-                            enable_thinking=False,
-                        )
-                    except TypeError:
-                        prompt_ids = tokenizer.apply_chat_template(
-                            message,
-                            tokenize=True,
-                            add_generation_prompt=True,
-                        )
-                    if torch.is_tensor(prompt_ids):
-                        prompt_ids = prompt_ids.tolist()
-                    if prompt_ids and isinstance(prompt_ids[0], list):
-                        prompt_ids = prompt_ids[0]
+                    prompt_text = self._render_chat_prompt(
+                        tokenizer,
+                        message,
+                        add_generation_prompt=True,
+                    )
+                    prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
                     if isinstance(prompt_ids, list) and prompt_ids:
                         return [int(tok) for tok in prompt_ids]
                 except Exception:
@@ -2861,7 +2944,6 @@ class SAFEModel(nn.Module):
                 # Wrap attention modules
                 self.kv_hook_manager.wrap_attention_modules()
 
-                gate_value = float(effective_gate) if not torch.is_tensor(effective_gate) else effective_gate.mean().item()
                 if self._kv_is_multimodal():
                     modality_tokens = {}
                     modality_masks = {}
@@ -2870,10 +2952,10 @@ class SAFEModel(nn.Module):
                         modality_tokens["audio"] = audio_tokens
                         if audio_attention_mask is not None:
                             modality_masks["audio"] = audio_attention_mask
-                        modality_gates["audio"] = gate_value
+                        modality_gates["audio"] = effective_gate
                     if vision_tokens is not None:
                         modality_tokens["vision"] = vision_tokens
-                        modality_gates["vision"] = gate_value
+                        modality_gates["vision"] = gate
                     self.kv_hook_manager.inject_modality_tokens(
                         modality_tokens=modality_tokens,
                         modality_masks=modality_masks if modality_masks else None,
@@ -2883,7 +2965,7 @@ class SAFEModel(nn.Module):
                     self.kv_hook_manager.inject_audio(
                         audio_tokens=audio_tokens,
                         audio_mask=audio_attention_mask,
-                        gate=gate_value,
+                        gate=effective_gate,
                     )
 
                 # Enable attention weight capture if regularization is active
@@ -2921,13 +3003,10 @@ class SAFEModel(nn.Module):
 
                     return outputs, attn_reg_loss
                 finally:
-                    # CRITICAL: Do NOT clear audio tokens here!
-                    # With gradient checkpointing, backward recomputes forward.
-                    # If audio tokens are cleared, the recompute won't have audio
-                    # and gradients won't flow to kv_adapters.
-                    # Audio tokens persist until next inject_audio() call.
-                    # self.kv_hook_manager.clear_audio(preserve_attention_weights=True)
-                    pass  # Audio cleanup deferred to next inject_audio()
+                    if not (self.training and self._llm_gradient_checkpointing_enabled()):
+                        self._clear_kv_runtime_state(
+                            preserve_attention_weights=compute_attn_loss and not self._kv_is_multimodal()
+                        )
 
             # Determine which fusion mode to use
             use_kv_augmentation = (
@@ -2935,6 +3014,8 @@ class SAFEModel(nn.Module):
                 and (audio_tokens is not None or vision_tokens is not None)
                 and gate_scalar > 0.0
             )
+            if self.enable_kv_augmentation and not use_kv_augmentation:
+                self._clear_kv_runtime_state()
 
             import sys
             sys.stdout.flush()
@@ -3006,7 +3087,13 @@ class SAFEModel(nn.Module):
                 else:
                     raise
             logits = outputs.logits
-            loss = outputs.loss if labels is not None else None
+            loss = None
+            if labels is not None:
+                loss = self._compute_causal_loss_from_logits(
+                    logits,
+                    labels,
+                    label_smoothing=self.label_smoothing,
+                )
             icm_aux: Dict[str, torch.Tensor] = {}
 
             # Optional interaction mixer correction in logit space.
@@ -3018,7 +3105,11 @@ class SAFEModel(nn.Module):
                 )
                 # Recompute supervised loss on corrected logits.
                 if labels is not None:
-                    loss = self._compute_causal_loss_from_logits(logits, labels)
+                    loss = self._compute_causal_loss_from_logits(
+                        logits,
+                        labels,
+                        label_smoothing=self.label_smoothing,
+                    )
 
             # Add attention regularization loss if computed
             if attn_reg_loss is not None and loss is not None:
@@ -3347,7 +3438,11 @@ class SAFEModel(nn.Module):
         return modality_summaries, active_mask
 
     @staticmethod
-    def _compute_causal_loss_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    def _compute_causal_loss_from_logits(
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        label_smoothing: float = 0.0,
+    ) -> torch.Tensor:
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
         vocab = shift_logits.size(-1)
@@ -3355,6 +3450,7 @@ class SAFEModel(nn.Module):
             shift_logits.view(-1, vocab),
             shift_labels.view(-1),
             ignore_index=-100,
+            label_smoothing=float(label_smoothing),
         )
 
     def _apply_interaction_mixer_logits(
@@ -3486,6 +3582,8 @@ class SAFEModel(nn.Module):
                 )
 
             if no_modality_to_fuse:
+                if self.enable_kv_augmentation:
+                    self._clear_kv_runtime_state()
                 # TRUE VL PASSTHROUGH: Use base_vl.llm.generate directly with input_ids
                 # This bypasses SAFE's contaminated embedding layer entirely
                 # Using inputs_embeds causes HF generate to return ONLY new tokens (breaks decoding)
@@ -3651,6 +3749,8 @@ class SAFEModel(nn.Module):
                 and (audio_tokens is not None or vision_tokens is not None)
                 and gate_scalar > 0.0
             )
+            if self.enable_kv_augmentation and not use_kv_augmentation_gen:
+                self._clear_kv_runtime_state()
 
             # Debug: log generation fusion state (once)
             if not hasattr(self, '_gen_fusion_logged'):
@@ -3723,7 +3823,6 @@ class SAFEModel(nn.Module):
 
                 # Wrap attention modules
                 self.kv_hook_manager.wrap_attention_modules()
-                gate_value = float(effective_gate) if not torch.is_tensor(effective_gate) else effective_gate.mean().item()
                 if self._kv_is_multimodal():
                     modality_tokens = {}
                     modality_masks = {}
@@ -3733,11 +3832,11 @@ class SAFEModel(nn.Module):
                         modality_tokens["audio"] = audio_tokens
                         if audio_attention_mask is not None:
                             modality_masks["audio"] = audio_attention_mask.to(_gen_device)
-                        modality_gates["audio"] = gate_value
+                        modality_gates["audio"] = effective_gate
                     if vision_tokens is not None:
                         vision_tokens = vision_tokens.to(device=_gen_device, dtype=base_dtype)
                         modality_tokens["vision"] = vision_tokens
-                        modality_gates["vision"] = gate_value
+                        modality_gates["vision"] = gate
                     self.kv_hook_manager.inject_modality_tokens(
                         modality_tokens=modality_tokens,
                         modality_masks=modality_masks if modality_masks else None,
@@ -3749,15 +3848,12 @@ class SAFEModel(nn.Module):
                     self.kv_hook_manager.inject_audio(
                         audio_tokens=audio_tokens,
                         audio_mask=audio_attn,
-                        gate=gate_value,
+                        gate=effective_gate,
                     )
                 try:
                     return self.base_vl.llm.generate(**kv_gen_inputs)
                 finally:
-                    if self._kv_is_multimodal():
-                        self.kv_hook_manager.clear_modality_tokens()
-                    else:
-                        self.kv_hook_manager.clear_audio()
+                    self._clear_kv_runtime_state()
                     self.kv_hook_manager.unwrap_attention_modules()
 
             # Build per-modality gate dict for generate

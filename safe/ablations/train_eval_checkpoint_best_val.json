@@ -1,0 +1,21 @@
+{
+  "checkpoint": "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/checkpoints/phase1_clean/checkpoint_best.pt",
+  "split": "val",
+  "config": "phase1",
+  "metrics": {
+    "loss": 4.523545499770872,
+    "cider": 0.04725691482844122,
+    "spice": 0.20257130493019043,
+    "spider": 0.12491410987931582,
+    "bleu1": 0.039164032314713805,
+    "bleu2": 0.010529736113793178,
+    "bleu3": 2.193056770762889e-08,
+    "bleu4": 3.1987987603425044e-11,
+    "meteor": 0.03537105650754523,
+    "rouge_l": 0.045001254581582245,
+    "bertscore_f1": 0.0,
+    "num_samples": 438.0,
+    "eval_time": 239.92155051231384,
+    "token_accuracy": 0.000376081233546446
+  }
+}

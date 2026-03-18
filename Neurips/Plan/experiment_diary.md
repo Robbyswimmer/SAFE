@@ -188,3 +188,56 @@ Interpretation:
 - this run should be tracked as a key test of the incremental-addition hypothesis:
   - if audio later rises while vision is preserved, incremental addition is viable
   - if audio remains weak, that supports a stability-versus-strength bottleneck for later residual adapters
+
+---
+
+### KV-augmentation vision-only operator sanity check and first-site ablation
+
+Status:
+- running
+- initial diagnostics recorded
+
+Source:
+- user-provided cluster logs for the layer-8 and layer-2 vision-only KV runs
+
+Setup:
+- operator: KV augmentation on Qwen3-8B
+- task: MUSIC-AVQA vision-only training
+- baseline layers: `8,14,20,26`
+- ablation layers: `2,14,20,26`
+- paired real-run submission also launched via `submit_qwen_kv_vision_then_audio.sh`
+
+Execution notes:
+- both variants evaluate all requested modalities cleanly
+- checkpoints save correctly
+- training continues into epoch 2 without log spam
+- this is enough to treat the KV launcher path as operational for longer runs
+
+Recorded diagnostic snapshots:
+```text
+Layer-8 run:
+[grad_attribution] step=700  ... kv:vision:14=1.828e-01 | kv:vision:20=1.179e-01 | kv:vision:26=4.150e-02 | kv:vision:8=5.606e-01 | vision_projector=1.165e-01
+[grad_attribution] step=800  ... kv:vision:14=3.768e-01 | kv:vision:20=2.311e-01 | kv:vision:26=8.520e-02 | kv:vision:8=1.297e+00 | vision_projector=2.173e-01
+[grad_attribution] step=900  ... kv:vision:14=2.884e-02 | kv:vision:20=1.379e-02 | kv:vision:26=4.259e-03 | kv:vision:8=8.967e-02 | vision_projector=1.575e-02
+[grad_attribution] step=1000 ... kv:vision:14=7.644e-02 | kv:vision:20=4.040e-02 | kv:vision:26=1.397e-02 | kv:vision:8=2.447e-01 | vision_projector=4.530e-02
+
+Layer-2 run:
+[grad_attribution] step=500 ... kv:vision:14=8.926e-01 | kv:vision:2=4.265e+00 | kv:vision:20=4.864e-01 | kv:vision:26=1.827e-01 | vision_projector=6.240e-01
+[grad_attribution] step=600 ... kv:vision:14=3.802e-01 | kv:vision:2=1.629e+00 | kv:vision:20=2.455e-01 | kv:vision:26=7.214e-02 | vision_projector=3.455e-01
+[grad_attribution] step=700 ... kv:vision:14=1.608e-01 | kv:vision:2=9.816e-01 | kv:vision:20=1.036e-01 | kv:vision:26=4.374e-02 | vision_projector=2.341e-01
+[grad_attribution] step=800 ... kv:vision:14=3.548e-01 | kv:vision:2=2.461e+00 | kv:vision:20=2.089e-01 | kv:vision:26=8.120e-02 | vision_projector=5.198e-01
+```
+
+Interpretation:
+- in both runs, the dominant KV gradient sits at the earliest active vision injection site
+- when the first site is layer `8`, `kv:vision:8` dominates
+- when the first site is layer `2`, `kv:vision:2` dominates
+- the dominant-to-later-layer ratio is consistently several-fold, so this looks like a first-site effect rather than a layer-8-specific effect
+- this is a useful mechanistic result for the operator story: early KV memory appears to absorb most of the learning signal unless the design or objective redistributes it
+
+Tentative optimization note:
+- the layer-2 run shows slightly lower loss than the layer-8 run at roughly comparable steps
+- example comparison:
+  - layer 8: step `6400` loss `3.2137`
+  - layer 2: step `6400` loss `3.0586`
+- this is only suggestive because run timing and warmup are not perfectly aligned yet

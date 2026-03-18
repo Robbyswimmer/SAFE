@@ -1,0 +1,32 @@
+[neurips-launch] SAFE_ROOT=/data/SalmanAsif/RobbyMoseley/SAFE/SAFE
+[neurips-launch] TRAIN_SCRIPT=/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/avqa_composition/scripts/train_preffn_music_avqa.sh
+[neurips-launch] MODEL_CONFIG=composition_independent TRAIN_MODALITY=both EVAL_MODALITIES=text,audio,image,both
+[neurips-launch] staggered_layers audio=8,14,20,26 vision=10,16,22,28
+[neurips-launch] OUTPUT_DIR=/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/checkpoints/qwen_staggered_joint_both_from_scratch EPOCHS=10 BATCH_SIZE=1 LR=5e-5 FUSION_GATE=0.1
+[launcher] model_config=composition_independent SAFE_GRAD_CKPT=0 SAFE_QWEN_QUANT=none USE_FP16=0
+/home/csgrad/rmose009/miniconda3/envs/safe-env/lib/python3.11/site-packages/timm/models/layers/__init__.py:48: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+[info] dataset=music_avqa device=cuda
+[info] train_samples=32087 val_samples=4595
+[info] train_media_stats={'checked_samples': 512, 'audio_paths_found': 512, 'image_paths_found': 512, 'both_paths_found': 512}
+[info] val_media_stats={'checked_samples': 512, 'audio_paths_found': 512, 'image_paths_found': 512, 'both_paths_found': 512}
+Traceback (most recent call last):
+  File "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/avqa_composition/train_avqa_composition.py", line 5129, in <module>
+    main()
+  File "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/avqa_composition/train_avqa_composition.py", line 4213, in main
+    wandb_run = wandb.init(
+                ^^^^^^^^^^^
+  File "/home/csgrad/rmose009/miniconda3/envs/safe-env/lib/python3.11/site-packages/wandb/sdk/wandb_init.py", line 1581, in init
+    wandb._sentry.reraise(e)
+  File "/home/csgrad/rmose009/miniconda3/envs/safe-env/lib/python3.11/site-packages/wandb/analytics/sentry.py", line 162, in reraise
+    raise exc.with_traceback(sys.exc_info()[2])
+  File "/home/csgrad/rmose009/miniconda3/envs/safe-env/lib/python3.11/site-packages/wandb/sdk/wandb_init.py", line 1504, in init
+    wi.maybe_login(init_settings)
+  File "/home/csgrad/rmose009/miniconda3/envs/safe-env/lib/python3.11/site-packages/wandb/sdk/wandb_init.py", line 190, in maybe_login
+    wandb_login._login(
+  File "/home/csgrad/rmose009/miniconda3/envs/safe-env/lib/python3.11/site-packages/wandb/sdk/wandb_login.py", line 318, in _login
+    key, key_status = wlogin.prompt_api_key(referrer=referrer)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/csgrad/rmose009/miniconda3/envs/safe-env/lib/python3.11/site-packages/wandb/sdk/wandb_login.py", line 244, in prompt_api_key
+    raise UsageError("api_key not configured (no-tty). call " + directive)
+wandb.errors.errors.UsageError: api_key not configured (no-tty). call wandb.login(key=[your_api_key])

@@ -1,0 +1,27 @@
+\n=== Running variant: no_retention ===
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/overfitting/run_overfitting.py", line 18, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+=== Completed variant: no_retention ===\n
+\n=== Running variant: soft_retention ===
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/overfitting/run_overfitting.py", line 18, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+=== Completed variant: soft_retention ===\n
+\n=== Running variant: full_safe ===
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/overfitting/run_overfitting.py", line 18, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+=== Completed variant: full_safe ===\n
+SAFE overfitting ablation complete at Mon Sep 22 09:32:43 PDT 2025
+Activating conda environment 'safe-env'
+Starting SAFE overfitting ablation at Mon Sep 22 09:32:44 PDT 2025

@@ -1,0 +1,9 @@
+/home/csgrad/rmose009/miniconda3/envs/safe-env/lib/python3.11/site-packages/timm/models/layers/__init__.py:48: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+usage: evaluate_checkpoint.py [-h] --run_id RUN_ID [--checkpoint CHECKPOINT]
+                              [--data_root DATA_ROOT] [--split SPLIT]
+                              [--device DEVICE] [--batch_size BATCH_SIZE]
+                              [--llm_model_name LLM_MODEL_NAME]
+                              [--num_audio_tokens NUM_AUDIO_TOKENS]
+                              [--model_config MODEL_CONFIG]
+evaluate_checkpoint.py: error: the following arguments are required: --run_id

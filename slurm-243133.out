@@ -1,0 +1,9 @@
+============================================
+ LoRA Baseline — Full Pipeline
+ Wed Feb 18 23:27:06 PST 2026
+============================================
+
+============================================
+ Stage 0: Text-only baseline evaluation
+============================================
+python3: can't open file '/var/experiments/lora_baseline/train_lora_baseline.py': [Errno 2] No such file or directory

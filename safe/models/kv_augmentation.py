@@ -27,6 +27,87 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _slice_attention_mask(
+    attention_mask: Optional[torch.Tensor],
+    kv_len: int,
+) -> Optional[torch.Tensor]:
+    """Align an additive attention mask to the active KV length."""
+    if attention_mask is None:
+        return None
+    if attention_mask.size(-1) != kv_len:
+        attention_mask = attention_mask[:, :, :, -kv_len:]
+    return attention_mask
+
+
+def _align_batch_dim(
+    tensor: Optional[torch.Tensor],
+    target_bsz: int,
+    *,
+    label: str,
+) -> Optional[torch.Tensor]:
+    """Match a batch-first tensor to the active batch size."""
+    if tensor is None:
+        return None
+
+    src_bsz = tensor.size(0)
+    if src_bsz == target_bsz:
+        return tensor
+    if target_bsz > src_bsz and target_bsz % src_bsz == 0:
+        num_beams = target_bsz // src_bsz
+        expand_shape = (-1, num_beams, *([-1] * (tensor.dim() - 1)))
+        new_shape = (target_bsz, *tensor.shape[1:])
+        return tensor.unsqueeze(1).expand(*expand_shape).reshape(*new_shape)
+    if src_bsz > target_bsz and src_bsz % target_bsz == 0:
+        return tensor[:target_bsz]
+
+    raise ValueError(
+        f"Cannot align batch dimension for {label}: src={src_bsz}, target={target_bsz}"
+    )
+
+
+def _build_modality_bias(
+    *,
+    mask: Optional[torch.Tensor],
+    gate: Optional[Union[float, torch.Tensor]],
+    batch_size: int,
+    token_count: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Create an additive logit bias for a modality token block."""
+    bias = torch.zeros((batch_size, 1, 1, token_count), device=device, dtype=dtype)
+
+    if gate is not None:
+        if torch.is_tensor(gate):
+            gate_tensor = _align_batch_dim(
+                gate.to(device=device, dtype=dtype).reshape(-1),
+                batch_size,
+                label="gate",
+            )
+            gate_tensor = gate_tensor.view(batch_size, 1, 1, 1)
+            bias = bias + torch.log(torch.clamp(gate_tensor, min=1e-8))
+            bias = bias.masked_fill(gate_tensor <= 0, float("-inf"))
+        else:
+            gate_value = float(gate)
+            if gate_value <= 0.0:
+                return torch.full(
+                    (batch_size, 1, 1, token_count),
+                    float("-inf"),
+                    device=device,
+                    dtype=dtype,
+                )
+            if gate_value != 1.0:
+                bias = bias + math.log(max(gate_value, 1e-8))
+
+    if mask is not None:
+        mask = _align_batch_dim(mask.to(device=device), batch_size, label="modality_mask")
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(1).unsqueeze(2)
+        bias = bias.masked_fill(mask <= 0.5, float("-inf"))
+
+    return bias
+
+
 class AudioQueryAdapter(nn.Module):
     """
     Low-rank adapter that produces ΔQ for audio attention.
@@ -369,6 +450,9 @@ class KVAugmentedAttention(nn.Module):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.Tensor] = None,
+        # Qwen3/newer transformers pass these instead of position_ids + past_key_value
+        past_key_values=None,
+        position_embeddings=None,
         **kwargs,
     ) -> Tuple[torch.Tensor, ...]:
         """
@@ -377,6 +461,10 @@ class KVAugmentedAttention(nn.Module):
         If no audio tokens are set, delegates to original attention.
         Otherwise, computes attention with audio K,V concatenated.
         """
+        # Normalize Qwen3-style args: past_key_values (plural) → past_key_value
+        if past_key_values is not None and past_key_value is None:
+            past_key_value = past_key_values
+
         # If no audio, pass through to original
         if self._audio_tokens is None:
             return self.original_attention(
@@ -387,6 +475,8 @@ class KVAugmentedAttention(nn.Module):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
+                past_key_values=past_key_values,
+                position_embeddings=position_embeddings,
                 **kwargs,
             )
 
@@ -399,6 +489,7 @@ class KVAugmentedAttention(nn.Module):
             output_attentions=output_attentions or self._return_attention_weights,
             use_cache=use_cache,
             cache_position=cache_position,
+            position_embeddings=position_embeddings,
             **kwargs,
         )
 
@@ -411,17 +502,16 @@ class KVAugmentedAttention(nn.Module):
         output_attentions: bool,
         use_cache: bool,
         cache_position: Optional[torch.Tensor],
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, ...]:
         """
-        Compute attention with SEPARATE text and audio branches.
+        Compute competitive attention over text KV and audio KV.
 
-        Key architecture:
-        1. TEXT ATTENTION: Completely frozen, identical to original LlamaAttention
-        2. AUDIO ATTENTION: Uses adapted queries (Q + ΔQ) to attend to audio K,V
-        3. COMBINE: text_output + gate * audio_output
-
-        This preserves the base model's text processing while adding audio capability.
+        Text scores use the frozen query, while audio scores use the adapted
+        query (Q + ΔQ). Both score blocks are normalized in one softmax so the
+        model can down-weight audio rather than always receiving an additive
+        audio write.
         """
         bsz, q_len, _ = hidden_states.size()
         n_audio = self._audio_tokens.size(1)
@@ -470,9 +560,14 @@ class KVAugmentedAttention(nn.Module):
             key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        # Apply RoPE to text Q, K (standard LLaMA)
+        # Apply RoPE — use pre-computed position_embeddings (Qwen3) or compute from rotary_emb
         cos, sin = None, None
-        if hasattr(orig_attn, 'rotary_emb'):
+        if position_embeddings is not None:
+            cos, sin = position_embeddings
+            query_states, key_states = self._apply_rotary_pos_emb(
+                query_states, key_states, cos, sin
+            )
+        elif hasattr(orig_attn, 'rotary_emb'):
             cos, sin = orig_attn.rotary_emb(value_states, position_ids)
             query_states, key_states = self._apply_rotary_pos_emb(
                 query_states, key_states, cos, sin
@@ -499,11 +594,12 @@ class KVAugmentedAttention(nn.Module):
             value_states_expanded = self._repeat_kv(value_states, self.num_key_value_groups)
 
         # Text attention (standard causal)
-        text_attn_weights = torch.matmul(query_states, key_states_expanded.transpose(2, 3)) / math.sqrt(self.head_dim)
+        text_attn_scores = torch.matmul(query_states, key_states_expanded.transpose(2, 3)) / math.sqrt(self.head_dim)
+        attention_mask = _slice_attention_mask(attention_mask, key_states_expanded.size(2))
         if attention_mask is not None:
-            text_attn_weights = text_attn_weights + attention_mask
-        text_attn_weights = torch.clamp(text_attn_weights, min=-50.0, max=50.0)
-        text_attn_weights = F.softmax(text_attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            text_attn_scores = text_attn_scores + attention_mask
+        text_attn_scores = torch.clamp(text_attn_scores, min=-50.0, max=50.0)
+        text_attn_weights = F.softmax(text_attn_scores, dim=-1, dtype=torch.float32).to(query_states.dtype)
         text_output = torch.matmul(text_attn_weights, value_states_expanded)
 
         # ============================================================
@@ -563,26 +659,28 @@ class KVAugmentedAttention(nn.Module):
             audio_keys = self._repeat_kv(audio_keys, adapter_kv_groups)
             audio_values = self._repeat_kv(audio_values, adapter_kv_groups)
 
-        # Audio attention (non-causal, all positions can attend to all audio)
-        audio_attn_weights = torch.matmul(query_for_audio, audio_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-        # Apply audio mask if provided: 1=attend, 0=mask.
-        if self._audio_mask is not None:
-            audio_mask = self._audio_mask.to(device=audio_attn_weights.device)
-            # Handle batch size mismatch (same logic as K/V handling above)
-            if audio_mask.dim() == 2:
-                mask_bsz = audio_mask.size(0)
-                if mask_bsz != bsz:
-                    if bsz > mask_bsz and bsz % mask_bsz == 0:
-                        # Beam search expansion
-                        num_beams = bsz // mask_bsz
-                        audio_mask = audio_mask.unsqueeze(1).expand(-1, num_beams, -1).reshape(bsz, -1)
-                    elif mask_bsz > bsz:
-                        # 8-bit quantization quirk: slice to match
-                        audio_mask = audio_mask[:bsz]
-                audio_mask_expanded = audio_mask.unsqueeze(1).unsqueeze(2)  # (B,1,1,Ta)
-                audio_attn_weights = audio_attn_weights.masked_fill(audio_mask_expanded <= 0.5, float("-inf"))
-        audio_attn_weights = torch.clamp(audio_attn_weights, min=-50.0, max=50.0)
-        audio_attn_weights = F.softmax(audio_attn_weights, dim=-1, dtype=torch.float32).to(query_for_audio.dtype)
+        # Competitive attention: audio scores are normalized together with text scores.
+        audio_attn_scores = torch.matmul(query_for_audio, audio_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+        audio_attn_scores = torch.clamp(audio_attn_scores, min=-50.0, max=50.0)
+        audio_attn_scores = audio_attn_scores + _build_modality_bias(
+            mask=self._audio_mask,
+            gate=self._gate,
+            batch_size=bsz,
+            token_count=n_audio,
+            device=audio_attn_scores.device,
+            dtype=audio_attn_scores.dtype,
+        )
+
+        combined_attn_scores = torch.cat([text_attn_scores, audio_attn_scores], dim=-1)
+        combined_attn_weights = F.softmax(
+            combined_attn_scores,
+            dim=-1,
+            dtype=torch.float32,
+        ).to(query_states.dtype)
+        text_len = key_states_expanded.size(2)
+        text_attn_from_combined = combined_attn_weights[..., :text_len]
+        audio_attn_weights = combined_attn_weights[..., text_len:]
+        text_output_from_combined = torch.matmul(text_attn_from_combined, value_states_expanded)
         audio_output = torch.matmul(audio_attn_weights, audio_values)
 
         # Store audio attention weights for regularization and logging
@@ -593,31 +691,29 @@ class KVAugmentedAttention(nn.Module):
             self._live_attention_weights = audio_attn_weights  # For reg loss (has gradients)
 
         # ============================================================
-        # 3. COMBINE: text_output + gate * audio_output
+        # 3. COMBINE
         # ============================================================
-        gated_audio_output = self._gate * audio_output
-        combined_output = text_output + gated_audio_output
+        combined_output = text_output_from_combined + audio_output
 
         # ============================================================
         # DIAGNOSTICS: Store RMS values for monitoring
         # ============================================================
         with torch.no_grad():
             text_rms = torch.sqrt(torch.mean(text_output.float() ** 2)).item()
-            audio_rms = torch.sqrt(torch.mean(gated_audio_output.float() ** 2)).item()
+            audio_rms = torch.sqrt(torch.mean(audio_output.float() ** 2)).item()
             rms_ratio = audio_rms / (text_rms + 1e-8)
 
-            # NOTE: In separate-branch architecture, audio attention always sums to 1.0
-            # (softmax over audio tokens). This is meaningless as a metric.
-            # Instead, use ENTROPY (should decrease with training) and ΔQ/Q ratio.
-
-            # Audio attention entropy (H/log(n) normalized)
-            # ~1.0 = uniform (bad if stays), <1.0 = focused (good)
-            attn_dist = audio_attn_weights.mean(dim=(0, 1))  # Average over batch, heads -> (seq, n_audio)
-            attn_dist = attn_dist.clamp(min=1e-10)
-            entropy_per_pos = -(attn_dist * attn_dist.log()).sum(dim=-1)  # (seq,)
-            mean_entropy = entropy_per_pos.mean().item()
-            max_entropy = math.log(n_audio) if n_audio > 1 else 1.0
+            audio_mass = audio_attn_weights.sum(dim=-1)
+            safe_audio_mass = audio_mass.unsqueeze(-1).clamp(min=1e-8)
+            conditional_audio = audio_attn_weights / safe_audio_mass
+            conditional_audio = conditional_audio.clamp(min=1e-10)
+            entropy_per_pos = -(conditional_audio * conditional_audio.log()).sum(dim=-1)
+            valid_audio = (audio_mass > 1e-6).float()
+            entropy_denom = valid_audio.sum().clamp(min=1.0)
+            mean_entropy = float((entropy_per_pos * valid_audio).sum().item() / entropy_denom.item())
+            max_entropy = math.log(float(max(n_audio, 2)))
             normalized_entropy = mean_entropy / max_entropy
+            mean_audio_mass = float(audio_mass.mean().item())
 
             # ΔQ/Q ratio for checking if query adapter is meaningful
             delta_q_rms = torch.sqrt(torch.mean(delta_q.float() ** 2)).item()
@@ -628,7 +724,8 @@ class KVAugmentedAttention(nn.Module):
                 "text_rms": text_rms,
                 "audio_rms": audio_rms,
                 "rms_ratio": rms_ratio,
-                "normalized_entropy": normalized_entropy,  # Replaces meaningless audio_attn_mass
+                "normalized_entropy": normalized_entropy,
+                "attention_mass": mean_audio_mass,
                 "gate": self._gate,
                 # ΔQ/Q diagnostics
                 "delta_q_rms": delta_q_rms,
@@ -643,7 +740,7 @@ class KVAugmentedAttention(nn.Module):
 
         # Return format for LlamaDecoderLayer
         if output_attentions:
-            # Return audio attention weights (text weights available as text_attn_weights)
+            # Preserve legacy behavior: expose the audio slice for logging/reg loss.
             attn_weights_out = audio_attn_weights
         else:
             attn_weights_out = None
@@ -664,7 +761,10 @@ class KVAugmentedAttention(nn.Module):
         sin: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply rotary position embeddings to Q and K."""
-        # Standard LLaMA rotary embedding application
+        # Unsqueeze for head dimension if needed (Qwen3 cos/sin are [bsz, seq, dim])
+        if cos.dim() == 3 and q.dim() == 4:
+            cos = cos.unsqueeze(1)
+            sin = sin.unsqueeze(1)
         q_embed = (q * cos) + (self._rotate_half(q) * sin)
         k_embed = (k * cos) + (self._rotate_half(k) * sin)
         return q_embed, k_embed
@@ -676,6 +776,9 @@ class KVAugmentedAttention(nn.Module):
         sin: torch.Tensor,
     ) -> torch.Tensor:
         """Apply rotary position embeddings to a single tensor (for ΔQ)."""
+        if cos.dim() == 3 and x.dim() == 4:
+            cos = cos.unsqueeze(1)
+            sin = sin.unsqueeze(1)
         return (x * cos) + (self._rotate_half(x) * sin)
 
     @staticmethod
@@ -1314,9 +1417,16 @@ class MultiModalKVAugmentedAttention(nn.Module):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.Tensor] = None,
+        # Qwen3/newer transformers pass these instead of position_ids + past_key_value
+        past_key_values=None,
+        position_embeddings=None,
         **kwargs,
     ) -> Tuple[torch.Tensor, ...]:
         """Forward pass with optional multi-modal KV augmentation."""
+        # Normalize Qwen3-style args: past_key_values (plural) → past_key_value
+        if past_key_values is not None and past_key_value is None:
+            past_key_value = past_key_values
+
         # If no modality tokens, pass through to original
         if not self._modality_tokens:
             return self.original_attention(
@@ -1327,6 +1437,8 @@ class MultiModalKVAugmentedAttention(nn.Module):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
+                past_key_values=past_key_values,
+                position_embeddings=position_embeddings,
                 **kwargs,
             )
 
@@ -1338,6 +1450,7 @@ class MultiModalKVAugmentedAttention(nn.Module):
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
+            position_embeddings=position_embeddings,
             **kwargs,
         )
 
@@ -1350,15 +1463,15 @@ class MultiModalKVAugmentedAttention(nn.Module):
         output_attentions: bool,
         use_cache: bool,
         cache_position: Optional[torch.Tensor],
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, ...]:
         """
-        Compute attention with multiple modality K,V branches.
+        Compute competitive attention over text and modality KV blocks.
 
-        Architecture:
-        1. TEXT ATTENTION: Frozen, identical to original
-        2. For each modality: Q + ΔQ_mod -> attend to mod K,V -> gate
-        3. COMBINE: text_output + sum(gated_modality_outputs)
+        Each modality keeps its own adapted query for scoring, but all score
+        blocks are normalized together in one softmax so modalities compete with
+        text and with each other.
         """
         bsz, q_len, _ = hidden_states.size()
         orig_attn = self.original_attention
@@ -1367,16 +1480,22 @@ class MultiModalKVAugmentedAttention(nn.Module):
         if self._return_format is None:
             try:
                 with torch.no_grad():
-                    probe = orig_attn(
+                    fwd_kwargs = dict(
                         hidden_states=hidden_states,
                         attention_mask=attention_mask,
                         position_ids=position_ids,
-                        past_key_value=past_key_value,
                         output_attentions=output_attentions,
                         use_cache=use_cache,
                         cache_position=cache_position,
                         **kwargs,
                     )
+                    # Pass cache and position_embeddings with the right kwarg name
+                    if position_embeddings is not None:
+                        fwd_kwargs["position_embeddings"] = position_embeddings
+                        fwd_kwargs["past_key_values"] = past_key_value
+                    else:
+                        fwd_kwargs["past_key_value"] = past_key_value
+                    probe = orig_attn(**fwd_kwargs)
                 self._return_format = len(probe) if isinstance(probe, tuple) else 1
             except Exception:
                 self._return_format = 2
@@ -1401,9 +1520,12 @@ class MultiModalKVAugmentedAttention(nn.Module):
             key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        # Apply RoPE
+        # Apply RoPE — use pre-computed position_embeddings (Qwen3) or compute from rotary_emb
         cos, sin = None, None
-        if hasattr(orig_attn, 'rotary_emb'):
+        if position_embeddings is not None:
+            cos, sin = position_embeddings
+            query_states, key_states = self._apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        elif hasattr(orig_attn, 'rotary_emb'):
             cos, sin = orig_attn.rotary_emb(value_states, position_ids)
             query_states, key_states = self._apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
@@ -1428,18 +1550,21 @@ class MultiModalKVAugmentedAttention(nn.Module):
             value_states_expanded = self._repeat_kv(value_states, self.num_key_value_groups)
 
         # Text attention
-        text_attn_weights = torch.matmul(query_states, key_states_expanded.transpose(2, 3)) / math.sqrt(self.head_dim)
+        text_attn_scores = torch.matmul(query_states, key_states_expanded.transpose(2, 3)) / math.sqrt(self.head_dim)
+        attention_mask = _slice_attention_mask(attention_mask, key_states_expanded.size(2))
         if attention_mask is not None:
-            text_attn_weights = text_attn_weights + attention_mask
-        text_attn_weights = torch.clamp(text_attn_weights, min=-50.0, max=50.0)
-        text_attn_weights = F.softmax(text_attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            text_attn_scores = text_attn_scores + attention_mask
+        text_attn_scores = torch.clamp(text_attn_scores, min=-50.0, max=50.0)
+        text_attn_weights = F.softmax(text_attn_scores, dim=-1, dtype=torch.float32).to(query_states.dtype)
         text_output = torch.matmul(text_attn_weights, value_states_expanded)
 
         # ============================================================
-        # 2. MODALITY ATTENTION (for each modality)
+        # 2. MODALITY ATTENTION (competitive with text and other modalities)
         # ============================================================
-        combined_modality_output = torch.zeros_like(text_output)
         self._last_diagnostics = {}
+        score_blocks = [text_attn_scores]
+        value_blocks = [value_states_expanded]
+        modality_meta: Dict[str, Dict[str, Any]] = {}
 
         for modality, mod_tokens in self._modality_tokens.items():
             if modality not in self._modality_adapters:
@@ -1487,52 +1612,73 @@ class MultiModalKVAugmentedAttention(nn.Module):
                 mod_keys = self._repeat_kv(mod_keys, adapter_kv_groups)
                 mod_values = self._repeat_kv(mod_values, adapter_kv_groups)
 
-            # Modality attention
-            mod_attn_weights = torch.matmul(query_for_mod, mod_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+            mod_scores = torch.matmul(query_for_mod, mod_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+            mod_scores = torch.clamp(mod_scores, min=-50.0, max=50.0)
+            mod_scores = mod_scores + _build_modality_bias(
+                mask=mod_mask,
+                gate=gate,
+                batch_size=bsz,
+                token_count=n_mod,
+                device=mod_scores.device,
+                dtype=mod_scores.dtype,
+            )
 
-            # Apply modality mask if provided
-            if mod_mask is not None:
-                mod_mask_dev = mod_mask.to(device=mod_attn_weights.device)
-                if mod_mask_dev.dim() == 2:
-                    mask_bsz = mod_mask_dev.size(0)
-                    if mask_bsz != bsz:
-                        if bsz > mask_bsz and bsz % mask_bsz == 0:
-                            num_beams = bsz // mask_bsz
-                            mod_mask_dev = mod_mask_dev.unsqueeze(1).expand(-1, num_beams, -1).reshape(bsz, -1)
-                        elif mask_bsz > bsz:
-                            mod_mask_dev = mod_mask_dev[:bsz]
-                    mod_mask_expanded = mod_mask_dev.unsqueeze(1).unsqueeze(2)
-                    mod_attn_weights = mod_attn_weights.masked_fill(mod_mask_expanded <= 0.5, float("-inf"))
-
-            mod_attn_weights = torch.clamp(mod_attn_weights, min=-50.0, max=50.0)
-            mod_attn_weights = F.softmax(mod_attn_weights, dim=-1, dtype=torch.float32).to(query_for_mod.dtype)
-            mod_output = torch.matmul(mod_attn_weights, mod_values)
-
-            # Gate and accumulate
-            gated_mod_output = gate * mod_output
-            combined_modality_output = combined_modality_output + gated_mod_output
-
-            # Store diagnostics for this modality
-            with torch.no_grad():
-                mod_rms = torch.sqrt(torch.mean(gated_mod_output.float() ** 2)).item()
-                text_rms = torch.sqrt(torch.mean(text_output.float() ** 2)).item()
-                delta_q_rms = torch.sqrt(torch.mean(delta_q.float() ** 2)).item()
-                q_rms = torch.sqrt(torch.mean(query_states.float() ** 2)).item()
-
-                self._last_diagnostics[modality] = {
-                    "text_rms": text_rms,
-                    "modality_rms": mod_rms,
-                    "rms_ratio": mod_rms / (text_rms + 1e-8),
-                    "delta_q_rms": delta_q_rms,
-                    "q_rms": q_rms,
-                    "delta_q_ratio": delta_q_rms / (q_rms + 1e-8),
-                    "gate": gate,
-                }
+            score_blocks.append(mod_scores)
+            value_blocks.append(mod_values)
+            modality_meta[modality] = {
+                "n_tokens": n_mod,
+                "delta_q_rms": float(torch.sqrt(torch.mean(delta_q.float() ** 2)).item()),
+                "q_rms": float(torch.sqrt(torch.mean(query_states.float() ** 2)).item()),
+                "gate": gate,
+            }
 
         # ============================================================
         # 3. COMBINE
         # ============================================================
-        combined_output = text_output + combined_modality_output
+        combined_scores = torch.cat(score_blocks, dim=-1)
+        combined_attn_weights = F.softmax(
+            combined_scores,
+            dim=-1,
+            dtype=torch.float32,
+        ).to(query_states.dtype)
+
+        combined_output = torch.matmul(
+            combined_attn_weights[..., :value_states_expanded.size(2)],
+            value_states_expanded,
+        )
+
+        start = value_states_expanded.size(2)
+        text_rms = torch.sqrt(torch.mean(text_output.float() ** 2)).item()
+        for modality, block in zip(modality_meta.keys(), value_blocks[1:]):
+            end = start + block.size(2)
+            mod_attn = combined_attn_weights[..., start:end]
+            mod_output = torch.matmul(mod_attn, block)
+            combined_output = combined_output + mod_output
+
+            with torch.no_grad():
+                mod_rms = torch.sqrt(torch.mean(mod_output.float() ** 2)).item()
+                mod_mass = mod_attn.sum(dim=-1)
+                safe_mass = mod_mass.unsqueeze(-1).clamp(min=1e-8)
+                conditional_mod = mod_attn / safe_mass
+                conditional_mod = conditional_mod.clamp(min=1e-10)
+                entropy_per_pos = -(conditional_mod * conditional_mod.log()).sum(dim=-1)
+                valid_mod = (mod_mass > 1e-6).float()
+                entropy_denom = valid_mod.sum().clamp(min=1.0)
+                mean_entropy = float((entropy_per_pos * valid_mod).sum().item() / entropy_denom.item())
+                max_entropy = math.log(float(max(block.size(2), 2)))
+                meta = modality_meta[modality]
+                self._last_diagnostics[modality] = {
+                    "text_rms": text_rms,
+                    "modality_rms": mod_rms,
+                    "rms_ratio": mod_rms / (text_rms + 1e-8),
+                    "normalized_entropy": mean_entropy / max_entropy,
+                    "attention_mass": float(mod_mass.mean().item()),
+                    "delta_q_rms": meta["delta_q_rms"],
+                    "q_rms": meta["q_rms"],
+                    "delta_q_ratio": meta["delta_q_rms"] / (meta["q_rms"] + 1e-8),
+                    "gate": meta["gate"],
+                }
+            start = end
 
         # Reshape and output projection
         combined_output = combined_output.transpose(1, 2).contiguous().reshape(bsz, q_len, -1)
@@ -1546,11 +1692,18 @@ class MultiModalKVAugmentedAttention(nn.Module):
         return (attn_output, None, None)
 
     def _apply_rotary_pos_emb(self, q, k, cos, sin):
+        # Unsqueeze for head dimension if needed (Qwen3 cos/sin are [bsz, seq, dim])
+        if cos.dim() == 3 and q.dim() == 4:
+            cos = cos.unsqueeze(1)
+            sin = sin.unsqueeze(1)
         q_embed = (q * cos) + (self._rotate_half(q) * sin)
         k_embed = (k * cos) + (self._rotate_half(k) * sin)
         return q_embed, k_embed
 
     def _apply_rotary_pos_emb_single(self, x, cos, sin):
+        if cos.dim() == 3 and x.dim() == 4:
+            cos = cos.unsqueeze(1)
+            sin = sin.unsqueeze(1)
         return (x * cos) + (self._rotate_half(x) * sin)
 
     @staticmethod
@@ -1717,7 +1870,9 @@ class MultiModalKVAugmentationHookManager:
             setattr(layer, attn_attr, wrapped)
 
         self._is_wrapped = True
-        print(f"[MultiModalKVAug] Wrapped {len(self.wrapped_attentions)} attention modules", flush=True)
+        if not hasattr(self, '_wrap_logged'):
+            print(f"[MultiModalKVAug] Wrapped {len(self.wrapped_attentions)} attention modules", flush=True)
+            self._wrap_logged = True
 
     def unwrap_attention_modules(self):
         """Restore original attention modules."""

@@ -1,0 +1,33 @@
+{
+  "checkpoint": "outputs/rkca_prompted_avqa/best_model.pt",
+  "model_config": "rkca",
+  "modality_aware_prompts": true,
+  "num_samples_audio": 512,
+  "num_samples_vision": 512,
+  "audio": {
+    "num_samples": 512,
+    "mean_cosine_same_anchor": -0.011774483366934874,
+    "mean_cosine_wrong_modality_anchor": -0.012089274170875797,
+    "mean_role_margin": 0.00031479080394092307,
+    "top1_same_retrieval": 0.5859375,
+    "top1_combined_role_correct": 0.5859375,
+    "linear_cka_to_same_anchor": 0.05504806712269783,
+    "subspace_overlap_to_same_anchor": 0.0019827531650662422
+  },
+  "vision": {
+    "num_samples": 512,
+    "mean_cosine_same_anchor": -0.0029922327014446637,
+    "mean_cosine_wrong_modality_anchor": -0.002871703809432802,
+    "mean_role_margin": -0.0001205288920118619,
+    "top1_same_retrieval": 0.1953125,
+    "top1_combined_role_correct": 0.0,
+    "linear_cka_to_same_anchor": 0.05682651698589325,
+    "subspace_overlap_to_same_anchor": 0.0015718857757747173
+  },
+  "cross": {
+    "audio_vs_vision_projector_cka": 0.47490400075912476,
+    "audio_vs_vision_projector_subspace_overlap": 0.010751488618552685,
+    "audio_anchor_vs_vision_anchor_cka": 0.9945899844169617,
+    "audio_anchor_vs_vision_anchor_subspace_overlap": 0.8112329244613647
+  }
+}

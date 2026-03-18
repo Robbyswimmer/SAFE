@@ -1,0 +1,12 @@
+============================================
+ LoRA Baseline — Full Pipeline
+ Thu Feb 19 08:42:57 PST 2026
+============================================
+
+============================================
+ Stage 0: Text-only baseline evaluation
+============================================
+Traceback (most recent call last):
+  File "/data/SalmanAsif/RobbyMoseley/SAFE/SAFE/experiments/lora_baseline/train_lora_baseline.py", line 29, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'

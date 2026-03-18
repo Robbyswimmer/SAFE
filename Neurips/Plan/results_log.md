@@ -77,6 +77,29 @@ What we can claim:
 What this implies for next experiments:
 - prioritize operator-level changes such as KV augmentation or other geometry-changing composition rules over gate-only calibration
 
+### Finding 6: Early KV-augmentation diagnostics suggest first-site dominance is positional, not layer-8-specific.
+
+Direct support:
+- two vision-only KV runs were launched with the same later layers but different first injection sites:
+  - layer-8 run: `8,14,20,26`
+  - layer-2 run: `2,14,20,26`
+- in the layer-8 run, `kv:vision:8` is the largest vision-side gradient term by several-fold at steps `700-1000`
+- in the layer-2 run, `kv:vision:2` becomes the largest vision-side gradient term by several-fold at steps `500-800`
+- both runs evaluate cleanly, save checkpoints, and continue training without the earlier KV logging/pathology issues
+
+What we can claim:
+- the dominant learning signal in the current KV setup is concentrated at the first active vision injection site
+- this concentration is not unique to layer `8`; it follows whichever layer is first
+- the current KV operator is therefore likely biased toward earliest-site memory formation
+
+What we cannot yet claim:
+- that earlier-first KV placement improves final validation accuracy
+- that first-site dominance is harmful rather than simply an efficient allocation pattern
+
+What this implies for next experiments:
+- treat layer placement in KV mode as a real operator design choice, not a cosmetic detail
+- compare final validation curves for layer-2 versus layer-8 starts before fixing the NeurIPS claim
+
 ## Qwen3 / MUSIC-AVQA Joint-Training Result
 
 Context:

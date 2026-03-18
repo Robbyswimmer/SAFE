@@ -1,0 +1,28 @@
+ESC-50 5-Fold Cross-Validation Summary
+======================================
+Experiment: kitchen_sink_16tok
+Date: Sun Feb  1 17:01:42 PST 2026
+Job ID: 240957
+
+Configuration:
+  Batch size: 16
+  Epochs: 50
+  SAFE LR: 6e-5
+  Head LR: 1e-3
+  Fusion layers: 1,5,9,13,17,21
+  Num audio tokens: 16
+  Mixup alpha: 0.3
+  Label smoothing: 0.1
+  Unfreeze CLAP layers: 2
+
+Per-Fold Results:
+  Fold 1: 0.9650
+  Fold 2: 0.9800
+  Fold 3: 0.9675
+  Fold 4: 0.9750
+  Fold 5: 0.9725
+
+Mean Accuracy: 0.9720 (97.20%)
+Std Deviation: 0.0060 (0.60%)
+
+Final Result: 97.20% ± 0.60%
