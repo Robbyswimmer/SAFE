@@ -1,4 +1,13 @@
 #!/bin/bash
+#SBATCH --job-name=run_qwen_staggered
+#SBATCH --output=logs/run_qwen_staggered_%j.out
+#SBATCH --error=logs/run_qwen_staggered_%j.err
+#SBATCH --time=48:00:00
+#SBATCH --mem=96G
+#SBATCH --cpus-per-task=8
+#SBATCH -p gpu
+# pass --gres=gpu:1 at submit time
+
 # Submit a Qwen staggered-layer joint-data MUSIC-AVQA run from scratch.
 #
 # Usage:
